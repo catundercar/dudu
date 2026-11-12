@@ -2,6 +2,10 @@
 
 A PM skill for Herdr: one agent coordinates a project, dispatches coding agents, reviews their work, and keeps a persistent task ledger.
 
+![dudu project and task board](preview.png)
+
+Preview uses invented demo data.
+
 This first version supports the Herdr desktop app. Its mods add a PM entry in the sidebar and a project/task board. Discord is optional.
 
 The `herdr` terminal UI is not supported yet: the skill contains code paths for it, but they are untested and may change.
@@ -49,6 +53,14 @@ Defaults are `~/.claude` and `~/.config/herdr-app`. Use the same overrides when 
 `CLAUDE_HOME` selects the install destination; it does not configure the other applications. The desktop mods currently read the skill and ledger from `~/.claude`. For desktop use, keep the default Claude destination. `pm.py` uses `PM_HOME` to override its ledger directory; an installation path override alone does not relocate ledger data.
 
 Restart existing Claude Code sessions to load the skill and hooks.
+
+## Add it from herdr.dev
+
+This repository is also a Herdr layout: `layouts/pm.json` plus the `pm-nav` and `pm-dash` mods. Read [RECIPE.md](RECIPE.md) for its behavior, dependencies, and rebuild instructions. A public GitHub repository with the `herdr-layout` topic can appear in the [Herdr layout directory](https://herdr.dev/layouts).
+
+When adding the layout from herdr.dev, also run `./install.sh` from this repository to install the PM skill. Both mods read its ledger through `python3 ~/.claude/skills/pm/scripts/pm.py state`; copying the layout and mods alone does not install that dependency. Connected machines also need the skill and their own ledger for remote state reads through `hc`.
+
+The shipped layout has no installer ownership marker. `./install.sh` keeps an existing layout containing `pm-nav`; otherwise it generates a layout from your own `main.json`, rather than copying the shipped file. `--uninstall` keeps the unmarked layout but removes the PM mods it needs, so switch away from it before uninstalling.
 
 ## Get started
 

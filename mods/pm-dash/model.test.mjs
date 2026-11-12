@@ -1,11 +1,52 @@
 import test from 'node:test';
-import { summary, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from '../pm-nav/model.js';
+import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from '../pm-nav/model.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP } from './model.js';
+
+test('navigation fits whole English and Chinese phrases and always retains blocked counts', () => {
+  const counts = { projects: 5, active: 1, blocked: 4 };
+  for (const [lang, full, active, blocked, fullWidth, activeWidth] of [
+    ['en', '5 projects · 1 active', '1 active', '4 blocked', 193.75, 119],
+    ['zh', '5 项目 · 1 进行中', '1 进行中', '4 阻塞', 153.5, 101.75],
+  ]) {
+    const detail = `${full} · ${blocked}`;
+    for (const [width, text, red] of [
+      [fullWidth, full, ` · ${blocked}`], [fullWidth - .01, active, ` · ${blocked}`],
+      [activeWidth, active, ` · ${blocked}`], [activeWidth - .01, '', blocked], [0, '', blocked],
+    ]) {
+      assert.deepEqual(fitSummary(counts, lang, width), {
+        text, blocked: red, detail, minimumWidth: estimateTextWidth(blocked) + 4,
+      });
+    }
+    // Normal row: four 8px insets, 9px gap, 13px title; ~230px sidebar.
+    const at230 = fitSummary(counts, lang, 230 - 32 - 9 - estimateTextWidth(lang === 'zh' ? '看板' : 'Board', 13));
+    assert.equal(at230.text, lang === 'zh' ? full : active);
+  }
+});
+
+test('navigation without blocked work keeps active, pluralizes projects and preserves full tooltip text', () => {
+  for (const [projects, noun] of [[0, 'projects'], [1, 'project'], [2, 'projects'], [123, 'projects']]) {
+    const counts = { projects, active: 12, blocked: 0 };
+    for (const lang of ['en', undefined, 'unsupported', 'zh']) {
+      const active = lang === 'zh' ? '12 进行中' : '12 active';
+      const full = lang === 'zh' ? `${projects} 项目 · ${active}` : `${projects} ${noun} · ${active}`;
+      const threshold = estimateTextWidth(full) + 4;
+      assert.equal(fitSummary(counts, lang, threshold).text, full);
+      for (const width of [threshold - .01, 0]) {
+        assert.deepEqual(fitSummary(counts, lang, width), {
+          text: active, blocked: '', detail: full, minimumWidth: estimateTextWidth(active) + 4,
+        });
+      }
+    }
+  }
+  assert.equal(fitSummary({ projects: 0, active: 0, blocked: 0 }, 'en', 0).text, '0 active');
+  assert.equal(fitSummary({ projects: 100, active: 25, blocked: 123 }, 'en', 0).blocked, '123 blocked');
+  assert.equal(estimateTextWidth('项目'), estimateTextWidth('abcd'));
+});
 
 test('task status text shows cleanup in both languages and preserves false or missing behavior', () => {
   for (const [lang, cleanupText, mergedText, releasedText, workingText, blockedText, reviewText] of [

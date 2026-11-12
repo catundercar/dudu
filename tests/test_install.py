@@ -122,6 +122,31 @@ class InstallTest(unittest.TestCase):
         self.assertFalse(self.desktop.exists())
         self.assertIn("Skip desktop", output)
 
+    def test_shipped_layout(self):
+        shipped = REPO / "layouts/pm.json"
+        tree = json.loads(shipped.read_text())
+        self.assertNotIn("generated_by", tree)
+        sidebar, stage = tree["children"]
+        lists = next(node for node in sidebar["children"] if node["id"] == "sidebar-lists")
+        self.assertEqual(lists["children"][0], {
+            "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
+        self.assertEqual(stage["id"], "pm-stage")
+        self.assertEqual(stage["type"], "stack")
+        self.assertEqual(stage["active"], "work")
+        self.assertEqual([node["id"] for node in stage["children"]], ["work", "pm-board"])
+        self.assertEqual(stage["children"][0]["type"], "column")
+        self.assertEqual(stage["children"][1], {
+            "id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}})
+
+        # Adding the directory layout first must not transfer ownership to the installer.
+        self.seed_layout()
+        target = self.desktop / "layouts/pm.json"
+        target.write_bytes(shipped.read_bytes())
+        self.assertIn("already contains pm-nav", self.run_install())
+        self.assertEqual(target.read_bytes(), shipped.read_bytes())
+        self.assertIn("Keep layout", self.run_install("--uninstall"))
+        self.assertEqual(target.read_bytes(), shipped.read_bytes())
+
     def test_layout(self):
         source = self.seed_layout()
         source_bytes = source.read_bytes()

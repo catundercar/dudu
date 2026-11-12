@@ -1,7 +1,7 @@
 import { View, div, svg } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, exec, watchFolder, layout, focused, run } from 'herdr';
-import { summary, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from './model.js';
+import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from './model.js';
 
 const PM_SCRIPT = '/.claude/skills/pm/scripts/pm.py';
 const STAGE = 'pm-stage', BOARD = 'pm-board', WORK = 'work';
@@ -39,6 +39,7 @@ export default class PmNav extends View {
     this.boardShown = false;
     this.focus = null;
     this.compact = false;
+    this.width = 120;
     this.refresh(cx);
     this.refreshRemote(cx);
     cx.timer.every(15000, cx => this.refreshRemote(cx));
@@ -128,7 +129,9 @@ export default class PmNav extends View {
       .bg(t.chrome).text_size(13).text_color(t.foreground)
       .on_size_change((size, cx) => {
         const compact = size.width < 120;
-        if (compact !== this.compact) { this.compact = compact; cx.notify(); }
+        if (size.width !== this.width || compact !== this.compact) {
+          this.width = size.width; this.compact = compact; cx.notify();
+        }
       });
     if (this.compact) {
       return root.items_center().justify_center()
@@ -139,17 +142,24 @@ export default class PmNav extends View {
           .child(svg('mods/pm-nav/dudu.svg').size(22).text_color(t.foreground))
           .when(Boolean(n?.blocked), el => el.child(div().absolute().top(1).right(1).size(6).rounded(3).bg(t.blocked))));
     }
-    const tail = h_flex().flex_1().min_w(0).gap(3).justify_end().items_center().text_size(11.5).text_color(t.dim)
-      .child(div().min_w(0).truncate().child(text));
-    if (n?.blocked) tail.child(div().flex_none().text_color(t.blocked).child(`· ${textFor('blocked', n.blocked)}`));
-    if (this.error && n) tail.child(div().flex_none().text_color(t.blocked).child('!'));
+    const titleWidth = estimateTextWidth(textFor('board'), 13), gap = 9;
+    const errorWidth = this.error && n ? estimateTextWidth('!') + 3 : 0;
+    const minimumWidth = n ? fitSummary(n, this.lang, 0).minimumWidth : estimateTextWidth(text) + 4;
+    // At the narrow end of wide mode, spend padding on the mandatory count.
+    const inset = Math.max(0, Math.min(8, (this.width - titleWidth - gap - errorWidth - minimumWidth) / 4));
+    const fitted = n ? fitSummary(n, this.lang, this.width - inset * 4 - titleWidth - gap - errorWidth) : null;
+    const tail = h_flex().flex_1().min_w(0).justify_end().items_center().text_size(11.5).text_color(t.dim);
+    const visibleText = fitted ? fitted.text : text;
+    if (visibleText) tail.child(div().flex_none().whitespace_nowrap().child(visibleText));
+    if (fitted?.blocked) tail.child(div().flex_none().whitespace_nowrap().text_color(t.blocked).child(fitted.blocked));
+    if (this.error && n) tail.child(div().flex_none().ml(3).text_color(t.blocked).child('!'));
     return root
       .child(h_flex().h(31).flex_none().pl(16).pr(10).items_center().text_size(11.5).text_color(t.dim).gap(6)
         .child(svg('mods/pm-nav/dudu.svg').size(14).text_color(t.foreground)).child('PM'))
-      .child(div().px(8).child(h_flex().id('pm-board-link').h(30).px(8).gap(9).rounded(8).items_center()
+      .child(div().px(inset).child(h_flex().id('pm-board-link').h(30).px(inset).gap(gap).rounded(8).items_center()
         .cursor_pointer().when(on, el => el.bg(t.selected)).when(!on, el => el.hover(s => s.bg(t.hover)))
-        .tooltip(this.error ? textFor('retry', this.error) : detail)
+        .tooltip(`${fitted ? fitted.detail : detail}${this.error ? `\n${textFor('retry', this.error)}` : ''}`)
         .on_click(toggleBoard)
-        .child(div().flex_none().child(textFor('board'))).child(tail)));
+        .child(div().flex_none().whitespace_nowrap().child(textFor('board'))).child(tail)));
   }
 }
