@@ -1,0 +1,7 @@
+__pycache__/
+.DS_Store
+gpui-kit.d.ts
+jsconfig.json
+briefs/
+evidence/
+.claude/coordination.md

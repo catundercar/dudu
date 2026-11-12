@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PM dashboard</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  --bg: #fafafa; --bg2: #f1f1f2; --card: #ffffff;
+  --ink: #111112; --ink2: #4a4a50; --ink3: #85858c; --line: #e4e4e7;
+  --warn: #c2410c; --warn-bg: #fff4ed;
+  --shadow: 0 1px 2px rgb(0 0 0 / .04), 0 8px 24px -12px rgb(0 0 0 / .12);
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0b0c; --bg2: #121214; --card: #161618;
+    --ink: #f2f2f3; --ink2: #b3b3ba; --ink3: #7a7a82; --line: #26262a;
+    --warn: #fb923c; --warn-bg: #24160e;
+    --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 8px 24px -12px rgb(0 0 0 / .6);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
+body { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+main { max-width: 1180px; margin: 0 auto; padding: 28px 24px 48px; }
+header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+header h1 { margin: 0; font-size: 22px; letter-spacing: -.02em; font-weight: 680; }
+header .sub { color: var(--ink3); font-size: 13.5px; }
+.conn { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink3); font-variant-numeric: tabular-nums; }
+.conn i { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
+.conn.ok i { background: var(--ink); animation: live 1.8s infinite; }
+.conn.bad i { background: var(--warn); }
+@keyframes live { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ink) 40%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+
+.rt { background: var(--card); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 18px 20px 16px; }
+.rt-top { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; }
+.rt-tabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; max-width: 100%; overflow-x: auto; }
+.rt-tabs button, .btn { font: inherit; font-size: 13.5px; border: 0; background: none; color: var(--ink2); padding: 6px 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
+.rt-tabs button:hover, .btn:hover { color: var(--ink); }
+.rt-tabs button[aria-selected="true"] { background: var(--card); color: var(--ink); font-weight: 560; box-shadow: 0 0 0 1px var(--line), 0 1px 2px rgb(0 0 0 / .08); }
+.rt-tabs button span { color: var(--ink3); font-weight: 450; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.tools { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.btn { border: 1px solid var(--line); background: var(--card); }
+.btn[aria-pressed="true"] { background: var(--ink); color: var(--card); border-color: var(--ink); }
+.btn:disabled { opacity: .5; cursor: default; }
+
+.stage { position: relative; display: grid; grid-template-columns: clamp(78px, 9.5vw, 112px) minmax(0, 1fr); column-gap: clamp(30px, 5.5vw, 72px); align-items: center; padding: 26px 2px 20px; }
+.wires { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.wires path { fill: none; stroke: var(--line); stroke-width: 1.5; transition: opacity .3s, stroke .3s; }
+.wires path.live { stroke: var(--ink3); stroke-dasharray: 3 5; animation: flow .7s linear infinite; }
+.wires path.rest { stroke-dasharray: 2 6; opacity: .45; }
+.wires path.hot { stroke: var(--ink); }
+.wires path.off { display: none; }
+@keyframes flow { to { stroke-dashoffset: -8; } }
+.wires .pkt { fill: var(--ink); filter: drop-shadow(0 0 3px var(--ink3)); }
+.wires .pkt.back { fill: var(--card); stroke: var(--ink); stroke-width: 2; }
+
+.node { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 14px 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; text-align: center; min-width: 0; }
+.node b { font-size: 14px; font-weight: 620; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node small { font-size: 12px; color: var(--ink3); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .pill { font-style: normal; font-size: 11.5px; font-weight: 560; margin-top: 6px; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink3); }
+.node.working .pill { background: var(--ink); border-color: var(--ink); color: var(--card); }
+.node.offline { border-style: dashed; }
+.node.offline > :not(.pill) { opacity: .5; }
+.node.hub { border-color: var(--ink); box-shadow: 0 0 0 4px var(--bg2); }
+.node.tick { animation: tick .4s ease-out; }
+@keyframes tick { 40% { transform: scale(1.05); } }
+.src { align-self: start; position: sticky; top: 24px; }
+.src .face { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: var(--card); font-weight: 650; font-size: 14px; margin-bottom: 4px; }
+
+.groups { display: grid; gap: 22px; min-width: 0; }
+.group { display: grid; grid-template-columns: clamp(128px, 15vw, 148px) minmax(0, 1fr); column-gap: clamp(30px, 5vw, 64px); align-items: center; }
+.group[hidden] { display: none; }
+.tasks { position: relative; z-index: 1; list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+.tasks .empty { font-size: 13px; color: var(--ink3); padding: 10px 14px; border: 1px dashed var(--line); border-radius: 12px; }
+.task { position: relative; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; column-gap: 12px; row-gap: 3px; padding: 10px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; font-size: 14px; transition: opacity .3s, border-color .3s; cursor: default; }
+.task[hidden] { display: none; }
+.task b { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task em { font-style: normal; font-size: 12.5px; color: var(--ink3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.task .latest { grid-column: 2 / 4; margin: 0; font-size: 12.5px; color: var(--ink3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--ink3); }
+.task.on { border-color: var(--ink); }
+.task.on em { color: var(--ink); }
+.task.on .dot { background: var(--ink); border-color: var(--ink); animation: live 1.8s infinite; }
+.task.review .dot { background: var(--ink3); border-color: var(--ink3); }
+.task.review em { color: var(--ink); font-weight: 560; }
+.task.blocked { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.task.blocked .dot { border-color: var(--warn); background: var(--warn-bg); }
+.task.blocked em { color: var(--warn); }
+.task.rest { border-style: dashed; }
+.task.rest > :not(.tag) { opacity: .5; }
+.task.closed > :not(.tag) { opacity: .55; }
+.task.closed .dot { border-color: transparent; background: none; position: relative; }
+.task.closed .dot::after { content: ""; position: absolute; left: 1px; top: -1px; width: 4px; height: 7px; border: solid var(--ink3); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+.task.hit { animation: hit .45s; }
+@keyframes hit { 20% { transform: translateX(-5px); } 40% { transform: translateX(4px); } 60% { transform: translateX(-2px); } 80% { transform: translateX(1px); } }
+.task.tick { animation: tick2 .4s ease-out; }
+@keyframes tick2 { 40% { transform: scale(1.015); } }
+.task.enter { animation: rtin .4s ease-out; }
+.task .tag { position: absolute; right: 12px; top: -10px; padding: 2px 8px; border-radius: 6px; background: var(--ink); color: var(--card); font: 600 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; opacity: 0; transform: translateY(4px) scale(.9); transition: opacity .25s, transform .25s; pointer-events: none; }
+.task.tagged .tag { opacity: 1; transform: none; }
+
+.foot { display: flex; align-items: center; justify-content: space-between; gap: 14px 24px; flex-wrap: wrap; padding-top: 14px; border-top: 1px solid var(--line); }
+.cap { flex: 1 1 26em; margin: 0; min-height: 3em; display: flex; align-items: center; font-size: 14.5px; color: var(--ink); }
+.cap .when { color: var(--ink3); font-variant-numeric: tabular-nums; margin-right: 8px; font-size: 13px; }
+.cap.in { animation: rtin .4s ease-out; }
+@keyframes rtin { from { opacity: 0; transform: translateY(4px); } }
+.stats { display: flex; gap: 22px; font-size: 12px; color: var(--ink3); }
+.stats span { display: flex; flex-direction: column; }
+.stats b { font-size: 22px; line-height: 1.2; font-weight: 650; letter-spacing: -.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.stats .warn b { color: var(--warn); }
+
+/* events inside the picture: a card that rides the packet, tags on nodes, rows that update on arrival */
+.bubble { position: absolute; z-index: 3; left: 0; top: 0; max-width: min(300px, 80%); padding: 7px 11px 8px; background: var(--card); border: 1px solid var(--ink); border-radius: 10px; box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.45; pointer-events: none; opacity: 0; transform: translate(-50%, calc(-100% - 12px)) scale(.96); transition: opacity .25s, transform .25s; }
+.bubble.on { opacity: 1; transform: translate(-50%, calc(-100% - 12px)); }
+.bubble.below { transform: translate(-50%, 14px) scale(.96); }
+.bubble.below.on { transform: translate(-50%, 14px); }
+.bubble.replay { border-style: dashed; border-color: var(--ink3); }
+.bubble .r { display: block; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bubble .r i { font-style: normal; color: var(--ink3); font-weight: 450; margin-right: 6px; }
+.bubble .x { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--ink2); }
+.bubble .st { font: 600 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 5px; border-radius: 4px; background: var(--ink); color: var(--card); margin-right: 5px; }
+.node .tag { position: absolute; left: 50%; top: -11px; padding: 2px 8px; border-radius: 6px; background: var(--ink); color: var(--card); font: 600 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; opacity: 0; transform: translate(-50%, 4px) scale(.9); transition: opacity .25s, transform .25s; pointer-events: none; }
+.node.tagged .tag { opacity: 1; transform: translate(-50%, 0); }
+.task .latest.fresh { animation: fresh 2.4s ease-out; color: var(--ink); }
+@keyframes fresh { 0% { opacity: 0; transform: translateY(4px); } 15% { opacity: 1; transform: none; } 100% { color: var(--ink3); } }
+.cap .rp { font: 600 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 6px; border-radius: 5px; border: 1px dashed var(--ink3); color: var(--ink3); margin-right: 8px; }
+
+.feed { margin-top: 22px; }
+.feed summary { cursor: pointer; font-size: 13px; color: var(--ink3); padding: 6px 2px; list-style: none; }
+.feed summary::-webkit-details-marker { display: none; }
+.feed summary::before { content: "▸"; display: inline-block; margin-right: 6px; transition: transform .2s; }
+.feed[open] summary::before { transform: rotate(90deg); }
+.feed[open] summary { margin-bottom: 8px; }
+.feed ol { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--card); overflow: hidden; }
+.feed li { display: grid; grid-template-columns: 92px 210px minmax(0, 1fr); gap: 12px; padding: 9px 14px; font-size: 13px; border-top: 1px solid var(--line); align-items: baseline; }
+.feed li:first-child { border-top: 0; }
+.feed li.new { animation: rtin .4s ease-out, glow 2.4s ease-out; }
+@keyframes glow { from { background: var(--bg2); } }
+.feed time { color: var(--ink3); font-variant-numeric: tabular-nums; }
+.feed .route { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed .what { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--ink); }
+.feed .what small { color: var(--ink3); }
+.feed .st { display: inline-block; font: 600 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 6px; border-radius: 5px; background: var(--bg2); border: 1px solid var(--line); margin-right: 6px; }
+
+@media (prefers-reduced-motion: reduce) { .task.on .dot, .conn.ok i, .wires path.live, .task.hit, .task.tick, .node.tick, .cap.in, .task.enter, .feed li.new, .task .latest.fresh { animation: none; } .bubble { transition: opacity .2s; } }
+@media (max-width: 1000px) {
+  main { padding: 20px 16px 40px; }
+  .rt { padding: 16px 14px 14px; }
+  .node { padding: 12px 6px 10px; }
+  .node b { font-size: 12.5px; letter-spacing: -.01em; }
+  .src small { font-size: 11px; }
+  .tools { margin-left: 0; }
+}
+@media (max-width: 600px) {
+  .stage { grid-template-columns: 1fr; row-gap: 34px; }
+  .src { justify-self: center; width: 140px; position: relative; top: 0; }
+  .group { grid-template-columns: 1fr; row-gap: 26px; }
+  .group .node { justify-self: center; width: 180px; }
+  .tasks { padding-left: 34px; }
+  .feed li { grid-template-columns: 1fr; gap: 2px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PM dashboard</h1>
+    <span class="sub">You → PM → worker: dispatches, reports and status changes, live</span>
+    <span class="conn" id="conn"><i></i><span>Connecting</span></span>
+  </header>
+
+  <section class="rt">
+    <div class="rt-top">
+      <div class="rt-tabs" role="tablist" aria-label="Projects" id="tabs"></div>
+      <div class="tools">
+        <button class="btn" id="closed" aria-pressed="false" title="Show tasks closed in the last 24 hours">Include closed</button>
+        <button class="btn" id="auto" aria-pressed="true" title="After 20 seconds with no new events, loop the last 12; a new event takes over at once">Replay when idle</button>
+        <button class="btn" id="replay" title="Play the recent ledger events again, in order">Replay last 20</button>
+      </div>
+    </div>
+    <div class="stage" id="stage">
+      <svg class="wires" id="wires" aria-hidden="true"></svg>
+      <div class="bubble" id="bubble" aria-hidden="true"></div>
+      <div class="node src" id="src"><span class="face">You</span><b>You</b><small>Terminal · Discord</small><span class="tag"></span></div>
+      <div class="groups" id="groups"></div>
+    </div>
+    <div class="foot">
+      <p class="cap" id="cap" aria-live="polite">Reading the ledger…</p>
+      <div class="stats" id="stats"></div>
+    </div>
+  </section>
+
+  <details class="feed">
+    <summary>Event history <span id="feedn"></span></summary>
+    <ol id="feed"></ol>
+  </details>
+</main>
+
+<script>
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), svg = $("wires"), src = $("src"), groupsEl = $("groups"), cap = $("cap"), bubble = $("bubble");
+    const ACTIVE = ["in_progress", "review", "blocked", "proposed", "paused"];
+  const ORDER = ["in_progress", "review", "blocked", "proposed", "paused", "merged", "released", "done", "abandoned"];
+  // ---- text: English by default, Chinese when the state says lang "zh" ----------
+  const TEXT = {
+    en: {
+      st: { in_progress: "In progress", review: "In review", blocked: "Blocked", paused: "Paused", proposed: "Proposed",
+            merged: "Merged", released: "Released", done: "Done", abandoned: "Abandoned" },
+      pm: { working: "Working", idle: "Idle", blocked: "Needs you", done: "Idle", offline: "Offline" },
+      title: "PM dashboard", sub: "You → PM → worker: dispatches, reports and status changes, live",
+      projects: "Projects", closedBtn: "Include closed", closedTip: "Show tasks closed in the last 24 hours",
+      autoBtn: "Replay when idle", autoTip: "After 20 seconds with no new events, loop the last 12; a new event takes over at once",
+      replayBtn: "Replay last 20", replayTip: "Play the recent ledger events again, in order",
+      you: "You", youSub: "Terminal · Discord", history: "Event history",
+      justNow: "just now", minAgo: (n) => `${n} min ago`, hourAgo: (n) => `${n} h ago`, dayAgo: (n) => `${n} d ago`,
+      unclaimed: "Unclaimed", noPm: "No PM", noPmSub: "These projects have no PM yet", hubSub: "PM of PMs · cross-project",
+      current: (x) => `Now: ${x}`, hubEmpty: "Takes no project work: starts and stops PMs, cross-project status",
+      closedCount: (n) => `${n} closed ${n === 1 ? "task" : "tasks"} (click "Include closed" to see ${n === 1 ? "it" : "them"})`,
+      noTasks: "No tasks registered", workerBusy: (w) => `${w} working`, branch: (b) => `branch ${b}`, updated: (x) => `updated ${x}`,
+      all: "All", agentsRunning: "Agents running", closed24h: "Closed in 24h",
+      feedCount: (n) => `· ${n} ${n === 1 ? "event" : "events"}`,
+      feedPrompt: "You sent a message in the terminal or Discord", feedReply: "The PM replied to this turn", colon: ": ",
+      task: "task", sayPrompt: "You sent a message", sayReply: "Replied to you", replay: "replay",
+      cardPrompt: "New message", cardReply: "Replied to this turn", replayAt: (x) => `replay ${x}`,
+      noteSend: "Sending", noteGot: "Message received", noteReply: "Replying", noteGotReply: "Reply received",
+      noteLedger: "Wrote to ledger", noteDispatch: "Dispatch", noteReport: "Report", noteGotReport: "Report received",
+      gotStatus: (x) => `Got · ${x}`, live: (x) => `Live · ${x}`, unreachable: "Can't reach pm.py dash",
+      noEvents: "No events in the ledger yet.",
+    },
+    zh: {
+      st: { in_progress: "进行中", review: "待审", blocked: "阻塞", paused: "暂停", proposed: "提议",
+            merged: "已合并", released: "已发布", done: "完成", abandoned: "放弃" },
+      pm: { working: "工作中", idle: "空闲", blocked: "等你确认", done: "空闲", offline: "离线" },
+      title: "PM 看板", sub: "你 → PM → worker：派活、汇报、状态流转实时可见",
+      projects: "项目", closedBtn: "含已收尾", closedTip: "显示 24 小时内收尾的任务",
+      autoBtn: "空闲时回放", autoTip: "20 秒没有新事件时，循环回放最近 12 条；新事件一来立即让路",
+      replayBtn: "回放最近 20 条", replayTip: "把最近的台账事件按顺序重放一遍",
+      you: "你", youSub: "终端 · Discord", history: "事件历史",
+      justNow: "刚刚", minAgo: (n) => `${n} 分钟前`, hourAgo: (n) => `${n} 小时前`, dayAgo: (n) => `${n} 天前`,
+      unclaimed: "未认领", noPm: "无 PM", noPmSub: "这些项目还没有 PM", hubSub: "PM 的 PM · 跨项目",
+      current: (x) => `当前：${x}`, hubEmpty: "不接项目活：起停 PM、跨项目状态",
+      closedCount: (n) => `${n} 个已收尾任务（点「含已收尾」查看）`,
+      noTasks: "暂无登记任务", workerBusy: (w) => `${w} 工作中`, branch: (b) => `分支 ${b}`, updated: (x) => `更新 ${x}`,
+      all: "全部", agentsRunning: "agent 在跑", closed24h: "24h 收尾",
+      feedCount: (n) => `· ${n} 条`,
+      feedPrompt: "你在终端或 Discord 里发了一条消息", feedReply: "PM 回复了这一轮", colon: "：",
+      task: "任务", sayPrompt: "你发来一条消息", sayReply: "回复了你", replay: "回放",
+      cardPrompt: "新消息", cardReply: "回复了这一轮", replayAt: (x) => `回放 ${x}`,
+      noteSend: "发消息", noteGot: "收到消息", noteReply: "回复你", noteGotReply: "收到回复",
+      noteLedger: "直接写台账", noteDispatch: "派活", noteReport: "汇报", noteGotReport: "收到汇报",
+      gotStatus: (x) => `收到·${x}`, live: (x) => `实时 · ${x}`, unreachable: "连不上 pm.py dash",
+      noEvents: "台账里还没有事件。",
+    },
+  };
+  let lang = "en", langSet = false, ST = TEXT.en.st, PM_ST = TEXT.en.pm;
+  const tx = (key, ...a) => { const v = TEXT[lang][key] ?? TEXT.en[key] ?? key; return typeof v === "function" ? v(...a) : v; };
+  function applyLang(l) {
+    l = l === "zh" ? "zh" : "en";
+    if (langSet && l === lang) return;
+    lang = l; langSet = true; ST = TEXT[l].st; PM_ST = TEXT[l].pm;
+    document.documentElement.lang = l === "zh" ? "zh-CN" : "en";
+    document.title = tx("title");
+    document.querySelector("header h1").textContent = tx("title");
+    document.querySelector("header .sub").textContent = tx("sub");
+    $("tabs").setAttribute("aria-label", tx("projects"));
+    for (const [id, k] of [["closed", "closed"], ["auto", "auto"], ["replay", "replay"]]) {
+      $(id).textContent = tx(k + "Btn"); $(id).title = tx(k + "Tip");
+    }
+    src.querySelector(".face").textContent = src.querySelector("b").textContent = tx("you");
+    src.querySelector("small").textContent = tx("youSub");
+    document.querySelector(".feed summary").firstChild.nodeValue = tx("history") + " ";
+  }
+  const IDLE_MS = 20000, AMBIENT_N = 12;
+
+  let S = null, filter = "all", showClosed = false, replaying = false, dirty = true, auto = true;
+  const G = new Map();   // pm name -> { el, node, list, wire, ids }
+  const R = new Map();   // task id -> { li, wire, t }
+  const seen = new Set(); let primed = false;
+  const queue = []; let playing = false, lastMotion = performance.now();
+  // A row with live events still in the queue keeps its old look until the packet lands on it.
+  const hold = new Map();
+  const holdAdd = (id, n) => { if (!id) return; const v = (hold.get(id) || 0) + n; v > 0 ? hold.set(id, v) : hold.delete(id); };
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const short = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+  const parse = (s) => new Date(String(s).replace(" ", "T"));
+  const ago = (s) => {
+    if (!S || !s) return "";
+    const m = Math.round((parse(S.now) - parse(s)) / 60000);
+    return m < 1 ? tx("justNow") : m < 60 ? tx("minAgo", m) : m < 48 * 60 ? tx("hourAgo", Math.round(m / 60)) : tx("dayAgo", Math.round(m / 1440));
+  };
+  const who = (pane) => {
+    if (!pane) return "?";
+    if (pane === "user") return tx("you");
+    const pm = S.pms.find((p) => p.pane === pane); if (pm) return pm.name;
+    const a = S.agents[pane]; return a ? (a.name || `${a.kind} ${pane}`) : pane;
+  };
+  const tick = (el, cls = "tick") => { if (!el) return; el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
+  const mkpath = () => { const p = document.createElementNS(NS, "path"); svg.insertBefore(p, svg.firstChild); return p; };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ---- structure -------------------------------------------------------------
+  function visibleTask(t) {
+    if (ACTIVE.includes(t.status)) return true;
+    if (showClosed) return true;
+    return S && (parse(S.now) - parse(t.updated)) < 2 * 3600e3;   // fresh closures stay briefly
+  }
+
+  function groupList() {
+    const pms = S.pms.slice();
+    const order = (p) => (p.project === "hub" ? -1 : 0);
+    const count = (name) => S.tasks.filter((t) => t.pm === name && ACTIVE.includes(t.status)).length;
+    pms.sort((a, b) => order(a) - order(b) || count(b.name) - count(a.name) || a.name.localeCompare(b.name));
+    const list = pms.map((p) => ({ ...p, hub: p.project === "hub" }));
+    if (S.tasks.some((t) => !t.pm)) list.push({ name: "", project: tx("unclaimed"), status: "offline", pane: "", none: true });
+    return list;
+  }
+
+  function render() {
+    const groups = groupList();
+    const keep = new Set();
+    for (const g of groups) {
+      const key = g.name || "_none"; keep.add(key);
+      let e = G.get(key);
+      if (!e) {
+        const el = document.createElement("div"); el.className = "group";
+        el.innerHTML = `<div class="node pm"><b></b><small></small><i class="pill"></i><span class="tag"></span></div><ol class="tasks"></ol>`;
+        e = { el, node: el.firstChild, list: el.lastChild, wire: mkpath(), ids: [] };
+        G.set(key, e);
+      }
+      groupsEl.appendChild(e.el);   // also reorders
+      const n = e.node;
+      n.querySelector("b").textContent = g.none ? tx("noPm") : g.name;
+      n.querySelector("small").textContent = g.none ? tx("noPmSub") : (g.hub ? tx("hubSub") : g.project + (g.pane ? ` · ${g.pane}` : ""));
+      n.querySelector(".pill").textContent = g.none ? "—" : (PM_ST[g.status] || g.status || "—");
+      for (const c of ["hub", "working", "idle", "done", "blocked", "offline"]) n.classList.toggle(c, c === "hub" ? !!g.hub : g.status === c);
+      n.title = g.title ? tx("current", g.title) : "";
+      const mine = S.tasks.filter((t) => (t.pm || "") === (g.name || ""))
+        .sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status) || b.updated.localeCompare(a.updated));
+      e.ids = mine.map((t) => t.id);
+      for (const t of mine) upsertTask(t, e.list);
+      for (const li of [...e.list.children]) if (li.dataset.id && !e.ids.includes(li.dataset.id)) li.remove();
+      const shown = mine.filter(visibleTask).length;
+      let empty = e.list.querySelector(".empty");
+      if (!shown) {
+        if (!empty) { empty = document.createElement("li"); empty.className = "empty"; e.list.appendChild(empty); }
+        empty.textContent = g.hub ? tx("hubEmpty") : mine.length ? tx("closedCount", mine.length) : tx("noTasks");
+      } else if (empty) empty.remove();
+      e.el.hidden = filter !== "all" && filter !== key;
+      e.wire.classList.toggle("off", e.el.hidden);
+      e.wire.classList.toggle("live", !e.el.hidden && g.status === "working");
+      e.wire.classList.toggle("rest", g.status === "offline");
+    }
+    for (const [key, e] of G) if (!keep.has(key)) { e.el.remove(); e.wire.remove(); G.delete(key); }
+    for (const [id, r] of R) if (!S.tasks.some((t) => t.id === id)) { r.li.remove(); r.wire.remove(); R.delete(id); }
+    renderTabs(groups); renderStats(); dirty = true;
+  }
+
+  function upsertTask(t, list) {
+    let r = R.get(t.id);
+    if (!r) {
+      const li = document.createElement("li"); li.className = "task"; li.dataset.id = t.id;
+      li.innerHTML = `<i class="dot"></i><b></b><em></em><p class="latest"></p><span class="tag"></span>`;
+      r = { li, wire: mkpath(), t: null, shown: null };
+      R.set(t.id, r);
+      if (primed) li.classList.add("enter");
+    }
+    r.t = t;
+    list.appendChild(r.li);
+    r.li.hidden = !visibleTask(t);
+    r.wire.classList.toggle("off", r.li.hidden || filter !== "all" && filter !== (t.pm || "_none"));
+    if (!hold.has(t.id)) paint(r);
+  }
+
+  function paint(r) {
+    const t = r.t, before = r.shown;
+    const worker = t.pane ? (S.agents[t.pane]?.name || t.agent || t.pane) : (t.agent || "");
+    const working = t.worker === "working";
+    const closed = !ACTIVE.includes(t.status);
+    const rest = t.status === "paused" || t.status === "proposed";
+    let em = ST[t.status] || t.status;
+    if (t.status === "in_progress") em = working ? tx("workerBusy", worker) : worker ? `${worker} · ${ago(t.updated)}` : `${ST.in_progress} · ${ago(t.updated)}`;
+    else em += ` · ${ago(t.updated)}`;
+    r.li.querySelector("b").textContent = t.title;
+    r.li.querySelector("em").textContent = em;
+    r.li.querySelector(".latest").textContent = short(t.latest, 140);
+    r.li.title = [t.id, t.branch && tx("branch", t.branch), t.pane && `pane ${t.pane}`, tx("updated", t.updated)].filter(Boolean).join("\n") + "\n\n" + t.latest;
+    for (const s of ORDER) r.li.classList.toggle(s, s === t.status);
+    r.li.classList.toggle("on", working && !closed);
+    r.li.classList.toggle("rest", rest);
+    r.li.classList.toggle("closed", closed);
+    r.wire.classList.toggle("live", working && !closed);
+    r.wire.classList.toggle("rest", rest || closed);
+    r.shown = t;
+    // a status that moved without a log line we could animate: still show it
+    if (before && before.status !== t.status && primed) {
+      tag(r, ST[t.status] || t.status);
+      if (t.status === "blocked") tick(r.li, "hit");
+    }
+  }
+
+  function renderTabs(groups) {
+    const items = [{ key: "all", label: tx("all"), n: S.tasks.filter((t) => ACTIVE.includes(t.status)).length }]
+      .concat(groups.filter((g) => !g.hub).map((g) => ({ key: g.name || "_none", label: g.none ? tx("noPm") : g.name.replace(/^pm-/, ""),
+        n: S.tasks.filter((t) => (t.pm || "") === g.name && ACTIVE.includes(t.status)).length })));
+    $("tabs").innerHTML = items.map((i) => `<button role="tab" data-k="${esc(i.key)}" aria-selected="${filter === i.key}">${esc(i.label)}<span>${i.n}</span></button>`).join("");
+  }
+
+  function renderStats() {
+    const c = (s) => S.tasks.filter((t) => t.status === s).length;
+    const busy = S.tasks.filter((t) => t.worker === "working" && ACTIVE.includes(t.status)).length
+      + S.pms.filter((p) => p.status === "working").length;
+    const closed = S.tasks.filter((t) => !ACTIVE.includes(t.status)).length;
+    $("stats").innerHTML = [[ST.in_progress, c("in_progress")], [tx("agentsRunning"), busy], [ST.review, c("review")],
+      [ST.blocked, c("blocked"), c("blocked") ? "warn" : ""], [tx("closed24h"), closed]]
+      .map(([n, v, cls]) => `<span class="${cls || ""}"><b>${v}</b>${n}</span>`).join("");
+  }
+
+  function renderFeed(fresh) {
+    const ev = S.events.slice(-40).reverse();
+    $("feedn").textContent = tx("feedCount", ev.length);
+    $("feed").innerHTML = ev.map((e) => {
+      const t = S.tasks.find((x) => x.id === e.task);
+      const [from, to] = route(e);
+      const what = e.kind === "prompt" ? `<small>${esc(tx("feedPrompt"))}</small>`
+        : e.kind === "reply" ? `<small>${esc(tx("feedReply"))}</small>`
+        : `${e.status ? `<span class="st">${esc(ST[e.status] || e.status)}</span>` : ""}${t ? `<small>${esc(short(t.title, 26))}${esc(tx("colon"))}</small>` : ""}${esc(short(e.text, 220))}`;
+      return `<li class="${fresh.has(e.key) ? "new" : ""}"><time>${esc(e.at.slice(5))}</time><span class="route">${esc(from)} → ${esc(to)}</span><span class="what">${what}</span></li>`;
+    }).join("");
+  }
+
+  function route(e) {
+    const t = S.tasks.find((x) => x.id === e.task);
+    const pmPane = S.pms.find((p) => p.name === e.pm)?.pane;
+    const ownWorker = t && t.pane && t.pane !== pmPane;   // a task parked on the PM's pane has no worker
+    const target = t ? (ownWorker ? (S.agents[t.pane]?.name || t.agent || t.pane) : short(t.title, 14)) : tx("task");
+    const pm = e.pm || tx("noPm");
+    if (e.kind === "prompt") return [tx("you"), pm];
+    if (e.kind === "reply") return [pm, tx("you")];
+    if (e.kind === "dispatch") return [e.by === "user" ? tx("you") : pm, target];
+    const from = who(e.by);
+    return [from === pm ? target : from, pm];
+  }
+
+  // ---- geometry ----------------------------------------------------------------
+  const curve = (x1, y1, x2, y2) => { const mx = (x1 + x2) / 2; return `M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`; };
+  function layout() {
+    const r = stage.getBoundingClientRect();
+    const box = (el) => { const b = el.getBoundingClientRect(); return { l: b.left - r.left, r: b.right - r.left, t: b.top - r.top, b: b.bottom - r.top, cx: (b.left + b.right) / 2 - r.left, cy: (b.top + b.bottom) / 2 - r.top }; };
+    svg.setAttribute("viewBox", `0 0 ${r.width} ${r.height}`);
+    const s = box(src);
+    for (const e of G.values()) {
+      if (e.el.hidden) continue;
+      const p = box(e.node);
+      // stacked (narrow) layout: 你 reaches each PM by a lane down the left edge, clear of the nodes
+      e.wire.setAttribute("d", p.l > s.r ? curve(s.r, s.cy, p.l, p.cy)
+        : `M${s.l} ${s.cy} C6 ${s.cy} 6 ${s.cy} 6 ${s.cy + 18} L6 ${p.cy - 10} Q6 ${p.cy} 16 ${p.cy} L${p.l} ${p.cy}`);
+      for (const id of e.ids) {
+        const t = R.get(id); if (!t || t.li.hidden) continue;
+        const b = box(t.li);
+        if (b.l > p.r) t.wire.setAttribute("d", curve(p.r, p.cy, b.l, b.cy));
+        else { const x = b.l - 14; t.wire.setAttribute("d", `M${p.cx} ${p.b} C${p.cx} ${p.b + 22} ${x} ${p.b + 2} ${x} ${p.b + 24} L${x} ${b.cy - 10} Q${x} ${b.cy} ${b.l} ${b.cy}`); }
+      }
+    }
+  }
+
+  // ---- packets and the card that rides them --------------------------------------
+  const trips = [];
+  let bubbleT = 0;
+  function showBubble(card) {
+    clearTimeout(bubbleT);
+    bubble.innerHTML = `<span class="r"><i>${esc(card.when)}</i>${esc(card.from)} → ${esc(card.to)}</span>`
+      + (card.text ? `<span class="x">${card.status ? `<span class="st">${esc(card.status)}</span>` : ""}${esc(card.text)}</span>` : "");
+    bubble.classList.toggle("replay", !!card.replay);
+    bubble.classList.add("on");
+  }
+  function moveBubble(x, y) {
+    const w = bubble.offsetWidth, h = bubble.offsetHeight, W = stage.clientWidth;
+    bubble.style.left = Math.max(w / 2 + 4, Math.min(W - w / 2 - 4, x)) + "px";
+    bubble.style.top = y + "px";
+    bubble.classList.toggle("below", y - h - 14 < 0);
+  }
+  const hideBubble = (ms) => { clearTimeout(bubbleT); bubbleT = setTimeout(() => bubble.classList.remove("on"), ms); };
+
+  function travel(path, rev, dur, hollow, card) {
+    return new Promise((res) => {
+      if (!path || path.classList.contains("off") || !path.getAttribute("d")) return res(false);
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("r", hollow ? 4 : 4.5); dot.setAttribute("class", "pkt" + (hollow ? " back" : ""));
+      svg.appendChild(dot); path.classList.add("hot");
+      if (card) showBubble(card);
+      trips.push({ dot, path, rev, t0: performance.now(), dur, res, card });
+    });
+  }
+  function frame(now) {
+    if (dirty) { layout(); dirty = false; }
+    for (let i = trips.length - 1; i >= 0; i--) {
+      const tr = trips[i], k = Math.min(1, (now - tr.t0) / tr.dur);
+      const e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+      const len = tr.path.getTotalLength(), pt = tr.path.getPointAtLength((tr.rev ? 1 - e : e) * len);
+      tr.dot.setAttribute("cx", pt.x); tr.dot.setAttribute("cy", pt.y);
+      if (tr.card) moveBubble(pt.x, pt.y);
+      if (k >= 1) { tr.dot.remove(); trips.splice(i, 1); if (!trips.some((x) => x.path === tr.path)) tr.path.classList.remove("hot"); tr.res(true); }
+    }
+    requestAnimationFrame(frame);
+  }
+  function tag(r, text) {
+    if (!r) return;
+    r.li.querySelector(".tag").textContent = text;
+    r.li.classList.add("tagged");
+    clearTimeout(r.tagT); r.tagT = setTimeout(() => r.li.classList.remove("tagged"), 1800);
+  }
+  function note(node, text) {
+    if (!node) return;
+    node.querySelector(".tag").textContent = text;
+    node.classList.add("tagged"); tick(node);
+    clearTimeout(node._t); node._t = setTimeout(() => node.classList.remove("tagged"), 1600);
+  }
+  function say(e, replay) {
+    const [from, to] = route(e);
+    const t = S.tasks.find((x) => x.id === e.task);
+    const body = e.kind === "prompt" ? tx("sayPrompt") : e.kind === "reply" ? tx("sayReply")
+      : (e.status ? `[${ST[e.status] || e.status}] ` : "") + short(e.text, 90);
+    cap.innerHTML = `<span>${replay ? `<span class="rp">${esc(tx("replay"))}</span>` : ""}<span class="when">${esc(e.at.slice(replay ? 5 : 11))}</span><b>${esc(from)}</b> → <b>${esc(to)}</b>${t && e.task ? `<span class="when" style="margin-left:8px">${esc(short(t.title, 20))}</span>` : ""}<br>${esc(body)}</span>`;
+    tick(cap, "in");
+  }
+  function cardFor(e, replay) {
+    const [from, to] = route(e);
+    const text = e.kind === "prompt" ? tx("cardPrompt") : e.kind === "reply" ? tx("cardReply") : short(e.text, 70);
+    return { from, to, text, status: e.status ? (ST[e.status] || e.status) : "", replay,
+             when: replay ? tx("replayAt", e.at.slice(11)) : e.at.slice(11) };
+  }
+
+  // One event: the packet (with its card) runs the route, nodes and the row react when it lands.
+  async function play(e, speed, replay) {
+    const D = (ms) => ms / speed;
+    const g = G.get(e.pm || "_none"), r = R.get(e.task);
+    try {
+      say(e, replay);
+      if (!g || g.el.hidden) { await sleep(D(600)); return; }
+      const card = cardFor(e, replay);
+      const rowOk = r && !r.li.hidden;
+      if (e.kind === "prompt") {
+        note(src, tx("noteSend"));
+        await travel(g.wire, false, D(950), false, card);
+        note(g.node, tx("noteGot"));
+      } else if (e.kind === "reply") {
+        note(g.node, tx("noteReply"));
+        await travel(g.wire, true, D(950), true, card);
+        note(src, tx("noteGotReply"));
+      } else if (e.kind === "dispatch") {
+        if (e.by === "user") { note(src, tx("noteLedger")); await travel(g.wire, false, D(700), false, card); }
+        note(g.node, e.status ? ST[e.status] || e.status : tx("noteDispatch"));
+        if (rowOk) { await travel(r.wire, false, D(1050), false, card); tick(r.li); }
+        land(r, e, replay);
+      } else {
+        if (rowOk) { tag(r, tx("noteReport")); await travel(r.wire, true, D(1050), true, card); }
+        note(g.node, e.status ? tx("gotStatus", ST[e.status] || e.status) : tx("noteGotReport"));
+        land(r, e, replay);
+      }
+      hideBubble(D(1500));
+      await sleep(D(900));
+    } finally {
+      if (!replay && e.task) {
+        holdAdd(e.task, -1);
+        // the events already announced any status change; repaint without tagging it again
+        if (r && !hold.has(e.task)) { if (r.shown) r.shown = { ...r.shown, status: r.t.status }; paint(r); }
+      }
+      if (!replay) lastMotion = performance.now();
+    }
+  }
+  function land(r, e, replay) {
+    if (!r) return;
+    if (e.status) { tag(r, ST[e.status] || e.status); if (e.status === "blocked") tick(r.li, "hit"); }
+    if (replay || r.li.hidden) return;
+    const p = r.li.querySelector(".latest");
+    p.textContent = short(e.text, 140);
+    tick(p, "fresh");
+  }
+  async function drain() {
+    if (playing || replaying) return; playing = true;
+    while (queue.length) { const e = queue.shift(); await play(e, queue.length > 5 ? 2.6 : 1, false); }
+    playing = false;
+  }
+  async function replay(n, ambient) {
+    if (!S || replaying) return;
+    replaying = true; $("replay").disabled = true;
+    while (playing) await sleep(100);
+    for (const e of S.events.slice(-n)) {
+      if (ambient && (queue.length || !auto || document.hidden)) break;   // live events go first
+      await play(e, ambient ? 1.15 : 1.4, true);
+    }
+    replaying = false; $("replay").disabled = false; lastMotion = performance.now();
+    drain();
+  }
+  setInterval(() => {
+    if (auto && !replaying && !playing && !queue.length && S && S.events.length && !document.hidden
+        && performance.now() - lastMotion > IDLE_MS) replay(AMBIENT_N, true);
+  }, 1000);
+
+  // ---- polling -----------------------------------------------------------------
+  async function poll() {
+    const conn = $("conn");
+    try {
+      const res = await fetch("/api/state", { cache: "no-store" });
+      if (!res.ok) throw new Error(res.status);
+      S = await res.json();
+      applyLang(S.lang);
+      conn.className = "conn ok"; conn.lastChild.textContent = tx("live", S.now.slice(11));
+    } catch (err) {
+      conn.className = "conn bad"; conn.lastChild.textContent = tx("unreachable");
+      return setTimeout(poll, 5000);
+    }
+    const fresh = new Set();
+    for (const e of S.events) if (!seen.has(e.key)) {
+      seen.add(e.key);
+      if (primed) { fresh.add(e.key); queue.push(e); holdAdd(e.task, 1); }
+    }
+    render(); renderFeed(fresh);
+    if (!primed) {
+      primed = true;
+      const last = S.events[S.events.length - 1];
+      if (last) say(last); else cap.textContent = tx("noEvents");
+      lastMotion = performance.now() - IDLE_MS + 2500;   // first loop starts shortly after opening
+    }
+    drain();
+    setTimeout(poll, 3000);
+  }
+
+  // ---- controls ----------------------------------------------------------------
+  $("tabs").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button"); if (!b) return;
+    filter = b.dataset.k; render();
+  });
+  $("closed").addEventListener("click", (ev) => {
+    showClosed = !showClosed; ev.currentTarget.setAttribute("aria-pressed", String(showClosed)); render();
+  });
+  $("auto").addEventListener("click", (ev) => {
+    auto = !auto; ev.currentTarget.setAttribute("aria-pressed", String(auto));
+    try { localStorage.setItem("pmdash.auto", auto ? "1" : "0"); } catch {}
+  });
+  try { if (localStorage.getItem("pmdash.auto") === "0") { auto = false; $("auto").setAttribute("aria-pressed", "false"); } } catch {}
+  $("replay").addEventListener("click", () => replay(20, false));
+  new ResizeObserver(() => { dirty = true; }).observe(stage);
+  // iPad rotation and split view: lay the wires out again once the new size has settled
+  for (const ev of ["orientationchange", "resize"]) addEventListener(ev, () => { dirty = true; setTimeout(() => { dirty = true; }, 350); });
+  visualViewport?.addEventListener("resize", () => { dirty = true; });
+  addEventListener("scroll", () => { dirty = true; }, { passive: true });
+  requestAnimationFrame(frame);
+  poll();
+})();
+</script>
+</body>
+</html>

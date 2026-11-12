@@ -1,0 +1,35 @@
+# herdr-core recipes and pitfalls
+
+Terminals in the Herdr desktop app run in herdr-core; its CLI is `hc`. For the full CLI, run `hc --help` or `hc --skill` once. Below are only the patterns that proved reliable in practice. `<t>` is a terminal address such as `t7`, or `<machine>/t7` on another machine.
+
+## Terminals
+
+- **State of one terminal:** `hc get <t> --json`. An agent's state is under `status` (`app`, `state`); values seen are `idle`, `working`, `done`, and no status at all while a program is still starting or sits at a startup dialog.
+- **Read the screen:** `hc read <t> | tail -40`.
+- **Start a program in a terminal of its own:** `hc run --bg --name <name> --cwd <dir> -- <program> <args>`. It becomes a sub-agent of the terminal that started it: the app lists it under that agent, without a pane (`herdr-app do terminal.peek '{"terminal":"<t>"}'` shows it, `terminal.keep` gives it a tab). A sub-agent ends with its parent unless started with `--outlive-parent`; `pm.py dispatch` uses that, so a worker survives its PM's rotation. `--no-parent` starts a terminal that the app does not show at all. `--no-notify` stops hc from typing notes about the child into its parent.
+- **`--json` goes before `--`.** Anything after `--` is passed to the started program.
+- **Labels:** `hc label <t> pm=<project>` marks a PM, `task=<id>` a worker. The board uses them to find the terminal to jump to.
+- **End and remove:** `hc kill <t>`, then `hc rm <t>`. `pm.py retire` does both for a worker.
+
+## Agents
+
+- **Send a brief:** `hc send <t> "$(cat brief.txt)"`. Long multi-line text works. The result contains `"started": true` when the agent took it as a turn.
+- **A just-started agent is not ready.** Wait until its state is `idle` before sending; `pm.py dispatch` does this and retries for a short while.
+- **The brief was not delivered:** a startup screen took the input or blocked it. Codex asks whether to trust a folder it has not seen, offers an update when one is out (`pm.py dispatch` turns that check off with `-c check_for_update_on_startup=false`), and shows a hook review screen ("1 hook needs review") the first time it meets a new hook. Read the screen. If the dialog is one the user would confirm (their own folder, a hook they installed), answer it with `hc keys <t> <key>`, then resend the brief. Anything else: ask the user.
+- **Wait for a worker:** `hc wait <t> --timeout 3600` in the background. A timeout is a check-in, not a failure: read the screen and wait again.
+- **Stop a turn:** `hc interrupt <t>`.
+- **Question UI** (the agent shows options): read the screen, choose with `hc keys <t> ...`, or type a free-text answer with `hc send <t> "<answer>"`.
+
+## Other machines
+
+- `hc machine ls --json` lists connected machines; `hc exec --on <machine> "<cmd>"` runs a command there and prints its output.
+- The desktop board reads each connected machine's ledger with `hc exec --on <machine> 'python3 ~/.claude/skills/pm/scripts/pm.py state'`, so the skill must be installed on that machine too.
+
+## Discord plugin (claude-plugins-official/discord)
+
+- One plugin process per Claude session, state in `DISCORD_STATE_DIR` (default `~/.claude/channels/discord`): `.env` with the token, `access.json` with the gate. No token → the process exits, so a session without a per-PM state dir never connects.
+- Claude Code does **not** pass the shell environment to plugin MCP servers, so `DISCORD_STATE_DIR=... claude` has no effect. Run the same server through a session-only `--mcp-config` file whose server entry has an `env` block, and name it only on `--dangerously-load-development-channels server:<name>` (tagged list; a startup dialog asks for confirmation). Do not add `--channels server:<name>` as well: the registration check takes the first matching entry, which is then not marked as development and is skipped with "not on the approved channels allowlist". Plugin servers are named `plugin:<plugin>@<marketplace>`; an untagged name is rejected. The MCP log (`~/Library/Caches/claude-cli-nodejs/<cwd>/mcp-logs-<server>/`) says "Channel notifications skipped: …" when the channel did not register.
+- Guild messages are delivered only when the channel ID is in `groups`; everything else is dropped silently. Threads inherit the parent channel. `dmPolicy: disabled` drops guild messages too; use `allowlist` with an empty `allowFrom` to keep the channel and ignore DMs.
+- The outbound `reply` tool is gated the same way: a PM can only post into channels in its own `access.json`.
+- Several sessions may share one bot token; each holds its own gateway connection. Keep the number of connected sessions small (PMs only).
+- Messages are capped at 2000 characters; the plugin chunks long replies.
