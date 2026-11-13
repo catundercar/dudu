@@ -1,12 +1,14 @@
 # dudu
 
-A PM skill for Herdr: one agent coordinates a project, dispatches coding agents, reviews their work, and keeps a persistent task ledger.
+Manage all your coding agents from one session. Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.
 
-![dudu project and task board](preview.png)
+![dudu board: a task is dispatched, comes back for review, another one gets blocked](demo.gif)
 
-Preview uses invented demo data.
+The recording uses invented demo data.
 
-This first version supports the Herdr desktop app. Its mods add a PM entry in the sidebar and a project/task board. Discord is optional.
+For each project, one Claude Code session in Herdr acts as the manager: it hands tasks to coding agents in their own worktrees, checks what they bring back, and keeps a persistent task ledger, so progress survives restarts and is visible across projects and machines.
+
+This first version supports the Herdr desktop app. Its mods add a sidebar entry and a board of every project and task. Discord is optional.
 
 The `herdr` terminal UI is not supported yet: the skill contains code paths for it, but they are untested and may change.
 
