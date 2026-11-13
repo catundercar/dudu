@@ -1,7 +1,7 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, watchFolder, terminals, agents, run, props, closeOverlay, layout as desktopLayout } from 'herdr';
-import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates } from './model.js';
+import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalTargetFor, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates } from './model.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
 
@@ -209,14 +209,14 @@ export default class PmDash extends View {
     cx.timer.after(400, cx => this.next(cx));
   }
   presentation(row, terms, live) {
-    const terminal = row.type ? terminalFor(row, terms) : null;
-    const actual = terminal ? live.find(a => a.address === terminal.address)?.status || terminal.status || 'unknown' :
+    const { terminal, exact } = row.type ? terminalTargetFor(row, terms) : { terminal: null, exact: false };
+    const actual = exact ? live.find(a => a.address === terminal.address)?.status || terminal.status || 'unknown' :
       row.type === 'task' ? row.worker || row.status : row.status;
     const pending = [...this.queue, ...(this.trip && !this.trip.replay ? [this.trip.event] : [])];
     const held = pending.some(e => row.id === taskId(e.task) || row.id === pmId(e.pm));
     if (!held || !(row.id in this.shownLive)) this.shownLive[row.id] = actual;
     if (!held) this.shownStatus[row.id] = row.status;
-    return { ...row, terminal, status: this.shownStatus[row.id] || row.status, live: this.shownLive[row.id] };
+    return { ...row, terminal, terminalExact: exact, status: this.shownStatus[row.id] || row.status, live: this.shownLive[row.id] };
   }
   projectColor(name, t) {
     const pm = this.state.pms.find(p => (p.name || '') === (name || ''));
@@ -335,9 +335,10 @@ export default class PmDash extends View {
       .px(px(12)).gap(px(10)).items_center().rounded(px(12)).text_size(font(13))
       .line_height(`${Math.max(12, px(18))}px`).opacity(this.dim(pm)).transition('opacity', 160);
     if (row.type === 'pm') {
-      const away = !row.terminal;
+      const away = !row.terminalExact;
       const statusColor = working ? t.ansi2 : t.muted;
       el = el.when(!away, el => el.bg(t.surface))
+        .when(away, el => el.tooltip(this.text(row.terminal ? 'pmProjectFallback' : 'pmDesktopMissing')))
         .child(div().absolute().left(px(-3)).top(row.h / 2 - px(3)).w(px(6)).h(px(6)).rounded(px(3)).bg(color))
         .on_hover((over, cx) => {
           if (over) this.hoverPm = row.name || '';

@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP } from './model.js';
+import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, pmId, taskId, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP } from './model.js';
 
 test('setup needs both skill and hooks before comparing versions', () => {
   for (const input of [null, undefined, {}, { skill_present: true }, { hooks_present: true },
@@ -548,6 +548,87 @@ test('live child agent needs neither a pane nor desktop labels to match a task',
   const child = {address:'t13',state:'live',status:'working',labels:{task:'dudu-pm-dash'}};
   assert.equal(terminalFor({type:'task',task:'dudu-pm-dash'},[child]),child);
   assert.equal(terminalFor({type:'task',task:'dudu-pm-dash'},[{...child,state:'exited'}]),undefined);
+});
+
+test('PM project fallback matches live cwd on its own machine, normalizing trailing slashes only', () => {
+  const row = { type: 'pm', project: 'sample', repo: '/work/sample/', pane: 'wS:p1' };
+  const local = { address: 't8', state: 'live', cwd: '/work/sample' };
+  const remote = { ...local, address: 'remote-a/t8', cwd: '/work/sample/' };
+  const others = [{ ...local, address: 'remote-b/t1' },
+    { ...local, address: 't1', state: 'exited' },
+    { ...local, address: 't2', cwd: '/work/sample/child' },
+    { ...local, address: 't3', cwd: '/work/other' },
+    { ...local, address: 't4', cwd: null },
+    { ...local, address: 't5', cwd: '/work/Sample' }];
+  assert.deepEqual(terminalTargetFor(row, [...others, remote, local]), { terminal: local, exact: false });
+  assert.deepEqual(terminalTargetFor({ ...row, machine: 'remote-a', repo: '/work/sample' },
+    [...others, local, remote]), { terminal: remote, exact: false });
+  assert.equal(terminalTargetFor(row, [...others, remote]).terminal, undefined);
+  assert.equal(terminalTargetFor({ ...row, machine: 'remote-a' }, [...others, local]).terminal, undefined);
+  for (const repo of [undefined, null, '', 42]) {
+    assert.equal(terminalTargetFor({ ...row, repo }, [local, { ...local, cwd: '' }]).terminal, undefined);
+  }
+  const root = { ...local, cwd: '/' };
+  assert.equal(terminalTargetFor({ ...row, repo: '/' }, [root]).terminal, root);
+});
+
+test('PM project fallback prefers agents then stable address order without reordering input', () => {
+  const row = { type: 'pm', repo: '/work/sample' };
+  const shell = { address: 't1', state: 'live', cwd: row.repo, program: { agent: false } };
+  const agent = { ...shell, address: 't20', program: { agent: true } };
+  const later = { ...agent, address: 't30' };
+  const terms = [later, shell, agent], before = JSON.stringify(terms);
+  assert.equal(terminalTargetFor(row, terms).terminal, agent);
+  assert.equal(terminalTargetFor(row, [...terms].reverse()).terminal, agent);
+  assert.equal(terminalTargetFor(row, [later, shell]).terminal, later);
+  assert.equal(terminalTargetFor(row, [{ ...shell, address: 't2' }, shell]).terminal, shell);
+  assert.equal(JSON.stringify(terms), before);
+});
+
+test('project fallback never applies to tasks or overrides labels and recorded hc panes', () => {
+  for (const machine of ['', 'remote-a']) {
+    const address = id => machine ? `${machine}/${id}` : id;
+    const row = { type: 'pm', machine, project: 'sample', repo: '/work/sample', pane: 'hc:t9' };
+    const fallback = { address: address('t1'), state: 'live', cwd: row.repo, program: { agent: true } };
+    const pane = { address: address('t9'), state: 'live', cwd: '/work/elsewhere' };
+    const labeled = { ...pane, address: address('t10'), labels: { pm: 'sample' } };
+    assert.deepEqual(terminalTargetFor(row, [fallback, pane, labeled]), { terminal: labeled, exact: true });
+    assert.deepEqual(terminalTargetFor(row, [fallback, pane]), { terminal: pane, exact: true });
+    assert.deepEqual(terminalTargetFor({ ...row, type: 'task', task: 'sample-task', pane: 'wS:p1' },
+      [fallback]), { terminal: undefined, exact: false });
+    const task = { ...labeled, labels: { task: 'sample-task' } };
+    assert.deepEqual(terminalTargetFor({ ...row, type: 'task', task: 'sample-task' }, [fallback, pane, task]),
+      { terminal: task, exact: true });
+  }
+});
+
+test('PM presentation uses fallback for navigation without borrowing its agent or terminal status', () => {
+  const board = modWithIO('./main.js', { terminalTargetFor, pmId, taskId });
+  board.queue = []; board.trip = null; board.shownLive = {}; board.shownStatus = {};
+  const row = { id: 'pm:sample', name: 'sample', type: 'pm', repo: '/work/sample', status: 'offline' };
+  const fallback = { address: 't8', state: 'live', cwd: row.repo, status: 'working', program: { agent: true } };
+  const live = [{ address: fallback.address, status: 'blocked' }];
+  let presented = board.presentation(row, [fallback], live);
+  assert.equal(presented.terminal, fallback);
+  assert.equal(presented.terminalExact, false);
+  assert.equal(presented.live, 'offline');
+  assert.equal(wireFlows({ to: row.id }, [presented]), false);
+  assert.equal(board.presentation({ ...row, status: 'idle' }, [fallback], []).live, 'idle');
+  const exact = { ...fallback, labels: { pm: 'sample' } };
+  presented = board.presentation(row, [exact], live);
+  assert.equal(presented.terminalExact, true);
+  assert.equal(presented.live, 'blocked');
+  assert.equal(board.presentation(row, [exact], []).live, 'working');
+  assert.equal(board.presentation(row, [fallback], live).live, 'offline');
+  assert.equal(board.presentation(row, [], live).terminal, undefined);
+  assert.equal(board.presentation(row, [], live).live, 'offline');
+});
+
+test('missing PM session hints explain project fallback and desktop claim in both languages', () => {
+  assert.equal(word('en', 'pmProjectFallback'), "PM session is not in the desktop app. Click opens the project's space.");
+  assert.equal(word('zh', 'pmProjectFallback'), 'PM 会话不在 desktop 里，点击打开该项目的空间。');
+  assert.equal(word('en', 'pmDesktopMissing'), 'PM session is not in the desktop app. Start it there and run pm.py claim.');
+  assert.equal(word('zh', 'pmDesktopMissing'), 'PM 会话不在 desktop 里。在 desktop 里启动后运行 pm.py claim。');
 });
 
 const machine = '100.64.0.1';

@@ -10,6 +10,8 @@ const STRINGS = {
     prompt: 'You sent a message', reply: 'PM replied to this turn',
     allProjects: 'All your projects', waiting: n => `${n} ${n === 1 ? 'item' : 'items'} waiting`,
     nothingWaiting: 'Nothing waiting', notDesktop: 'Not in desktop', inDesktop: 'In desktop', localMachine: 'Local',
+    pmProjectFallback: "PM session is not in the desktop app. Click opens the project's space.",
+    pmDesktopMissing: 'PM session is not in the desktop app. Start it there and run pm.py claim.',
     blockedWaiting: 'Blocked · Waiting for you', reviewWaiting: 'Review · Waiting for you', workingNow: 'Working…',
     task: 'Task', projects: 'Project PMs', tasks: 'Tasks', running: 'Running',
     recent: 'Recent activity', replay: 'Replay · ', noEvents: 'No new records yet.', idleReplay: 'Idle replay',
@@ -36,6 +38,8 @@ const STRINGS = {
     prompt: '你发来一条消息', reply: 'PM 回复了这一轮',
     allProjects: '项目都在这里', waiting: n => `${n} 件等你`,
     nothingWaiting: '没有等你的事', notDesktop: '不在 desktop', inDesktop: '在 desktop', localMachine: '本机',
+    pmProjectFallback: 'PM 会话不在 desktop 里，点击打开该项目的空间。',
+    pmDesktopMissing: 'PM 会话不在 desktop 里。在 desktop 里启动后运行 pm.py claim。',
     blockedWaiting: '阻塞 · 等你', reviewWaiting: '待审 · 等你', workingNow: '工作中…',
     task: '任务', projects: '项目 PM', tasks: '任务', running: '在跑',
     recent: '最近发生了什么', replay: '回放 · ', noEvents: '还没有新的记录。', idleReplay: '空闲回放',
@@ -280,10 +284,14 @@ export function pointAt(points, u) {
   const v = 1 - u, c = [v*v*v, 3*v*v*u, 3*v*u*u, u*u*u];
   return { x: points.reduce((s,p,i) => s + c[i]*p[0], 0), y: points.reduce((s,p,i) => s + c[i]*p[1], 0) };
 }
+function liveTerminalsFor(row, terms) {
+  const machine = row.machine || '';
+  return terms.filter(t => t.state === 'live' &&
+    (machine ? t.address?.startsWith(`${machine}/`) : !t.address?.includes('/')));
+}
 export function terminalFor(row, terms) {
   const machine = row.machine || '';
-  const candidates = terms.filter(t => t.state === 'live' &&
-    (machine ? t.address?.startsWith(`${machine}/`) : !t.address?.includes('/')));
+  const candidates = liveTerminalsFor(row, terms);
   const key = row.type === 'pm' ? 'pm' : 'task';
   const value = row.type === 'pm' ? row.project || (row.sourceName ?? row.name)?.replace(/^pm-/, '') : row.sourceId ?? row.task;
   // Prefer a labeled child over a recorded parent pane (tasks may share their PM's pane).
@@ -293,6 +301,19 @@ export function terminalFor(row, terms) {
   return labeled || (pane ? candidates.find(t => t.address === address &&
     // A task recorded on its PM's pane must not borrow that PM's live status.
     (row.type === 'pm' || (!t.labels?.pm && (!t.labels?.task || t.labels.task === value)))) : undefined);
+}
+
+// A project terminal is a navigation destination, not evidence of the PM session.
+export function terminalTargetFor(row, terms) {
+  const exact = terminalFor(row, terms);
+  if (exact) return { terminal: exact, exact: true };
+  const folder = path => typeof path === 'string' && path ? path.replace(/\/+$/, '') || '/' : '';
+  const repo = folder(row.repo);
+  const candidates = row.type === 'pm' && repo ? liveTerminalsFor(row, terms)
+    .filter(t => t.address && folder(t.cwd) === repo) : [];
+  candidates.sort((a, b) => Number(Boolean(b.program?.agent)) - Number(Boolean(a.program?.agent)) ||
+    (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
+  return { terminal: candidates[0], exact: false };
 }
 
 // A PM's activity never makes a different worker's wire active.
