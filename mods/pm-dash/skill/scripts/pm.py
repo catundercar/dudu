@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Task ledger and herdr helpers for the pm skill.
 
-State lives in ~/.claude/pm (override with PM_HOME): one JSON file per task in
-tasks/, and BOARD.md, which is regenerated after every write. Each project has
-its own PM: the herdr agent named "pm-<project slug>". PM registrations live in
-pms/, and discord.json holds the
-optional board channel that BOARD.md is mirrored to.
+State lives in the ledger home (PM_HOME; default ~/.dudu, or ~/.claude/pm where an
+earlier install already keeps it): one JSON file per task in tasks/, and BOARD.md,
+which is regenerated after every write. Each project has its own PM: a session of
+any coding agent, registered in pms/. Workers are coding agents too; which program
+plays which part is a matter of configuration (see AGENT_KINDS).
 """
 import argparse
 import datetime
@@ -18,17 +18,18 @@ import sys
 import time
 from pathlib import Path
 
-STATE = Path(os.environ.get("PM_HOME", Path.home() / ".claude" / "pm"))
+
+
+def default_home():
+    """The ledger home: PM_HOME, else ~/.claude/pm where an earlier install keeps it, else ~/.dudu."""
+    earlier = Path.home() / ".claude" / "pm"
+    return Path(os.environ.get("PM_HOME") or (earlier if earlier.exists() else Path.home() / ".dudu"))
+
+
+STATE = default_home()
 TASKS = STATE / "tasks"
 PMS = STATE / "pms"
 BOARD = STATE / "BOARD.md"
-DISCORD_CFG = STATE / "discord.json"
-DISCORD_HOME = Path(os.environ.get("DISCORD_HOME", Path.home() / ".claude" / "channels" / "discord"))
-DISCORD_TOKEN_FILE = DISCORD_HOME / "pm-token.env"
-DISCORD_PLUGIN_ROOT = Path.home() / ".claude" / "plugins" / "cache" / "claude-plugins-official" / "discord"
-MCP_DIR = STATE / "mcp"
-MCP_SERVER = "discord-pm"
-DISCORD_API = "https://discord.com/api/v10"
 ACTIVE = ["proposed", "in_progress", "review", "blocked", "paused"]
 CLOSED = ["merged", "released", "done", "abandoned"]
 # A session is identified by its herdr pane, or in the herdr desktop app by its herdr-core terminal ("hc:t7").
@@ -176,7 +177,6 @@ def save(task):
     tmp.write_text(json.dumps(task, ensure_ascii=False, indent=2) + "\n")
     tmp.replace(TASKS / f"{task['id']}.json")
     write_board()
-    post_board()
 
 
 def all_tasks():
@@ -222,157 +222,17 @@ def write_board():
     BOARD.write_text("\n".join(lines))
 
 
-# ---- discord ----------------------------------------------------------------
-
-def discord_token():
-    token = os.environ.get("DISCORD_BOT_TOKEN")
-    if not token and DISCORD_TOKEN_FILE.exists():
-        m = re.search(r"^DISCORD_BOT_TOKEN=(.+)$", DISCORD_TOKEN_FILE.read_text(), re.M)
-        token = m.group(1).strip() if m else None
-    return token
+TURN_LOG = STATE / "turns.log"
 
 
-def discord_api(method, path, body=None):
-    """One Discord REST call with the bot token; returns the parsed JSON or None."""
-    import urllib.error
-    import urllib.request
-    token = discord_token()
-    if not token:
-        return None
-    req = urllib.request.Request(f"{DISCORD_API}{path}", method=method,
-                                 data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Authorization": f"Bot {token}", "Content-Type": "application/json",
-                                          "User-Agent": "pm.py (herdr PM skill)"})
-    try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            return json.loads(r.read() or b"null")
-    except urllib.error.HTTPError as e:
-        hook_log(f"discord {method} {path}: HTTP {e.code} {e.read()[:200]!r}")
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        hook_log(f"discord {method} {path}: {e!r}")
-    return None
-
-
-def hook_log(text):
-    """Append one line to ~/.claude/pm/hook-mirror.log; hooks must never fail, so failures are logged instead."""
+def turn_log(text):
+    """Append one line to the turn log; hooks must never fail, so failures are swallowed."""
     try:
         STATE.mkdir(parents=True, exist_ok=True)
-        with open(STATE / "hook-mirror.log", "a") as f:
+        with open(TURN_LOG, "a") as f:
             f.write(f"{now()} [{PANE or '-'}] {text}\n")
     except OSError:
         pass
-
-
-def discord_cfg():
-    return json.loads(DISCORD_CFG.read_text()) if DISCORD_CFG.exists() else {}
-
-
-def board_text():
-    """BOARD.md condensed for a single Discord message (limit 2000 chars)."""
-    tasks = all_tasks()
-    lines = [f"**PM Board** · {now()}"]
-    for project in sorted({t["project"] for t in tasks}):
-        pm = pm_record_for_project(project)
-        where = f" · PM {pm['pane']}" if pm and pm.get("pane") else ""
-        lines.append(f"\n__{project}__{where}")
-        for t in [t for t in tasks if t["project"] == project and t["status"] in ACTIVE]:
-            latest = (t.get("log") or [{}])[-1].get("text", "").replace("\n", " ")[:60]
-            who = " ".join(x for x in (t.get("pane"), t.get("agent")) if x) or t.get("owner", "")
-            lines.append(f"• `{t['status']}` {t['title']} — {who} · {latest}")
-        if not any(t["project"] == project and t["status"] in ACTIVE for t in tasks):
-            lines.append("• (no active tasks)")
-    text = "\n".join(lines)
-    return text if len(text) <= 1900 else text[:1880] + "\n…(truncated)"
-
-
-def pm_record_for_project(project):
-    for p in PMS.glob("*.json") if PMS.exists() else []:
-        rec = json.loads(p.read_text())
-        if rec.get("project") == project:
-            return rec
-    return None
-
-
-def post_board(force=False):
-    """Mirror the board into the configured Discord channel by editing one message in place.
-
-    Best effort: never fails the ledger write. Returns True when the message was updated.
-    """
-    cfg = discord_cfg()
-    channel = cfg.get("board_channel")
-    if not channel or (os.environ.get("PM_NO_DISCORD") and not force):
-        return False
-    body = {"content": board_text()}
-    if cfg.get("message_id"):
-        if discord_api("PATCH", f"/channels/{channel}/messages/{cfg['message_id']}", body):
-            return True
-        cfg.pop("message_id", None)  # deleted by hand; post a fresh one
-    created = discord_api("POST", f"/channels/{channel}/messages", body)
-    if not created or "id" not in created:
-        return False
-    cfg["message_id"] = created["id"]
-    DISCORD_CFG.write_text(json.dumps(cfg, indent=2) + "\n")
-    return True
-
-
-def discord_state_dir(repo):
-    return DISCORD_HOME / pm_name(repo)
-
-
-def write_discord_state(repo, channel_id, user_ids):
-    """Per-PM plugin state: own .env (token) and an access.json that admits only this PM's channel."""
-    sdir = discord_state_dir(repo)
-    sdir.mkdir(parents=True, exist_ok=True)
-    token = discord_token()
-    if not token:
-        sys.exit(f"no bot token: put DISCORD_BOT_TOKEN=... in {DISCORD_TOKEN_FILE}")
-    env = sdir / ".env"
-    env.write_text(f"DISCORD_BOT_TOKEN={token}\n")
-    env.chmod(0o600)
-    access_file = sdir / "access.json"
-    access = json.loads(access_file.read_text()) if access_file.exists() else {}
-    # "disabled" would drop guild messages too; allowlist with nobody drops DMs silently and keeps the channel.
-    access.update({"dmPolicy": "allowlist", "allowFrom": [], "pending": {}})
-    access.setdefault("groups", {})[str(channel_id)] = {"requireMention": False, "allowFrom": list(user_ids)}
-    access_file.write_text(json.dumps(access, indent=2) + "\n")
-    access_file.chmod(0o600)
-    write_mcp_config(repo)
-    return sdir
-
-
-def plugin_root():
-    """Newest installed version of the official discord plugin."""
-    versions = sorted(DISCORD_PLUGIN_ROOT.glob("*/server.ts"), key=lambda p: p.parent.name)
-    if not versions:
-        sys.exit(f"discord plugin not installed under {DISCORD_PLUGIN_ROOT}")
-    return versions[-1].parent
-
-
-def mcp_config_path(repo):
-    return MCP_DIR / f"{pm_name(repo)}.json"
-
-
-def write_mcp_config(repo):
-    """A session-only MCP config that runs the plugin's server with this PM's state dir.
-
-    Claude Code does not pass the parent environment to plugin MCP servers, so the
-    state dir has to be set through a server config's env block.
-    """
-    MCP_DIR.mkdir(parents=True, exist_ok=True)
-    cfg = {"mcpServers": {MCP_SERVER: {
-        "command": "bun",
-        "args": ["run", "--cwd", str(plugin_root()), "--shell=bun", "--silent", "start"],
-        "env": {"DISCORD_STATE_DIR": str(discord_state_dir(repo))}}}}
-    mcp_config_path(repo).write_text(json.dumps(cfg, indent=2) + "\n")
-    return mcp_config_path(repo)
-
-
-def launch_command(repo, resume=None):
-    # A manually configured server only counts as a channel through the development-channels flag.
-    # Do not also pass --channels for it: the first matching entry wins and that one is not marked dev.
-    return (f"claude --mcp-config {mcp_config_path(repo)} "
-            f"--dangerously-load-development-channels server:{MCP_SERVER}"
-            + (f" --resume {resume}" if resume else "") + " <your usual flags>")
 
 
 # ---- commands ---------------------------------------------------------------
@@ -442,16 +302,6 @@ def cmd_show(a):
 
 def cmd_board(a):
     write_board()
-    if a.post or a.channel:
-        cfg = discord_cfg()
-        if a.channel:
-            cfg = {"board_channel": str(a.channel)}  # new channel: start a fresh message
-            STATE.mkdir(parents=True, exist_ok=True)
-            DISCORD_CFG.write_text(json.dumps(cfg, indent=2) + "\n")
-        if not cfg.get("board_channel"):
-            sys.exit("no board channel configured; pass --channel <id> once")
-        print("board posted to Discord" if post_board(force=True) else "posting to Discord failed")
-        return
     print(BOARD.read_text())
 
 
@@ -463,10 +313,8 @@ def cmd_status(a):
     print("PMs:")
     for x in listing:
         if x["pane_id"] in pm_panes:
-            rec = pm_record(x.get("cwd") or ".")
-            discord = f" discord #{rec['discord']['channel_id']}" if rec and rec.get("discord") else ""
             print(f"  {x['name']}  {x['pane_id']}{' (this session)' if x['pane_id'] == PANE else ''}  "
-                  f"{x.get('agent_status')}  {x.get('cwd')}{discord}")
+                  f"{x.get('agent_status')}  {x.get('cwd')}")
     in_hc = [pm for pm in (hc_pm(json.loads(p.read_text()).get("repo") or "") for p in sorted(PMS.glob("*.json"))
                            if json.loads(p.read_text()).get("runtime") == "hc") if pm] if PMS.exists() else []
     for pm in in_hc:
@@ -548,10 +396,12 @@ def cmd_claim(a):
     if pm and pm["pane_id"] != pane:
         sys.exit(f"PM for {Path(repo).name} already exists at {pm['pane_id']}; ask the user before replacing it")
     name = pm_name(repo)
+    kind = getattr(a, "kind", None) or ""
     if pane.startswith("hc:"):
         workspace = ""
         if hc("label", pane[3:], f"pm={Path(repo).name}") is None:
             sys.exit(f"hc label {pane[3:]} failed")
+        kind = kind or terminal_kind(hc("get", pane[3:]) or {})
     elif pane == PANE:
         workspace = WORKSPACE
         if not herdr("agent", "rename", PANE, name):
@@ -566,39 +416,17 @@ def cmd_claim(a):
     rec = json.loads(rec_path.read_text()) if rec_path.exists() else {}
     rec.update({"project": Path(repo).name, "repo": repo, "name": name, "pane": pane, "workspace": workspace,
                 "claimed": now()})
+    rec.pop("discord", None)  # written by earlier versions
+    if kind:
+        rec["agent"] = kind  # which program this PM is: its successor is started the same way
     for key in ("runtime", "terminal"):
         rec.pop(key, None)
     if pane.startswith("hc:"):
         rec.update({"runtime": "hc", "terminal": pane[3:]})
     print(f"{pane} is now {name} (PM for {Path(repo).name})")
-    if a.discord_channel:
-        users = a.discord_users.split(",") if a.discord_users else default_discord_users()
-        sdir = write_discord_state(repo, a.discord_channel, users)
-        rec["discord"] = {"channel_id": str(a.discord_channel), "state_dir": str(sdir), "users": users}
-        print(f"discord: channel {a.discord_channel} bound; plugin state in {sdir}")
-        if pane == PANE and os.environ.get("DISCORD_STATE_DIR") != str(sdir):
-            print("this session is not connected to that channel yet. Restart it as:\n  "
-                  + launch_command(repo, resume="<session id>"))
     rec_path.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n")
     if pane != PANE and not pane.startswith("hc:"):
-        flags = launch_command(repo).removeprefix("claude ") if a.discord_channel else "<your usual flags>"
-        print(f"start it: herdr agent start {name} --kind claude --pane {pane} -- {flags}")
-
-
-def default_discord_users():
-    """Users already paired with the bot in the shared access.json (the user's own account)."""
-    shared = DISCORD_HOME / "access.json"
-    try:
-        return list(json.loads(shared.read_text()).get("allowFrom", []))
-    except (OSError, ValueError):
-        return []
-
-
-def cmd_launch(a):
-    repo = project_root(a.repo)
-    if not repo:
-        sys.exit(f"{a.repo} is not a directory")
-    print(launch_command(repo, resume=a.resume))
+        print(f"start it: herdr agent start {name} --kind {kind or 'claude'} --pane {pane} -- <your usual flags>")
 
 
 def cmd_notify(a):
@@ -657,7 +485,8 @@ def cmd_dispatch(a):
 
 
 def config():
-    """Personal settings: ~/.claude/pm/config.json, for example {"worker": {"kind": "codex", "model": "...", "effort": "high"}}."""
+    """Personal settings: config.json in the ledger home, for example
+    {"worker": {"kind": "codex", "model": "...", "effort": "high"}, "pm": {"kind": "claude"}}."""
     try:
         return json.loads((STATE / "config.json").read_text())
     except (OSError, ValueError):
@@ -672,18 +501,78 @@ def tr(en, zh):
 def worker_defaults(a):
     """Fill the worker's kind, model and effort: the command line wins, then config.json, then the program's own defaults."""
     cfg = config().get("worker") or {}
-    a.kind = a.kind or cfg.get("kind") or "codex"
-    a.model = a.model or cfg.get("model") or ""
-    a.effort = a.effort or cfg.get("effort") or ""
+    default = cfg.get("kind") or "codex"
+    a.kind = a.kind or default
+    # A configured model or effort belongs to the configured program, not to another one named on the command line.
+    mine = cfg if a.kind == default else {}
+    a.model = a.model or mine.get("model") or ""
+    a.effort = a.effort or mine.get("effort") or ""
     return a
 
 
+# How each coding agent is started, as a PM or as a worker. "{}" stands for the value. `prompt_arg`: the program
+# takes its first prompt as a trailing argument; without it the prompt is typed in once the program is ready.
+# config.json adds or overrides kinds: {"agents": {"mine": {"argv": ["mine", "--yes"], "model": ["--model", "{}"]}}}.
+AGENT_KINDS = {
+    "claude": {"argv": ["claude"], "model": ["--model", "{}"], "effort": [], "prompt_arg": True},
+    # No update prompt at startup: it would take the place of the input and the brief could not be delivered.
+    "codex": {"argv": ["codex", "-c", "check_for_update_on_startup=false"], "model": ["-m", "{}"],
+              "effort": ["-c", 'model_reasoning_effort="{}"'], "prompt_arg": True},
+    "pi": {"argv": ["pi"], "model": ["--model", "{}"], "effort": ["--thinking", "{}"], "prompt_arg": True},
+    "gemini": {"argv": ["gemini"], "model": ["-m", "{}"], "effort": []},
+    "opencode": {"argv": ["opencode"], "model": ["-m", "{}"], "effort": []},
+}
+# What herdr-core calls a program where that differs from the kind's name.
+APP_KINDS = {"claude-code": "claude"}
+
+
+def agent_kinds():
+    kinds = {k: dict(v) for k, v in AGENT_KINDS.items()}
+    for name, spec in (config().get("agents") or {}).items():
+        if isinstance(spec, dict) and spec.get("argv"):
+            kinds[name] = {**kinds.get(name, {}), **spec}
+    return kinds
+
+
+def agent_argv(kind, model="", effort="", prompt=None):
+    """The command that starts an agent of this kind. An unknown kind is run as written ("myagent --flag")."""
+    spec = agent_kinds().get(kind)
+    if not spec:
+        return shlex.split(kind)
+    fill = lambda flags, value: [f.replace("{}", value) for f in flags or []] if value else []
+    return (list(spec["argv"]) + fill(spec.get("model"), model) + fill(spec.get("effort"), effort)
+            + ([prompt] if prompt and spec.get("prompt_arg") else []))
+
+
+def takes_prompt(kind):
+    return bool((agent_kinds().get(kind) or {}).get("prompt_arg"))
+
+
+def terminal_kind(term):
+    """The kind of the agent running in a herdr-core terminal, from its program."""
+    argv = (term.get("foreground") or {}).get("argv") or term.get("argv") or []
+    program = Path(argv[0]).name if argv else ""
+    for kind, spec in agent_kinds().items():
+        if program and program == Path(spec["argv"][0]).name:
+            return kind
+    app = (term.get("status") or {}).get("app") or ""
+    return APP_KINDS.get(app, app) or program
+
+
+def send_when_ready(term, text, tries=8):
+    """Type text into an agent once its input is ready; a send that comes too early is refused."""
+    for attempt in range(tries):
+        time.sleep(3)
+        status = (hc("get", term) or {}).get("status")
+        # A program that reports no status at all gets the text after a short wait.
+        ready = status.get("state") == "idle" if status else attempt >= 2
+        if ready and (hc("send", term, text) or {}).get("started"):
+            return True
+    return False
+
+
 def worker_argv(a):
-    if a.kind == "codex":
-        # No update prompt at startup: it would take the place of the input and the brief could not be delivered.
-        return (["codex", "-c", "check_for_update_on_startup=false"] + (["-m", a.model] if a.model else [])
-                + (["-c", f'model_reasoning_effort="{a.effort}"'] if a.effort else []))
-    return [a.kind]
+    return agent_argv(a.kind, a.model, a.effort)
 
 
 def worker_placement():
@@ -716,13 +605,7 @@ def dispatch_hc(a, repo, brief):
     task = load(task_id)
     task["dispatched"] = True  # `update --status merged` retires only what `dispatch` created
     save(task)
-    # The agent needs a moment before its input is ready; a send that comes too early is refused.
-    for attempt in range(8):
-        time.sleep(3)
-        state = ((hc("get", made) or {}).get("status") or {}).get("state")
-        if state == "idle" and (hc("send", made, brief) or {}).get("started"):
-            break
-    else:
+    if not send_when_ready(made, brief):
         sys.exit(f"the brief was not sent: the worker in hc:{made} is not ready (read its screen: it may be at a "
                  "startup dialog such as folder trust). Send the brief by hand with `hc send`.")
     print(f"pane=hc:{made} worktree={path}")
@@ -791,13 +674,13 @@ def cmd_hook_session_start(a):
     pm = find_pm()
     if not pm:
         # A restarted PM loses its herdr name; restore it from the registration for this pane.
-        rec = pm_record_for_pane(PANE, require_discord=False)
+        rec = pm_record_for_pane(PANE)
         if rec and herdr("agent", "rename", PANE, rec["name"]):
             pm = {"pane_id": PANE, "name": rec["name"]}
         else:
             return
     if pm["pane_id"] == PANE:
-        print(f"You are {pm.get('name')}, the PM for this project (pm skill). Ledger board: ~/.claude/pm/BOARD.md. "
+        print(f"You are {pm.get('name')}, the PM for this project (pm skill). Ledger board: {BOARD}. "
               "If you have not read it in this session, run `pm.py handover` before anything else.")
         return
     print(f"A PM coordinator ({pm.get('name')}) runs in {pm['pane_id']}. Before implementing a non-trivial change, "
@@ -805,112 +688,36 @@ def cmd_hook_session_start(a):
           "and mark it `review` when it is ready to merge.")
 
 
-def pm_record_for_pane(pane, require_discord=True):
+def pm_record_for_pane(pane):
     for path in PMS.glob("*.json") if PMS.exists() else []:
         rec = json.loads(path.read_text())
-        if rec.get("pane") == pane and (rec.get("discord", {}).get("channel_id") or not require_discord):
+        if rec.get("pane") == pane:
             return rec
     return None
 
 
-def chunks(text, size=1900, limit=3):
-    parts = []
-    while text and len(parts) < limit:
-        cut = text.rfind("\n", 0, size) if len(text) > size else len(text)
-        cut = cut if cut > size // 2 else size
-        parts.append(text[:cut])
-        text = text[cut:].lstrip("\n")
-    if text:
-        parts[-1] = parts[-1][:size - 30] + tr("\n…(truncated; the full text is in the terminal)", "\n…(已截断，完整内容见终端)")
-    return parts
-
-
-def last_reply(transcript):
-    """Final assistant text of the last turn in a Claude Code transcript, or None if the turn answered on Discord.
-
-    Returns "" while the final message is not written yet: the transcript has one row per content block,
-    so until then the last row is a tool call or result and the newest text is only a progress note.
-    """
-    text, replied_on_discord, final_written = None, False, None
-    for line in Path(transcript).read_text().splitlines()[::-1]:
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if row.get("isSidechain"):
-            continue
-        content = (row.get("message") or {}).get("content")
-        if final_written is None and row.get("type") in ("user", "assistant"):
-            final_written = row["type"] == "assistant" and isinstance(content, list) and any(
-                b.get("type") == "text" and b.get("text", "").strip() for b in content)
-        if row.get("type") == "user":
-            blocks = content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
-            if any(b.get("type") == "text" for b in blocks):
-                break  # the prompt that started this turn
-        elif row.get("type") == "assistant" and isinstance(content, list):
-            if any(b.get("type") == "tool_use" and "discord" in str(b.get("name", "")) and str(b.get("name", "")).endswith("__reply")
-                   for b in content):
-                replied_on_discord = True
-            if text is None:
-                texts = [b["text"] for b in content if b.get("type") == "text" and b.get("text", "").strip()]
-                if texts:
-                    text = "\n".join(texts)
-    if replied_on_discord:
-        return None
-    return text if final_written and text else ""
-
-
-def cmd_hook_mirror(a):
-    """UserPromptSubmit/Stop hook: mirror a PM session's terminal chat into its Discord channel."""
+def cmd_hook_turn(a):
+    """UserPromptSubmit/Stop hook of a PM session: note the turn for the board, and say when to hand over."""
     try:
         data = json.load(sys.stdin)
-    except ValueError as e:
-        hook_log(f"bad stdin: {e!r}")
+    except ValueError:
         return
     event = data.get("hook_event_name", "")
-    if event == "UserPromptSubmit" and PANE and pm_record_for_pane(PANE, require_discord=False):
+    if event not in ("UserPromptSubmit", "Stop") or not PANE or not pm_record_for_pane(PANE):
+        return
+    if event == "UserPromptSubmit":
         # What a UserPromptSubmit hook prints is added to the session's context.
         used = context_tokens(data.get("transcript_path") or "")
         if used > ROTATE_TOKENS:
             print(f"[pm] This PM session holds {used // 1000}k context tokens (limit {ROTATE_TOKENS // 1000}k). "
                   "Finish the step in hand, then hand over: `pm.py rotate --notes \"<what the ledger does not say>\"`.")
-    rec = pm_record_for_pane(PANE) if PANE else None
-    if not rec or os.environ.get("PM_NO_DISCORD"):
-        return
-    if event == "UserPromptSubmit":
         prompt = (data.get("prompt") or "").strip()
-        if not prompt or prompt.startswith("<") or prompt.startswith("/"):
-            return  # task notifications, channel relays, slash commands
-        # Prompts typed in by another agent (`pm.py notify`, briefs) start with "[from <pane>]".
-        sender = re.match(r"\[from ([^\]]+)\]\s*", prompt)
-        text = f"**{sender.group(1)}**\n{prompt[sender.end():]}" if sender else f"**{tr('You', '你')}**\n{prompt}"
-    elif event == "Stop":
-        path = data.get("transcript_path") or ""
-        if not Path(path).exists():
-            hook_log(f"Stop: transcript missing: {path!r}; keys={sorted(data)}")
-            return
-        import time
-        reply = ""
-        for attempt in range(8):  # the final message may be appended to the transcript after the hook starts
-            reply = last_reply(path)
-            if reply != "":  # text found, or None = this turn answered on Discord already
-                break
-            time.sleep(0.5)
-        if reply is None:
-            hook_log("Stop: turn answered on Discord via reply; not mirrored")
-            return
-        if not reply:
-            hook_log(f"Stop: no final text in transcript after 4s: {path}")
-            return
-        text = f"**{rec['name']}**\n{reply}"
-    else:
-        return
-    channel = rec["discord"]["channel_id"]
-    for part in chunks(text):
-        if not discord_api("POST", f"/channels/{channel}/messages", {"content": part, "flags": 4}):  # 4 = suppress embeds
-            hook_log(f"{event}: post failed ({len(part)} chars)")
-            return
-    hook_log(f"{event}: mirrored {len(text)} chars")
+        if not prompt or prompt[0] in "</[":
+            return  # task notifications, slash commands, text typed in by another agent
+    turn_log(f"{event}: turn")
+
+
+cmd_hook_mirror = cmd_hook_turn  # the name earlier installs put in their hooks
 
 
 # ---- rotation: the PM is the project's record, not one session ----------------
@@ -922,7 +729,7 @@ def project_dir(repo):
 
 
 def own_transcript():
-    """Transcript file of the Claude Code session running this command, or ""."""
+    """Transcript file of the Claude Code session running this command, or "" (other agents: not read yet)."""
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     hits = list((Path.home() / ".claude" / "projects").glob(f"*/{sid}.jsonl")) if sid else []
     return str(hits[0]) if hits else ""
@@ -1028,11 +835,14 @@ def cmd_handover(a):
 
 
 # Flags of the outgoing PM whose value is carried over to its successor.
-KEEP_VALUE = ("--mcp-config", "--dangerously-load-development-channels", "--permission-mode", "--settings", "--add-dir")
+KEEP_VALUE = ("--mcp-config", "--permission-mode", "--settings", "--add-dir")
 
 
-def successor_argv(args, model, prompt):
-    """The claude command of the next PM: the outgoing session's flags, minus anything that would resume it."""
+def successor_argv(kind, args, model, prompt):
+    """The command of the next PM. Claude Code keeps the outgoing session's flags, minus anything that would
+    resume it; other kinds start from their registry entry."""
+    if kind != "claude":
+        return agent_argv(kind, model, prompt=prompt)
     argv = ["claude"]
     for i, arg in enumerate(args):
         if not arg.startswith("-") or arg in ("--resume", "-r", "--continue", "-c", "--model", "--fork-session"):
@@ -1057,12 +867,11 @@ def rotate_herdr(a, repo, rec, previous, prompt, is_self):
                  f"session by hand (SKILL.md, \"Restart a PM\", without --resume) and give it this prompt:\n{prompt}")
     new = made.group(1)
     info = ((herdr("pane", "process-info", "--pane", old) or {}).get("process_info") or {})
+    kind = rec.get("agent") or "claude"
+    program = Path(agent_argv(kind)[0]).name
     args = next((p["argv"][1:] for p in info.get("foreground_processes", [])
-                 if p.get("argv") and Path(p["argv"][0]).name == "claude"), [])
-    argv = successor_argv(args, a.model, prompt)
-    if rec.get("discord") and "--mcp-config" not in argv:
-        argv[1:1] = ["--mcp-config", str(mcp_config_path(repo)),
-                     "--dangerously-load-development-channels", f"server:{MCP_SERVER}"]
+                 if p.get("argv") and Path(p["argv"][0]).name == program), [])
+    argv = successor_argv(kind, args, a.model, prompt)
     # The name must be free: the new session's SessionStart hook takes it from the registration of its pane.
     herdr("agent", "rename", old, f"ex-{name}")
     rec.update({"pane": new, "workspace": workspace, "claimed": now(), "previous": previous,
@@ -1073,9 +882,50 @@ def rotate_herdr(a, repo, rec, previous, prompt, is_self):
                  "--timeout", "30000")
     print(f"new PM session started in {new}; {old} is retired"
           + (": stop acting as PM in this session and tell the user to continue there." if is_self else "."))
-    if not seen or rec.get("discord"):
-        print(f"check {new}: it may be waiting at a startup dialog (folder trust, development channels) "
-              "that the user has to confirm.")
+    if not seen:
+        print(f"check {new}: it may be waiting at a startup dialog (folder trust) that the user has to confirm.")
+
+
+def start_pm_terminal(repo, argv, space=None):
+    """Start a PM's program in the desktop app: a tab in the given space when there is one, else a bare terminal."""
+    made = None
+    if space:
+        try:
+            out = subprocess.run(["herdr-app", "do", "tab.new", json.dumps({"space": space, "folder": repo, "argv": argv})],
+                                 capture_output=True, text=True, timeout=30)
+            made = json.loads(out.stdout).get("terminal")
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            made = None
+    return made or (hc("run", "--bg", "--no-parent", "--cwd", repo, "--", *argv) or {}).get("address")
+
+
+def cmd_start(a):
+    """Start a PM session of any agent kind for a project and hand it the project's record."""
+    repo = project_root(a.repo)
+    if not repo:
+        sys.exit(f"{a.repo} is not a directory")
+    pm = find_pm(repo=repo)
+    if pm:
+        sys.exit(f"PM for {Path(repo).name} already exists at {pm['pane_id']}; use `pm.py rotate` to replace it")
+    cfg = config().get("pm") or {}
+    kind = a.kind or cfg.get("kind") or "claude"
+    skill = Path(__file__).resolve().parent.parent
+    handover = f"python3 {Path(__file__).resolve()} handover"
+    prompt = "[from pm.py start] " + tr(
+        f"You are the PM (project manager) of the {Path(repo).name} project. Read {skill}/SKILL.md and "
+        f"{skill}/references/pm-playbook.md, then run `{handover}` and work from what it prints. Then tell the "
+        "user in three or four sentences what is open and what is waiting for them.",
+        f"你是 {Path(repo).name} 项目的 PM（项目协调者）。先读 {skill}/SKILL.md 和 "
+        f"{skill}/references/pm-playbook.md，再运行 `{handover}`，按它给出的内容开始工作，"
+        "然后用三四句话告诉用户：有哪些在办的事、哪些事在等他。")
+    own = (hc("get", HC_TERMINAL) or {}) if HC_TERMINAL else {}
+    made = start_pm_terminal(repo, agent_argv(kind, a.model or cfg.get("model") or "", prompt=prompt),
+                             (own.get("labels") or {}).get("herdr.space"))
+    if not made:
+        sys.exit("could not start the PM session (is herdr-core running?)")
+    cmd_claim(argparse.Namespace(repo=repo, pane=f"hc:{made}", kind=kind))
+    if not takes_prompt(kind) and not send_when_ready(made, prompt):
+        print(f"the first prompt was not typed into hc:{made}; send it by hand:\n{prompt}")
 
 
 def cmd_rotate(a):
@@ -1104,25 +954,18 @@ def cmd_rotate(a):
     if rec.get("runtime") != "hc":
         return rotate_herdr(a, repo, rec, previous, prompt, is_self)
     old = hc("get", rec["terminal"]) or {}
-    argv = successor_argv(((old.get("foreground") or {}).get("argv") or [])[1:], a.model, prompt)
-    space = (old.get("labels") or {}).get("herdr.space")
-    made = None
-    if space:  # a tab next to the outgoing PM in the desktop app
-        try:
-            out = subprocess.run(["herdr-app", "do", "tab.new", json.dumps({"space": space, "folder": repo, "argv": argv})],
-                                 capture_output=True, text=True, timeout=30)
-            made = json.loads(out.stdout).get("terminal")
-        except (OSError, subprocess.TimeoutExpired, ValueError):
-            made = None
-    if not made:
-        made = (hc("run", "--bg", "--no-parent", "--cwd", repo, "--", *argv) or {}).get("address")
+    kind = rec.get("agent") or terminal_kind(old) or "claude"
+    argv = successor_argv(kind, ((old.get("foreground") or {}).get("argv") or [])[1:], a.model, prompt)
+    made = start_pm_terminal(repo, argv, (old.get("labels") or {}).get("herdr.space"))
     if not made:
         sys.exit("could not start the new PM session; the old one stays registered")
     hc("label", made, f"pm={Path(repo).name}")
     hc("label", rec["terminal"], "pm=")
-    rec.update({"pane": f"hc:{made}", "terminal": made, "claimed": now(), "previous": previous,
+    rec.update({"pane": f"hc:{made}", "terminal": made, "claimed": now(), "previous": previous, "agent": kind,
                 "rotations": rec.get("rotations", 0) + 1})
     (PMS / f"{project_slug(repo)}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n")
+    if not takes_prompt(kind) and not send_when_ready(made, prompt):
+        print(f"the handover prompt was not typed into hc:{made}; send it by hand:\n{prompt}")
     print(f"new PM session started in hc:{made}; {previous['pane']} is retired"
           + (": stop acting as PM in this session and tell the user to continue there." if is_self else "."))
 
@@ -1130,8 +973,7 @@ def cmd_rotate(a):
 # ---- dash: live board in the browser ----------------------------------------
 
 DASH_HTML = Path(__file__).resolve().parent.parent / "assets" / "dash.html"
-MIRROR_LOG = STATE / "hook-mirror.log"
-MIRROR_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d) \[([^\]]+)\] (UserPromptSubmit|Stop): (?:mirrored|post failed)")
+TURN_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d) \[([^\]]+)\] (UserPromptSubmit|Stop): turn")
 
 
 def dash_state():
@@ -1151,7 +993,7 @@ def dash_state():
         pms.append({"name": rec["name"], "project": rec.get("project", ""), "repo": rec.get("repo", ""),
                     "pane": rec.get("pane", ""), "status": live.get("agent_status") if alive else "offline",
                     "title": live.get("terminal_title_stripped", "") if alive else "",
-                    "discord": bool(rec.get("discord"))})
+                    "agent": rec.get("agent", "")})
 
     def owner_pm(t):
         repo = str(Path(t["repo"]).resolve())
@@ -1182,18 +1024,18 @@ def dash_state():
             events.append({"key": f"{t['id']}#{i}", "at": e.get("at", ""), "by": by, "task": t["id"], "pm": pm,
                            "kind": "dispatch" if by in ("user", pm_pane) else "report",
                            "status": status.group(1) if status else "", "text": e.get("text", "")})
-    # Chat turns with a PM, as recorded by the Discord mirror hook.
-    if MIRROR_LOG.exists():
+    # Chat turns with a PM, as recorded by the turn hook.
+    if TURN_LOG.exists():
         pane_pm = {p["pane"]: p["name"] for p in pms}
-        for line in MIRROR_LOG.read_text(errors="replace").splitlines()[-400:]:
-            m = MIRROR_LINE.match(line)
+        for line in TURN_LOG.read_text(errors="replace").splitlines()[-400:]:
+            m = TURN_LINE.match(line)
             if m and m.group(2) in pane_pm:
                 events.append({"key": "m:" + line, "at": m.group(1), "by": m.group(2), "task": "",
                                "pm": pane_pm[m.group(2)], "status": "", "text": "",
                                "kind": "prompt" if m.group(3) == "UserPromptSubmit" else "reply"})
     events = sorted(events, key=lambda e: e["at"])[-120:]
     return {"now": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "pms": pms, "tasks": tasks,
-            "agents": agent_map, "events": events, "lang": tr("en", "zh")}
+            "agents": agent_map, "events": events, "lang": tr("en", "zh"), "home": str(STATE)}
 
 
 def cmd_state(a):
@@ -1280,19 +1122,17 @@ def main():
     l.add_argument("id")
     l.add_argument("text")
     sub.add_parser("show").add_argument("id")
-    b = sub.add_parser("board")
-    b.add_argument("--post", action="store_true", help="mirror the board to the configured Discord channel")
-    b.add_argument("--channel", help="set (or change) the Discord board channel, then post")
+    sub.add_parser("board")
     sub.add_parser("status").add_argument("--all", action="store_true")
     sub.add_parser("find").add_argument("--repo", default=".")
     c = sub.add_parser("claim")
     c.add_argument("--repo", default=".")
     c.add_argument("--pane", help="register the PM for this pane instead of the current one")
-    c.add_argument("--discord-channel", help="guild channel ID this PM listens to")
-    c.add_argument("--discord-users", help="comma-separated user IDs allowed to talk there (default: paired users)")
-    la = sub.add_parser("launch", help="print the command that starts a Discord-connected PM session")
-    la.add_argument("--repo", default=".")
-    la.add_argument("--resume")
+    c.add_argument("--kind", help="which agent this PM is (default: read from its terminal)")
+    st = sub.add_parser("start", help="start a PM session for a project, with any coding agent")
+    st.add_argument("--repo", default=".")
+    st.add_argument("--kind", help="agent program (default: config.json pm.kind, else claude)")
+    st.add_argument("--model", help="default: config.json pm.model, else the program's own")
     nt = sub.add_parser("notify")
     nt.add_argument("text")
     nt.add_argument("--repo", default=".")
@@ -1331,7 +1171,8 @@ def main():
     ro.add_argument("--model", help="model for the new session (default: the CLI's default)")
     ro.add_argument("--transcript", help="the outgoing session's transcript (default: this session's)")
     sub.add_parser("hook-session-start")
-    sub.add_parser("hook-mirror")
+    sub.add_parser("hook-turn")
+    sub.add_parser("hook-mirror")  # earlier installs
     a = p.parse_args()
     globals()["cmd_" + a.cmd.replace("-", "_")](a)
 

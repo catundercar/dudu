@@ -1,7 +1,7 @@
 import { View, div, svg } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
-import { theme, home, appHome, exec, watchFolder, nextCommand, layout, focused, run } from 'herdr';
-import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from './model.js';
+import { theme, home, appHome, exec, watchFolder, nextCommand, layout, focused, run, notify, playSound, settings } from 'herdr';
+import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand, enteredWaiting, alertNotices } from './model.js';
 
 // The sidebar deliberately depends on the original pm-dash bundle.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
@@ -39,6 +39,7 @@ export default class PmNav extends View {
   init(_props, cx) {
     this.counts = null;
     this.localState = { pms: [], tasks: [], events: [] }; this.remoteStates = {};
+    this.waiting = {}; // per source: the tasks waiting for the person at its last read
     this.error = '';
     this.setupAvailable = false;
     this.boardShown = false;
@@ -46,6 +47,16 @@ export default class PmNav extends View {
     this.compact = false;
     this.width = 120;
     this.checkSetup(cx);
+    this.ledgerHome = '';
+    cx.spawn(async cx => {
+      // Until the first state reports `home`, apply pm.py's rule without waiting for it.
+      let fallback = home() + '/.dudu';
+      try {
+        const r = await exec('sh', ['-c', LEDGER_HOME_SH]);
+        if (r.code === 0 && r.stdout.trim()) fallback = r.stdout.trim();
+      } catch (_) { /* Keep the default. */ }
+      if (!this.ledgerHome) this.setLedgerHome(fallback, cx);
+    });
     this.refresh(cx);
     this.refreshRemote(cx);
     cx.timer.every(15000, cx => this.refreshRemote(cx));
@@ -53,9 +64,17 @@ export default class PmNav extends View {
     cx.spawn(async cx => {
       for (;;) { if (await nextCommand() === 'setup-changed') this.checkSetup(cx); }
     });
+  }
+  // Watch <ledger home>/tasks; a different home arms a new watcher and the old one stops at its next wake.
+  setLedgerHome(path, cx) {
+    if (typeof path !== 'string' || !path || path === this.ledgerHome) return;
+    this.ledgerHome = path;
     cx.spawn(async cx => {
       try {
-        for (;;) { await watchFolder(home() + '/.claude/pm/tasks'); this.refresh(cx); }
+        while (this.ledgerHome === path) {
+          await watchFolder(path + '/tasks');
+          if (this.ledgerHome === path) this.refresh(cx);
+        }
       } catch (_) { /* The 10-second fallback also covers a missing tasks directory. */ }
     });
   }
@@ -67,7 +86,8 @@ export default class PmNav extends View {
         const result = await exec('python3', [appHome() + SETUP_SCRIPT, '--status', '--claude-home', home() + '/.claude']);
         if (result.code !== 0) throw new Error(result.stderr || `setup.py: ${result.code}`);
         const status = JSON.parse(result.stdout);
-        this.setupAvailable = status.skill_present === true && status.hooks_present === true;
+        // Any agent with the skill counts; the board itself offers Set up or Update.
+        this.setupAvailable = Array.isArray(status.summary?.installed) && status.summary.installed.length > 0;
       } catch (_) { this.setupAvailable = false; }
       finally {
         this.checkingSetup = false; cx.notify();
@@ -85,6 +105,8 @@ export default class PmNav extends View {
         const state = JSON.parse(r.stdout);
         if (!Array.isArray(state.pms) || !Array.isArray(state.tasks)) throw new Error('state is missing pms/tasks arrays');
         this.localState = { ...state, events: state.events || [] };
+        this.alert(this.watchWaiting('', state));
+        this.setLedgerHome(state.home, cx);
         this.publish(cx);
         this.error = '';
       } catch (e) { this.error = String(e); }
@@ -108,24 +130,44 @@ export default class PmNav extends View {
         const names = [...new Set(machines.filter(m => m.state === 'connected' && typeof m.name === 'string' && m.name).map(m => m.name))];
         // Disconnects remove rows; a transient read failure retains the last good snapshot.
         for (const name of Object.keys(this.remoteStates)) if (!names.includes(name)) delete this.remoteStates[name];
+        const entered = [];
         await Promise.all(names.map(async name => {
           try {
-            const r = await exec('hc', ['exec', '--on', name, 'python3 ~/.claude/skills/pm/scripts/pm.py state'], { timeout: 4000 });
+            const r = await exec('hc', ['exec', '--on', name, remoteStateCommand()], { timeout: 4000 });
             if (r.code !== 0) return;
             const state = JSON.parse(r.stdout);
-            if (['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) this.remoteStates[name] = state;
+            if (['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) {
+              this.remoteStates[name] = state;
+              entered.push(...this.watchWaiting(name, state));
+            }
           } catch (_) { /* One unavailable machine must not interrupt the others. */ }
         }));
+        this.alert(entered);
         this.publish(cx);
         try {
-          if (this.setupAvailable) {
-            await exec('python3', ['-c', WRITE_REMOTE_CACHE, home() + '/.claude/pm/cache/remote-states.json',
+          if (this.setupAvailable && this.ledgerHome) {
+            await exec('python3', ['-c', WRITE_REMOTE_CACHE, this.ledgerHome + '/cache/remote-states.json',
               JSON.stringify(this.remoteStates), String(Date.now())], { timeout: 4000 });
           }
         } catch (_) { /* Cache writes are best effort; the sidebar is already updated. */ }
       } catch (_) { /* Discovery failures leave the last good board intact. */ }
       finally { this.remoteLoading = false; }
     });
+  }
+  // A machine's first read is its baseline; a disconnect keeps what it last showed.
+  watchWaiting(source, state) {
+    const { seen, entered } = enteredWaiting(this.waiting, source, state);
+    this.waiting = seen;
+    return entered;
+  }
+  // notify() only posts the toast; Herdr's own alerts also play a sound, so play one, once.
+  alert(entered) {
+    if (!entered.length) return;
+    const { notices, sound } = alertNotices(entered, this.localState.lang);
+    try {
+      for (const notice of notices) notify(notice);
+      if (sound && settings()?.sounds?.enabled !== false) playSound(sound);
+    } catch (_) { /* An alert must never stop the sidebar from updating. */ }
   }
   publish(cx) {
     this.counts = summary(this.localState, this.remoteStates);

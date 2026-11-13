@@ -1,27 +1,35 @@
 import test from 'node:test';
 import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from '../pm-nav/model.js';
+import * as nav from '../pm-nav/model.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, pmId, taskId, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP } from './model.js';
+import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, pmId, taskId, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText } from './model.js';
 
-test('setup needs both skill and hooks before comparing versions', () => {
-  for (const input of [null, undefined, {}, { skill_present: true }, { hooks_present: true },
-    { skill_present: false, hooks_present: true, script_matches: true },
-    { skill_present: true, hooks_present: false, script_matches: false }]) {
+const setupSummary = (installed = [], ready = [], outdated = []) =>
+  ({ summary: { detected: installed, installed, ready, outdated } });
+
+test('setup is ready when one agent is complete and no installed copy is outdated', () => {
+  // No agent has the skill, or the earlier single-agent shape.
+  for (const input of [null, undefined, {}, { summary: {} }, setupSummary(),
+    { skill_present: true, hooks_present: true, script_matches: true }]) {
     assert.equal(setupState(input), 'missing');
   }
-  const installed = { skill_present: true, hooks_present: true };
-  assert.equal(setupState({ ...installed, script_matches: true }), 'ready');
-  assert.equal(setupState({ ...installed, script_matches: false }), 'outdated');
-  assert.equal(setupState(installed), 'outdated');
+  assert.equal(setupState(setupSummary(['claude'], ['claude'])), 'ready');
+  assert.equal(setupState(setupSummary(['claude', 'pi'], ['claude'])), 'ready'); // pi without hooks is still fine
+  // Any differing copy asks for an update, even next to a ready agent.
+  assert.equal(setupState(setupSummary(['claude', 'codex'], ['claude'], ['codex'])), 'outdated');
+  assert.equal(setupState(setupSummary(['codex'], [], ['codex'])), 'outdated');
+  // The skill without its hooks is not set up yet.
+  assert.equal(setupState(setupSummary(['codex'], [])), 'missing');
   for (const lang of ['en', 'zh']) {
     for (const key of ['setupTitle', 'setup', 'settingUp', 'checkingSetup', 'setupDescription',
       'setupDone', 'setupOutdated', 'update', 'setupIncomplete']) assert.ok(word(lang, key));
-    assert.ok(word(lang, 'setupDescription').includes('~/.claude/skills/pm'));
-    assert.ok(word(lang, 'setupDescription').includes('~/.claude/settings.json'));
+    for (const agent of ['Claude Code', 'Codex', 'pi']) assert.ok(word(lang, 'setupDescription').includes(agent));
+    assert.ok(!word(lang, 'setupDescription').includes('~/.claude'));
+    assert.ok(!word(lang, 'setupDone').includes('Claude'));
   }
 });
 
@@ -46,8 +54,8 @@ test('board checks are read-only, setup failures retry, and success refreshes st
     run: name => commands.push(name),
     exec: async (program, args) => {
       calls.push({ program, args });
-      if (args.includes('--status')) return { code: 0, stdout: JSON.stringify({
-        skill_present: installed, hooks_present: installed, script_matches: installed }) };
+      if (args.includes('--status')) return { code: 0, stdout: JSON.stringify(installed
+        ? setupSummary(['claude', 'codex'], ['claude', 'codex']) : setupSummary()) };
       if (fail) return { code: 1, stderr: 'Install failed: invalid settings\n' };
       installed = true;
       return { code: 0, stdout: 'Installation complete.' };
@@ -95,7 +103,7 @@ test('sidebar keeps remote reads but suppresses cache writes until setup is avai
   });
   nav.remoteStates = {}; nav.publish = () => {};
   const { cx, drain } = asyncContext();
-  nav.setupAvailable = false;
+  nav.setupAvailable = false; nav.ledgerHome = '/test home/.dudu';
   nav.refreshRemote(cx);
   await drain();
   assert.deepEqual(calls.map(call => call.program), ['hc']);
@@ -103,7 +111,87 @@ test('sidebar keeps remote reads but suppresses cache writes until setup is avai
   nav.refreshRemote(cx);
   await drain();
   assert.deepEqual(calls.map(call => call.program), ['hc', 'hc', 'python3']);
-  assert.equal(calls[2].args[2], '/test home/.claude/pm/cache/remote-states.json');
+  assert.equal(calls[2].args[2], '/test home/.dudu/cache/remote-states.json');
+});
+
+test('both mods read other machines with the same command and follow the ledger home', async () => {
+  for (const file of ['./main.js', '../pm-nav/main.js']) {
+    const calls = [], watched = [], wakes = [];
+    const mod = modWithIO(file, {
+      home: () => '/test home', WRITE_REMOTE_CACHE, remoteStateCommand: nav.remoteStateCommand,
+      enteredWaiting: nav.enteredWaiting, boardVisible: () => true, desktopLayout: () => ({}), props: () => ({}),
+      watchFolder: path => { watched.push(path); return new Promise(resolve => wakes.push(resolve)); },
+      exec: async (program, args) => {
+        calls.push({ program, args });
+        if (args[0] === 'machine') return { code: 0, stdout: JSON.stringify([{ name: 'box', state: 'connected' }]) };
+        return { code: 0, stdout: JSON.stringify({ pms: [], tasks: [], events: [] }) };
+      },
+    });
+    mod.remoteStates = {}; mod.publish = () => {}; mod.resolveHome = () => {};
+    let refreshed = 0;
+    mod.refresh = () => { refreshed++; };
+    const { cx, drain } = asyncContext();
+    mod.refreshRemote(cx);
+    await drain();
+    assert.deepEqual(calls[1], { program: 'hc', args: ['exec', '--on', 'box', remoteStateCommand()] }, file);
+    // The watcher follows `home`; repeating the same home keeps one watcher, a new one re-arms.
+    mod.ledgerHome = '';
+    mod.setLedgerHome('/test home/.dudu', cx);
+    mod.setLedgerHome('/test home/.dudu', cx);
+    await Promise.resolve();
+    assert.deepEqual(watched, ['/test home/.dudu/tasks'], file);
+    wakes.shift()();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(refreshed, 1, file);
+    assert.deepEqual(watched, ['/test home/.dudu/tasks', '/test home/.dudu/tasks'], file);
+    mod.setLedgerHome('/test home/.claude/pm', cx);
+    await Promise.resolve();
+    assert.equal(watched.at(-1), '/test home/.claude/pm/tasks', file);
+    wakes.shift()(); // the old watcher wakes once more, then stops without refreshing
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(refreshed, 1, file);
+    assert.equal(watched.length, 3, file);
+  }
+});
+
+test('the remote command runs state with the first pm.py that exists, in the same order in both mods', () => {
+  assert.equal(nav.remoteStateCommand(), remoteStateCommand());
+  assert.deepEqual(nav.PM_SCRIPTS, PM_SCRIPTS);
+  assert.equal(nav.LEDGER_HOME_SH, LEDGER_HOME_SH);
+  assert.deepEqual(PM_SCRIPTS, ['.config/herdr-app/mods/pm-dash/skill/scripts/pm.py', '.claude/skills/pm/scripts/pm.py',
+    '.codex/skills/pm/scripts/pm.py', '.pi/agent/skills/pm/scripts/pm.py']);
+  const dir = mkdtempSync(join(tmpdir(), 'pm-remote-'));
+  try {
+    const run = () => {
+      try {
+        return { code: 0, out: execFileSync('sh', ['-c', remoteStateCommand()], { env: { HOME: dir, PATH: process.env.PATH }, encoding: 'utf8', stdio: 'pipe' }) };
+      } catch (error) { return { code: error.status, out: error.stderr }; }
+    };
+    assert.deepEqual(run(), { code: 127, out: 'pm.py not found\n' });
+    for (const [i, path] of [[3, PM_SCRIPTS[3]], [2, PM_SCRIPTS[2]], [1, PM_SCRIPTS[1]], [0, PM_SCRIPTS[0]]]) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      writeFileSync(join(dir, path), `import sys; print(${i}, sys.argv[1])\n`);
+      assert.deepEqual(run(), { code: 0, out: `${i} state\n` });
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the fallback ledger home follows PM_HOME, then an earlier ~/.claude/pm, then ~/.dudu', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pm-home-'));
+  try {
+    const home = extra => execFileSync('sh', ['-c', LEDGER_HOME_SH], { env: { HOME: dir, PATH: process.env.PATH, ...extra }, encoding: 'utf8' });
+    assert.equal(home(), `${dir}/.dudu`);
+    mkdirSync(join(dir, '.claude/pm'), { recursive: true });
+    assert.equal(home(), `${dir}/.claude/pm`);
+    assert.equal(home({ PM_HOME: '/elsewhere' }), '/elsewhere');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a PM card names its agent quietly, and nothing when the ledger has none', () => {
+  assert.equal(pmStatusText('en', { live: 'idle', agent: 'codex' }), 'Idle · codex');
+  assert.equal(pmStatusText('zh', { live: 'working', agent: 'pi' }), '工作中 · pi');
+  assert.equal(pmStatusText('en', { live: 'idle', agent: '' }), 'Idle');
+  assert.equal(pmStatusText('en', { live: 'idle' }), 'Idle');
 });
 
 test('navigation fits whole English and Chinese phrases and always retains blocked counts', () => {
@@ -798,4 +886,113 @@ test('built-in text defaults to English and preserves Chinese wording and ledger
   }
   assert.equal(layout(state).rows.find(r => r.type === 'pm' && !r.name).title, 'No PM');
   assert.equal(layout({...state,lang:'zh'}).rows.find(r => r.type === 'pm' && !r.name).title, '无 PM');
+});
+
+test('a task alerts once per entry into review or blocked, after a per-machine baseline', () => {
+  const task = (id, status, extra = {}) => ({ id, title: `Task ${id}`, project: 'demo', status, ...extra });
+  let { seen, entered } = nav.enteredWaiting({}, '', { tasks: [task('a', 'review'), task('b', 'in_progress')] });
+  assert.deepEqual(entered, []); // the first read is the baseline: what already waits stays quiet
+  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'review'), task('b', 'blocked')] }));
+  assert.deepEqual(entered.map(t => [t.id, t.machine]), [['b', '']]);
+  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'blocked'), task('b', 'blocked')] }));
+  assert.deepEqual(entered, []); // review -> blocked is the same wait
+  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'in_progress'), task('b', 'blocked')] }));
+  assert.deepEqual(entered, []);
+  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'review'), task('b', 'blocked')] }));
+  assert.deepEqual(entered.map(t => t.id), ['a']); // left and came back: alerts again
+  // Another machine has its own baseline, and the same id there is a different task.
+  ({ seen, entered } = nav.enteredWaiting(seen, 'box', { tasks: [task('c', 'review')] }));
+  assert.deepEqual(entered, []);
+  ({ seen, entered } = nav.enteredWaiting(seen, 'box', { tasks: [task('c', 'review'), task('a', 'blocked')] }));
+  assert.deepEqual(entered.map(t => [t.id, t.machine]), [['a', 'box']]);
+  assert.deepEqual(seen, { '': { a: 'review', b: 'blocked' }, box: { c: 'review', a: 'blocked' } });
+  for (const broken of [null, {}, { tasks: null }, { tasks: [null, { status: 'review' }] }]) {
+    assert.deepEqual(nav.enteredWaiting(seen, '', broken).entered, []);
+  }
+});
+
+test('alerts: one notice per task up to three, then one line; one sound; both languages', () => {
+  for (const lang of ['en', 'zh']) {
+    assert.equal(nav.ALERT_STRINGS[lang].review, word(lang, 'reviewWaiting'));
+    assert.equal(nav.ALERT_STRINGS[lang].blocked, word(lang, 'blockedWaiting'));
+  }
+  const board = { name: 'layout.select', args: { stack: 'pm-stage', child: 'pm-board' } };
+  const one = nav.alertNotices([{ id: 'x', title: 'Fix login', project: 'demo', status: 'review' }], 'en');
+  assert.deepEqual(one, { sound: 'done', notices: [
+    { title: 'Fix login', body: 'demo · Review · Waiting for you', level: 'info', action: board }] });
+  const five = ['review', 'review', 'review', 'review', 'blocked'].map((status, i) =>
+    ({ id: `t${i}`, title: `T${i}`, project: 'demo', status }));
+  const zh = nav.alertNotices(five, 'zh');
+  assert.equal(zh.sound, 'blocked');
+  assert.deepEqual(zh.notices.map(n => [n.title, n.body, n.level]), [
+    ['T0', 'demo · 待审 · 等你', 'info'], ['T1', 'demo · 待审 · 等你', 'info'], ['T2', 'demo · 待审 · 等你', 'info'],
+    ['还有 2 件事等你', undefined, 'error']]);
+  assert.ok(zh.notices.every(n => n.action === nav.BOARD_ACTION));
+  assert.equal(nav.alertNotices(five.slice(0, 4), 'en').notices.at(-1).title, '1 more item waiting for you');
+  assert.deepEqual(nav.alertNotices([{ id: 'y', status: 'blocked' }], 'en').notices[0],
+    { title: 'y', body: 'Blocked · Waiting for you', level: 'error', action: board });
+  assert.deepEqual(nav.alertNotices([], 'en'), { notices: [], sound: null });
+});
+
+test('the sidebar alerts on local and remote changes after its first read, with one sound', async () => {
+  const notices = [], sounds = [];
+  let local = [], remote = [], soundsOn = true;
+  const state = tasks => JSON.stringify({ lang: 'en', pms: [], tasks, events: [] });
+  const mod = modWithIO('../pm-nav/main.js', {
+    appHome: () => '/app home', home: () => '/test home', WRITE_REMOTE_CACHE,
+    remoteStateCommand: nav.remoteStateCommand, enteredWaiting: nav.enteredWaiting, alertNotices: nav.alertNotices,
+    notify: n => notices.push(n), playSound: s => sounds.push(s), settings: () => ({ sounds: { enabled: soundsOn } }),
+    exec: async (program, args) => {
+      if (program === 'python3') return { code: 0, stdout: state(local) };
+      if (args[0] === 'machine') return { code: 0, stdout: JSON.stringify([{ name: 'box', state: 'connected' }]) };
+      return { code: 0, stdout: state(remote) };
+    },
+  });
+  Object.assign(mod, { localState: { pms: [], tasks: [], events: [] }, remoteStates: {}, waiting: {},
+    publish() {}, setLedgerHome() {} });
+  const { cx, drain } = asyncContext();
+  const read = async () => { mod.refresh(cx); mod.refreshRemote(cx); await drain(); };
+  local = [{ id: 'a', title: 'A', project: 'demo', status: 'review' }];
+  remote = [{ id: 'r', title: 'R', project: 'demo', status: 'blocked' }];
+  await read();
+  assert.deepEqual([notices, sounds], [[], []]); // baseline on both machines
+  local = [{ id: 'a', title: 'A', project: 'demo', status: 'review' }, { id: 'b', title: 'B', project: 'demo', status: 'review' }];
+  await read();
+  assert.deepEqual(notices.map(n => n.title), ['B']);
+  assert.deepEqual(sounds, ['done']);
+  remote = [{ id: 'r', title: 'R', project: 'demo', status: 'in_progress' }];
+  await read();
+  remote = [{ id: 'r', title: 'R', project: 'demo', status: 'blocked' }];
+  soundsOn = false;
+  await read();
+  assert.deepEqual(notices.map(n => n.title), ['B', 'R']);
+  assert.deepEqual(sounds, ['done']); // sounds off in settings: the toast only
+});
+
+test('the pm layout hides only the finished notice of a dispatched worker', async () => {
+  const { isWorkerNotice } = await import('../pm-toast/model.js');
+  const terms = [
+    { address: 't9', state: 'live', parent: 't1', labels: { task: 'demo-fix' } },
+    { address: 'box/t4', state: 'live', parent: 'box/t2', labels: { task: 'demo-api' } },
+    { address: 't1', state: 'live', labels: { pm: 'demo' } }, // the PM itself
+    { address: 't5', state: 'live', parent: 't1' }, // a child without a task
+    { address: 't6', state: 'live', labels: { task: 'demo-own' } }, // a task in the person's own pane
+    { address: 't7', state: 'finished', parent: 't1', labels: { task: 'demo-old' } },
+  ];
+  const notice = (terminal, title = 'Claude Code finished') =>
+    ({ title, body: 'demo / 1', level: 'success', action: { name: 'agent.focus', args: { terminal } }, overlay: 'o1' });
+  assert.equal(isWorkerNotice(notice('t9'), terms), true);
+  // A worker stopped at a prompt or a question tells nobody else: it still shows.
+  assert.equal(isWorkerNotice(notice('t9', 'Codex needs you'), terms), false);
+  assert.equal(isWorkerNotice(notice('box/t4', 'Claude Code needs you'), terms), false);
+  assert.equal(isWorkerNotice(notice('box/t4'), terms), true);
+  for (const address of ['t1', 't5', 't6', 't7', 't404', '', undefined]) {
+    assert.equal(isWorkerNotice(notice(address), terms), false, String(address));
+  }
+  // Fail open: no terminal list, another action, another title, or no action at all.
+  assert.equal(isWorkerNotice(notice('t9'), null), false);
+  assert.equal(isWorkerNotice({ ...notice('t9'), action: { name: 'pane.focus', args: { terminal: 't9' } } }, terms), false);
+  assert.equal(isWorkerNotice(notice('t9', 'Build failed'), terms), false);
+  assert.equal(isWorkerNotice({ title: 'Fix login', body: 'demo · Review · Waiting for you', action: nav.BOARD_ACTION }, terms), false);
+  for (const props of [null, undefined, {}, { title: 'x finished' }]) assert.equal(isWorkerNotice(props, terms), false);
 });

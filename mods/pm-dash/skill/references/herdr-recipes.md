@@ -23,13 +23,4 @@ Terminals in the Herdr desktop app run in herdr-core; its CLI is `hc`. For the f
 ## Other machines
 
 - `hc machine ls --json` lists connected machines; `hc exec --on <machine> "<cmd>"` runs a command there and prints its output.
-- The desktop board reads each connected machine's ledger with `hc exec --on <machine> 'python3 ~/.claude/skills/pm/scripts/pm.py state'`, so the skill must be installed on that machine too.
-
-## Discord plugin (claude-plugins-official/discord)
-
-- One plugin process per Claude session, state in `DISCORD_STATE_DIR` (default `~/.claude/channels/discord`): `.env` with the token, `access.json` with the gate. No token → the process exits, so a session without a per-PM state dir never connects.
-- Claude Code does **not** pass the shell environment to plugin MCP servers, so `DISCORD_STATE_DIR=... claude` has no effect. Run the same server through a session-only `--mcp-config` file whose server entry has an `env` block, and name it only on `--dangerously-load-development-channels server:<name>` (tagged list; a startup dialog asks for confirmation). Do not add `--channels server:<name>` as well: the registration check takes the first matching entry, which is then not marked as development and is skipped with "not on the approved channels allowlist". Plugin servers are named `plugin:<plugin>@<marketplace>`; an untagged name is rejected. The MCP log (`~/Library/Caches/claude-cli-nodejs/<cwd>/mcp-logs-<server>/`) says "Channel notifications skipped: …" when the channel did not register.
-- Guild messages are delivered only when the channel ID is in `groups`; everything else is dropped silently. Threads inherit the parent channel. `dmPolicy: disabled` drops guild messages too; use `allowlist` with an empty `allowFrom` to keep the channel and ignore DMs.
-- The outbound `reply` tool is gated the same way: a PM can only post into channels in its own `access.json`.
-- Several sessions may share one bot token; each holds its own gateway connection. Keep the number of connected sessions small (PMs only).
-- Messages are capped at 2000 characters; the plugin chunks long replies.
+- The desktop board reads each connected machine's ledger by running the skill's `pm.py state` there through `hc exec --on <machine>`, so the skill must be installed on that machine too (for any agent, or with the board mod).

@@ -1,7 +1,7 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, watchFolder, terminals, agents, run, props, closeOverlay, layout as desktopLayout } from 'herdr';
-import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalTargetFor, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates } from './model.js';
+import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalTargetFor, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText } from './model.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
 
@@ -31,10 +31,20 @@ export default class PmDash extends View {
       }
     });
     cx.spawn(async cx => { await this.checkSetup(); cx.notify(); });
+    this.ledgerHome = ''; this.homeKnown = new Promise(resolve => { this.resolveHome = resolve; });
+    cx.spawn(async cx => {
+      // Until the first state reports `home`, apply pm.py's rule without waiting for it.
+      let fallback = home() + '/.dudu';
+      try {
+        const r = await exec('sh', ['-c', LEDGER_HOME_SH]);
+        if (r.code === 0 && r.stdout.trim()) fallback = r.stdout.trim();
+      } catch (_) { /* Keep the default. */ }
+      if (!this.ledgerHome) this.setLedgerHome(fallback, cx);
+    });
     this.refresh(cx);
     cx.spawn(async cx => {
       try {
-        const cached = cachedRemoteStates(await readTextFile(home() + '/.claude/pm/cache/remote-states.json'));
+        const cached = cachedRemoteStates(await readTextFile(await this.homeKnown + '/cache/remote-states.json'));
         if (cached) { this.remoteStates = cached; this.publish(cx); }
       } catch (_) { /* An absent, unreadable or invalid cache does not block live reads. */ }
       // Start live reads after restoration so a late cache cannot replace them.
@@ -42,12 +52,21 @@ export default class PmDash extends View {
       cx.timer.every(5000, cx => this.refreshRemote(cx));
     });
     cx.timer.every(10000, cx => this.refresh(cx));
+    this.armIdle(cx);
+  }
+  // Watch <ledger home>/tasks. A different home (the first state correcting the
+  // fallback, or PM_HOME changing) arms a new watcher; the old one stops at its next wake.
+  setLedgerHome(path, cx) {
+    if (typeof path !== 'string' || !path || path === this.ledgerHome) return;
+    this.ledgerHome = path; this.resolveHome(path);
     cx.spawn(async cx => {
       try {
-        for (;;) { await watchFolder(home() + '/.claude/pm/tasks'); this.refresh(cx); }
+        while (this.ledgerHome === path) {
+          await watchFolder(path + '/tasks');
+          if (this.ledgerHome === path) this.refresh(cx);
+        }
       } catch (_) { /* Missing folder/watch failure: the 10s fallback remains active. */ }
     });
-    this.armIdle(cx);
   }
   text(key, ...args) { return word(this.state.lang, key, ...args); }
   async checkSetup() {
@@ -108,6 +127,7 @@ export default class PmDash extends View {
         const next = JSON.parse(result.stdout);
         if (!['pms', 'tasks', 'events'].every(k => Array.isArray(next[k]))) throw new Error('state is missing pms/tasks/events arrays');
         this.localState = next; this.error = '';
+        this.setLedgerHome(next.home, cx);
         this.publish(cx);
       } catch (e) { this.error = String(e); cx.notify(); }
       finally {
@@ -131,7 +151,7 @@ export default class PmDash extends View {
         for (const name of Object.keys(this.remoteStates)) if (!names.includes(name)) delete this.remoteStates[name];
         await Promise.all(names.map(async name => {
           try {
-            const r = await exec('hc', ['exec', '--on', name, 'python3 ~/.claude/skills/pm/scripts/pm.py state'], { timeout: 4000 });
+            const r = await exec('hc', ['exec', '--on', name, remoteStateCommand()], { timeout: 4000 });
             if (r.code !== 0) return;
             const state = JSON.parse(r.stdout);
             if (['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) this.remoteStates[name] = state;
@@ -358,7 +378,7 @@ export default class PmDash extends View {
           .child(h_flex().id(`status:${row.id}`).gap(px(5)).items_center().text_size(font(11.5)).text_color(statusColor)
             .opacity(this.tags[row.id] ? .4 : 1).transition('opacity', 180)
             .child(this.dot(working ? t.ansi2 : t.dim, true, t, px(6)))
-            .child(div().flex_1().min_w(0).truncate().child(label(this.state.lang, row.live)))))
+            .child(div().flex_1().min_w(0).truncate().child(pmStatusText(this.state.lang, row)))))
         .when(row.waiting > 0, el => el.child(h_flex().min_w(px(20)).h(Math.max(14, px(20))).px(px(6))
           .flex_none().rounded(px(10)).items_center().justify_center().text_size(font(11.5)).font_bold()
           .bg(t.blocked).text_color(solidText(t.blocked, t)).child(String(row.waiting))));

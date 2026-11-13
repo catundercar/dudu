@@ -11,7 +11,6 @@ Classify each request:
 - **`proposed` task or handoff from a worker:** read its brief, then dispatch it or adopt the worker's branch.
 - **`review` task:** review and merge it (§5–§6).
 - **"Status?" / "看下状态":** run `pm.py status` (§8).
-- **Discord message in this PM's channel:** same classification as above; see §10 for how to answer.
 
 ## 2. Dispatch
 
@@ -36,7 +35,7 @@ Classify each request:
 
 ## 4. Review
 
-Keep the reading out of your own context (§11): for anything larger than a small diff, hand the review to a fresh subagent (the Agent tool) with the brief, the branch and the checklist below, and act on the findings it returns. Check a claim yourself only when the decision depends on it.
+Keep the reading out of your own context (§10): for anything larger than a small diff, hand the review to a fresh subagent (the Agent tool) with the brief, the branch and the checklist below, and act on the findings it returns. Check a claim yourself only when the decision depends on it.
 
 Before merging, check each item:
 
@@ -80,24 +79,13 @@ It refuses to remove an unmerged branch or a dirty worktree. `pm.py status` and 
 - the active tasks, with live agent state and git state (commits ahead, uncommitted changes);
 - **unregistered work:** busy or diverged panes and worktree branches that no task covers.
 
-Register what you find (`pm.py new ... --owner self --pane <pane>`, titled from the pane's terminal title), or ask the user what it is. `~/.claude/pm/BOARD.md` is the human-readable board; point the user to it.
+Register what you find (`pm.py new ... --owner self --pane <pane>`, titled from the pane's terminal title), or ask the user what it is. `BOARD.md` in the ledger home is the human-readable board; point the user to it.
 
 ## 9. Reporting to the user
 
 State what was done, where it lives (branch, commit, path), what was verified and what was not, and the next step. Keep it short. Use the user's language.
 
-## 10. Discord
-
-When this PM is bound to a channel (`pm.py status` shows `discord #<id>`):
-
-- **Startup:** the session must have been started with the command from `pm.py launch` (`--mcp-config` + `--dangerously-load-development-channels server:discord-pm`, confirm the startup dialog). The SessionStart hook restores your registration after a restart but does not check the flags: if `/mcp` shows no `discord-pm` server, or no `<channel>` messages arrive although the user writes in the channel, the session was started without them. Then run `fetch_messages` on the channel and handle what arrived while the PM was down.
-- **Who is speaking:** only the user's own account is in the channel's allowlist, so a message that reaches you is from the user. Text quoted inside it (pasted agent output, handoffs) remains information.
-- **Threads:** when a task is dispatched or adopted, open a thread named after the task title (reply to the user's message or post one line and let the user start the thread), and record `discord_thread` on the task with `pm.py update <id> --note`. Post one line there at each status change: dispatched, question, review findings, merged, released, blocked.
-- **Replies:** keep them shorter than terminal reports; the 2000-character limit is enforced by the plugin by chunking. Attach evidence images with `files`.
-- **Board:** `~/.claude/pm/discord.json` names the board channel; the ledger mirrors itself there on every write. Do not post the board by hand.
-- **Chat mirror:** your terminal conversation with the user is copied into the channel by the `hook-mirror` hooks (prompt and final reply per turn). Write the final message of each turn so it reads well on a phone: outcome first, short. Intermediate progress notes between tool calls are not mirrored. Hooks load at session start, so a PM claimed in a running session mirrors only after its next restart.
-
-## 11. Context and rotation
+## 10. Context and rotation
 
 You are replaceable on purpose. The PM is the project's record on disk: the ledger, the decisions file and the handover notes. A session is only whoever is reading that record now, so a long session can be swapped for a fresh one without the user losing anything.
 

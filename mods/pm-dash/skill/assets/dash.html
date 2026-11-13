@@ -184,7 +184,7 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
     <div class="stage" id="stage">
       <svg class="wires" id="wires" aria-hidden="true"></svg>
       <div class="bubble" id="bubble" aria-hidden="true"></div>
-      <div class="node src" id="src"><span class="face">You</span><b>You</b><small>Terminal · Discord</small><span class="tag"></span></div>
+      <div class="node src" id="src"><span class="face">You</span><b>You</b><small>Terminal</small><span class="tag"></span></div>
       <div class="groups" id="groups"></div>
     </div>
     <div class="foot">
@@ -216,7 +216,7 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
       projects: "Projects", closedBtn: "Include closed", closedTip: "Show tasks closed in the last 24 hours",
       autoBtn: "Replay when idle", autoTip: "After 20 seconds with no new events, loop the last 12; a new event takes over at once",
       replayBtn: "Replay last 20", replayTip: "Play the recent ledger events again, in order",
-      you: "You", youSub: "Terminal · Discord", history: "Event history",
+      you: "You", youSub: "Terminal", history: "Event history",
       justNow: "just now", minAgo: (n) => `${n} min ago`, hourAgo: (n) => `${n} h ago`, dayAgo: (n) => `${n} d ago`,
       unclaimed: "Unclaimed", noPm: "No PM", noPmSub: "These projects have no PM yet", hubSub: "PM of PMs · cross-project",
       current: (x) => `Now: ${x}`, hubEmpty: "Takes no project work: starts and stops PMs, cross-project status",
@@ -224,7 +224,7 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
       noTasks: "No tasks registered", workerBusy: (w) => `${w} working`, branch: (b) => `branch ${b}`, updated: (x) => `updated ${x}`,
       all: "All", agentsRunning: "Agents running", closed24h: "Closed in 24h",
       feedCount: (n) => `· ${n} ${n === 1 ? "event" : "events"}`,
-      feedPrompt: "You sent a message in the terminal or Discord", feedReply: "The PM replied to this turn", colon: ": ",
+      feedPrompt: "You sent a message", feedReply: "The PM replied to this turn", colon: ": ",
       task: "task", sayPrompt: "You sent a message", sayReply: "Replied to you", replay: "replay",
       cardPrompt: "New message", cardReply: "Replied to this turn", replayAt: (x) => `replay ${x}`,
       noteSend: "Sending", noteGot: "Message received", noteReply: "Replying", noteGotReply: "Reply received",
@@ -240,7 +240,7 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
       projects: "项目", closedBtn: "含已收尾", closedTip: "显示 24 小时内收尾的任务",
       autoBtn: "空闲时回放", autoTip: "20 秒没有新事件时，循环回放最近 12 条；新事件一来立即让路",
       replayBtn: "回放最近 20 条", replayTip: "把最近的台账事件按顺序重放一遍",
-      you: "你", youSub: "终端 · Discord", history: "事件历史",
+      you: "你", youSub: "终端", history: "事件历史",
       justNow: "刚刚", minAgo: (n) => `${n} 分钟前`, hourAgo: (n) => `${n} 小时前`, dayAgo: (n) => `${n} 天前`,
       unclaimed: "未认领", noPm: "无 PM", noPmSub: "这些项目还没有 PM", hubSub: "PM 的 PM · 跨项目",
       current: (x) => `当前：${x}`, hubEmpty: "不接项目活：起停 PM、跨项目状态",
@@ -248,7 +248,7 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
       noTasks: "暂无登记任务", workerBusy: (w) => `${w} 工作中`, branch: (b) => `分支 ${b}`, updated: (x) => `更新 ${x}`,
       all: "全部", agentsRunning: "agent 在跑", closed24h: "24h 收尾",
       feedCount: (n) => `· ${n} 条`,
-      feedPrompt: "你在终端或 Discord 里发了一条消息", feedReply: "PM 回复了这一轮", colon: "：",
+      feedPrompt: "你发了一条消息", feedReply: "PM 回复了这一轮", colon: "：",
       task: "任务", sayPrompt: "你发来一条消息", sayReply: "回复了你", replay: "回放",
       cardPrompt: "新消息", cardReply: "回复了这一轮", replayAt: (x) => `回放 ${x}`,
       noteSend: "发消息", noteGot: "收到消息", noteReply: "回复你", noteGotReply: "收到回复",

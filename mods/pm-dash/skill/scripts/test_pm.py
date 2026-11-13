@@ -75,8 +75,12 @@ class Rotation(unittest.TestCase):
 
     def test_successor_keeps_flags_but_not_the_old_session(self):
         args = ["--resume", "abc-123", "--mcp-config", "/x/mcp.json", "--model", "old", "--chrome", "earlier prompt"]
-        self.assertEqual(pm.successor_argv(args, "new", "接手"),
+        self.assertEqual(pm.successor_argv("claude", args, "new", "接手"),
                          ["claude", "--mcp-config", "/x/mcp.json", "--chrome", "--model", "new", "接手"])
+        # Other agents start from their registry entry; the outgoing session's flags are not theirs to carry.
+        self.assertEqual(pm.successor_argv("codex", args, "new", "接手"),
+                         ["codex", "-c", "check_for_update_on_startup=false", "-m", "new", "接手"])
+        self.assertEqual(pm.successor_argv("gemini", args, "", "接手"), ["gemini"])  # prompt is typed in afterwards
 
 
 class Commands(unittest.TestCase):
@@ -121,12 +125,49 @@ class Commands(unittest.TestCase):
         a = type("A", (), {"kind": "codex", "model": "m", "effort": "high"})
         self.assertEqual(pm.worker_argv(a), ["codex", "-c", "check_for_update_on_startup=false", "-m", "m", "-c", 'model_reasoning_effort="high"'])
         a.kind = "claude"
-        self.assertEqual(pm.worker_argv(a), ["claude"])
+        self.assertEqual(pm.worker_argv(a), ["claude", "--model", "m"])  # no effort flag for this program
+        a.kind = "pi"
+        self.assertEqual(pm.worker_argv(a), ["pi", "--model", "m", "--thinking", "high"])
+        a.kind = "mine --yes"  # not in the registry: run as written
+        self.assertEqual(pm.worker_argv(a), ["mine", "--yes"])
+
+    def test_agent_kinds_can_be_added_in_config(self):
+        (Path(HOME) / "config.json").write_text(json.dumps(
+            {"agents": {"mine": {"argv": ["mine", "run"], "model": ["--m={}"], "prompt_arg": True}}}))
+        try:
+            self.assertEqual(pm.agent_argv("mine", "x", prompt="go"), ["mine", "run", "--m=x", "go"])
+            self.assertTrue(pm.takes_prompt("mine"))
+            self.assertFalse(pm.takes_prompt("gemini"))
+        finally:
+            (Path(HOME) / "config.json").unlink()
+
+    def test_the_kind_of_a_terminal_comes_from_its_program(self):
+        self.assertEqual(pm.terminal_kind({"foreground": {"argv": ["/opt/bin/codex", "-m", "x"]}}), "codex")
+        self.assertEqual(pm.terminal_kind({"argv": ["zsh"], "status": {"app": "claude-code"}}), "claude")
+        self.assertEqual(pm.terminal_kind({"foreground": {"argv": ["other"]}}), "other")
+
+    def test_turn_hook_notes_pm_turns_only(self):
+        (pm.PMS).mkdir(parents=True, exist_ok=True)
+        (pm.PMS / "t.json").write_text(json.dumps({"name": "pm-t", "pane": "hc:t9", "project": "t", "repo": "/x"}))
+        pane, stdin = pm.PANE, pm.sys.stdin
+        try:
+            for who, prompt in (("hc:t9", "hello"), ("hc:t9", "[from hc:t3] done"), ("hc:t8", "hello")):
+                pm.PANE = who
+                pm.sys.stdin = io.StringIO(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": prompt}))
+                pm.cmd_hook_mirror(None)  # the earlier name still works
+        finally:
+            pm.PANE, pm.sys.stdin = pane, stdin
+            (pm.PMS / "t.json").unlink()
+        lines = pm.TURN_LOG.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(pm.TURN_LINE.match(lines[0]))
 
     def test_worker_defaults_come_from_config_unless_given(self):
         (Path(HOME) / "config.json").write_text(json.dumps({"worker": {"model": "m1", "effort": "high"}}))
         a = pm.worker_defaults(type("A", (), {"kind": None, "model": None, "effort": "low"}))
         self.assertEqual((a.kind, a.model, a.effort), ("codex", "m1", "low"))
+        a = pm.worker_defaults(type("A", (), {"kind": "claude", "model": None, "effort": None}))
+        self.assertEqual((a.kind, a.model, a.effort), ("claude", "", ""))  # codex's model is not claude's
         (Path(HOME) / "config.json").unlink()
         a = pm.worker_defaults(type("A", (), {"kind": None, "model": None, "effort": None}))
         self.assertEqual(pm.worker_argv(a), ["codex", "-c", "check_for_update_on_startup=false"])

@@ -12,21 +12,24 @@ import sys
 import importlib.util
 
 repo = Path(sys.argv.pop(1))
-parser = argparse.ArgumentParser(prog="install.sh", description="Install the PM skill and optional Herdr desktop mods.")
-parser.add_argument("--discord", action="store_true", help="add optional chat-mirroring hooks")
-parser.add_argument("--desktop", action="store_true", help="install desktop mods even if HERDR_APP_HOME is absent")
-parser.add_argument("--dry-run", action="store_true", help="print planned changes without writing files")
-parser.add_argument("--uninstall", action="store_true", help="remove PM hooks, skill, mods and layout; keep the ledger")
-args = parser.parse_args()
-desktop = Path(os.environ.get("HERDR_APP_HOME") or Path.home() / ".config/herdr-app").expanduser().absolute()
-prefix = "Would " if args.dry_run else ""
-generated_by = "dudu install.sh"
-
 # Import without writing bytecode, including during --dry-run.
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("pm_setup", repo / "mods/pm-dash/setup.py")
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
+
+parser = argparse.ArgumentParser(prog="install.sh", description="Install the PM skill for your coding agents and optional Herdr desktop mods.")
+installer.add_agent_arguments(parser)
+parser.add_argument("--desktop", action="store_true", help="install desktop mods even if HERDR_APP_HOME is absent")
+parser.add_argument("--dry-run", action="store_true", help="print planned changes without writing files")
+parser.add_argument("--uninstall", action="store_true", help="remove PM hooks, skills, mods and layout; keep the ledger")
+args = parser.parse_args()
+desktop = Path(os.environ.get("HERDR_APP_HOME") or Path.home() / ".config/herdr-app").expanduser().absolute()
+prefix = "Would " if args.dry_run else ""
+generated_by = "dudu install.sh"
+# The pm layout draws notifications with pm-toast, which hides dispatched workers' agent notices.
+TOAST = "pm-toast"
+TOAST_HINT = f'"toast": "{TOAST}"'
 setup = installer.Setup(args, repo=repo)
 write_json, remove_path = installer.write_json, installer.remove_path
 
@@ -47,6 +50,7 @@ def manual_layout(reason):
     print(f"Manual fallback (also in README.md): copy {desktop / 'layouts/main.json'} to {desktop / 'layouts/pm.json'}.")
     print('In sidebar-lists.children, insert first: {"id":"pm-nav","type":"block","size":{"px":64},"content":{"mod":"pm-nav"}}')
     print('Replace the work column with: {"id":"pm-stage","type":"stack","active":"work","children":[<original work node>,{"id":"pm-board","type":"block","content":{"mod":"pm-dash"}}]}')
+    print(f'At the root, add: {TOAST_HINT}')
     print("Keep the original work node intact; if main.json is missing, obtain the default layout from your Herdr desktop installation first.")
 
 
@@ -58,7 +62,17 @@ def install_layout():
             existing = json.loads(target.read_text(encoding="utf-8"))
             if any(node.get("id") == "pm-nav" or node.get("content", {}).get("mod") == "pm-nav"
                    for node in nodes(existing)):
-                print(f"Skip layout: {target} already contains pm-nav.")
+                if "toast" in existing:
+                    print(f"Skip layout: {target} already contains pm-nav.")
+                elif existing.get("generated_by") == generated_by:
+                    # A layout this installer generated before pm-toast existed.
+                    existing["toast"] = TOAST
+                    print(f"{prefix}Add {TOAST_HINT} to {target}")
+                    if not args.dry_run:
+                        write_json(target, existing)
+                else:
+                    print(f"Skip layout: {target} already contains pm-nav.")
+                    print(f"To hide finished-worker toasts, add {TOAST_HINT} at the root of {target}.")
                 return
         tree = json.loads(source.read_text(encoding="utf-8"))
         all_nodes = list(nodes(tree))
@@ -80,6 +94,7 @@ def install_layout():
     except (OSError, ValueError, AttributeError) as error:
         manual_layout(str(error))
         return
+    tree["toast"] = TOAST
     tree["generated_by"] = generated_by
     if "version" in tree:
         tree["cloned_from"] = {"name": "main", "version": tree["version"]}
@@ -99,7 +114,8 @@ def main():
         print('Before removing the pm layout, switch back: herdr-app do layout.switch \'{"name":"main"}\'')
         setup.save_settings()
         setup.remove_skill()
-        for path in (desktop / "mods/pm-dash", desktop / "mods/pm-nav", desktop / "layouts/pm.json"):
+        for path in (desktop / "mods/pm-dash", desktop / "mods/pm-nav", desktop / "mods/pm-toast",
+                     desktop / "layouts/pm.json"):
             if path.exists() or path.is_symlink():
                 if path == desktop / "layouts/pm.json":
                     try:
@@ -120,7 +136,7 @@ def main():
 
     setup.install_skill()
     if desktop.exists() or args.desktop:
-        for name in ("pm-dash", "pm-nav"):
+        for name in ("pm-dash", "pm-nav", "pm-toast"):
             setup.copy_files(repo / "mods" / name, desktop / "mods" / name,
                        ("gpui-kit.d.ts", "jsconfig.json", "*.test.mjs", "__pycache__", ".DS_Store"))
         install_layout()

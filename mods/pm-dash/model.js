@@ -18,8 +18,8 @@ const STRINGS = {
     noLogs: 'No logs yet', openTerminal: 'Click to open its terminal', board: 'Board', readError: 'Could not read ledger. Retrying soon',
     live: 'Live from ledger', loading: 'Reading ledger…',
     setupTitle: 'Set up PM', setup: 'Set up', settingUp: 'Setting up…', checkingSetup: 'Checking PM setup…',
-    setupDescription: 'Copies the PM skill to ~/.claude/skills/pm and adds its hooks to ~/.claude/settings.json.',
-    setupDone: 'Done. Restart your Claude Code sessions, then say "act as PM for this project".',
+    setupDescription: "Copies the PM skill into your coding agents' skill folders (Claude Code, Codex, pi) and adds their hooks.",
+    setupDone: 'Done. Restart your coding agent sessions, then say "act as PM for this project".',
     setupOutdated: 'A PM skill update is available.', update: 'Update',
     setupIncomplete: 'Setup did not finish. Try again.',
     line: (name, text) => `${name}: ${text}`,
@@ -46,8 +46,8 @@ const STRINGS = {
     noLogs: '暂无日志', openTerminal: '点击跳到该终端', board: '看 板', readError: '台账读取失败，稍后重试',
     live: '实时，来自台账', loading: '正在读取台账…',
     setupTitle: '设置 PM', setup: '设置', settingUp: '正在设置…', checkingSetup: '正在检查 PM 设置…',
-    setupDescription: '将 PM 技能复制到 ~/.claude/skills/pm，并将其 hooks 添加到 ~/.claude/settings.json。',
-    setupDone: '设置完成。重启 Claude Code 会话，然后说“作为本项目的 PM”。',
+    setupDescription: '将 PM 技能复制到各编程 agent 的技能目录（Claude Code、Codex、pi），并添加它们的 hooks。',
+    setupDone: '设置完成。重启编程 agent 的会话，然后说“作为本项目的 PM”。',
     setupOutdated: 'PM 技能有可用更新。', update: '更新',
     setupIncomplete: '设置尚未完成，请重试。',
     line: (name, text) => `${name}：${text}`,
@@ -62,11 +62,35 @@ export function word(lang, key, ...args) {
 }
 export const label = (lang, status) => word(lang, status) || status || word(lang, 'unknown');
 
-// Facts come from setup.py --status. Missing prerequisites take precedence over
-// a version difference; optional Discord hooks do not affect readiness.
+// Facts come from setup.py --status, per agent with a summary. Ready: at least one
+// agent is fully set up and no installed copy is outdated. An agent that has the
+// skill but lacks its hooks is not ready; Set up installs them.
 export function setupState(status) {
-  if (status?.skill_present !== true || status?.hooks_present !== true) return 'missing';
-  return status.script_matches === true ? 'ready' : 'outdated';
+  const summary = status?.summary, list = key => Array.isArray(summary?.[key]) ? summary[key] : [];
+  if (!list('installed').length) return 'missing';
+  if (list('outdated').length) return 'outdated';
+  return list('ready').length ? 'ready' : 'missing';
+}
+
+// The ledger home pm.py uses: PM_HOME, else ~/.claude/pm where an earlier install
+// keeps it, else ~/.dudu. `pm.py state` reports it as `home`; this shell line
+// answers the same question before the first state arrives.
+export const LEDGER_HOME_SH = 'if [ -n "$PM_HOME" ]; then printf %s "$PM_HOME"; ' +
+  'elif [ -d "$HOME/.claude/pm" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
+
+// Where another machine may keep pm.py: the desktop bundle, then each agent's skill folder.
+export const PM_SCRIPTS = ['.config/herdr-app/mods/pm-dash/skill/scripts/pm.py', '.claude/skills/pm/scripts/pm.py',
+  '.codex/skills/pm/scripts/pm.py', '.pi/agent/skills/pm/scripts/pm.py'];
+
+// One shell line for `hc exec --on <machine>`: run `state` with the first script that exists.
+export function remoteStateCommand(scripts = PM_SCRIPTS) {
+  return `for f in ${scripts.map(path => `"$HOME/${path}"`).join(' ')}; do ` +
+    'if [ -f "$f" ]; then exec python3 "$f" state; fi; done; echo "pm.py not found" >&2; exit 127';
+}
+
+// A PM card's status line names its agent program quietly when the ledger knows it.
+export function pmStatusText(lang, row) {
+  return [label(lang, row.live), row.agent].filter(Boolean).join(' · ');
 }
 
 export function taskStatusText(lang, row) {
