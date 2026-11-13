@@ -6,7 +6,7 @@ Manage all your coding agents from one session. Tell it what you want; it dispat
 
 The recording uses invented demo data.
 
-For each project, one Claude Code session in Herdr acts as the manager: it hands tasks to coding agents in their own worktrees, checks what they bring back, and keeps a persistent task ledger, so progress survives restarts and is visible across projects and machines.
+For each project, one agent session in Herdr acts as the manager (Claude Code today): it hands tasks to coding agents in their own worktrees, checks what they bring back, and keeps a persistent task ledger, so progress survives restarts and is visible across projects and machines.
 
 This first version supports the Herdr desktop app. Its mods add a sidebar entry and a board of every project and task. Discord is optional.
 
@@ -14,11 +14,11 @@ The `herdr` terminal UI is not supported yet: the skill contains code paths for 
 
 ## Requirements
 
-- Claude Code for the PM session, installed and authenticated.
+- Claude Code for the manager session, installed and authenticated. The manager side currently relies on Claude Code's skills and hooks; the ledger, the board and the workers do not.
 - The Herdr desktop app, with `herdr-app` and `herdr-core` (`hc`) available on your PATH.
 - Bash and Python 3 (tested on Python 3.14). The installer uses only Python's standard library.
 - Git for repository work and worker worktrees.
-- Codex CLI, installed and authenticated, if you choose Codex workers. Otherwise choose another installed worker program.
+- A command-line coding agent for the workers. Codex CLI is the default and the only one tested; `--kind` starts any other installed program by name.
 
 ## Install
 
@@ -188,6 +188,17 @@ Use these steps when automatic layout generation is skipped. Paths below are rel
    ```
 
 4. Save valid JSON, then select it with `herdr-app do layout.switch '{"name":"pm"}'`.
+
+## Roadmap
+
+Not done yet, roughly in this order:
+
+- **Other agents as the manager.** Today the manager must be a Claude Code session: the skill installs into `~/.claude`, the session-start reminder is a Claude Code hook, and session rotation restarts `claude`. The ledger and board are agent-neutral, so Codex and others can be supported by adapting those three points.
+- **Tested worker programs beyond Codex.** Other programs can already be started with `--kind`, but only Codex has its startup handled and verified.
+- **The `herdr` terminal UI.** Code paths exist but are untested.
+- **Uninstall from the board.** Setup is one click; removal still needs `./install.sh --uninstall`.
+
+Requests and reports are welcome in the issues.
 
 ## Repository structure
 
