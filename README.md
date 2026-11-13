@@ -20,15 +20,18 @@ The `herdr` terminal UI is not supported yet: the skill contains code paths for 
 
 ## Install
 
-Clone or download this repository, then run from its root:
+Choose either path:
+
+- **From herdr.dev:** add the PM layout, or copy `layouts/` and `mods/` into your Herdr app folder (`~/.config/herdr-app`, or `$HERDR_APP_HOME`). Select the PM layout, open **Board**, then click **Set up**. The skill is bundled inside `pm-dash`; no repository checkout or separate installer command is needed.
+- **From the repository:** clone or download this repository, then run from its root:
 
 ```bash
 ./install.sh
 ```
 
-This copies the PM skill to `~/.claude/skills/pm` and adds its `SessionStart` hook to `~/.claude/settings.json`. Existing settings and unrelated hooks are preserved. Before the first change to an existing settings file, the installer saves its original bytes as `settings.json.pm-backup`; later runs keep that backup.
+Both paths use `mods/pm-dash/setup.py`. This copies the PM skill to `~/.claude/skills/pm` and adds its `SessionStart` hook to `~/.claude/settings.json`. Existing settings and unrelated hooks are preserved. Before the first change to an existing settings file, the installer saves its original bytes as `settings.json.pm-backup`; later runs keep that backup.
 
-If `~/.config/herdr-app` exists, the installer also copies `pm-dash` and `pm-nav` into its `mods/` directory and creates `layouts/pm.json` from `layouts/main.json`. The original layout is unchanged. An existing PM layout containing `pm-nav` is kept. Before replacing another existing `pm.json`, the installer saves the first `pm.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
+With `./install.sh`, if `~/.config/herdr-app` exists, the installer also copies `pm-dash` and `pm-nav` into its `mods/` directory and creates `layouts/pm.json` from `layouts/main.json`. The original layout is unchanged. An existing PM layout containing `pm-nav` is kept. Before replacing another existing `pm.json`, the installer saves the first `pm.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
 
 ```bash
 ./install.sh --desktop          # Install desktop mods even before its config directory exists
@@ -50,7 +53,7 @@ HERDR_APP_HOME=/path/to/herdr-config \
 
 Defaults are `~/.claude` and `~/.config/herdr-app`. Use the same overrides when uninstalling. Hook commands use the selected skill path, including paths containing spaces. Herdr desktop itself also recognizes `HERDR_APP_HOME`.
 
-`CLAUDE_HOME` selects the install destination; it does not configure the other applications. The desktop mods currently read the skill and ledger from `~/.claude`. For desktop use, keep the default Claude destination. `pm.py` uses `PM_HOME` to override its ledger directory; an installation path override alone does not relocate ledger data.
+`CLAUDE_HOME` selects the install destination; it does not configure the other applications. The desktop mods read local state with the bundled `mods/pm-dash/skill/scripts/pm.py` under `appHome()`, and watch the ledger in `~/.claude/pm`. The board’s Set up action explicitly targets `~/.claude`; for desktop use, keep the default Claude destination. `pm.py` uses `PM_HOME` to override its ledger directory; an installation path override alone does not relocate ledger data.
 
 Restart existing Claude Code sessions to load the skill and hooks.
 
@@ -58,7 +61,9 @@ Restart existing Claude Code sessions to load the skill and hooks.
 
 This repository is also a Herdr layout: `layouts/pm.json` plus the `pm-nav` and `pm-dash` mods. Read [RECIPE.md](RECIPE.md) for its behavior, dependencies, and rebuild instructions. A public GitHub repository with the `herdr-layout` topic can appear in the [Herdr layout directory](https://herdr.dev/layouts).
 
-When adding the layout from herdr.dev, also run `./install.sh` from this repository to install the PM skill. Both mods read its ledger through `python3 ~/.claude/skills/pm/scripts/pm.py state`; copying the layout and mods alone does not install that dependency. Connected machines also need the skill and their own ledger for remote state reads through `hc`.
+Open **Board** and click **Set up** to copy the bundled skill and add its hooks. Before setup, the board shows a centered setup block and the sidebar says **Set up**; status checks do not write files. Success shows a reminder to restart Claude Code sessions and say “act as PM for this project”, then displays the board. Errors stay visible with a retryable button. If the installed `pm.py` differs from the bundle, the normal board shows a quiet **Update** action using the same installer. Setup is checked at startup and after the action, not on the ledger polling timer.
+
+Local ledger reads use the bundled script. Connected machines still need `~/.claude/skills/pm/scripts/pm.py` and their own ledger for remote reads through `hc`. The sidebar’s remote cache starts writing only once the local skill and hooks are installed.
 
 The shipped layout has no installer ownership marker. `./install.sh` keeps an existing layout containing `pm-nav`; otherwise it generates a layout from your own `main.json`, rather than copying the shipped file. `--uninstall` keeps the unmarked layout but removes the PM mods it needs, so switch away from it before uninstalling.
 
@@ -112,7 +117,7 @@ Create `~/.claude/pm/config.json` to set your worker preferences:
 
 `lang` defaults to `en`; set it to `zh` for Chinese. It controls built-in text, including handover prompts, the labels around recorded user quotes, and dashboard text. User quotes, task titles, and logs are kept in their original language.
 
-The skill includes two task brief templates: `assets/brief-template.md` (English) and `assets/brief-template.zh.md` (Chinese), under `skill/pm/`.
+The skill includes two task brief templates: `assets/brief-template.md` (English) and `assets/brief-template.zh.md` (Chinese), under `mods/pm-dash/skill/`.
 
 All three worker fields are optional. When `model` or `effort` is omitted, the worker program uses its own defaults. Explicit `pm.py dispatch --kind`, `--model`, and `--effort` arguments take precedence over the corresponding configuration values. Choose a kind and model available in your environment; the values above are examples.
 
@@ -137,13 +142,15 @@ To enable it:
 
 5. Follow the launch command printed by `claim`. You can print it again with `pm.py launch`. It uses a session-specific MCP configuration; restart the PM with that command and review the channel confirmation shown by Claude Code.
 
-Only a registered PM bound to a channel mirrors its terminal conversation. Set `PM_NO_DISCORD=1` in the session environment to silence mirroring. To also mirror the task board to a channel, run `pm.py board --channel YOUR_CHANNEL_ID` once. See [the skill's Discord instructions](skill/pm/SKILL.md#discord) for details.
+Only a registered PM bound to a channel mirrors its terminal conversation. Set `PM_NO_DISCORD=1` in the session environment to silence mirroring. To also mirror the task board to a channel, run `pm.py board --channel YOUR_CHANNEL_ID` once. See [the skill's Discord instructions](mods/pm-dash/skill/SKILL.md#discord) for details.
 
 ## Uninstall
 
 ```bash
 ./install.sh --uninstall
 ```
+
+Use this command for either installation path; there is no uninstall button in the board. If you installed through herdr.dev, download this repository to run it.
 
 This removes PM command hooks (commands containing `skills/pm/scripts/pm.py`), `skills/pm`, the two PM mod directories, and `layouts/pm.json` only when it carries the installer’s `generated_by` marker. Unmarked layouts (including layouts from older installers) are kept. If settings are invalid, uninstall warns and skips hook cleanup but still removes installed files. Other settings and hooks are kept, including unrelated commands grouped with a PM hook.
 
@@ -182,9 +189,10 @@ Use these steps when automatic layout generation is skipped. Paths below are rel
 
 ## Repository structure
 
-- `install.sh` — repeatable installation, preview, and uninstall.
-- `skill/pm/` — PM playbook, ledger CLI, and browser dashboard.
-- `mods/pm-dash/` — desktop project/task board.
+- `install.sh` — desktop installation, preview, and uninstall; calls the shared skill installer.
+- `layouts/pm.json` — distributable PM layout.
+- `mods/pm-dash/` — desktop project/task board, including `setup.py` for skill/hooks installation and read-only status.
+- `mods/pm-dash/skill/` — the single bundled PM playbook, ledger CLI, and browser dashboard.
 - `mods/pm-nav/` — desktop sidebar entry and summary.
 - `tests/test_install.py` — installation tests using temporary directories.
 

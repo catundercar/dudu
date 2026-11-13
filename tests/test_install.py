@@ -3,12 +3,14 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
 
 
 REPO = Path(__file__).resolve().parents[1]
+BUNDLE = REPO / "mods/pm-dash"
 # Same node hierarchy as the shipped desktop main.json; no personal content.
 MAIN = {
     "id": "root", "type": "row", "background": "canvas", "version": "1", "children": [
@@ -31,7 +33,7 @@ class InstallTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.claude = self.root / "claude home"
         self.desktop = self.root / "desktop home"
-        self.env = dict(os.environ, CLAUDE_HOME=str(self.claude), HERDR_APP_HOME=str(self.desktop))
+        self.env = dict(os.environ, HOME=str(self.root), CLAUDE_HOME=str(self.claude), HERDR_APP_HOME=str(self.desktop))
         self.settings = self.claude / "settings.json"
 
     def run_install(self, *args):
@@ -42,6 +44,109 @@ class InstallTest(unittest.TestCase):
 
     def read_settings(self):
         return json.loads(self.settings.read_text())
+
+    def run_setup(self, *args, bundle=BUNDLE, success=True):
+        result = subprocess.run(["python3", str(bundle / "setup.py"), *args], env=self.env,
+                                cwd=self.root, text=True, capture_output=True)
+        if success:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0)
+        return result
+
+    def snapshot(self):
+        return {str(p.relative_to(self.root)): p.read_bytes() if p.is_file() else None
+                for p in self.root.rglob("*")}
+
+    def test_setup_status_install_and_update_from_standalone_renamed_bundle(self):
+        # A directory download has no repository or install.sh, and a mod clone
+        # must install the skill alongside its own setup.py.
+        bundle = self.root / "app home/mods/custom-board"
+        shutil.copytree(BUNDLE, bundle, ignore=shutil.ignore_patterns("__pycache__"))
+        before = self.snapshot()
+        status = json.loads(self.run_setup("--status", bundle=bundle).stdout)
+        self.assertFalse(status["skill_present"])
+        self.assertFalse(status["hooks_present"])
+        self.assertEqual(self.snapshot(), before)
+        self.run_setup("--dry-run", bundle=bundle)
+        self.assertEqual(self.snapshot(), before)
+        self.run_setup(bundle=bundle)
+        status = json.loads(self.run_setup("--status", bundle=bundle).stdout)
+        self.assertTrue(all(status[key] for key in ("skill_present", "hooks_present", "script_matches")))
+        first_settings = self.settings.read_bytes()
+        installed = self.claude / "skills/pm/scripts/pm.py"
+        bundled = bundle / "skill/scripts/pm.py"
+        # Equal size is not enough: an edit must be caught by the hash.
+        content = bundled.read_bytes()
+        bundled.write_bytes(content.replace(b"import ", b"#mport ", 1))
+        status = json.loads(self.run_setup("--status", bundle=bundle).stdout)
+        self.assertTrue(status["skill_present"] and status["hooks_present"])
+        self.assertFalse(status["script_matches"])
+        self.assertEqual(status["installed"]["size"], status["bundled"]["size"])
+        self.assertNotEqual(status["installed"]["sha256"], status["bundled"]["sha256"])
+        self.run_setup(bundle=bundle)
+        self.assertEqual(installed.read_bytes(), bundled.read_bytes())
+        self.assertEqual(self.settings.read_bytes(), first_settings)
+        self.assertTrue(json.loads(self.run_setup("--status", bundle=bundle).stdout)["script_matches"])
+        self.assertFalse(self.desktop.exists())
+
+    def test_setup_status_partial_install_invalid_settings_and_no_writes(self):
+        self.run_setup()
+        self.write_settings({"hooks": {"SessionStart": []}})
+        before = self.snapshot()
+        status = json.loads(self.run_setup("--status").stdout)
+        self.assertTrue(status["skill_present"])
+        self.assertFalse(status["hooks_present"])
+        self.assertEqual(self.snapshot(), before)
+        self.run_setup()
+        (self.claude / "skills/pm/SKILL.md").unlink()
+        status = json.loads(self.run_setup("--status").stdout)
+        self.assertFalse(status["skill_present"])
+        self.assertTrue(status["hooks_present"])
+        for invalid in ('{invalid', '{"hooks":[]}', '{"hooks":{"SessionStart":[null]}}'):
+            with self.subTest(settings=invalid):
+                self.settings.write_text(invalid)
+                before = self.snapshot()
+                status = json.loads(self.run_setup("--status").stdout)
+                self.assertFalse(status["hooks_present"])
+                self.assertIn("Install failed", status["error"])
+                self.assertIn("Install failed", self.run_setup(success=False).stderr)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_shell_and_board_install_have_identical_skill_and_hooks(self):
+        self.env.pop("CLAUDE_HOME")
+        self.claude = self.root / ".claude"
+        self.settings = self.claude / "settings.json"
+        original = {"permissions": {"allow": ["Read"]}, "hooks": {
+            "SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": "echo other"}]}]}}
+        for flags in ((), ("--discord",)):
+            with self.subTest(flags=flags):
+                if self.claude.exists():
+                    shutil.rmtree(self.claude)
+                self.write_settings(original)
+                self.settings.chmod(0o640)
+                self.run_setup(*flags, "--claude-home", str(self.claude))
+                board = self.snapshot()
+                expected = copy.deepcopy(original)
+                expected["hooks"]["SessionStart"].append({"matcher": "^(startup|resume|clear|compact)$", "hooks": [{
+                    "type": "command", "command": "python3 ~/.claude/skills/pm/scripts/pm.py hook-session-start", "timeout": 10}]})
+                if flags:
+                    for event in ("UserPromptSubmit", "Stop"):
+                        expected["hooks"][event] = [{"hooks": [{"type": "command", "command":
+                            "python3 ~/.claude/skills/pm/scripts/pm.py hook-mirror", "timeout": 15, "async": True}]}]
+                self.assertEqual(self.read_settings(), expected)
+                expected_files = {str(p.relative_to(BUNDLE / "skill")): p.read_bytes()
+                                  for p in (BUNDLE / "skill").rglob("*") if p.is_file()
+                                  and p.name not in ("test_pm.py", ".DS_Store") and "__pycache__" not in p.parts}
+                actual_files = {str(p.relative_to(self.claude / "skills/pm")): p.read_bytes()
+                                for p in (self.claude / "skills/pm").rglob("*") if p.is_file()}
+                self.assertEqual(actual_files, expected_files)
+                shutil.rmtree(self.claude)
+                self.write_settings(original)
+                self.settings.chmod(0o640)
+                self.run_install(*flags)
+                self.assertEqual(self.snapshot(), board)
+                self.assertEqual(self.settings.stat().st_mode & 0o777, 0o640)
 
     def write_settings(self, value):
         self.claude.mkdir(parents=True, exist_ok=True)
@@ -97,7 +202,7 @@ class InstallTest(unittest.TestCase):
         self.run_install("--uninstall")
         self.assertNotIn("hooks", self.read_settings())
         # A linked development install must neither delete nor copy onto the source.
-        (self.claude / "skills/pm").symlink_to(REPO / "skill/pm", target_is_directory=True)
+        (self.claude / "skills/pm").symlink_to(REPO / "mods/pm-dash/skill", target_is_directory=True)
         self.assertIn("already points to the repository source", self.run_install())
         self.assertTrue((self.claude / "skills/pm").is_symlink())
 

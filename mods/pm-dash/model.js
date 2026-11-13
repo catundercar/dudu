@@ -15,6 +15,11 @@ const STRINGS = {
     recent: 'Recent activity', replay: 'Replay · ', noEvents: 'No new records yet.', idleReplay: 'Idle replay',
     noLogs: 'No logs yet', openTerminal: 'Click to open its terminal', board: 'Board', readError: 'Could not read ledger. Retrying soon',
     live: 'Live from ledger', loading: 'Reading ledger…',
+    setupTitle: 'Set up PM', setup: 'Set up', settingUp: 'Setting up…', checkingSetup: 'Checking PM setup…',
+    setupDescription: 'Copies the PM skill to ~/.claude/skills/pm and adds its hooks to ~/.claude/settings.json.',
+    setupDone: 'Done. Restart your Claude Code sessions, then say "act as PM for this project".',
+    setupOutdated: 'A PM skill update is available.', update: 'Update',
+    setupIncomplete: 'Setup did not finish. Try again.',
     line: (name, text) => `${name}: ${text}`,
     summaryLead: (p, r) => `${p} ${p === 1 ? 'project' : 'projects'} · ${r} ${r === 1 ? 'task' : 'tasks'} running ·`,
     summaryWaiting: w => `${w} ${w === 1 ? 'item' : 'items'} waiting`,
@@ -36,6 +41,11 @@ const STRINGS = {
     recent: '最近发生了什么', replay: '回放 · ', noEvents: '还没有新的记录。', idleReplay: '空闲回放',
     noLogs: '暂无日志', openTerminal: '点击跳到该终端', board: '看 板', readError: '台账读取失败，稍后重试',
     live: '实时，来自台账', loading: '正在读取台账…',
+    setupTitle: '设置 PM', setup: '设置', settingUp: '正在设置…', checkingSetup: '正在检查 PM 设置…',
+    setupDescription: '将 PM 技能复制到 ~/.claude/skills/pm，并将其 hooks 添加到 ~/.claude/settings.json。',
+    setupDone: '设置完成。重启 Claude Code 会话，然后说“作为本项目的 PM”。',
+    setupOutdated: 'PM 技能有可用更新。', update: '更新',
+    setupIncomplete: '设置尚未完成，请重试。',
     line: (name, text) => `${name}：${text}`,
     summaryLead: (p, r) => `${p} 个项目 · ${r} 个任务在跑 ·`,
     summaryWaiting: w => `${w} 件事等你`,
@@ -47,6 +57,13 @@ export function word(lang, key, ...args) {
   return typeof value === 'function' ? value(...args) : value;
 }
 export const label = (lang, status) => word(lang, status) || status || word(lang, 'unknown');
+
+// Facts come from setup.py --status. Missing prerequisites take precedence over
+// a version difference; optional Discord hooks do not affect readiness.
+export function setupState(status) {
+  if (status?.skill_present !== true || status?.hooks_present !== true) return 'missing';
+  return status.script_matches === true ? 'ready' : 'outdated';
+}
 
 export function taskStatusText(lang, row) {
   if (row.cleanup) return word(lang, 'cleanup');

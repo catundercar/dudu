@@ -1,17 +1,18 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
-import { theme, home, exec, readTextFile, watchFolder, terminals, agents, run, props, closeOverlay, layout as desktopLayout } from 'herdr';
-import { fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates } from './model.js';
+import { theme, home, appHome, exec, readTextFile, watchFolder, terminals, agents, run, props, closeOverlay, layout as desktopLayout } from 'herdr';
+import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates } from './model.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
 
-// Relative to home(); change only this constant when installing against a different skill.
-const PM_SCRIPT = '/.claude/skills/pm/scripts/pm.py';
+// Keep the full mods/<name>/ prefix: Herdr rewrites it when cloning this mod.
+const MOD_FOLDER = 'mods/pm-dash/';
 const STAGE = 'pm-stage', WORK = 'work';
 
 export default class PmDash extends View {
   init(_props, cx) {
     this.state = { pms: [], tasks: [], events: [] };
+    this.setupStatus = null; this.setupError = ''; this.setupBusy = false; this.setupDone = false;
     this.localState = this.state; this.remoteStates = {};
     this.primed = false; this.size = { width: 980, height: 640 };
     this.queue = []; this.recent = []; this.replayIndex = 0; this.auto = false;
@@ -29,6 +30,7 @@ export default class PmDash extends View {
         if (this.trip?.token === token) this.land(cx);
       }
     });
+    cx.spawn(async cx => { await this.checkSetup(); cx.notify(); });
     this.refresh(cx);
     cx.spawn(async cx => {
       try {
@@ -48,6 +50,50 @@ export default class PmDash extends View {
     this.armIdle(cx);
   }
   text(key, ...args) { return word(this.state.lang, key, ...args); }
+  async checkSetup() {
+    try {
+      const result = await exec('python3', [appHome() + '/' + MOD_FOLDER + 'setup.py', '--status', '--claude-home', home() + '/.claude']);
+      if (result.code !== 0) throw new Error(result.stderr || result.stdout || `setup.py: ${result.code}`);
+      const status = JSON.parse(result.stdout);
+      this.setupStatus = setupState(status); this.setupError = status.error || '';
+    } catch (error) { this.setupStatus = 'missing'; this.setupError = String(error); }
+  }
+  setUp(cx) {
+    if (this.setupBusy) return;
+    this.setupBusy = true; this.setupError = ''; this.setupDone = false; cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const result = await exec('python3', [appHome() + '/' + MOD_FOLDER + 'setup.py', '--claude-home', home() + '/.claude']);
+        if (result.code !== 0) throw new Error(result.stderr || result.stdout || `setup.py: ${result.code}`);
+        await this.checkSetup();
+        this.setupDone = this.setupStatus === 'ready';
+        if (!this.setupDone && !this.setupError) this.setupError = this.text('setupIncomplete');
+        if (this.setupDone) this.refresh(cx);
+      } catch (error) { this.setupError = String(error); }
+      finally { this.setupBusy = false; run('pm-nav.setup-changed'); cx.notify(); }
+    });
+  }
+  setupButton(t, label, quiet = false) {
+    return div().id('pm-setup-action').px(quiet ? 8 : 18).py(quiet ? 4 : 9).rounded(8).flex_none()
+      .text_size(13).font_semibold().cursor_pointer()
+      .bg(quiet ? t.surface : t.foreground).text_color(quiet ? t.foreground : solidText(t.foreground, t))
+      .opacity(this.setupBusy ? .5 : 1)
+      .on_click((_event, cx) => this.setUp(cx)).child(this.text(this.setupBusy ? 'settingUp' : label));
+  }
+  setupView(t) {
+    const block = v_flex().w_full().max_w(480).flex_none().p(28).gap(16).rounded(20).bg(t.surface).items_center()
+      .child(svg('mods/pm-dash/dudu.svg').size(36).text_color(t.foreground))
+      .child(div().text_size(22).font_semibold().child(this.text('setupTitle')));
+    if (this.setupStatus === null) block.child(div().text_color(t.muted).child(this.text('checkingSetup')));
+    else {
+      block.child(div().w_full().whitespace_normal().line_height('20px').text_color(t.muted).child(this.text('setupDescription')));
+      if (this.setupError) block.child(div().w_full().whitespace_normal().text_color(t.blocked).child(this.setupError));
+      block.child(this.setupButton(t, 'setup'));
+    }
+    return v_flex().id('setup-root').size_full().min_w(0).min_h(0).bg(t.canvas).text_color(t.foreground).text_size(13)
+      .child(v_flex().id('setup-scroll').size_full().overflow_scroll().p(24)
+        .child(v_flex().w_full().flex_1().items_center().justify_center().child(block)));
+  }
   geometry() {
     return fitBoard(this.state, this.size.width, this.size.height,
       this.measuredWidth === this.size.width ? this.fixedHeight : undefined);
@@ -57,7 +103,7 @@ export default class PmDash extends View {
     this.loading = true;
     cx.spawn(async cx => {
       try {
-        const result = await exec('python3', [home() + PM_SCRIPT, 'state']);
+        const result = await exec('python3', [appHome() + '/' + MOD_FOLDER + 'skill/scripts/pm.py', 'state']);
         if (result.code !== 0) throw new Error(result.stderr || `pm.py: ${result.code}`);
         const next = JSON.parse(result.stdout);
         if (!['pms', 'tasks', 'events'].every(k => Array.isArray(next[k]))) throw new Error('state is missing pms/tasks/events arrays');
@@ -352,6 +398,7 @@ export default class PmDash extends View {
     return task ? this.text('line', task.title, text || taskStatusText(this.state.lang, task)) : text;
   }
   render(cx) {
+    if (this.setupStatus === null || this.setupStatus === 'missing') return this.setupView(theme());
     const t = theme(), g = this.geometry(), terms = terminals(), live = agents();
     const px = n => n * g.scale, font = n => Math.max(10, px(n));
     const rows = g.rows.map(r => this.presentation(r, terms, live));
@@ -470,6 +517,11 @@ export default class PmDash extends View {
           .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.muted)
             .child(this.error ? this.text('readError') : this.primed ? this.text('live') : this.text('loading'))))
         .child(toggle))
+      .when(this.setupStatus === 'outdated', el => el.child(h_flex().mt(8).gap(8).items_center()
+        .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.muted).child(this.text('setupOutdated')))
+        .child(this.setupButton(t, 'update', true))))
+      .when(Boolean(this.setupError || this.setupDone), el => el.child(div().mt(8).whitespace_normal().text_size(12.5)
+        .text_color(this.setupError ? t.blocked : t.muted).child(this.setupError || this.text('setupDone'))))
       .child(h_flex().flex_none().mt(14).gap(small ? 12 : 24).items_start().justify_between()
         .child(v_flex().flex_1().min_w(0).gap(6)
           .child(h_flex().flex_wrap().gap(5).text_size(small ? 16 : 22).font_semibold()

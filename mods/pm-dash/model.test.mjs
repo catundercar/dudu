@@ -5,7 +5,106 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP } from './model.js';
+import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP } from './model.js';
+
+test('setup needs both skill and hooks before comparing versions', () => {
+  for (const input of [null, undefined, {}, { skill_present: true }, { hooks_present: true },
+    { skill_present: false, hooks_present: true, script_matches: true },
+    { skill_present: true, hooks_present: false, script_matches: false }]) {
+    assert.equal(setupState(input), 'missing');
+  }
+  const installed = { skill_present: true, hooks_present: true };
+  assert.equal(setupState({ ...installed, script_matches: true }), 'ready');
+  assert.equal(setupState({ ...installed, script_matches: false }), 'outdated');
+  assert.equal(setupState(installed), 'outdated');
+  for (const lang of ['en', 'zh']) {
+    for (const key of ['setupTitle', 'setup', 'settingUp', 'checkingSetup', 'setupDescription',
+      'setupDone', 'setupOutdated', 'update', 'setupIncomplete']) assert.ok(word(lang, key));
+    assert.ok(word(lang, 'setupDescription').includes('~/.claude/skills/pm'));
+    assert.ok(word(lang, 'setupDescription').includes('~/.claude/settings.json'));
+  }
+});
+
+// Exercise async setup/IO decisions without starting Herdr or executing Python.
+function modWithIO(file, bindings) {
+  const source = readFileSync(new URL(file, import.meta.url), 'utf8')
+    .replace(/^import .*;$/gm, '').replace('export default class ', 'return class ');
+  const Mod = new Function('View', ...Object.keys(bindings), source)(class {}, ...Object.values(bindings));
+  return new Mod();
+}
+function asyncContext() {
+  const pending = [];
+  const cx = { notify() {}, spawn(task) { pending.push(task(cx)); } };
+  return { cx, async drain() { while (pending.length) await pending.shift(); } };
+}
+
+test('board checks are read-only, setup failures retry, and success refreshes state and sidebar', async () => {
+  const calls = [], commands = [];
+  let installed = false, fail = true, refreshed = 0;
+  const board = modWithIO('./main.js', {
+    appHome: () => '/app home', home: () => '/test home', setupState, word,
+    run: name => commands.push(name),
+    exec: async (program, args) => {
+      calls.push({ program, args });
+      if (args.includes('--status')) return { code: 0, stdout: JSON.stringify({
+        skill_present: installed, hooks_present: installed, script_matches: installed }) };
+      if (fail) return { code: 1, stderr: 'Install failed: invalid settings\n' };
+      installed = true;
+      return { code: 0, stdout: 'Installation complete.' };
+    },
+  });
+  board.state = { lang: 'en' };
+  board.refresh = () => { refreshed++; };
+  const { cx, drain } = asyncContext();
+  await board.checkSetup();
+  assert.equal(board.setupStatus, 'missing');
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].args.includes('--status'));
+  assert.equal(installed, false);
+  board.setUp(cx);
+  board.setUp(cx); // A repeated click while busy must not start a second installer.
+  await drain();
+  assert.equal(calls.length, 2);
+  assert.equal(board.setupStatus, 'missing');
+  assert.match(board.setupError, /Install failed: invalid settings/);
+  assert.equal(board.setupBusy, false);
+  assert.equal(refreshed, 0);
+  fail = false;
+  board.setUp(cx);
+  await drain();
+  assert.equal(board.setupStatus, 'ready');
+  assert.equal(board.setupDone, true);
+  assert.equal(board.setupError, '');
+  assert.equal(refreshed, 1);
+  assert.deepEqual(commands, ['pm-nav.setup-changed', 'pm-nav.setup-changed']);
+  for (const call of calls) {
+    assert.equal(call.program, 'python3');
+    assert.equal(call.args[0], '/app home/mods/pm-dash/setup.py');
+    assert.deepEqual(call.args.slice(-2), ['--claude-home', '/test home/.claude']);
+  }
+});
+
+test('sidebar keeps remote reads but suppresses cache writes until setup is available', async () => {
+  const calls = [];
+  const nav = modWithIO('../pm-nav/main.js', {
+    home: () => '/test home', WRITE_REMOTE_CACHE,
+    exec: async (program, args) => {
+      calls.push({ program, args });
+      return { code: 0, stdout: '[]' };
+    },
+  });
+  nav.remoteStates = {}; nav.publish = () => {};
+  const { cx, drain } = asyncContext();
+  nav.setupAvailable = false;
+  nav.refreshRemote(cx);
+  await drain();
+  assert.deepEqual(calls.map(call => call.program), ['hc']);
+  nav.setupAvailable = true;
+  nav.refreshRemote(cx);
+  await drain();
+  assert.deepEqual(calls.map(call => call.program), ['hc', 'hc', 'python3']);
+  assert.equal(calls[2].args[2], '/test home/.claude/pm/cache/remote-states.json');
+});
 
 test('navigation fits whole English and Chinese phrases and always retains blocked counts', () => {
   const counts = { projects: 5, active: 1, blocked: 4 };
