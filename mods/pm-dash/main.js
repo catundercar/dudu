@@ -252,9 +252,10 @@ export default class PmDash extends View {
   }
   taskPill(row, t, scale, maxWidth, id = `status:${row.id}`) {
     const px = n => n * scale, font = n => Math.max(10, px(n));
-    const waiting = !row.cleanup && ['blocked', 'review'].includes(row.status);
+    const waiting = !row.cleanup && row.status === 'blocked';
     const running = !row.cleanup && row.status === 'in_progress';
-    const color = waiting ? (row.status === 'blocked' ? t.blocked : t.accent) : running ? t.ansi2 : t.dim;
+    const review = !row.cleanup && row.status === 'review';
+    const color = waiting ? t.blocked : review ? t.accent : running ? t.ansi2 : t.dim;
     return div().id(id).max_w(maxWidth).flex_shrink_0().truncate()
       .px(px(8)).py(px(2)).rounded(px(10)).text_size(font(11.5)).font_semibold()
       .line_height(`${Math.max(12, px(18))}px`)
@@ -383,9 +384,10 @@ export default class PmDash extends View {
           .flex_none().rounded(px(10)).items_center().justify_center().text_size(font(11.5)).font_bold()
           .bg(t.blocked).text_color(solidText(t.blocked, t)).child(String(row.waiting))));
     } else {
-      const waiting = !row.cleanup && ['blocked', 'review'].includes(row.status);
+      const waiting = !row.cleanup && row.status === 'blocked';
       const running = !row.cleanup && row.status === 'in_progress';
-      const statusColor = waiting ? (row.status === 'blocked' ? t.blocked : t.accent) : running ? t.ansi2 : t.dim;
+      const review = !row.cleanup && row.status === 'review';
+      const statusColor = waiting ? t.blocked : review ? t.accent : running ? t.ansi2 : t.dim;
       el = el.on_hover((over, cx) => {
         if (over) this.hoverTask = row.task;
         else if (this.hoverTask === row.task) this.hoverTask = null;
@@ -396,7 +398,7 @@ export default class PmDash extends View {
         if (this.hoverTask !== row.task) { this.hoverTask = row.task; cx.notify(); }
       })
         .when(!row.first, el => el.child(div().absolute().left(px(12)).right(px(12)).top(0).h(1).bg(t.border)))
-        .child(this.dot(statusColor, waiting || running, t, px(8)))
+        .child(this.dot(statusColor, waiting || running || review, t, px(8)))
         // Nudge only the title: row edges and packet endpoints stay aligned.
         .child(div().id(`title:${row.id}`).relative().left(px(this.nudges[row.id] || 0)).spring('left', { response: 320, damping: .35 })
           .flex_1().min_w(0).truncate().font_weight(waiting ? 600 : 400)
@@ -425,7 +427,7 @@ export default class PmDash extends View {
     const rows = g.rows.map(r => this.presentation(r, terms, live));
     const total = counts({ lang: this.state.lang, pms: this.state.pms, tasks: rows.filter(r => r.type === 'task').map(r => ({...r, worker:r.live})) });
     for (const pm of rows.filter(r => r.type === 'pm')) {
-      pm.waiting = rows.filter(r => r.type === 'task' && (r.pm || '') === (pm.name || '') && ['blocked', 'review'].includes(r.status)).length;
+      pm.waiting = rows.filter(r => r.type === 'task' && (r.pm || '') === (pm.name || '') && r.status === 'blocked').length;
     }
     const stage = div().id('board-stage').relative().w(g.width).h(g.height).flex_none()
       .on_mouse_move((event, cx) => this.hoverBounds('stageBounds', event.bounds, cx));

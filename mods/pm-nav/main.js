@@ -1,7 +1,7 @@
 import { View, div, svg } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
-import { theme, home, appHome, exec, watchFolder, nextCommand, layout, focused, run, notify, playSound, settings } from 'herdr';
-import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand, enteredWaiting, alertNotices } from './model.js';
+import { theme, home, appHome, exec, watchFolder, nextCommand, layout, focused, run } from 'herdr';
+import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand } from './model.js';
 
 // The sidebar deliberately depends on the original pm-dash bundle.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
@@ -39,10 +39,10 @@ export default class PmNav extends View {
   init(_props, cx) {
     this.counts = null;
     this.localState = { pms: [], tasks: [], events: [] }; this.remoteStates = {};
-    this.waiting = {}; // per source: the tasks waiting for the person at its last read
     this.error = '';
     this.setupAvailable = false;
     this.boardShown = false;
+    this.awayShown = false;
     this.focus = null;
     this.compact = false;
     this.width = 120;
@@ -105,7 +105,6 @@ export default class PmNav extends View {
         const state = JSON.parse(r.stdout);
         if (!Array.isArray(state.pms) || !Array.isArray(state.tasks)) throw new Error('state is missing pms/tasks arrays');
         this.localState = { ...state, events: state.events || [] };
-        this.alert(this.watchWaiting('', state));
         this.setLedgerHome(state.home, cx);
         this.publish(cx);
         this.error = '';
@@ -130,19 +129,14 @@ export default class PmNav extends View {
         const names = [...new Set(machines.filter(m => m.state === 'connected' && typeof m.name === 'string' && m.name).map(m => m.name))];
         // Disconnects remove rows; a transient read failure retains the last good snapshot.
         for (const name of Object.keys(this.remoteStates)) if (!names.includes(name)) delete this.remoteStates[name];
-        const entered = [];
         await Promise.all(names.map(async name => {
           try {
             const r = await exec('hc', ['exec', '--on', name, remoteStateCommand()], { timeout: 4000 });
             if (r.code !== 0) return;
             const state = JSON.parse(r.stdout);
-            if (['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) {
-              this.remoteStates[name] = state;
-              entered.push(...this.watchWaiting(name, state));
-            }
+            if (['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) this.remoteStates[name] = state;
           } catch (_) { /* One unavailable machine must not interrupt the others. */ }
         }));
-        this.alert(entered);
         this.publish(cx);
         try {
           if (this.setupAvailable && this.ledgerHome) {
@@ -154,21 +148,6 @@ export default class PmNav extends View {
       finally { this.remoteLoading = false; }
     });
   }
-  // A machine's first read is its baseline; a disconnect keeps what it last showed.
-  watchWaiting(source, state) {
-    const { seen, entered } = enteredWaiting(this.waiting, source, state);
-    this.waiting = seen;
-    return entered;
-  }
-  // notify() only posts the toast; Herdr's own alerts also play a sound, so play one, once.
-  alert(entered) {
-    if (!entered.length) return;
-    const { notices, sound } = alertNotices(entered, this.localState.lang);
-    try {
-      for (const notice of notices) notify(notice);
-      if (sound && settings()?.sounds?.enabled !== false) playSound(sound);
-    } catch (_) { /* An alert must never stop the sidebar from updating. */ }
-  }
   publish(cx) {
     this.counts = summary(this.localState, this.remoteStates);
     this.lang = this.localState.lang;
@@ -177,14 +156,16 @@ export default class PmNav extends View {
   render(cx) {
     const textFor = (key, ...args) => word(this.lang, key, ...args);
     const t = theme(), stage = find(layout(), STAGE);
-    const shown = stage?.active === BOARD, focus = focusKey(focused());
-    const returnToWork = shouldReturnToWork(shown, this.boardShown, focus, this.focus);
+    // Away: the board or a project view (pm-project) covers the workspace; a later focus change returns to it.
+    const shown = stage?.active === BOARD, away = Boolean(stage?.active) && stage.active !== WORK, focus = focusKey(focused());
+    const returnToWork = shouldReturnToWork(away, this.awayShown, focus, this.focus);
     if (shown !== this.boardShown) cx.timer.after(0, cx => this.checkSetup(cx));
     // Opening the board establishes a fresh baseline. Only later navigation
     // returns to work; live layout/focus data already triggers render, no polling.
     // Re-selecting the same item has no observable focus change. nextCommand()
     // only receives commands addressed to this mod, not other sidebar clicks.
     this.boardShown = shown;
+    this.awayShown = away;
     this.focus = focus;
     if (returnToWork) run('layout.select', { stack: STAGE, child: WORK });
     const on = shown && !returnToWork, n = this.setupAvailable ? this.counts : null;

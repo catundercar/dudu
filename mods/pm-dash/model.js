@@ -12,7 +12,7 @@ const STRINGS = {
     nothingWaiting: 'Nothing waiting', notDesktop: 'Not in desktop', inDesktop: 'In desktop', localMachine: 'Local',
     pmProjectFallback: "PM session is not in the desktop app. Click opens the project's space.",
     pmDesktopMissing: 'PM session is not in the desktop app. Start it there and run pm.py claim.',
-    blockedWaiting: 'Blocked · Waiting for you', reviewWaiting: 'Review · Waiting for you', workingNow: 'Working…',
+    blockedWaiting: 'Blocked · Waiting for you', workingNow: 'Working…',
     task: 'Task', projects: 'Project PMs', tasks: 'Tasks', running: 'Running',
     recent: 'Recent activity', replay: 'Replay · ', noEvents: 'No new records yet.', idleReplay: 'Idle replay',
     noLogs: 'No logs yet', openTerminal: 'Click to open its terminal', board: 'Board', readError: 'Could not read ledger. Retrying soon',
@@ -40,7 +40,7 @@ const STRINGS = {
     nothingWaiting: '没有等你的事', notDesktop: '不在 desktop', inDesktop: '在 desktop', localMachine: '本机',
     pmProjectFallback: 'PM 会话不在 desktop 里，点击打开该项目的空间。',
     pmDesktopMissing: 'PM 会话不在 desktop 里。在 desktop 里启动后运行 pm.py claim。',
-    blockedWaiting: '阻塞 · 等你', reviewWaiting: '待审 · 等你', workingNow: '工作中…',
+    blockedWaiting: '阻塞 · 等你', workingNow: '工作中…',
     task: '任务', projects: '项目 PM', tasks: '任务', running: '在跑',
     recent: '最近发生了什么', replay: '回放 · ', noEvents: '还没有新的记录。', idleReplay: '空闲回放',
     noLogs: '暂无日志', openTerminal: '点击跳到该终端', board: '看 板', readError: '台账读取失败，稍后重试',
@@ -96,8 +96,7 @@ export function pmStatusText(lang, row) {
 export function taskStatusText(lang, row) {
   if (row.cleanup) return word(lang, 'cleanup');
   if (row.status === 'blocked') return word(lang, 'blockedWaiting');
-  if (row.status === 'review') return word(lang, 'reviewWaiting');
-  if (['paused', 'proposed', 'done', 'merged', 'released', 'abandoned', 'cancelled'].includes(row.status)) return label(lang, row.status);
+  if (['review', 'paused', 'proposed', 'done', 'merged', 'released', 'abandoned', 'cancelled'].includes(row.status)) return label(lang, row.status);
   return row.live === 'working' ? word(lang, 'workingNow') : label(lang, row.status);
 }
 
@@ -282,9 +281,10 @@ export function counts(state) {
   const review = state.tasks.filter(t => t.status === 'review').length;
   const blocked = state.tasks.filter(t => t.status === 'blocked').length;
   const running = state.tasks.filter(t => t.status === 'in_progress' && t.worker === 'working').length;
-  const waiting = review + blocked;
+  // Only blocked work waits for the user; review is the PM's job.
+  const waiting = blocked;
   const groups = new Map();
-  for (const task of state.tasks.filter(t => ['review', 'blocked'].includes(t.status))) {
+  for (const task of state.tasks.filter(t => t.status === 'blocked')) {
     const pm = state.pms.find(p => p.name === task.pm);
     const name = pm?.project || (pm?.sourceName ?? pm?.name) || task.project || word(state.lang, 'unassigned');
     const key = JSON.stringify([task.machine || '', pm?.name || name]);

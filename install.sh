@@ -30,6 +30,11 @@ generated_by = "dudu install.sh"
 # The pm layout draws notifications with pm-toast, which hides dispatched workers' agent notices.
 TOAST = "pm-toast"
 TOAST_HINT = f'"toast": "{TOAST}"'
+# The PM list sits right above the agents list; the mod sizes its own block.
+PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
+# The project view: a child of the pm-stage stack, beside the work column and the board.
+PM_PROJECT = {"id": "pm-project", "type": "block", "content": {"mod": "pm-project"}}
+MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
 setup = installer.Setup(args, repo=repo)
 write_json, remove_path = installer.write_json, installer.remove_path
 
@@ -45,13 +50,33 @@ def nodes(tree):
         yield from nodes(child)
 
 
+def has_mod(node, name):
+    content = node.get("content")
+    return node.get("id") == name or (isinstance(content, dict) and content.get("mod") == name)
+
+
+def insert_pm_list(children):
+    agents = [i for i, child in enumerate(children) if isinstance(child, dict) and has_mod(child, "agents")]
+    children.insert(agents[0] if agents else len(children), dict(PM_LIST, size=dict(PM_LIST["size"])))
+
+
 def manual_layout(reason):
     print(f"Skip automatic layout: {reason}")
     print(f"Manual fallback (also in README.md): copy {desktop / 'layouts/main.json'} to {desktop / 'layouts/pm.json'}.")
     print('In sidebar-lists.children, insert first: {"id":"pm-nav","type":"block","size":{"px":64},"content":{"mod":"pm-nav"}}')
-    print('Replace the work column with: {"id":"pm-stage","type":"stack","active":"work","children":[<original work node>,{"id":"pm-board","type":"block","content":{"mod":"pm-dash"}}]}')
+    print(f'and right before the agents block: {json.dumps(PM_LIST, separators=(",", ":"))}')
+    print('Replace the work column with: {"id":"pm-stage","type":"stack","active":"work","children":[<original work node>,'
+          '{"id":"pm-board","type":"block","content":{"mod":"pm-dash"}},' + json.dumps(PM_PROJECT, separators=(",", ":")) + ']}')
     print(f'At the root, add: {TOAST_HINT}')
     print("Keep the original work node intact; if main.json is missing, obtain the default layout from your Herdr desktop installation first.")
+
+
+def back_up(target):
+    layout_backup = target.with_name("pm.json.pm-backup")
+    if not layout_backup.exists():
+        print(f"{prefix}Back up layout to {layout_backup}")
+        if not args.dry_run:
+            shutil.copy2(target, layout_backup)
 
 
 def install_layout():
@@ -60,19 +85,44 @@ def install_layout():
     try:
         if target.exists():
             existing = json.loads(target.read_text(encoding="utf-8"))
-            if any(node.get("id") == "pm-nav" or node.get("content", {}).get("mod") == "pm-nav"
-                   for node in nodes(existing)):
-                if "toast" in existing:
+            if any(has_mod(node, "pm-nav") for node in nodes(existing)):
+                changed, hint = False, None
+                parent = next((node for node in nodes(existing)
+                               if any(isinstance(child, dict) and has_mod(child, "pm-nav")
+                                      for child in node.get("children", []))), None)
+                has_list = any(has_mod(node, "pm-list") for node in nodes(existing))
+                if not has_list and parent is None:
+                    # Never fall back to regenerating: that would replace the person's layout.
+                    print(f"Skip pm-list: no column in {target} holds pm-nav. Add this block by hand, "
+                          f"right before the agents block: {json.dumps(PM_LIST, separators=(',', ':'))}")
+                elif not has_list:
+                    # A layout from before pm-list, the person's own edits included: add only the block.
+                    insert_pm_list(parent["children"])
+                    back_up(target)
+                    print(f"{prefix}Add the pm-list block to {target}")
+                    changed = True
+                stage = next((node for node in nodes(existing) if node.get("id") == "pm-stage"
+                              and node.get("type") == "stack" and isinstance(node.get("children"), list)), None)
+                if stage is not None and not any(has_mod(node, "pm-project") for node in nodes(existing)):
+                    # A layout from before the project view: add only its block to the stack.
+                    stage["children"].append(dict(PM_PROJECT, content=dict(PM_PROJECT["content"])))
+                    back_up(target)
+                    print(f"{prefix}Add the pm-project block to {target}")
+                    changed = True
+                if "toast" not in existing:
+                    if existing.get("generated_by") == generated_by:
+                        # A layout this installer generated before pm-toast existed.
+                        existing["toast"] = TOAST
+                        print(f"{prefix}Add {TOAST_HINT} to {target}")
+                        changed = True
+                    else:
+                        hint = f"To hide finished-worker toasts, add {TOAST_HINT} at the root of {target}."
+                if changed and not args.dry_run:
+                    write_json(target, existing)
+                if not changed:
                     print(f"Skip layout: {target} already contains pm-nav.")
-                elif existing.get("generated_by") == generated_by:
-                    # A layout this installer generated before pm-toast existed.
-                    existing["toast"] = TOAST
-                    print(f"{prefix}Add {TOAST_HINT} to {target}")
-                    if not args.dry_run:
-                        write_json(target, existing)
-                else:
-                    print(f"Skip layout: {target} already contains pm-nav.")
-                    print(f"To hide finished-worker toasts, add {TOAST_HINT} at the root of {target}.")
+                if hint:
+                    print(hint)
                 return
         tree = json.loads(source.read_text(encoding="utf-8"))
         all_nodes = list(nodes(tree))
@@ -81,16 +131,18 @@ def install_layout():
         if (len(sidebars) != 1 or len(works) != 1
                 or sidebars[0].get("type") != "column" or works[0].get("type") != "column"
                 or "children" not in sidebars[0] or "children" not in works[0]
-                or any(node.get("id") in ("pm-nav", "pm-stage", "pm-board") for node in all_nodes)):
+                or any(node.get("id") in ("pm-nav", "pm-list", "pm-stage", "pm-board", "pm-project") for node in all_nodes)):
             raise ValueError("expected one sidebar-lists column and one work column, without PM nodes")
         sidebar, work = sidebars[0], works[0]
         parents = [node for node in all_nodes if any(child is work for child in node.get("children", []))]
         if len(parents) != 1 or sidebar in list(nodes(work)) or work in list(nodes(sidebar)):
             raise ValueError("sidebar-lists and work must be separate branches")
         sidebar["children"].insert(0, {"id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
+        insert_pm_list(sidebar["children"])
         children = parents[0]["children"]
         children[children.index(work)] = {"id": "pm-stage", "type": "stack", "active": "work", "children": [
-            work, {"id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}}]}
+            work, {"id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}},
+            dict(PM_PROJECT, content=dict(PM_PROJECT["content"]))]}
     except (OSError, ValueError, AttributeError) as error:
         manual_layout(str(error))
         return
@@ -114,8 +166,7 @@ def main():
         print('Before removing the pm layout, switch back: herdr-app do layout.switch \'{"name":"main"}\'')
         setup.save_settings()
         setup.remove_skill()
-        for path in (desktop / "mods/pm-dash", desktop / "mods/pm-nav", desktop / "mods/pm-toast",
-                     desktop / "layouts/pm.json"):
+        for path in (*(desktop / "mods" / name for name in MODS), desktop / "layouts/pm.json"):
             if path.exists() or path.is_symlink():
                 if path == desktop / "layouts/pm.json":
                     try:
@@ -136,7 +187,7 @@ def main():
 
     setup.install_skill()
     if desktop.exists() or args.desktop:
-        for name in ("pm-dash", "pm-nav", "pm-toast"):
+        for name in MODS:
             setup.copy_files(repo / "mods" / name, desktop / "mods" / name,
                        ("gpui-kit.d.ts", "jsconfig.json", "*.test.mjs", "__pycache__", ".DS_Store"))
         install_layout()

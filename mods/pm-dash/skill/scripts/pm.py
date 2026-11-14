@@ -58,13 +58,16 @@ def agents():
     return (herdr("agent", "list") or {}).get("agents", [])
 
 
-def hc(*args):
-    """Parsed JSON of a herdr-core CLI call, or None when hc is missing or the call fails."""
+def hc(*args, errors=False):
+    """Parsed JSON of a herdr-core CLI call, or None when hc is missing or the call fails.
+    With errors, a failed call returns hc's error object instead ({"error": {"kind": "not_found", ...}})."""
     try:
         # --json goes before a "--": what follows that belongs to the program being started.
         cut = args.index("--") if "--" in args else len(args)
         out = subprocess.run(["hc", *args[:cut], "--json", *args[cut:]], capture_output=True, text=True, timeout=60)
-        return json.loads(out.stdout) if out.returncode == 0 else None
+        if out.returncode != 0:
+            return json.loads(out.stderr or "null") if errors else None
+        return json.loads(out.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
 
@@ -89,6 +92,26 @@ def project_slug(repo):
 
 def pm_name(repo):
     return f"pm-{project_slug(repo)}"
+
+
+def pm_tab_name(repo):
+    return f"PM-{Path(repo).name}"
+
+
+def name_tab(terminal, name, only_if=None):
+    """Rename the desktop tab that shows terminal; an empty name gives the tab its number back.
+    With only_if, only a tab now called that. No app, or no tab (a bare or sub-agent terminal): nothing happens."""
+    try:
+        out = subprocess.run(["herdr-app", "ls"], capture_output=True, text=True, timeout=30)
+        spaces = (json.loads(out.stdout).get("spaces") or []) if out.returncode == 0 else []
+        for tab in (tab for space in spaces for tab in space.get("tabs") or []):
+            if any(t.get("terminal") == terminal for t in tab.get("terminals") or []):
+                if only_if is None or tab.get("name") == only_if:
+                    subprocess.run(["herdr-app", "do", "tab.rename", json.dumps({"id": tab["id"], "name": name})],
+                                   capture_output=True, text=True, timeout=30)
+                return
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        pass
 
 
 def find_pm(listing=None, repo=None):
@@ -186,8 +209,13 @@ def all_tasks():
                   key=lambda t: t.get("updated", ""), reverse=True)
 
 
-def note(task, text):
+def note(task, text, **extra):
+    """Log text on the task. extra (such as `options`, the quick answers a blocked task offers) joins the
+    conversation event."""
     task.setdefault("log", []).append({"at": now(), "by": PANE or "user", "text": text})
+    if task.get("repo"):  # every ledger entry is also an event in the project's conversation
+        record(task["repo"], "thread", task=task.get("id"), title=task.get("title"), status=task.get("status"),
+               by=PANE or "user", text=text, **extra)
 
 
 def slugify(text):
@@ -256,7 +284,11 @@ def cmd_new(a):
     for f in ("agent", "branch", "worktree", "brief"):
         if getattr(a, f):
             task[f] = getattr(a, f)
-    note(task, a.note or f"registered ({task['status']})")
+    # A question for the user that belongs to no task yet: a blocked entry of its own, with its quick answers.
+    options = [o.strip() for o in getattr(a, "option", None) or [] if o.strip()]
+    if options:
+        task["options"] = options
+    note(task, a.note or f"registered ({task['status']})", **({"options": options} if options else {}))
     save(task)
     print(task["id"])
     return task["id"]
@@ -270,8 +302,17 @@ def cmd_update(a):
         if value is not None and task.get(f) != value:
             changes.append(f"{f}={value}")
             task[f] = value
-    if a.note or changes:
-        note(task, "; ".join(x for x in [", ".join(changes), a.note] if x))
+    # Quick answers the user can pick in the project view; they belong to the question being asked now,
+    # so a status change without new ones drops the old ones.
+    options = [o.strip() for o in getattr(a, "option", None) or [] if o.strip()]
+    offered = bool(options) and task.get("options") != options
+    if options:
+        task["options"] = options
+    elif any(c.startswith("status=") for c in changes):
+        task.pop("options", None)
+    if a.note or changes or offered:
+        text = "; ".join(x for x in [", ".join(changes), a.note] if x) or " / ".join(options)
+        note(task, text, **({"options": options} if options else {}))
     save(task)
     print(f"{task['id']}: {task['status']}")
     # A merged task that the PM dispatched is cleaned up at once; its worker, worktree and branch have no further use.
@@ -401,6 +442,7 @@ def cmd_claim(a):
         workspace = ""
         if hc("label", pane[3:], f"pm={Path(repo).name}") is None:
             sys.exit(f"hc label {pane[3:]} failed")
+        name_tab(pane[3:], pm_tab_name(repo))
         kind = kind or terminal_kind(hc("get", pane[3:]) or {})
     elif pane == PANE:
         workspace = WORKSPACE
@@ -471,17 +513,51 @@ def cmd_dispatch(a):
         args += ["--", *worker_argv(a)[1:]]
     if not herdr(*args):
         sys.exit(f"agent start failed in {pane.group(1)}")
-    if not herdr("agent", "prompt", a.name, brief):
-        sys.exit("prompt failed; the agent is running, send the brief by hand")
-    # A startup screen (for example codex's hook trust review) can swallow the brief.
-    if not herdr("agent", "wait", a.name, "--until", "working", "--timeout", "20000"):
-        print(f"warning: {a.name} did not start working; read its screen and resend the brief", file=sys.stderr)
+    # Registered before the brief goes out: the report section names the task.
     task = argparse.Namespace(repo=repo, title=a.title, status="in_progress", owner="pm", base=a.base,
                               workspace=workspace.group(1), pane=pane.group(1), agent=a.name, branch=a.branch,
                               worktree=path.group(1), brief=str(Path(a.brief).resolve()), slug=a.label,
                               note=f"dispatched to {a.name} ({' '.join(x for x in (a.kind, a.model, a.effort) if x)})")
-    cmd_new(task)
+    task_id = cmd_new(task)
+    sent = keep_sent(task_id, brief)
+    if not herdr("agent", "prompt", a.name, sent.read_text()):
+        sys.exit(f"prompt failed; the agent is running. Send the brief by hand: "
+                 f"herdr agent prompt {a.name} \"$(cat {shlex.quote(str(sent))})\"")
+    # A startup screen (for example codex's hook trust review) can swallow the brief.
+    if not herdr("agent", "wait", a.name, "--until", "working", "--timeout", "20000"):
+        print(f"warning: {a.name} did not start working; read its screen and resend the brief from {sent}",
+              file=sys.stderr)
     print(f"workspace={workspace.group(1)} pane={pane.group(1)} worktree={path.group(1)}")
+
+
+def keep_sent(task_id, brief):
+    """The brief as the worker gets it, report section included, kept as sent/<id>.md for a resend."""
+    path = STATE / "sent" / f"{task_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(brief + report_section(task_id))
+    return path
+
+
+def pm_command():
+    """How a worker runs this script: the installed copy, with the ledger home when it is not the default."""
+    home = f"PM_HOME={shlex.quote(str(STATE))} " if os.environ.get("PM_HOME") else ""
+    return f"{home}python3 {shlex.quote(str(Path(__file__).resolve()))}"
+
+
+def report_section(task_id):
+    """Appended to every brief: the worker reports in the ledger, and that report is all the PM reads."""
+    cmd = pm_command()
+    return "\n\n" + tr(
+        f"Reporting (task {task_id}):\n"
+        f"- When done: `{cmd} update {task_id} --status review --commit <sha> --note \"<what changed; which "
+        "checks ran; what was not verified>\"`\n"
+        f"- When a person has to decide something: `{cmd} update {task_id} --status blocked --note \"<the question>\"`\n"
+        "The PM reads only this report, never your screen. Keep the note under 600 characters.",
+        f"汇报（任务 {task_id}）：\n"
+        f"- 做完时：`{cmd} update {task_id} --status review --commit <sha> --note \"<改了什么；跑了哪些检查；"
+        "哪些没验证>\"`\n"
+        f"- 需要人来决定时：`{cmd} update {task_id} --status blocked --note \"<问题>\"`\n"
+        "PM 只看这条汇报，不会读你的屏幕。写在 600 字以内。") + "\n"
 
 
 def config():
@@ -605,9 +681,11 @@ def dispatch_hc(a, repo, brief):
     task = load(task_id)
     task["dispatched"] = True  # `update --status merged` retires only what `dispatch` created
     save(task)
-    if not send_when_ready(made, brief):
+    sent = keep_sent(task_id, brief)
+    if not send_when_ready(made, sent.read_text()):
         sys.exit(f"the brief was not sent: the worker in hc:{made} is not ready (read its screen: it may be at a "
-                 "startup dialog such as folder trust). Send the brief by hand with `hc send`.")
+                 f"startup dialog such as folder trust). Then send it by hand: "
+                 f"hc send {made} \"$(cat {shlex.quote(str(sent))})\"")
     print(f"pane=hc:{made} worktree={path}")
 
 
@@ -616,17 +694,101 @@ def hc_terminal_of(task):
     return pane[3:] if pane.startswith("hc:") else ""
 
 
+WAIT_POLL = 5  # seconds between looks at the task file
+
+
+def worker_state(term):
+    """Why the worker in a herdr-core terminal is not working: idle, done, blocked, error, exited or removed.
+    "" while it works, and when nothing is known (no hc terminal, hc unavailable)."""
+    info = hc("get", term, errors=True) if term else None
+    if not info:
+        return ""
+    if (info.get("error") or {}).get("kind") == "not_found":
+        return "removed"
+    if info.get("error"):
+        return ""
+    if info.get("state") != "live":
+        return "exited"
+    state = (info.get("status") or {}).get("state")
+    return state if state in ("idle", "done", "blocked", "error") else ""
+
+
+def cmd_wait(a):
+    """Wait until the worker reports in the ledger; print that report, never the worker's screen.
+
+    A task already past in_progress (the PM answered a blocked worker or sent review findings) counts as
+    reported only once a new log entry arrives, so an old report is not returned again."""
+    deadline, stopped, last = time.time() + a.timeout, 0, ""
+    task = load(a.id)
+    term = hc_terminal_of(task)
+    seen = len(task.get("log") or []) if task["status"] != "in_progress" else None
+    while True:
+        task = load(a.id)
+        if task["status"] != "in_progress" and (seen is None or len(task.get("log") or []) > seen):
+            latest = (task.get("log") or [{}])[-1]
+            ahead, dirty = git_state(task.get("worktree") or task["repo"], task.get("branch"), task["base"])
+            print(f"{task['id']}: {task['status']}" + (f" (commit {task['commit']})" if task.get("commit") else ""))
+            print(clip(f"{latest.get('at', '')} {latest.get('by', '')}: {latest.get('text', '')}", 600))
+            print(f"ahead={ahead} dirty={dirty}")
+            return
+        # Two looks in a row, so a turn that has only just started (or a report on its way) is not mistaken.
+        state = worker_state(term)
+        stopped, last = (stopped + 1 if state == last else 1, state) if state else (0, "")
+        if stopped >= 2:
+            if state in ("exited", "removed"):
+                print(tr(f"{a.id}: the worker's terminal hc:{term} has {state} without reporting.",
+                         f"{a.id}：worker 的终端 hc:{term} 已{'退出' if state == 'exited' else '被移除'}，没有汇报。"))
+            elif state in ("blocked", "error"):
+                print(tr(f"{a.id}: the worker is {state} (a prompt it waits on, or an error) and has not reported. "
+                         f"It cannot report from there: read its screen (`hc read {term} | tail -40`).",
+                         f"{a.id}：worker 处于 {state}（在等一个提示，或出错了），没有汇报。它在那里没法汇报："
+                         f"看一下它的屏幕（`hc read {term} | tail -40`）。"))
+            else:
+                remind = tr(f"[from {PANE or 'the PM'}] Report in the ledger as your brief says: "
+                            f"`{pm_command()} update {a.id} --status review|blocked --note \"...\"`",
+                            f"[from {PANE or 'PM'}] 请按任务书末尾的说明在台账里汇报：`{pm_command()} update {a.id} "
+                            "--status review|blocked --note \"...\"`")
+                print(tr(f"{a.id}: the worker stopped ({state}) without reporting. Remind it:",
+                         f"{a.id}：worker 停了（{state}）但没有汇报。提醒它："))
+                print(f"hc send {term} {shlex.quote(remind)}")
+            sys.exit(3)
+        if time.time() >= deadline:
+            print(tr(f"{a.id}: no new report after {a.timeout} s; wait again.",
+                     f"{a.id}：{a.timeout} 秒后仍没有新的汇报，接着等。"))
+            sys.exit(2)
+        time.sleep(WAIT_POLL)
+
+
+def checkout_of(repo, branch):
+    """The checkout (the main one or a worktree) that has this branch checked out, or None."""
+    for block in (git(repo, "worktree", "list", "--porcelain") or "").split("\n\n"):
+        path = re.search(r"^worktree (.+)$", block, re.M)
+        if path and re.search(rf"^branch refs/heads/{re.escape(branch)}$", block, re.M):
+            return path.group(1)
+    return None
+
+
 def cmd_retire(a):
     task = load(a.id)
     repo, branch, base = task["repo"], task.get("branch"), task["base"]
     worktree = task.get("worktree")
+    # A worker that made its own worktree registers only the branch (`pm.py new --branch`): its worktree is the
+    # checkout that has that branch.
+    found = False
+    if not worktree and branch and branch != base:
+        worktree = checkout_of(repo, branch)
+        found = bool(worktree)
     done = []
     if branch and git(repo, "merge-base", "--is-ancestor", branch, base) is None and not a.force:
         sys.exit(f"{branch} is not merged into {base}; pass --force to discard it")
     # Several tasks can run one after another in the same worktree and terminal: the last one retired removes them.
     others = [t for t in all_tasks() if t["id"] != task["id"] and not t.get("retired")
               and t["status"] not in ("done", "abandoned")]
-    if worktree and any(t.get("worktree") == worktree for t in others):
+    def shares(t):
+        if t.get("worktree"):
+            return Path(t["worktree"]).resolve() == Path(worktree).resolve()
+        return bool(branch) and t["repo"] == repo and t.get("branch") == branch
+    if worktree and any(shares(t) for t in others):
         print(f"{worktree} is kept: another task still uses it")
         worktree = None
     if worktree and Path(worktree).is_dir() and Path(worktree).resolve() != Path(repo).resolve():
@@ -634,9 +796,15 @@ def cmd_retire(a):
         if dirty and not a.force:
             sys.exit(f"{worktree} has {dirty} uncommitted changes")
         term = hc_terminal_of(task)
-        info = (hc("get", term) or {}) if term and f"hc:{term}" != PANE else {}
-        # End the worker's terminal with its worktree, never a PM's or one that sits elsewhere.
-        if (info and not (info.get("labels") or {}).get("pm")
+        info = (hc("get", term) or {}) if term and (found or f"hc:{term}" != PANE) else {}
+        if found:
+            # A worktree found by its branch holds a session's own task, and the task's terminal is that session's
+            # conversation, often the user's. It is never ended, and its directory stays while it sits there.
+            cwd = Path(info.get("cwd") or "/").resolve()
+            if info.get("state") == "live" and Path(worktree).resolve() in (cwd, *cwd.parents):
+                sys.exit(f"worktree {worktree} is kept: hc:{term} still works in it")
+        # A recorded worktree: end the worker's terminal with it, never a PM's or one that sits elsewhere.
+        elif (info and not (info.get("labels") or {}).get("pm")
                 and Path(info.get("cwd") or "/").resolve() == Path(worktree).resolve()):
             if info.get("state") == "live":
                 hc("kill", term)
@@ -655,16 +823,21 @@ def cmd_retire(a):
             git(repo, "worktree", "remove", "--force", worktree)
         if not Path(worktree).is_dir():
             done.append(f"worktree {worktree}")
+    kept = ""
     if branch and branch != base:
         # Merged was checked above; -D because git's own check compares with the checked-out branch.
         if git(repo, "branch", "-D", branch) is not None:
             done.append(f"branch {branch}")
+        elif git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") is not None:
+            where = checkout_of(repo, branch)
+            kept = f"; branch {branch} is kept: " + (f"checked out in {where}" if where else "git refused to delete it")
     task["retired"] = now()
     if task["status"] in ACTIVE:
         task["status"] = "abandoned" if a.force else "merged"
-    note(task, "retired: removed " + (", ".join(done) or "nothing"))
+    summary = "retired: removed " + (", ".join(done) or "nothing") + kept
+    note(task, summary)
     save(task)
-    print(f"{task['id']} retired: removed " + (", ".join(done) or "nothing"))
+    print(f"{task['id']} {summary}")
 
 
 def cmd_hook_session_start(a):
@@ -696,24 +869,50 @@ def pm_record_for_pane(pane):
     return None
 
 
+SLASH_COMMAND = re.compile(r"/[\w:.-]+(\s|$)")  # "/compact", not a path such as "/Users/me/shot.png"
+HC_SENT = re.compile(r'<hc from="([^"]+)">(.*)</hc>$', re.S)
+
+
 def cmd_hook_turn(a):
-    """UserPromptSubmit/Stop hook of a PM session: note the turn for the board, and say when to hand over."""
+    """UserPromptSubmit/Stop hook of a PM session: keep the project's conversation log, note the turn for
+    the board, and say when to hand over."""
     try:
         data = json.load(sys.stdin)
     except ValueError:
         return
     event = data.get("hook_event_name", "")
-    if event not in ("UserPromptSubmit", "Stop") or not PANE or not pm_record_for_pane(PANE):
+    rec = pm_record_for_pane(PANE) if PANE else None
+    if event not in ("UserPromptSubmit", "Stop") or not rec:
         return
+    repo = rec.get("repo") or ""
     if event == "UserPromptSubmit":
         # What a UserPromptSubmit hook prints is added to the session's context.
         used = context_tokens(data.get("transcript_path") or "")
         if used > ROTATE_TOKENS:
             print(f"[pm] This PM session holds {used // 1000}k context tokens (limit {ROTATE_TOKENS // 1000}k). "
                   "Finish the step in hand, then hand over: `pm.py rotate --notes \"<what the ledger does not say>\"`.")
-        prompt = (data.get("prompt") or "").strip()
-        if not prompt or prompt[0] in "</[":
-            return  # task notifications, slash commands, text typed in by another agent
+        prompt, sender = (data.get("prompt") or "").strip(), ""
+        # Text typed in by another agent is not the user's turn: `hc send` from a terminal wraps it in
+        # <hc from="t3">…</hc>, and `pm.py notify` starts it with "[from <pane>]".
+        wrapped = HC_SENT.match(prompt)
+        if wrapped:
+            sender, prompt = f"hc:{wrapped.group(1)}", wrapped.group(2).strip()
+        named = re.match(r"\[from ([^\]]+)\]\s*", prompt)
+        if named:
+            sender, prompt = sender or named.group(1), prompt[named.end():]
+        if sender:
+            if repo and prompt:
+                record(repo, "agent", by=sender, text=prompt)
+            return
+        if not prompt or prompt.startswith("<") or SLASH_COMMAND.match(prompt):
+            return  # task notifications, slash commands
+        if repo:
+            record(repo, "user", text=prompt)
+    else:
+        # The agent's Stop hook carries the final message of the turn (Claude Code and Codex name it so).
+        reply = (data.get("last_assistant_message") or "").strip()
+        if repo and reply:
+            record(repo, "pm", text=reply)
     turn_log(f"{event}: turn")
 
 
@@ -726,6 +925,81 @@ def project_dir(repo):
     d = PROJECTS / project_slug(repo)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def record(repo, kind, **fields):
+    """Append one event to the project's conversation log, projects/<project>/conversation.jsonl.
+
+    The log is the conversation as the project keeps it, in order: what the user said (`user`), the PM's
+    final reply of each turn (`pm`), what other agents typed in (`agent`), ledger entries (`thread`) and
+    decisions (`decision`). It belongs to the project, not to a session: a PM session of any agent appends
+    to it and a fresh one reads it. Nothing may fail because of it, so errors are swallowed.
+    """
+    try:
+        at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = json.dumps({"at": at, "type": kind, **fields}, ensure_ascii=False) + "\n"
+        fd = os.open(project_dir(repo) / "conversation.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, line.encode())  # one write, so a hook and a ledger command cannot interleave lines
+        finally:
+            os.close(fd)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def conversation(repo):
+    """The events of the project's conversation log, oldest first."""
+    try:
+        lines = (project_dir(repo) / "conversation.jsonl").read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    events = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):  # a stray `null` or `[]` line is not an event
+            events.append(event)
+    return events
+
+
+def clip(text, width):
+    return text if not width or len(text) <= width else text[:width] + " …"
+
+
+def log_tail(repo, turns=6, width=700):
+    """The last exchanges in the conversation log: what the user said and the PM's reply to it.
+
+    The reply to a user turn is the first `pm` event after it. Later ones answer something else (a finished
+    background wait, the next session taking over), and so does any reply after an `agent` event.
+    """
+    out, awaiting_reply = [], False
+    for event in conversation(repo):
+        kind = event.get("type")
+        if kind == "user":
+            out.append({"user": str(event.get("text") or ""), "pm": ""})
+            awaiting_reply = True
+        elif kind == "agent":
+            awaiting_reply = False
+        elif kind == "pm" and awaiting_reply:
+            out[-1]["pm"] = str(event.get("text") or "")
+            awaiting_reply = False
+    return [{"user": clip(t["user"], width), "pm": clip(t["pm"], width)} for t in out[-turns:]]
+
+
+def cmd_conversation(a):
+    """Print the end of the project's conversation log: how to look further back than a handover does."""
+    repo = project_root(a.repo)
+    if not repo:
+        sys.exit(f"{a.repo} is not a directory")
+    events = [e for e in conversation(repo) if not a.type or e.get("type") in a.type.split(",")]
+    for e in events[-a.last:]:
+        kind = e.get("type")
+        who = {"user": tr("User", "用户"), "pm": "PM", "decision": tr("Decision", "决定"), "agent": e.get("by"),
+               "thread": f"[{e.get('task')} · {e.get('status')}] {e.get('by')}"}.get(kind, kind)
+        text = str(e.get("text") or "") + (f' — "{e["quote"]}"' if e.get("quote") else "")
+        print(f"{e.get('at')} {who}: {clip(' '.join(text.split()), a.width)}")
 
 
 def own_transcript():
@@ -776,8 +1050,7 @@ def conversation_tail(path, turns=6, width=700):
             texts = [b["text"] for b in content if b.get("type") == "text" and b.get("text", "").strip()]
             if texts:
                 current["pm"] = "\n".join(texts)  # later rows overwrite: the final message wins
-    clip = lambda t: t if len(t) <= width else t[:width] + " …"
-    return [{"user": clip(t["user"]), "pm": clip(t["pm"])} for t in out[-turns:]]
+    return [{"user": clip(t["user"], width), "pm": clip(t["pm"], width)} for t in out[-turns:]]
 
 
 def cmd_decide(a):
@@ -787,6 +1060,7 @@ def cmd_decide(a):
     line = f"- {now()[:10]} {a.text}" + (tr(f' — the user\'s words: "{a.quote}"', f" — 用户原话：「{a.quote}」") if a.quote else "")
     with open(project_dir(repo) / "decisions.md", "a") as f:
         f.write(line + "\n")
+    record(repo, "decision", text=a.text, quote=a.quote or "")
     print(line)
 
 
@@ -826,31 +1100,38 @@ def cmd_handover(a):
     closed = [t for t in tasks if t not in active and t.get("updated", "") >= day_ago]
     if closed:
         out += ["", "## Closed in the last 48 h"] + [f"- [{t['status']}] {t['id']}: {t['title']}" for t in closed]
-    tail = conversation_tail((rec.get("previous") or {}).get("transcript") or "", turns=a.turns)
+    # The conversation log is the source; a project whose log is still empty falls back to the last transcript.
+    tail = log_tail(repo, turns=a.turns) or conversation_tail(
+        (rec.get("previous") or {}).get("transcript") or "", turns=a.turns)
     if tail:
-        out += ["", "## The last exchanges with the user (previous session, shortened)"]
+        out += ["", "## The last exchanges with the user (shortened; `pm.py conversation --last 40` shows more)"]
         for t in tail:
             out += [f"{tr('User', '用户')}: {t['user']}", f"PM: {t['pm'] or '(no final text)'}", ""]
     print("\n".join(out))
 
 
 # Flags of the outgoing PM whose value is carried over to its successor.
-KEEP_VALUE = ("--mcp-config", "--permission-mode", "--settings", "--add-dir")
+KEEP_VALUE = ("--mcp-config", "--permission-mode", "--settings", "--add-dir", "--plugin-dir", "--allowed-tools",
+              "--allowedTools", "--disallowed-tools", "--disallowedTools", "--append-system-prompt", "--agents",
+              "--effort", "--setting-sources")
 
 
 def successor_argv(kind, args, model, prompt):
     """The command of the next PM. Claude Code keeps the outgoing session's flags, minus anything that would
-    resume it; other kinds start from their registry entry."""
+    resume it; other kinds start from their registry entry. The prompt follows `--`: a kept flag such as
+    `--allowed-tools` takes any number of values and would take the prompt as one more."""
     if kind != "claude":
         return agent_argv(kind, model, prompt=prompt)
     argv = ["claude"]
     for i, arg in enumerate(args):
+        if arg == "--":
+            break  # what follows is the first prompt the outgoing session was started with
         if not arg.startswith("-") or arg in ("--resume", "-r", "--continue", "-c", "--model", "--fork-session"):
             continue  # also drops a session id, a model name and an initial prompt
         argv.append(arg)
         if arg in KEEP_VALUE and i + 1 < len(args):
             argv.append(args[i + 1])
-    return argv + (["--model", model] if model else []) + [prompt]
+    return argv + (["--model", model] if model else []) + ["--", prompt]
 
 
 def rotate_herdr(a, repo, rec, previous, prompt, is_self):
@@ -961,6 +1242,8 @@ def cmd_rotate(a):
         sys.exit("could not start the new PM session; the old one stays registered")
     hc("label", made, f"pm={Path(repo).name}")
     hc("label", rec["terminal"], "pm=")
+    name_tab(made, pm_tab_name(repo))
+    name_tab(rec["terminal"], "", only_if=pm_tab_name(repo))
     rec.update({"pane": f"hc:{made}", "terminal": made, "claimed": now(), "previous": previous, "agent": kind,
                 "rotations": rec.get("rotations", 0) + 1})
     (PMS / f"{project_slug(repo)}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n")
@@ -993,7 +1276,10 @@ def dash_state():
         pms.append({"name": rec["name"], "project": rec.get("project", ""), "repo": rec.get("repo", ""),
                     "pane": rec.get("pane", ""), "status": live.get("agent_status") if alive else "offline",
                     "title": live.get("terminal_title_stripped", "") if alive else "",
-                    "agent": rec.get("agent", "")})
+                    "agent": rec.get("agent", ""),
+                    # The project's conversation log; read-only here, so its folder is not created.
+                    "conversation": str(PROJECTS / project_slug(rec["repo"]) / "conversation.jsonl")
+                    if rec.get("repo") else ""})
 
     def owner_pm(t):
         repo = str(Path(t["repo"]).resolve())
@@ -1112,10 +1398,14 @@ def main():
     n.add_argument("--status", default="in_progress", choices=ACTIVE + CLOSED)
     for f in ("owner", "workspace", "pane", "agent", "branch", "worktree", "base", "brief", "slug", "note"):
         n.add_argument(f"--{f}")
+    n.add_argument("--option", action="append", metavar="TEXT",
+                   help="a quick answer the user can pick in the project view (repeat for more; with --status blocked)")
     u = sub.add_parser("update")
     u.add_argument("id")
     for f in FIELDS + ["note"]:
         u.add_argument(f"--{f}", choices=ACTIVE + CLOSED if f == "status" else None)
+    u.add_argument("--option", action="append", metavar="TEXT",
+                   help="a quick answer the user can pick in the project view (repeat for more; with --status blocked)")
     u.add_argument("--keep", action="store_true",
                    help="with --status merged: keep the worker, worktree and branch (no automatic retire)")
     l = sub.add_parser("log")
@@ -1148,6 +1438,9 @@ def main():
     d.add_argument("--kind", help="worker program (default: config.json, else codex)")
     d.add_argument("--model", help="default: config.json, else the program's own")
     d.add_argument("--effort", help="default: config.json, else the program's own")
+    w = sub.add_parser("wait", help="wait for a worker's report in the ledger (exit 2: timeout, 3: stopped unreported)")
+    w.add_argument("id")
+    w.add_argument("--timeout", type=int, default=3600, help="seconds (default 3600)")
     r = sub.add_parser("retire")
     r.add_argument("id")
     r.add_argument("--force", action="store_true")
@@ -1163,6 +1456,11 @@ def main():
     ho = sub.add_parser("handover", help="print what a fresh PM session needs to take over this project")
     ho.add_argument("--repo", default=".")
     ho.add_argument("--turns", type=int, default=6, help="how many past exchanges with the user to include")
+    cv = sub.add_parser("conversation", help="print the end of the project's conversation log")
+    cv.add_argument("--repo", default=".")
+    cv.add_argument("--last", type=int, default=20, help="how many events (default 20)")
+    cv.add_argument("--type", help="only these kinds, comma-separated: user,pm,agent,thread,decision")
+    cv.add_argument("--width", type=int, default=300, help="clip each text to this many characters (0: whole text)")
     cxp = sub.add_parser("context", help="context tokens held by this session")
     cxp.add_argument("--transcript")
     ro = sub.add_parser("rotate", help="hand the project to a fresh PM session")

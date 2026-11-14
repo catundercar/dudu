@@ -16,7 +16,8 @@ MAIN = {
     "id": "root", "type": "row", "background": "canvas", "version": "1", "children": [
         {"id": "sidebar", "type": "column", "children": [
             {"id": "sidebar-lists", "type": "column", "children": [
-                {"id": "spaces", "type": "block", "content": {"mod": "spaces"}}
+                {"id": "spaces", "type": "block", "content": {"mod": "spaces"}},
+                {"id": "agents", "type": "block", "content": {"mod": "agents"}}
             ]}
         ]},
         {"id": "work", "type": "column", "resizable": False, "children": [
@@ -24,6 +25,10 @@ MAIN = {
         ]}
     ]
 }
+PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
+PM_BOARD = {"id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}}
+PM_PROJECT = {"id": "pm-project", "type": "block", "content": {"mod": "pm-project"}}
+MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
 
 
 class InstallTest(unittest.TestCase):
@@ -180,7 +185,7 @@ class InstallTest(unittest.TestCase):
         self.assertTrue((self.claude / "skills/pm/SKILL.md").is_file())
         self.assertFalse((self.claude / "skills/pm/scripts/test_pm.py").exists())
         self.assertFalse(list((self.claude / "skills/pm").rglob("__pycache__")))
-        for name in ("pm-dash", "pm-nav", "pm-toast"):
+        for name in MODS:
             mod = self.desktop / "mods" / name
             self.assertTrue((mod / "main.js").is_file())
             self.assertTrue((mod / "mod.json").is_file())
@@ -204,8 +209,7 @@ class InstallTest(unittest.TestCase):
     def test_repeat_install_is_identical(self):
         self.run_install("--desktop")
         first = self.settings.read_bytes()
-        stale = [self.claude / "skills/pm/removed.txt", self.desktop / "mods/pm-dash/removed.txt",
-                 self.desktop / "mods/pm-nav/removed.txt", self.desktop / "mods/pm-toast/removed.txt"]
+        stale = [self.claude / "skills/pm/removed.txt", *(self.desktop / "mods" / name / "removed.txt" for name in MODS)]
         for path in stale:
             path.write_text("obsolete")
         self.run_install()
@@ -255,13 +259,14 @@ class InstallTest(unittest.TestCase):
         lists = next(node for node in sidebar["children"] if node["id"] == "sidebar-lists")
         self.assertEqual(lists["children"][0], {
             "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
+        self.assertEqual([node["id"] for node in lists["children"]], ["pm-nav", "spaces", "pm-list", "agents"])
+        self.assertEqual(lists["children"][2], PM_LIST)
         self.assertEqual(stage["id"], "pm-stage")
         self.assertEqual(stage["type"], "stack")
         self.assertEqual(stage["active"], "work")
-        self.assertEqual([node["id"] for node in stage["children"]], ["work", "pm-board"])
+        self.assertEqual([node["id"] for node in stage["children"]], ["work", "pm-board", "pm-project"])
         self.assertEqual(stage["children"][0]["type"], "column")
-        self.assertEqual(stage["children"][1], {
-            "id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}})
+        self.assertEqual(stage["children"][1:], [PM_BOARD, PM_PROJECT])
 
         # Adding the directory layout first must not transfer ownership to the installer.
         self.seed_layout()
@@ -282,10 +287,11 @@ class InstallTest(unittest.TestCase):
         expected["toast"] = "pm-toast"
         expected["generated_by"] = "dudu install.sh"
         expected["cloned_from"] = {"name": "main", "version": "1"}
+        expected["children"][0]["children"][0]["children"][1:1] = [PM_LIST]
         expected["children"][0]["children"][0]["children"].insert(0, {
             "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
         expected["children"][1] = {"id": "pm-stage", "type": "stack", "active": "work", "children": [
-            copy.deepcopy(MAIN["children"][1]), {"id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}}]}
+            copy.deepcopy(MAIN["children"][1]), PM_BOARD, PM_PROJECT]}
         self.assertEqual(actual, expected)
         self.assertEqual(source.read_bytes(), source_bytes)
         actual["background"] = "custom"
@@ -317,6 +323,75 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), previous)
         self.assertEqual(json.loads(target.read_text())["generated_by"], "dudu install.sh")
 
+    def test_existing_layout_gets_pm_list(self):
+        # A pm layout from before pm-list, unmarked and edited by the person (as Herdr rewrites it).
+        self.seed_layout()
+        target = self.desktop / "layouts/pm.json"
+        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        lists = layout["children"][0]["children"][1]
+        lists["children"] = [node for node in lists["children"] if node["id"] != "pm-list"]
+        lists["children"][1]["size"] = {"px": 200}
+        layout["background"] = "custom"
+        target.write_text(json.dumps(layout))
+        before = target.read_bytes()
+        output = self.run_install("--dry-run")
+        self.assertIn(f"Would Add the pm-list block to {target}", output)
+        self.assertEqual(target.read_bytes(), before)
+        output = self.run_install()
+        self.assertIn(f"Add the pm-list block to {target}", output)
+        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        expected = copy.deepcopy(layout)
+        expected["children"][0]["children"][1]["children"].insert(2, PM_LIST)
+        self.assertEqual(json.loads(target.read_text()), expected)
+        # Once added, later installs leave the layout alone, wherever the person moved the block.
+        self.assertIn("already contains pm-nav", self.run_install())
+        self.assertEqual(json.loads(target.read_text()), expected)
+        # Without an agents block, the list goes to the end of pm-nav's column.
+        del layout["toast"]
+        lists["children"] = [node for node in lists["children"] if node["id"] != "agents"]
+        target.write_text(json.dumps(layout))
+        output = self.run_install()
+        self.assertIn(f'add "toast": "pm-toast" at the root of {target}', output)
+        self.assertEqual([node["id"] for node in json.loads(target.read_text())["children"][0]["children"][1]["children"]],
+                         ["pm-nav", "spaces", "pm-list"])
+        self.assertNotIn("toast", json.loads(target.read_text()))
+        # pm-nav at the root (no column to join): only a hint, the layout stays as it is.
+        target.write_text(json.dumps({"id": "pm-nav", "type": "block", "toast": "pm-toast", "content": {"mod": "pm-nav"}}))
+        own = target.read_bytes()
+        output = self.run_install()
+        self.assertIn("Skip pm-list: no column", output)
+        self.assertIn('"id":"pm-list"', output)
+        self.assertNotIn("Manual fallback", output)
+        self.assertEqual(target.read_bytes(), own)
+
+    def test_existing_layout_gets_pm_project(self):
+        # A pm layout from before the project view, unmarked and edited by the person.
+        self.seed_layout()
+        target = self.desktop / "layouts/pm.json"
+        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        stage = layout["children"][1]
+        stage["children"] = stage["children"][:2]
+        layout["background"] = "custom"
+        target.write_text(json.dumps(layout))
+        before = target.read_bytes()
+        self.assertIn(f"Would Add the pm-project block to {target}", self.run_install("--dry-run"))
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIn(f"Add the pm-project block to {target}", self.run_install())
+        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        expected = copy.deepcopy(layout)
+        expected["children"][1]["children"].append(PM_PROJECT)
+        self.assertEqual(json.loads(target.read_text()), expected)
+        # Once there, wherever the person put it, later installs leave the layout alone.
+        self.assertIn("already contains pm-nav", self.run_install())
+        self.assertEqual(json.loads(target.read_text()), expected)
+        # Without a pm-stack there is nowhere to add it: the layout stays as it is.
+        lone = {"id": "root", "type": "column", "toast": "pm-toast", "children": [
+            {"id": "pm-nav", "type": "block", "content": {"mod": "pm-nav"}}, PM_LIST]}
+        target.write_text(json.dumps(lone))
+        own = target.read_bytes()
+        self.assertIn("already contains pm-nav", self.run_install())
+        self.assertEqual(target.read_bytes(), own)
+
     def test_uninstall_keeps_ledger_and_other_hooks(self):
         self.seed_layout()
         other = {"type": "command", "command": "echo other"}
@@ -335,8 +410,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.read_settings()["hooks"]["Stop"], original["hooks"]["Stop"])
         self.assertEqual(self.read_settings()["hooks"]["SessionStart"][0]["hooks"], [other])
         self.assertNotIn("skills/pm/scripts/pm.py", self.settings.read_text())
-        for path in (self.claude / "skills/pm", self.desktop / "mods/pm-dash", self.desktop / "mods/pm-nav",
-                     self.desktop / "mods/pm-toast", self.desktop / "layouts/pm.json"):
+        for path in (self.claude / "skills/pm", *(self.desktop / "mods" / name for name in MODS), self.desktop / "layouts/pm.json"):
             self.assertFalse(path.exists())
         self.assertTrue((self.desktop / "layouts/main.json").is_file())
         self.assertTrue((self.claude / "settings.json.pm-backup").is_file())

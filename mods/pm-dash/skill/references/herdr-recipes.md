@@ -15,8 +15,8 @@ Terminals in the Herdr desktop app run in herdr-core; its CLI is `hc`. For the f
 
 - **Send a brief:** `hc send <t> "$(cat brief.txt)"`. Long multi-line text works. The result contains `"started": true` when the agent took it as a turn.
 - **A just-started agent is not ready.** Wait until its state is `idle` before sending; `pm.py dispatch` does this and retries for a short while.
-- **The brief was not delivered:** a startup screen took the input or blocked it. Codex asks whether to trust a folder it has not seen, offers an update when one is out (`pm.py dispatch` turns that check off with `-c check_for_update_on_startup=false`), and shows a hook review screen ("1 hook needs review") the first time it meets a new hook. Read the screen. If the dialog is one the user would confirm (their own folder, a hook they installed), answer it with `hc keys <t> <key>`, then resend the brief. Anything else: ask the user.
-- **Wait for a worker:** `hc wait <t> --timeout 3600` in the background. A timeout is a check-in, not a failure: read the screen and wait again.
+- **The brief was not delivered:** a startup screen took the input or blocked it. Codex asks whether to trust a folder it has not seen, offers an update when one is out (`pm.py dispatch` turns that check off with `-c check_for_update_on_startup=false`), and shows a hook review screen ("1 hook needs review") the first time it meets a new hook. Read the screen. If the dialog is one the user would confirm (their own folder, a hook they installed), answer it with `hc keys <t> <key>`, then resend the brief with its report section: `hc send <t> "$(cat <ledger home>/sent/<id>.md)"` (dispatch's failure message prints this command). Anything else: ask the user.
+- **Wait for a worker:** `pm.py wait <id>` in the background; it returns the worker's report from the ledger. A timeout is a check-in, not a failure: wait again.
 - **Stop a turn:** `hc interrupt <t>`.
 - **Question UI** (the agent shows options): read the screen, choose with `hc keys <t> ...`, or type a free-text answer with `hc send <t> "<answer>"`.
 

@@ -119,7 +119,7 @@ test('both mods read other machines with the same command and follow the ledger 
     const calls = [], watched = [], wakes = [];
     const mod = modWithIO(file, {
       home: () => '/test home', WRITE_REMOTE_CACHE, remoteStateCommand: nav.remoteStateCommand,
-      enteredWaiting: nav.enteredWaiting, boardVisible: () => true, desktopLayout: () => ({}), props: () => ({}),
+      boardVisible: () => true, desktopLayout: () => ({}), props: () => ({}),
       watchFolder: path => { watched.push(path); return new Promise(resolve => wakes.push(resolve)); },
       exec: async (program, args) => {
         calls.push({ program, args });
@@ -237,8 +237,8 @@ test('navigation without blocked work keeps active, pluralizes projects and pres
 
 test('task status text shows cleanup in both languages and preserves false or missing behavior', () => {
   for (const [lang, cleanupText, mergedText, releasedText, workingText, blockedText, reviewText] of [
-    ['en', 'Merged · not retired', 'Merged', 'Released', 'Working…', 'Blocked · Waiting for you', 'Review · Waiting for you'],
-    ['zh', '已合并 · 待回收', '已合并', '已发布', '工作中…', '阻塞 · 等你', '待审 · 等你'],
+    ['en', 'Merged · not retired', 'Merged', 'Released', 'Working…', 'Blocked · Waiting for you', 'Review'],
+    ['zh', '已合并 · 待回收', '已合并', '已发布', '工作中…', '阻塞 · 等你', '待审'],
   ]) {
     for (const [status, expected] of [['merged', mergedText], ['released', releasedText],
       ['in_progress', workingText], ['blocked', blockedText], ['review', reviewText]]) {
@@ -805,13 +805,16 @@ test('navigation summary counts ledger task states, not worker activity or close
   assert.deepEqual(summary({pms:[],tasks:[]}), {projects:0,active:0,blocked:0});
 });
 
-test('dashboard counts waiting work and running workers without counting idle or closed work', () => {
+test('dashboard counts blocked work as waiting and running workers without counting idle or closed work', () => {
   const result = counts({lang:'zh',pms:[{name:'pm-a',project:'Alpha'}],tasks:[
     {pm:'pm-a',status:'review',worker:'working'}, {pm:'pm-a',status:'blocked'},
     {pm:'pm-a',status:'in_progress',worker:'working'}, {status:'in_progress',worker:'idle'},
     {status:'merged',worker:'working'}, {status:'paused',worker:'working'}
   ]});
-  assert.deepEqual(result, {running:1,review:1,blocked:1,waiting:2,conclusion:'Alpha 有 2 件事等你。'});
+  assert.deepEqual(result, {running:1,review:1,blocked:1,waiting:1,conclusion:'Alpha 有 1 件事等你。'});
+  // Review is the PM's job: a review task alone waits for nobody.
+  assert.deepEqual(counts({lang:'zh',pms:[{name:'pm-a',project:'Alpha'}],tasks:[{pm:'pm-a',status:'review'}]}),
+    {running:0,review:1,blocked:0,waiting:0,conclusion:'现在没有等你的事。'});
   assert.deepEqual(counts({lang:'zh',pms:[],tasks:[]}), {running:0,review:0,blocked:0,waiting:0,conclusion:'现在没有等你的事。'});
 });
 test('project colors are stable theme tokens, independent of project order', () => {
@@ -868,7 +871,7 @@ test('arc-length hops have equal distance and proportional duration, including r
 
 
 test('built-in text defaults to English and preserves Chinese wording and ledger text', () => {
-  const input = {pms:[{name:'pm-a',project:'Alpha'}],tasks:[{pm:'pm-a',status:'review'}]};
+  const input = {pms:[{name:'pm-a',project:'Alpha'}],tasks:[{pm:'pm-a',status:'blocked'}]};
   assert.equal(counts(input).conclusion, 'Alpha has 1 item waiting for you.');
   assert.equal(counts({...input,lang:'zh'}).conclusion, 'Alpha 有 1 件事等你。');
   assert.equal(counts({...input,tasks:[...input.tasks,...input.tasks]}).conclusion, 'Alpha has 2 items waiting for you.');
@@ -888,111 +891,33 @@ test('built-in text defaults to English and preserves Chinese wording and ledger
   assert.equal(layout({...state,lang:'zh'}).rows.find(r => r.type === 'pm' && !r.name).title, '无 PM');
 });
 
-test('a task alerts once per entry into review or blocked, after a per-machine baseline', () => {
-  const task = (id, status, extra = {}) => ({ id, title: `Task ${id}`, project: 'demo', status, ...extra });
-  let { seen, entered } = nav.enteredWaiting({}, '', { tasks: [task('a', 'review'), task('b', 'in_progress')] });
-  assert.deepEqual(entered, []); // the first read is the baseline: what already waits stays quiet
-  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'review'), task('b', 'blocked')] }));
-  assert.deepEqual(entered.map(t => [t.id, t.machine]), [['b', '']]);
-  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'blocked'), task('b', 'blocked')] }));
-  assert.deepEqual(entered, []); // review -> blocked is the same wait
-  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'in_progress'), task('b', 'blocked')] }));
-  assert.deepEqual(entered, []);
-  ({ seen, entered } = nav.enteredWaiting(seen, '', { tasks: [task('a', 'review'), task('b', 'blocked')] }));
-  assert.deepEqual(entered.map(t => t.id), ['a']); // left and came back: alerts again
-  // Another machine has its own baseline, and the same id there is a different task.
-  ({ seen, entered } = nav.enteredWaiting(seen, 'box', { tasks: [task('c', 'review')] }));
-  assert.deepEqual(entered, []);
-  ({ seen, entered } = nav.enteredWaiting(seen, 'box', { tasks: [task('c', 'review'), task('a', 'blocked')] }));
-  assert.deepEqual(entered.map(t => [t.id, t.machine]), [['a', 'box']]);
-  assert.deepEqual(seen, { '': { a: 'review', b: 'blocked' }, box: { c: 'review', a: 'blocked' } });
-  for (const broken of [null, {}, { tasks: null }, { tasks: [null, { status: 'review' }] }]) {
-    assert.deepEqual(nav.enteredWaiting(seen, '', broken).entered, []);
-  }
-});
-
-test('alerts: one notice per task up to three, then one line; one sound; both languages', () => {
-  for (const lang of ['en', 'zh']) {
-    assert.equal(nav.ALERT_STRINGS[lang].review, word(lang, 'reviewWaiting'));
-    assert.equal(nav.ALERT_STRINGS[lang].blocked, word(lang, 'blockedWaiting'));
-  }
-  const board = { name: 'layout.select', args: { stack: 'pm-stage', child: 'pm-board' } };
-  const one = nav.alertNotices([{ id: 'x', title: 'Fix login', project: 'demo', status: 'review' }], 'en');
-  assert.deepEqual(one, { sound: 'done', notices: [
-    { title: 'Fix login', body: 'demo · Review · Waiting for you', level: 'info', action: board }] });
-  const five = ['review', 'review', 'review', 'review', 'blocked'].map((status, i) =>
-    ({ id: `t${i}`, title: `T${i}`, project: 'demo', status }));
-  const zh = nav.alertNotices(five, 'zh');
-  assert.equal(zh.sound, 'blocked');
-  assert.deepEqual(zh.notices.map(n => [n.title, n.body, n.level]), [
-    ['T0', 'demo · 待审 · 等你', 'info'], ['T1', 'demo · 待审 · 等你', 'info'], ['T2', 'demo · 待审 · 等你', 'info'],
-    ['还有 2 件事等你', undefined, 'error']]);
-  assert.ok(zh.notices.every(n => n.action === nav.BOARD_ACTION));
-  assert.equal(nav.alertNotices(five.slice(0, 4), 'en').notices.at(-1).title, '1 more item waiting for you');
-  assert.deepEqual(nav.alertNotices([{ id: 'y', status: 'blocked' }], 'en').notices[0],
-    { title: 'y', body: 'Blocked · Waiting for you', level: 'error', action: board });
-  assert.deepEqual(nav.alertNotices([], 'en'), { notices: [], sound: null });
-});
-
-test('the sidebar alerts on local and remote changes after its first read, with one sound', async () => {
-  const notices = [], sounds = [];
-  let local = [], remote = [], soundsOn = true;
-  const state = tasks => JSON.stringify({ lang: 'en', pms: [], tasks, events: [] });
-  const mod = modWithIO('../pm-nav/main.js', {
-    appHome: () => '/app home', home: () => '/test home', WRITE_REMOTE_CACHE,
-    remoteStateCommand: nav.remoteStateCommand, enteredWaiting: nav.enteredWaiting, alertNotices: nav.alertNotices,
-    notify: n => notices.push(n), playSound: s => sounds.push(s), settings: () => ({ sounds: { enabled: soundsOn } }),
-    exec: async (program, args) => {
-      if (program === 'python3') return { code: 0, stdout: state(local) };
-      if (args[0] === 'machine') return { code: 0, stdout: JSON.stringify([{ name: 'box', state: 'connected' }]) };
-      return { code: 0, stdout: state(remote) };
-    },
-  });
-  Object.assign(mod, { localState: { pms: [], tasks: [], events: [] }, remoteStates: {}, waiting: {},
-    publish() {}, setLedgerHome() {} });
-  const { cx, drain } = asyncContext();
-  const read = async () => { mod.refresh(cx); mod.refreshRemote(cx); await drain(); };
-  local = [{ id: 'a', title: 'A', project: 'demo', status: 'review' }];
-  remote = [{ id: 'r', title: 'R', project: 'demo', status: 'blocked' }];
-  await read();
-  assert.deepEqual([notices, sounds], [[], []]); // baseline on both machines
-  local = [{ id: 'a', title: 'A', project: 'demo', status: 'review' }, { id: 'b', title: 'B', project: 'demo', status: 'review' }];
-  await read();
-  assert.deepEqual(notices.map(n => n.title), ['B']);
-  assert.deepEqual(sounds, ['done']);
-  remote = [{ id: 'r', title: 'R', project: 'demo', status: 'in_progress' }];
-  await read();
-  remote = [{ id: 'r', title: 'R', project: 'demo', status: 'blocked' }];
-  soundsOn = false;
-  await read();
-  assert.deepEqual(notices.map(n => n.title), ['B', 'R']);
-  assert.deepEqual(sounds, ['done']); // sounds off in settings: the toast only
-});
-
-test('the pm layout hides only the finished notice of a dispatched worker', async () => {
+test('the pm layout hides every agent notice of an agent the PM dispatched', async () => {
   const { isWorkerNotice } = await import('../pm-toast/model.js');
   const terms = [
-    { address: 't9', state: 'live', parent: 't1', labels: { task: 'demo-fix' } },
-    { address: 'box/t4', state: 'live', parent: 'box/t2', labels: { task: 'demo-api' } },
     { address: 't1', state: 'live', labels: { pm: 'demo' } }, // the PM itself
-    { address: 't5', state: 'live', parent: 't1' }, // a child without a task
-    { address: 't6', state: 'live', labels: { task: 'demo-own' } }, // a task in the person's own pane
-    { address: 't7', state: 'finished', parent: 't1', labels: { task: 'demo-old' } },
+    { address: 't9', state: 'live', parent: 't1', labels: { task: 'demo-fix' } }, // a task worker
+    { address: 't5', state: 'live', parent: 't1' }, // the PM's sub-agent without a task
+    { address: 'box/t2', state: 'live', labels: { pm: 'api' } },
+    { address: 'box/t4', state: 'live', parent: 'box/t2' },
+    { address: 't3', state: 'live' }, // an agent the person started
+    { address: 't6', state: 'live', parent: 't3' }, // its own sub-agent
+    { address: 't8', state: 'live', parent: 't404' }, // parent not listed
   ];
   const notice = (terminal, title = 'Claude Code finished') =>
     ({ title, body: 'demo / 1', level: 'success', action: { name: 'agent.focus', args: { terminal } }, overlay: 'o1' });
-  assert.equal(isWorkerNotice(notice('t9'), terms), true);
-  // A worker stopped at a prompt or a question tells nobody else: it still shows.
-  assert.equal(isWorkerNotice(notice('t9', 'Codex needs you'), terms), false);
-  assert.equal(isWorkerNotice(notice('box/t4', 'Claude Code needs you'), terms), false);
-  assert.equal(isWorkerNotice(notice('box/t4'), terms), true);
-  for (const address of ['t1', 't5', 't6', 't7', 't404', '', undefined]) {
-    assert.equal(isWorkerNotice(notice(address), terms), false, String(address));
+  for (const address of ['t9', 't5', 'box/t4']) {
+    for (const title of ['Claude Code finished', 'Codex needs you']) {
+      assert.equal(isWorkerNotice(notice(address, title), terms), true, `${address} ${title}`);
+    }
   }
-  // Fail open: no terminal list, another action, another title, or no action at all.
+  // The PM, the person's own agents and unknown terminals show (fail open).
+  for (const address of ['t1', 'box/t2', 't3', 't6', 't8', 't404', '', undefined]) {
+    for (const title of ['Claude Code finished', 'Codex needs you']) {
+      assert.equal(isWorkerNotice(notice(address, title), terms), false, `${address} ${title}`);
+    }
+  }
   assert.equal(isWorkerNotice(notice('t9'), null), false);
+  assert.equal(isWorkerNotice(notice('t9'), [{ address: 't1', labels: { pm: '' } }, { address: 't9', parent: 't1' }]), false);
   assert.equal(isWorkerNotice({ ...notice('t9'), action: { name: 'pane.focus', args: { terminal: 't9' } } }, terms), false);
-  assert.equal(isWorkerNotice(notice('t9', 'Build failed'), terms), false);
-  assert.equal(isWorkerNotice({ title: 'Fix login', body: 'demo · Review · Waiting for you', action: nav.BOARD_ACTION }, terms), false);
   for (const props of [null, undefined, {}, { title: 'x finished' }]) assert.equal(isWorkerNotice(props, terms), false);
 });

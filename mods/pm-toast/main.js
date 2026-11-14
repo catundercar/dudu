@@ -1,13 +1,22 @@
-// The PM layout's notifications: Herdr's shipped toast, except that the
-// "finished" notice of a dispatched worker (a sub-agent with a task label)
-// closes at once and draws nothing; its "needs you" notice still shows, as do
-// the task alert pm-nav posts and every other notification.
+// The PM layout's notifications: Herdr's shipped toast, except that the agent
+// notices ("finished" and "needs you") of an agent the PM dispatched close at
+// once and draw nothing. The PM's own notices and every other notification show.
+// Clicking an agent notice also leaves the board, so the agent is in view.
 // Herdr plays its own sound separately; this mod cannot silence it.
 
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { props, closeOverlay, run, theme, terminals } from "herdr";
+import { props, closeOverlay, run, theme, terminals, layout } from "herdr";
 import { isWorkerNotice } from "./model.js";
+
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = find(child, id);
+    if (found) return found;
+  }
+  return null;
+}
 
 const DOT = { error: "blocked", warning: "working", success: "done", info: "accent" };
 
@@ -36,6 +45,12 @@ export default class PmToast extends View {
       .hover((s) => s.bg(t.hover))
       .on_click(() => {
         if (p.action?.name) run(p.action.name, p.action.args ?? {});
+        // Focusing the agent that already has focus changes nothing pm-nav sees, so leave the board
+        // (or a project view) here.
+        const stage = find(layout(), "pm-stage");
+        if (p.action?.name === "agent.focus" && stage?.active && stage.active !== "work") {
+          run("layout.select", { stack: "pm-stage", child: "work" });
+        }
         closeOverlay(p.overlay);
       })
       .child(p.icon ? image(p.icon).w(18).h(18).flex_none() : div().size(8).rounded(4).flex_none().bg(t[DOT[p.level] ?? "accent"]))

@@ -65,6 +65,16 @@
               }
             },
             {
+              "id": "pm-list",
+              "type": "block",
+              "size": {
+                "px": 30
+              },
+              "content": {
+                "mod": "pm-list"
+              }
+            },
+            {
               "id": "agents",
               "type": "block",
               "size": {
@@ -200,6 +210,13 @@
           "type": "block",
           "content": {
             "mod": "pm-dash"
+          }
+        },
+        {
+          "id": "pm-project",
+          "type": "block",
+          "content": {
+            "mod": "pm-project"
           }
         }
       ]

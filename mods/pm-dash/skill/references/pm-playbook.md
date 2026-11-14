@@ -14,23 +14,27 @@ Classify each request:
 
 ## 2. Dispatch
 
-1. Write the brief from `assets/brief-template.md` (`brief-template.zh.md` when you work with the user in Chinese) into the project's brief directory (see the profile). Fill in the user's original words, the chosen solution, the minimal scope, the red lines, the exact checks, the commit rules with the session attribution line, and "report briefly and stop".
+1. Write the brief from `assets/brief-template.md` (`brief-template.zh.md` when you work with the user in Chinese) into the project's brief directory (see the profile). Fill in the user's original words, the chosen solution, the minimal scope, the red lines, the exact checks, the commit rules with the session attribution line, and "report as the appended section says, then stop". `dispatch` appends that section itself: the task id and the `pm.py update` commands the worker reports with.
 2. Start the agent:
    ```bash
    pm.py dispatch "<title>" --repo <repo> --branch dev/<topic> --label <topic> \
      --brief <file> --name <agent-name> --prep "<prep from profile>" [--effort xhigh]
    ```
-   This creates a git worktree under `~/.herdr/worktrees/<project>/` (one per task), runs the prep command (with `$MAIN` set to the main checkout), starts the worker in a terminal of its own that the user can open from the board (codex by default; kind, model and effort come from `~/.claude/pm/config.json` unless given on the command line), sends the brief and records the task. It prints the worker's terminal (`pane=hc:<t>`). If it reports that the brief was not delivered, the worker stopped at a startup dialog: see `herdr-recipes.md`. Use `xhigh` for release, security or protocol-risky work.
-3. Wait in the background. Never poll in the foreground:
+   This creates a git worktree under `~/.herdr/worktrees/<project>/` (one per task), runs the prep command (with `$MAIN` set to the main checkout), starts the worker in a terminal of its own that the user can open from the board (codex by default; kind, model and effort come from `~/.claude/pm/config.json` unless given on the command line), sends the brief and records the task. It prints the worker's terminal (`pane=hc:<t>`). If it reports that the brief was not delivered, the worker stopped at a startup dialog: see `herdr-recipes.md`. The text that was sent, report section included, is kept in `sent/<id>.md` in the ledger home; resend that file, not the brief. Use `xhigh` for release, security or protocol-risky work.
+3. Wait in the background for the worker's report in the ledger. Never poll in the foreground:
    ```bash
-   hc wait <t> --timeout 3600; hc read <t> | tail -30
+   pm.py wait <id> --timeout 3600
    ```
-   Run this with `run_in_background: true`. You are notified when it finishes.
+   Run this with `run_in_background: true`. You are notified when it finishes. Exit 0: the task left `in_progress`; it prints the status, the worker's report (at most 600 characters) and ahead/dirty, which is all you read. Exit 2: no report by the timeout; wait again. Exit 3 (hc terminals only; a herdr TUI worker is waited on to the timeout): the worker stopped without reporting. Idle: send the `hc send` reminder it prints. Blocked or error: it sits at a prompt, read its screen and answer it. Exited or removed: there is no worker left; dispatch again or adopt the branch. Then wait again. After you answer a blocked worker or send it review findings, the next `wait` returns only on a new report, not the old one.
 
 ## 3. While agents work
 
 - **Agent asks a question:** answer it directly when the user has already decided the point (check the ledger log and memory). Otherwise ask the user, then reply with `hc send <t> "[from <your terminal>] ..."`. Log the answer with `pm.py log`.
+- **A task waits for the user's decision:** `pm.py update <id> --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`. The project view shows the note as your question and each option as a quick answer; picking one sends you `【<task title>】<answer>` as the user's turn. Leave out `--option` when the answer is open; the user types it.
+- **Something else waits for the user's decision** (a push, a cleanup, a choice that belongs to no task yet): give it a ledger entry of its own, `pm.py new "<what it is about>" --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`, and close it with `pm.py update <id> --status done --note "<the answer>"` once the user has answered. Say it once in your reply. After that the project view, the board and `pm.py status` keep showing what waits, so later replies do not list it again.
+- **Replies are read in the project view as a conversation.** Open with one or two sentences that stand on their own: the view shows that opening and folds the rest. What a worker did belongs in the ledger, not retold in full.
 - **Agent stalls:** if it is blocked on an approval or question UI, see `herdr-recipes.md`.
+- **Do not read a worker's screen to follow its work.** `hc read` is only for a worker stuck where it cannot report, such as a startup dialog (`herdr-recipes.md`); its report comes through `pm.py wait`.
 - **Scope creep:** new scripts, frameworks, large evidence trees or many commits. Stop it early: tell it to trim, then log the correction.
 
 ## 4. Review
@@ -70,7 +74,7 @@ A dispatched task is retired when you mark it merged. For everything else (adopt
 pm.py retire <id>
 ```
 
-It refuses to remove an unmerged branch or a dirty worktree. `pm.py status` and the board mark merged tasks that are not retired yet; clear them before you rotate. When several tasks used the same worktree one after another, the worktree and the worker's terminal go with the last of them. It ends the worker's terminal only when that terminal sits in the worktree and is not a PM. Never close terminals, spaces or worktrees that belong to the user or another session without asking.
+It refuses to remove an unmerged branch or a dirty worktree. A task registered with only a branch (a worker that made its own worktree) is cleaned up the same way: retire removes the worktree that has the branch checked out. It never ends that session's terminal, and it refuses while the terminal is live inside the worktree. A branch it cannot delete is named with the checkout that holds it. `pm.py status` and the board mark merged tasks that are not retired yet; clear them before you rotate. When several tasks used the same worktree one after another, the worktree and the worker's terminal go with the last of them. It ends the worker's terminal only when that terminal sits in the worktree and is not a PM. Never close terminals, spaces or worktrees that belong to the user or another session without asking.
 
 ## 8. Status and reconciliation
 
@@ -87,13 +91,13 @@ State what was done, where it lives (branch, commit, path), what was verified an
 
 ## 10. Context and rotation
 
-You are replaceable on purpose. The PM is the project's record on disk: the ledger, the decisions file and the handover notes. A session is only whoever is reading that record now, so a long session can be swapped for a fresh one without the user losing anything.
+You are replaceable on purpose. The PM is the project's record on disk: the ledger, the decisions file, the conversation log and the handover notes. A session is only whoever is reading that record now, so a long session can be swapped for a fresh one without the user losing anything.
 
 - **Spend context on decisions, not content.** Diffs, logs, long files and screenshots go to a subagent or a worker; you keep the conclusion. Look at one image per review, not a series.
 - **Record a decision when the user makes it:** `pm.py decide "<decision>" --quote "<the user's words>"`. That covers preferences ("no right-angle wires"), scope calls and things you were told not to touch. If it is not in the ledger or the decisions file, your successor will not know it.
 - **When to rotate.** `pm.py context` prints what this session holds. Above the limit (200k tokens; `PM_ROTATE_TOKENS`), a line starting with `[pm]` appears with the user's next prompt. Finish the step in hand, reach a point where nothing is half merged, then rotate. Also rotate when the user asks, or when you notice you are re-reading things you already decided.
 - **How to rotate:** `pm.py rotate --notes "<what the ledger and decisions do not say>"`. Notes are for what is in flight: what you promised the user, what the user is about to check, a worker you are waiting on and what to do when it reports. It opens the new PM in a tab of your space, moves the registration to it and retires this session: say so to the user and stop acting as PM. The new session may stop at a startup dialog (folder trust, development channels for a Discord PM); that is the user's to confirm, so tell them.
-- **When you are the fresh session:** run `pm.py handover` first and work from what it prints (decisions, notes, open work with the latest log lines, the last exchanges with the user). Do not open the previous transcript. Tell the user in a few sentences what you took over and what is waiting for them.
+- **When you are the fresh session:** run `pm.py handover` first and work from what it prints (decisions, notes, open work with the latest log lines, the last exchanges with the user, taken from the project's conversation log). To look further back, run `pm.py conversation --last 40` (`--type user,pm` for the talk alone); do not open the previous transcript. Tell the user in a few sentences what you took over and what is waiting for them.
 
 ## Red lines (always)
 

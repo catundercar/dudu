@@ -20,4 +20,4 @@ Verification (only these):
 - <one real run, cleaned up afterwards>
 - The project's full check list: <copied from the project profile>
 
-Commits: 1–3, conventional style, ending with <session attribution line>. Write a dozen lines in evidence/<topic>/README.md. When done, report briefly and stop.
+Commits: 1–3, conventional style, ending with <session attribution line>. Write a dozen lines in evidence/<topic>/README.md. When done, report as the section appended below says, then stop.
