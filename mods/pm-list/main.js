@@ -1,7 +1,7 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, shared, setShared } from 'herdr';
-import { pmRows, remotePmStates, track, age, listHeight, LEDGER_HOME_SH } from './model.js';
+import { pmRows, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH } from './model.js';
 
 // Like pm-nav, the list reads the ledger through the original pm-dash bundle.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
@@ -89,9 +89,9 @@ export default class PmList extends View {
   // The block grows with the list: resize this mod's own layout node to fit.
   // Compared with the node's size now, so a reloaded layout is fitted again;
   // asked once per (size, wanted) pair, so a clamped size does not ask on every render.
-  fit(count) {
+  fit(count, header) {
     const node = find(layout(), n => n.content?.mod === 'pm-list');
-    const px = listHeight(count, this.compact), ask = `${node?.size?.px}>${px}`;
+    const px = listHeight(count, this.compact, header), ask = `${node?.size?.px}>${px}`;
     if (!node?.id || node.size?.px === px || this.asked === ask) return;
     this.asked = ask;
     run('layout.resize', { id: node.id, px });
@@ -137,7 +137,9 @@ export default class PmList extends View {
       this.changed = changed;
       try { localStorage.setItem('changed', JSON.stringify(changed)); } catch (_) { /* Ages restart from the ledger. */ }
     }
-    this.fit(rows.length);
+    // Right under pm-nav the PM title above is the list's heading.
+    const headed = !underNav(layout());
+    this.fit(rows.length, headed);
     // The rail: the same rule as pm-nav, by this block's own width.
     const root = v_flex().id('pm-list-root').size_full().min_w(0).min_h(0).overflow_hidden()
       .bg(t.chrome).text_size(13).text_color(t.foreground)
@@ -175,6 +177,6 @@ export default class PmList extends View {
           .when(Boolean(at), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(age(now - at))))
           .child(this.mark(t, row.status, lang));
       }));
-    return root.child(header).child(list);
+    return root.when(headed, el => el.child(header)).child(list);
   }
 }

@@ -259,8 +259,8 @@ class InstallTest(unittest.TestCase):
         lists = next(node for node in sidebar["children"] if node["id"] == "sidebar-lists")
         self.assertEqual(lists["children"][0], {
             "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
-        self.assertEqual([node["id"] for node in lists["children"]], ["pm-nav", "spaces", "pm-list", "agents"])
-        self.assertEqual(lists["children"][2], PM_LIST)
+        self.assertEqual([node["id"] for node in lists["children"]], ["pm-nav", "pm-list", "spaces", "agents"])
+        self.assertEqual(lists["children"][1], PM_LIST)
         self.assertEqual(stage["id"], "pm-stage")
         self.assertEqual(stage["type"], "stack")
         self.assertEqual(stage["active"], "work")
@@ -287,9 +287,8 @@ class InstallTest(unittest.TestCase):
         expected["toast"] = "pm-toast"
         expected["generated_by"] = "dudu install.sh"
         expected["cloned_from"] = {"name": "main", "version": "1"}
-        expected["children"][0]["children"][0]["children"][1:1] = [PM_LIST]
-        expected["children"][0]["children"][0]["children"].insert(0, {
-            "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
+        expected["children"][0]["children"][0]["children"][0:0] = [{
+            "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}}, PM_LIST]
         expected["children"][1] = {"id": "pm-stage", "type": "stack", "active": "work", "children": [
             copy.deepcopy(MAIN["children"][1]), PM_BOARD, PM_PROJECT]}
         self.assertEqual(actual, expected)
@@ -341,19 +340,30 @@ class InstallTest(unittest.TestCase):
         self.assertIn(f"Add the pm-list block to {target}", output)
         self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
         expected = copy.deepcopy(layout)
-        expected["children"][0]["children"][1]["children"].insert(2, PM_LIST)
+        expected["children"][0]["children"][1]["children"].insert(1, PM_LIST)   # right under pm-nav
         self.assertEqual(json.loads(target.read_text()), expected)
         # Once added, later installs leave the layout alone, wherever the person moved the block.
-        self.assertIn("already contains pm-nav", self.run_install())
+        output = self.run_install()
+        self.assertIn("already contains pm-nav", output)
+        self.assertNotIn("move the pm-list block", output)
         self.assertEqual(json.loads(target.read_text()), expected)
-        # Without an agents block, the list goes to the end of pm-nav's column.
+        # Where earlier installers put the list (right above agents): a hint, and the layout stays as it is.
+        old = copy.deepcopy(layout)
+        old["children"][0]["children"][1]["children"].insert(2, PM_LIST)
+        self.assertEqual([node["id"] for node in old["children"][0]["children"][1]["children"]],
+                         ["pm-nav", "spaces", "pm-list", "agents"])
+        target.write_text(json.dumps(old))
+        output = self.run_install()
+        self.assertIn(f"move the pm-list block right after pm-nav in {target}", output)
+        self.assertEqual(json.loads(target.read_text()), old)
+        # A column without an agents block gets the list in the same place.
         del layout["toast"]
         lists["children"] = [node for node in lists["children"] if node["id"] != "agents"]
         target.write_text(json.dumps(layout))
         output = self.run_install()
         self.assertIn(f'add "toast": "pm-toast" at the root of {target}', output)
         self.assertEqual([node["id"] for node in json.loads(target.read_text())["children"][0]["children"][1]["children"]],
-                         ["pm-nav", "spaces", "pm-list"])
+                         ["pm-nav", "pm-list", "spaces"])
         self.assertNotIn("toast", json.loads(target.read_text()))
         # pm-nav at the root (no column to join): only a hint, the layout stays as it is.
         target.write_text(json.dumps({"id": "pm-nav", "type": "block", "toast": "pm-toast", "content": {"mod": "pm-nav"}}))

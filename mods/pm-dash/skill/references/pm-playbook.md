@@ -20,6 +20,8 @@ Classify each request:
    pm.py dispatch "<title>" --repo <repo> --branch dev/<topic> --label <topic> \
      --brief <file> --name <agent-name> --prep "<prep from profile>" [--effort xhigh]
    ```
+   The title is the thread's name wherever the user meets it (the conversation, the side panel, the board): a few words, not a sentence. The scope belongs in the brief.
+
    This creates a git worktree under `~/.herdr/worktrees/<project>/` (one per task), runs the prep command (with `$MAIN` set to the main checkout), starts the worker in a terminal of its own that the user can open from the board (codex by default; kind, model and effort come from `~/.claude/pm/config.json` unless given on the command line), sends the brief and records the task. It prints the worker's terminal (`pane=hc:<t>`). If it reports that the brief was not delivered, the worker stopped at a startup dialog: see `herdr-recipes.md`. The text that was sent, report section included, is kept in `sent/<id>.md` in the ledger home; resend that file, not the brief. Use `xhigh` for release, security or protocol-risky work.
 3. Wait in the background for the worker's report in the ledger. Never poll in the foreground:
    ```bash
@@ -30,9 +32,8 @@ Classify each request:
 ## 3. While agents work
 
 - **Agent asks a question:** answer it directly when the user has already decided the point (check the ledger log and memory). Otherwise ask the user, then reply with `hc send <t> "[from <your terminal>] ..."`. Log the answer with `pm.py log`.
-- **A task waits for the user's decision:** `pm.py update <id> --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`. The project view shows the note as your question and each option as a quick answer; picking one sends you `【<task title>】<answer>` as the user's turn. Leave out `--option` when the answer is open; the user types it.
-- **Something else waits for the user's decision** (a push, a cleanup, a choice that belongs to no task yet): give it a ledger entry of its own, `pm.py new "<what it is about>" --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`, and close it with `pm.py update <id> --status done --note "<the answer>"` once the user has answered. Say it once in your reply. After that the project view, the board and `pm.py status` keep showing what waits, so later replies do not list it again.
-- **Replies are read in the project view as a conversation.** Open with one or two sentences that stand on their own: the view shows that opening and folds the rest. What a worker did belongs in the ledger, not retold in full.
+- **A task waits for the user's decision:** `pm.py update <id> --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`. The project view shows the note as your question on a card and each option as an answer to pick; picking one sends you `【<task title>】<answer>` as the user's turn. When an answer alone does not say what it means, follow its `--option` with `--why "<one line>"`; put the answer you would pick first and add `--recommend`. Leave out `--option` when the answer is open; the user types it.
+- **Something else waits for the user's decision** (a push, a cleanup, a choice that belongs to no task yet): give it a ledger entry of its own, `pm.py new "<what it is about>" --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`, and close it with `pm.py update <id> --status done --note "<the answer>"` once the user has answered. Say it once in your reply (§9). After that the project view, the board and `pm.py status` keep showing what waits, so later replies do not list it again.
 - **Agent stalls:** if it is blocked on an approval or question UI, see `herdr-recipes.md`.
 - **Do not read a worker's screen to follow its work.** `hc read` is only for a worker stuck where it cannot report, such as a startup dialog (`herdr-recipes.md`); its report comes through `pm.py wait`.
 - **Scope creep:** new scripts, frameworks, large evidence trees or many commits. Stop it early: tell it to trim, then log the correction.
@@ -85,9 +86,21 @@ It refuses to remove an unmerged branch or a dirty worktree. A task registered w
 
 Register what you find (`pm.py new ... --owner self --pane <pane>`, titled from the pane's terminal title), or ask the user what it is. `BOARD.md` in the ledger home is the human-readable board; point the user to it.
 
-## 9. Reporting to the user
+## 9. Talking to the user
 
-State what was done, where it lives (branch, commit, path), what was verified and what was not, and the next step. Keep it short. Use the user's language.
+The user reads you in the project view: one conversation with the project, where every thread's log, branch and changes are a click away in the side panel. A reply therefore carries only what the user needs from you now. A long report buries that, and repeats what the thread already holds.
+
+- **One or two sentences say it:** what is ready, what went wrong, or what you need from the user. When that is all the news, stop there.
+- **More than one thread: one line each**, the thread's name and where it stands, in a clause. Use the name the user would recognize, a few words; shorten a long ledger title.
+- **Name a thread as a link,** `[<name>](thread:<task id>)`, wherever a reply names one. In the project view a click on the name opens that thread; read in a terminal it is the name followed by the id.
+- **What you did goes to the thread, not the reply:** the changes, the review findings, commit ids, paths, test counts, how you checked. Write it with `pm.py log <id> "<…>"`, or as the `--note` of the `update` that moves the task. The user reads it by opening the thread, and your successor reads it at handover. If you are writing a list of changes into a reply, it belongs there.
+- **Three things always stay in the reply, a sentence each:** what failed or could not be verified; what you did that reaches outside the project (a setting changed, something pushed, installed or deleted); a decision you need (§3: register it, say it once). Being brief never leaves these out.
+- **Speak when there is news:** something is ready, something needs the user, or the user asked. A worker's progress in between is in its thread; do not narrate it.
+- **A question gets its answer.** When the user asks how or why, answer as fully as the question needs. This section shortens reports, not explanations.
+
+Reply in the user's language.
+
+The length to aim for (not words to reuse). After dispatching: “I started a thread for each of the three. I'll tell you here when one is ready or needs you.” Asked where things stand: “One is ready and two are still going.”, then a line per thread that starts with its name as a link. After a merge: “The thread list is merged and installed. Nobody has clicked through it in a real window yet.”
 
 ## 10. Context and rotation
 

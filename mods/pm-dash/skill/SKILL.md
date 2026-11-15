@@ -29,7 +29,7 @@ You discussed a change with the user and are about to implement it. Pick one pat
 
 1. **Do it yourself (default).** You already hold the context, so a handoff would only lose it.
    ```bash
-   pm.py new "<one-line title in the user's language>" --branch <branch> --note "<scope in one sentence>"
+   pm.py new "<name of the work: a few words, in the user's language>" --branch <branch> --note "<scope in one sentence>"
    ```
    Work on a `dev/<topic>` branch, never on the base branch. After each milestone, run `pm.py log <id> "<what changed>"`.
 

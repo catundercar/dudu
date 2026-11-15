@@ -1,4 +1,5 @@
 """Targeted tests for the rotation and dispatch helpers. Run: python3 -m unittest skill/pm/scripts/test_pm.py"""
+import argparse
 import contextlib
 import io
 import json
@@ -391,6 +392,7 @@ class ConversationLog(unittest.TestCase):
                          [("user", "先做看板"), ("pm", "好，已派出。"), ("user", "[Image #1] 这里不对"),
                           ("agent", "task x is ready"), ("agent", "要不要兼容旧版？"), ("user", "/Users/me/a.png 看下")])
         self.assertEqual([e["by"] for e in events[3:5]], ["hc:t3", "hc:t5"])
+        self.assertEqual(events[1]["by"], "hc:t7")                      # which session spoke
 
     def test_ledger_entries_and_decisions_join_the_log_and_a_handover_reads_it(self):
         repo = pm.project_root(tempfile.mkdtemp())
@@ -466,8 +468,47 @@ class ProjectView(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             pm.cmd_update(args(option=["是", "否"]))                       # answers alone still reach the log
         self.assertEqual(pm.conversation(repo)[-1]["options"], ["是", "否"])
+        self.assertNotIn("option_notes", pm.conversation(repo)[-1])       # plain answers carry nothing more
+        self.assertNotIn("recommended", pm.conversation(repo)[-1])
 
-    def test_state_names_each_pms_conversation_log(self):
+    def test_an_answer_can_say_why_and_the_first_can_be_recommended(self):
+        repo = pm.project_root(tempfile.mkdtemp())
+        name = Path(repo).name
+        pm.save({"id": f"{name}-q", "title": "限流", "project": name, "repo": repo, "status": "in_progress",
+                 "owner": "pm", "base": "main", "created": pm.now()})
+        args = lambda **kw: type("A", (), {"id": f"{name}-q", "note": None, "keep": False, "option": None, **kw})
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_update(args(status="blocked", note="计数放在哪？", recommend=True, option=["Redis", "git log | head", " 先不做 "],
+                               why={0: " 一份共享的计数，用你已经在跑的 Redis ", 1: "每个实例各数各的"}))
+        task, event = pm.load(f"{name}-q"), pm.conversation(repo)[-1]
+        for kept in (task, event):                                         # an answer is kept as written, `|` included
+            self.assertEqual(kept["options"], ["Redis", "git log | head", "先不做"])
+            self.assertEqual(kept["option_notes"], ["一份共享的计数，用你已经在跑的 Redis", "每个实例各数各的", ""])
+            self.assertIs(kept["recommended"], True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_update(args(status="in_progress", note="用户选了 Redis"))   # answered: all of it goes
+        task = pm.load(f"{name}-q")
+        for gone in ("options", "option_notes", "recommended"):
+            self.assertNotIn(gone, task)
+            self.assertNotIn(gone, pm.conversation(repo)[-1])
+        # A recommendation or a reason without its answer is an error, and nothing is written.
+        before = (pm.load(f"{name}-q"), len(pm.conversation(repo)))
+        for bad in (dict(recommend=True), dict(recommend=True, option=["", "B"]), dict(option=["", "B"], why={0: "why"})):
+            with self.assertRaises(SystemExit):
+                pm.cmd_update(args(status="blocked", note="?", **bad))
+        self.assertEqual((pm.load(f"{name}-q"), len(pm.conversation(repo))), before)
+
+    def test_why_explains_the_option_before_it(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--option", action="append")
+        parser.add_argument("--why", action=pm.Why)
+        a = parser.parse_args(["--option", "A", "--why", "because", "--option", "B", "--option", "C", "--why", "c"])
+        self.assertEqual((a.option, a.why), (["A", "B", "C"], {0: "because", 2: "c"}))
+        self.assertIsNone(parser.parse_args(["--option", "A"]).why)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["--why", "no answer before it", "--option", "A"])
+
+    def test_state_names_each_pms_conversation_log_and_worktree_folder(self):
         repo = pm.project_root(tempfile.mkdtemp())
         pm.PMS.mkdir(parents=True, exist_ok=True)
         (pm.PMS / "view.json").write_text(json.dumps({"name": "pm-view", "pane": "hc:t7", "project": "view", "repo": repo}))
@@ -483,6 +524,9 @@ class ProjectView(unittest.TestCase):
         self.assertEqual(path, pm.PROJECTS / pm.project_slug(repo) / "conversation.jsonl")
         self.assertFalse(path.parent.exists())  # reading state creates nothing
         self.assertEqual(pms["pm-norepo"]["conversation"], "")
+        # Where dispatch makes this project's worktrees: the project view lists the sessions inside.
+        self.assertEqual(Path(pms["pm-view"]["worktrees"]), Path.home() / ".herdr" / "worktrees" / Path(repo).name)
+        self.assertEqual(pms["pm-norepo"]["worktrees"], "")
 
 
 if __name__ == "__main__":

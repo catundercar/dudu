@@ -16,6 +16,12 @@ const STRINGS = {
     empty: 'Nothing said in this project yet.', readError: 'Could not read the conversation',
     today: 'Today', yesterday: 'Yesterday', noLog: 'No log yet', agent: (program, address) => `${program} · terminal ${address}`,
     unfold: 'Show the whole reply', fold: 'Fold',
+    threads: 'Threads', showThreads: 'Show the threads', hideThreads: 'Hide the threads',
+    group_waiting: 'Waiting on you', group_review: 'In review', group_working: 'Working', group_paused: 'Paused',
+    group_parked: 'Not started',
+    groupSessions: 'Sessions', groupFinished: 'Finished', recommended: 'Recommended', openThread: 'Open this thread',
+    noThreads: 'No threads in this project yet.', openSession: 'Click opens this session',
+    session_working: 'Working', session_blocked: 'Needs you', session_done: 'Done', session_idle: 'Idle',
     in_progress: 'In progress', blocked: 'Blocked', review: 'Review', paused: 'Paused', proposed: 'Proposed',
     merged: 'Merged', released: 'Released', done: 'Done', abandoned: 'Abandoned', cleanup: 'Merged · not retired',
   },
@@ -32,6 +38,11 @@ const STRINGS = {
     empty: '这个项目还没有对话。', readError: '对话记录读取失败',
     today: '今天', yesterday: '昨天', noLog: '暂无日志', agent: (program, address) => `${program} · 终端 ${address}`,
     unfold: '展开全文', fold: '收起',
+    threads: '线程', showThreads: '显示线程列表', hideThreads: '收起线程列表',
+    group_waiting: '等你', group_review: '审查中', group_working: '进行中', group_paused: '暂停', group_parked: '未开始',
+    groupSessions: '对话', groupFinished: '已结束', recommended: '推荐', openThread: '打开这个线程',
+    noThreads: '这个项目还没有线程。', openSession: '点击打开这个对话',
+    session_working: '工作中', session_blocked: '等你', session_done: '已完成', session_idle: '空闲',
     in_progress: '进行中', blocked: '阻塞', review: '审查中', paused: '暂停', proposed: '提议',
     merged: '已合并', released: '已发布', done: '完成', abandoned: '放弃', cleanup: '已合并 · 待回收',
   },
@@ -45,6 +56,25 @@ export const EVENT_LIMIT = 200;
 export const WAITING = ['blocked'];
 // Work that is over: its thread is one quiet line in the conversation, not a card row.
 export const CLOSED = ['merged', 'released', 'done', 'abandoned'];
+// Work that was given up (a proposal another task replaced, a test run) is not shown among the
+// threads: no line in the conversation, no place in the side panel. A question it asked stays in
+// the conversation, and a link that names it still opens it.
+const GIVEN_UP = 'abandoned';
+// A task in one of these has work to show. One that enters the log `blocked` and never reaches any
+// of them is only the coordinator asking (`pm.py new --status blocked`, then closed with the answer).
+const WORK = ['in_progress', 'review', 'paused', 'proposed'];
+
+// The tasks in these events that are only a question: the question line stands for them, so they
+// get no thread row in the conversation and are not listed among the threads that ended.
+export function questionOnly(events) {
+  const first = new Map(), worked = new Set();
+  for (const e of events || []) {
+    if (e.type !== 'thread' || !e.task) continue;
+    if (!first.has(e.task)) first.set(e.task, e.status);
+    if (WORK.includes(e.status)) worked.add(e.task);
+  }
+  return new Set([...first].filter(([task, status]) => status === 'blocked' && !worked.has(task)).map(([task]) => task));
+}
 
 // The last `limit` events of conversation.jsonl text. Lines that are not JSON
 // objects (a torn last line, a stray `null`) are skipped, as pm.py does.
@@ -127,6 +157,17 @@ export function lead(text, limit = 400) {
   return { text: cut, more: cut !== line || taken.length < lines.length || blocks.length > 1 };
 }
 
+// A reply can name a thread as a link, `[name](thread:<task id>)`. The task id of such a link's
+// address, or '' for any other address and for an id that could not be a ledger file's name.
+export function threadLink(url) {
+  const found = /^thread:(?:\/\/)?([^?#]+)/i.exec(String(url || '').trim());
+  if (!found) return '';
+  let id = found[1].replace(/\/+$/, '');
+  try { id = decodeURIComponent(id); } catch (_) { return ''; }
+  // A task id is its project's folder name and a slug: letters and digits of any script, spaces, . _ -
+  return /^[\p{L}\p{N}][\p{L}\p{N} ._-]*$/u.test(id) && !id.includes('..') ? id : '';
+}
+
 // What a quick answer sends as the user's turn.
 export function answerText(title, option) {
   return `【${title}】${option}`;
@@ -135,9 +176,18 @@ export function answerText(title, option) {
 // The timeline, oldest first. Kinds:
 //   day       a date divider
 //   user      the user's words (right bubble); pending/failed for an unconfirmed one
-//   pm        the coordinator's reply (markdown): {text, lead, long}; a long one folds to its lead
-//   threads   adjacent thread rows: {rows: [{task, title, status, latest, waiting, tone, cleanup, closed}]}
-//   question  the event that blocked a task: {task, title, text, options, open}
+//   pm        the coordinator's reply (markdown): {text, lead, long, by}; a long one folds to its lead;
+//             by: the session that spoke ('' in logs from before replies recorded it)
+//   threads   adjacent thread rows: {rows: [{task, title, status, latest, waiting, tone, cleanup, closed}]};
+//             a task that is abandoned now has no row and no `about`
+//   about     a later ledger entry of a thread that already showed: {task, title, by (who wrote
+//             it)}. turns() keeps the ones the coordinator wrote, to name what its reply is about.
+//   question  the event that blocked a task: {task, title, text, options, notes, recommended, open,
+//             chosen}. notes: a line of explanation per option ('' for none); recommended: the first
+//             option is the coordinator's pick; chosen: the option the user picked (its place in
+//             options, from a quick answer in the log or one still being sent), else -1. A task that
+//             enters the log blocked (the coordinator asking) is this alone; it gets its thread row
+//             where it first becomes work, if it ever does.
 //   decision  a recorded decision
 //   typing    the coordinator is working
 // tasks: `pm.py state` tasks; a task's row shows what it is now, falling back to
@@ -153,7 +203,7 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
       latest: cleanTaskLog(t ? t.latest : last.text).text, waiting: !cleanup && WAITING.includes(status), tone: tone(status, cleanup),
       closed: CLOSED.includes(status) };
   };
-  const items = [], shown = new Set(), before = new Map(), keys = new Map();
+  const items = [], shown = new Set(), asked = new Set(), before = new Map(), keys = new Map(), questions = [];
   let day = '';
   const key = (e, kind) => {
     const base = `${kind}:${e.at || ''}:${e.task || ''}`;
@@ -167,33 +217,52 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
       day = date;
       items.push({ kind: 'day', key: `day:${date}`, date, today: date === today });
     }
-    items.push({ at: e.at || '', ...item });
+    const pushed = { at: e.at || '', ...item };
+    items.push(pushed);
+    return pushed;
   };
   for (const e of events) {
     if (e.type === 'user' || e.type === 'pm') {
       if (!squash(e.text)) continue;
       const item = { kind: e.type, key: key(e, e.type), text: String(e.text).trim() };
+      if (e.type === 'user') {
+        // A quick answer in the log marks the option it picked, on the newest question that offered it.
+        const said = squash(e.text);
+        const hit = [...questions].reverse().find(q => q.chosen < 0 && q.options.some(o => squash(answerText(q.title, o)) === said));
+        if (hit) hit.chosen = hit.options.findIndex(o => squash(answerText(hit.title, o)) === said);
+      }
       if (e.type === 'pm') {
         const opening = lead(item.text);
-        item.lead = opening.text; item.long = opening.more;
+        item.lead = opening.text; item.long = opening.more; item.by = String(e.by || '');
       }
       push(e, item);
     } else if (e.type === 'decision') {
       if (squash(e.text)) push(e, { kind: 'decision', key: key(e, 'decision'), text: squash(e.text), quote: squash(e.quote) });
     } else if (e.type === 'thread' && e.task) {
+      const known = before.has(e.task);
+      if (!known && e.status === 'blocked') asked.add(e.task);
       const was = before.get(e.task);
       before.set(e.task, e.status);
-      if (!shown.has(e.task)) {
+      const gone = now(e.task).status === GIVEN_UP;
+      // A task that entered as a question waits for its row until it is work.
+      if (!gone && !shown.has(e.task) && (!asked.has(e.task) || WORK.includes(e.status))) {
         shown.add(e.task);
         const row = { task: e.task, ...now(e.task) };
-        const last = items[items.length - 1];
+        // Rows stay one group across the labels of threads that reported in between.
+        let at = items.length - 1;
+        while (at >= 0 && items[at].kind === 'about') at--;
+        const last = items[at];
         if (last?.kind === 'threads' && String(e.at || '').slice(0, 10) === day) last.rows.push(row);
         else push(e, { kind: 'threads', key: key(e, 'threads'), rows: [row] });
+      } else if (known && !gone) {
+        push(e, { kind: 'about', key: key(e, 'about'), task: e.task, title: now(e.task).title, by: String(e.by || '') });
       }
       if (e.status === 'blocked' && was !== 'blocked') {
-        push(e, { kind: 'question', key: key(e, 'question'), task: e.task, title: now(e.task).title,
-          text: cleanTaskLog(e.text).text, open: false,
-          options: (Array.isArray(e.options) ? e.options : []).map(squash).filter(Boolean) });
+        const offered = (Array.isArray(e.options) ? e.options : [])
+          .map((option, i) => [squash(option), squash(Array.isArray(e.option_notes) ? e.option_notes[i] : '')]).filter(([option]) => option);
+        questions.push(push(e, { kind: 'question', key: key(e, 'question'), task: e.task, title: now(e.task).title,
+          text: cleanTaskLog(e.text).text, open: false, options: offered.map(([option]) => option),
+          notes: offered.map(([, why]) => why), recommended: Boolean(e.recommended) && offered.length > 0, chosen: -1 }));
       }
     }
   }
@@ -207,17 +276,25 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
   }
   for (const p of pending || []) {
     items.push({ kind: 'user', key: `pending:${p.id}`, text: p.text, pending: !p.failed, failed: p.failed || '' });
+    // A quick answer on its way already shows as the picked option.
+    const asking = p.question && !p.failed ? questions.find(q => q.key === p.question) : null;
+    if (asking && asking.chosen < 0) asking.chosen = asking.options.findIndex(o => squash(answerText(asking.title, o)) === squash(p.text));
   }
   if (typing) items.push({ kind: 'typing', key: 'typing' });
   return items;
 }
 
 // Timeline items in blocks: a day divider, a user bubble, or a coordinator turn {kind: 'turn', parts,
-// index} drawn beside one avatar. A turn ends with the coordinator's reply; the reply leads the turn
-// and what the coordinator did on the way to it (threads, decisions, questions) follows, as a message
-// with its attachments. The working dots are a turn of their own. `index` lists the places in `items`
-// of the block's parts.
-export function turns(items) {
+// index} drawn beside one avatar. A turn ends with the coordinator's reply. Its parts, in order: the
+// names of the threads the reply is about, the reply, then what the coordinator did on the way to it
+// (new threads, questions, decisions), as a message with its attachments. The working dots are a
+// turn of their own. `index` lists the places in `items` of the block's parts.
+// A reply is about the threads the coordinator itself wrote a ledger entry for in that turn: one name
+// per thread, none for a thread whose row or question is in the same turn. A worker's entry names
+// nothing (it may have logged while the user asked about something else), and without a reply there
+// is nothing to name. The coordinator is the session that spoke the reply; a reply from before that
+// was recorded counts as `pmPane`'s, the PM's pane now.
+export function turns(items, pmPane = '') {
   const out = [];
   items.forEach((item, index) => {
     const last = out[out.length - 1];
@@ -238,7 +315,10 @@ export function turns(items) {
     const before = kept[kept.length - 1];
     if (block.kind === 'turn' && !block.said) {
       if (block !== tail && before?.kind === 'turn' && before.said) {
-        before.parts.push(...block.parts); before.index.push(...block.index);
+        // The earlier reply was not about these: only what stands on its own moves over.
+        block.parts.forEach((part, i) => {
+          if (part.kind !== 'about') { before.parts.push(part); before.index.push(block.index[i]); }
+        });
         continue;
       }
       block.bare = true;
@@ -246,15 +326,115 @@ export function turns(items) {
     kept.push(block);
   }
   for (const block of kept) {
-    if (block.kind === 'turn') block.parts = [...block.parts.filter(p => p.kind === 'pm'), ...block.parts.filter(p => p.kind !== 'pm')];
+    if (block.kind !== 'turn') continue;
+    const reply = block.parts.find(p => p.kind === 'pm');
+    const coordinator = reply ? reply.by || pmPane : '';
+    // Threads this turn already shows: a new row, or a question card that carries the name.
+    const here = new Set(block.parts.flatMap(p => p.kind === 'threads' ? p.rows.map(row => row.task) : p.kind === 'question' ? [p.task] : []));
+    const named = new Set();
+    const about = block.parts.filter(p => p.kind === 'about' && coordinator && p.by === coordinator &&
+      !here.has(p.task) && !named.has(p.task) && named.add(p.task));
+    block.parts = [...about, ...block.parts.filter(p => p.kind === 'pm'), ...block.parts.filter(p => p.kind !== 'pm' && p.kind !== 'about')];
   }
-  return kept;
+  return kept.filter(block => block.kind !== 'turn' || block.parts.length);
 }
 
 // The newest reply is read whole; older long ones fold until the user opens them.
 export function newestReply(items) {
   for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'pm') return items[i].key;
   return '';
+}
+
+// A session's name as the app's agents list gives it, so the two lists read alike: the tab's name
+// when someone named the tab, else the agent's own title when it says something (not the program's
+// name, a folder or user@host), else the program's name. `tab`: {name, named} or null.
+export function sessionLabel(agent, tab) {
+  const program = agent?.program?.name || '';
+  if (tab?.named && tab.name && tab.name !== program) return tab.name;
+  const raw = String(agent?.title || '');
+  const title = raw.replace(/^[^\p{L}\p{N}]+/u, '').trim();           // without a leading status glyph
+  const folder = /^[^\p{L}\p{N}~/]*([~/]|[A-Za-z]:\\)/.test(raw);
+  const telling = title && title !== program && title.toLowerCase() !== agent?.program?.key && !folder && !title.includes('@');
+  return telling ? title : program || agent?.address || '';
+}
+
+// What the side panel lists for one project while no thread is open there:
+//   open      the PM's tasks that are not over, most pressing first:
+//             {task, title, status, group, tone, waiting, latest, working (its own worker is at work),
+//             updated, branch}; group: 'waiting' (blocked) | 'review' | 'working' (in progress) |
+//             'paused' | 'parked' (proposed), in that order
+//   sessions  the agents in the window whose folder is the project's or one of its worktrees, except
+//             the PM and the workers of open tasks (their task's row stands for them):
+//             {address, label, status, program}; the app's order: needs you, done, working, idle
+//   finished  the newest FINISHED_LIMIT threads that are over: {task, title, status, cleanup};
+//             an answered question (see questionOnly) is not one, nor is an abandoned task
+// tasks: `pm.py state` tasks; events: the conversation log; terms: terminals(); live: agents();
+// tabs: every space's tabs ({id, name, named}).
+export const FINISHED_LIMIT = 6;
+const OPEN_ORDER = ['blocked', 'review', 'in_progress', 'paused', 'proposed'];
+const GROUP = { blocked: 'waiting', review: 'review', in_progress: 'working', paused: 'paused' };
+
+// The tasks whose own worker is at work now: a live terminal on this computer labeled with the task
+// and reporting `working`. Only these move on screen (dots in the conversation, the arc in the panel).
+export function workingTasks(terms = [], live = []) {
+  const ids = new Set();
+  for (const term of terms || []) {
+    const task = term.labels?.task;
+    if (!task || term.state !== 'live' || !term.address || term.address.includes('/')) continue;
+    if (((live || []).find(a => a.address === term.address)?.status || term.status) === 'working') ids.add(task);
+  }
+  return ids;
+}
+const SESSION_RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+const trimFolder = path => typeof path === 'string' && path ? path.replace(/\/+$/, '') || '/' : '';
+export function threadList(pm, tasks, events, terms = [], live = [], tabs = []) {
+  const mine = (Array.isArray(tasks) ? tasks : []).filter(t => (t.pm || '') === (pm?.name || ''));
+  const local = (terms || []).filter(x => x.state === 'live' && x.address && !x.address.includes('/'));
+  const atWork = workingTasks(terms, live);
+  const rank = status => { const i = OPEN_ORDER.indexOf(status); return i < 0 ? OPEN_ORDER.length : i; };
+  const open = mine.filter(t => !CLOSED.includes(t.status))
+    .sort((a, b) => rank(a.status) - rank(b.status) || String(b.updated || '').localeCompare(String(a.updated || '')))
+    .map(t => ({ task: t.id, title: t.title || t.id, status: t.status || '', tone: tone(t.status), waiting: WAITING.includes(t.status),
+      group: GROUP[t.status] || 'parked', latest: cleanTaskLog(t.latest).text, updated: String(t.updated || ''),
+      branch: String(t.branch || ''), working: atWork.has(t.id) }));
+
+  const roots = [trimFolder(pm?.repo), trimFolder(pm?.worktrees)].filter(Boolean);
+  const within = cwd => roots.some(root => cwd === root || cwd.startsWith(root === '/' ? root : `${root}/`));
+  const pmAddress = pm ? terminalFor(pmRow(pm), terms || [])?.address : '';
+  const openIds = new Set(open.map(row => row.task));
+  const found = (live || []).flatMap(agent => {
+    const term = local.find(x => x.address === agent.address);
+    if (!term || !within(trimFolder(term.cwd))) return [];
+    if (term.address === pmAddress || term.labels?.pm || openIds.has(term.labels?.task)) return [];
+    return [{ agent, term }];
+  });
+  const perTab = new Map();
+  for (const { agent } of found) perTab.set(agent.tab, (perTab.get(agent.tab) || 0) + 1);
+  const tabOf = new Map((tabs || []).map(tab => [tab.id, tab]));
+  const sessions = found.map(({ agent, term }) => ({
+    address: agent.address, status: SESSION_RANK[agent.status] ? agent.status : 'idle', program: agent.program || term.program || null,
+    // Two agents in one tab cannot both carry the tab's name.
+    label: sessionLabel(agent, perTab.get(agent.tab) > 1 ? null : tabOf.get(agent.tab)), seq: Number(agent.seq) || 0,
+  })).sort((a, b) => SESSION_RANK[b.status] - SESSION_RANK[a.status] || b.seq - a.seq)
+    .map(({ seq, ...row }) => row);
+
+  const byId = new Map(mine.map(t => [t.id, t]));
+  const over = new Map(), questions = questionOnly(events);
+  const ended = status => CLOSED.includes(status) && status !== GIVEN_UP;
+  for (const e of events || []) {
+    if (e.type !== 'thread' || !e.task || questions.has(e.task)) continue;
+    const t = byId.get(e.task), status = t?.status || e.status || '';
+    if (ended(status)) over.set(e.task, { task: e.task, title: t?.title || e.title || e.task, status, cleanup: Boolean(t?.cleanup), at: String(e.at || '') });
+    else over.delete(e.task);
+  }
+  for (const t of mine) {
+    if (ended(t.status) && !over.has(t.id) && !questions.has(t.id)) {
+      over.set(t.id, { task: t.id, title: t.title || t.id, status: t.status, cleanup: Boolean(t.cleanup), at: String(t.updated || '') });
+    }
+  }
+  const finished = [...over.values()].sort((a, b) => b.at.localeCompare(a.at)).slice(0, FINISHED_LIMIT)
+    .map(({ at, ...row }) => row);
+  return { open, sessions, finished };
 }
 
 // A PM reply as markdown the app's renderer numbers right. Herdr 0.1.15's TextView
@@ -359,6 +539,13 @@ export function pmRow(pm) {
 // A ledger task (or a state task) as a row the terminal lookup understands.
 export function taskRow(task) {
   return task ? { ...task, type: 'task', task: task.id, machine: '' } : null;
+}
+
+// "<1m", "5m", "3h", "2d": the largest whole unit (pm-list's rule; model.test.mjs keeps the copy identical).
+const UNITS = [[86400000, 'd'], [3600000, 'h'], [60000, 'm']];
+export function age(ms) {
+  const unit = UNITS.find(([size]) => ms >= size);
+  return unit ? `${Math.floor(ms / unit[0])}${unit[1]}` : '<1m';
 }
 
 // Copies of pm-dash/model.js (a mod cannot import from another mod's folder);

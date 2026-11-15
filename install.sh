@@ -30,7 +30,7 @@ generated_by = "dudu install.sh"
 # The pm layout draws notifications with pm-toast, which hides dispatched workers' agent notices.
 TOAST = "pm-toast"
 TOAST_HINT = f'"toast": "{TOAST}"'
-# The PM list sits right above the agents list; the mod sizes its own block.
+# The PM list sits right under the PM entry (pm-nav); the mod sizes its own block.
 PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
 # The project view: a child of the pm-stage stack, beside the work column and the board.
 PM_PROJECT = {"id": "pm-project", "type": "block", "content": {"mod": "pm-project"}}
@@ -56,15 +56,15 @@ def has_mod(node, name):
 
 
 def insert_pm_list(children):
-    agents = [i for i, child in enumerate(children) if isinstance(child, dict) and has_mod(child, "agents")]
-    children.insert(agents[0] if agents else len(children), dict(PM_LIST, size=dict(PM_LIST["size"])))
+    nav = [i for i, child in enumerate(children) if isinstance(child, dict) and has_mod(child, "pm-nav")]
+    children.insert(nav[0] + 1 if nav else len(children), dict(PM_LIST, size=dict(PM_LIST["size"])))
 
 
 def manual_layout(reason):
     print(f"Skip automatic layout: {reason}")
     print(f"Manual fallback (also in README.md): copy {desktop / 'layouts/main.json'} to {desktop / 'layouts/pm.json'}.")
     print('In sidebar-lists.children, insert first: {"id":"pm-nav","type":"block","size":{"px":64},"content":{"mod":"pm-nav"}}')
-    print(f'and right before the agents block: {json.dumps(PM_LIST, separators=(",", ":"))}')
+    print(f'and right after it: {json.dumps(PM_LIST, separators=(",", ":"))}')
     print('Replace the work column with: {"id":"pm-stage","type":"stack","active":"work","children":[<original work node>,'
           '{"id":"pm-board","type":"block","content":{"mod":"pm-dash"}},' + json.dumps(PM_PROJECT, separators=(",", ":")) + ']}')
     print(f'At the root, add: {TOAST_HINT}')
@@ -86,7 +86,7 @@ def install_layout():
         if target.exists():
             existing = json.loads(target.read_text(encoding="utf-8"))
             if any(has_mod(node, "pm-nav") for node in nodes(existing)):
-                changed, hint = False, None
+                changed, hints = False, []
                 parent = next((node for node in nodes(existing)
                                if any(isinstance(child, dict) and has_mod(child, "pm-nav")
                                       for child in node.get("children", []))), None)
@@ -94,13 +94,20 @@ def install_layout():
                 if not has_list and parent is None:
                     # Never fall back to regenerating: that would replace the person's layout.
                     print(f"Skip pm-list: no column in {target} holds pm-nav. Add this block by hand, "
-                          f"right before the agents block: {json.dumps(PM_LIST, separators=(',', ':'))}")
+                          f"right after pm-nav: {json.dumps(PM_LIST, separators=(',', ':'))}")
                 elif not has_list:
                     # A layout from before pm-list, the person's own edits included: add only the block.
                     insert_pm_list(parent["children"])
                     back_up(target)
                     print(f"{prefix}Add the pm-list block to {target}")
                     changed = True
+                elif parent is not None:
+                    kids = [child for child in parent["children"] if isinstance(child, dict)]
+                    at = next((i for i, child in enumerate(kids) if has_mod(child, "pm-list")), -1)
+                    if at > 0 and not has_mod(kids[at - 1], "pm-nav") and at + 1 < len(kids) and has_mod(kids[at + 1], "agents"):
+                        # Where earlier installers put it. The block is the person's to place: say so, move nothing.
+                        hints.append(f"The PM list now goes right under the PM entry. To have it there, "
+                                     f"move the pm-list block right after pm-nav in {target}.")
                 stage = next((node for node in nodes(existing) if node.get("id") == "pm-stage"
                               and node.get("type") == "stack" and isinstance(node.get("children"), list)), None)
                 if stage is not None and not any(has_mod(node, "pm-project") for node in nodes(existing)):
@@ -116,12 +123,12 @@ def install_layout():
                         print(f"{prefix}Add {TOAST_HINT} to {target}")
                         changed = True
                     else:
-                        hint = f"To hide finished-worker toasts, add {TOAST_HINT} at the root of {target}."
+                        hints.append(f"To hide finished-worker toasts, add {TOAST_HINT} at the root of {target}.")
                 if changed and not args.dry_run:
                     write_json(target, existing)
                 if not changed:
                     print(f"Skip layout: {target} already contains pm-nav.")
-                if hint:
+                for hint in hints:
                     print(hint)
                 return
         tree = json.loads(source.read_text(encoding="utf-8"))

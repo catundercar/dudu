@@ -1,9 +1,10 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex, TextView, TextareaState, Textarea, ScrollHandle } from 'gpui-base';
-import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, shared } from 'herdr';
+import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, spaces, shared } from 'herdr';
 import {
   word, timeline, parseConversation, settlePending, waitingCount, bellTarget, answerText, clock, dayLabel, shortPath,
-  diffArgv, sendArgv, pmRow, taskRow, terminalFor, terminalTargetFor, cleanTaskLog, statusLabel, tone, turns, newestReply,
+  diffArgv, sendArgv, pmRow, taskRow, terminalFor, terminalTargetFor, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
+  age, eventTime, workingTasks, threadLink,
   withAlpha, solidText, isDarkTheme, viewMarkdown, LEDGER_HOME_SH, EVENT_LIMIT,
 } from './model.js';
 
@@ -13,7 +14,10 @@ const STAGE = 'pm-stage', WORK = 'work';
 // pm-list names the project to show here: shared('pm-project') = {pm: <PM name>}.
 const SHARED = 'pm-project';
 const ICON = name => `mods/pm-project/${name}.svg`;
+const SPINNER = 'mods/workspace-chrome/spinner.svg';
 const COLUMN = 680, PANEL = 360, FADE = { duration: 180, easing: 'ease-out' };
+// From this width the conversation column and the side panel fit side by side, so the panel rests open.
+const WIDE = COLUMN + PANEL + 2 * 28;
 // How many renders the view keeps asking for the end after the blocks last changed
 // height. Counted in renders, not milliseconds: a window that draws few frames (in the
 // background, or covered) keeps following until its last reply has its full height.
@@ -36,9 +40,12 @@ export default class PmProject extends View {
     this.error = ''; this.logError = '';
     this.pmName = ''; this.logPath = '';
     this.ledgerHome = ''; this.watching = {};
-    this.thread = ''; this.threadTask = null; this.panelOpen = false; this.threadError = '';
+    // The side panel: the thread list while it rests, one thread's detail while `detail` is on.
+    // listShown: what the header's icon asked for; until then the list shows when the window is wide.
+    this.thread = ''; this.threadTask = null; this.detail = false; this.threadError = '';
+    this.listShown = null; this.wide = false; this.measured = false;
     this.seen = null; this.count = 0; this.settle = 0; this.away = false;
-    this.unfolded = new Map(); this.newest = '';
+    this.unfolded = new Map(); this.newest = ''; this.atWork = new Set();
     this.scroll = ScrollHandle.new();
     this.input = TextareaState.new({ rows: 1 });
     this.input.set_auto_grow(1, 6);
@@ -218,12 +225,27 @@ export default class PmProject extends View {
     cx.notify();
   }
 
+  listResting() { return this.listShown ?? this.wide; }
   openThread(id, cx) {
-    if (this.thread === id && this.panelOpen) { this.panelOpen = false; cx.notify(); return; }
+    if (this.thread === id && this.detail) { this.detail = false; cx.notify(); return; }
     if (this.thread !== id) { this.threadTask = null; this.threadError = ''; this.threadInput.set_value(''); this.threadDraft = ''; }
     this.thread = id;
-    this.panelOpen = true;
+    this.detail = true;
     this.readThread(cx);
+    cx.notify();
+  }
+  // A link in a reply: a thread's name opens that thread in the side panel (and leaves it open when
+  // it already is); a web address goes to the browser, as it would without this handler.
+  followLink(url, cx) {
+    const id = threadLink(url);
+    if (id) {
+      if (!(this.detail && this.thread === id)) this.openThread(id, cx);
+    } else if (/^https?:\/\//i.test(String(url || ''))) cx.open_url(url);
+  }
+  // The header's icon: shows the thread list, or puts the panel away whatever it shows.
+  togglePanel(cx) {
+    this.listShown = !(this.listResting() || this.detail);
+    this.detail = false;
     cx.notify();
   }
   // A scroll request is used once, after the next layout, and a reply that is still
@@ -274,13 +296,6 @@ export default class PmProject extends View {
   toneColor(tn, t) {
     return tn === 'blocked' ? t.blocked : tn === 'review' ? t.accent : tn === 'running' ? t.ansi2 : t.dim;
   }
-  // A status dot with a soft halo, as in the design.
-  dot(color, t, solid = true) {
-    return h_flex().size(14).flex_none().rounded_full().items_center().justify_center()
-      .when(solid, el => el.bg(withAlpha(color, .18)))
-      .child(div().size(8).rounded_full().when(solid, el => el.bg(color))
-        .when(!solid, el => el.border(1.5).border_color(color)));
-  }
   pill(text, color) {
     return h_flex().flex_none().h(22).px(8).rounded(7).items_center().whitespace_nowrap()
       .bg(withAlpha(color, .14)).text_color(color).text_size(12).font_medium().child(text);
@@ -319,61 +334,87 @@ export default class PmProject extends View {
     return raised ? this.lift(box, t, radius) : box;
   }
 
-  threadRow(row, first, t) {
-    const color = this.toneColor(row.tone, t), selected = this.panelOpen && this.thread === row.task;
-    const tip = [statusLabel(this.lang, row.status, row.cleanup), row.title].join(' · ');
-    return h_flex().id(`thread-${row.task}`).relative().h(48).pl(16).pr(12).gap(12).items_center().cursor_pointer()
-      .when(selected, el => el.bg(t.selected)).when(!selected, el => el.hover(s => s.bg(t.hover)))
-      .tooltip(tip)
-      .on_click((_e, cx) => this.openThread(row.task, cx))
-      .when(!first, el => el.child(div().absolute().top(0).left(0).right(0).h(1).bg(t.border)))
-      .child(this.dot(color, t, row.tone !== 'quiet'))
-      .child(div().flex_none().max_w('45%').truncate().font_medium()
-        .text_color(row.tone === 'quiet' ? t.muted : t.foreground).child(row.title))
-      .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(t.muted).child(row.latest))
-      .when(row.waiting, el => el.child(this.pill(word(this.lang, 'waiting'), color)))
-      .child(this.icon('chevron', 14).text_color(t.dim));
+  // Three small dots that breathe: this thread is being worked on.
+  workingDots(t) {
+    return h_flex().flex_none().gap(3).items_center().loop('opacity', { from: .3, to: 1, period: 1400 })
+      .children([0, 1, 2].map(() => div().size(4).rounded_full().bg(t.muted)));
   }
-
-  // A thread whose work is over: its mark and title, dim until the pointer is on it. A click opens its panel.
-  closedRow(row, t) {
-    const selected = this.panelOpen && this.thread === row.task;
+  // A thread where it starts in the conversation: a hook, its name, and a mark of what it is now
+  // (three dots while it is in progress, a dot in the status color while it waits or is in review,
+  // nothing once it is over). Quiet until the pointer is on it; a click opens it in the side panel.
+  threadLine(row, t, atWork) {
+    const selected = this.detail && this.thread === row.task;
     const tip = [statusLabel(this.lang, row.status, row.cleanup), row.title].join(' · ');
-    // The ring starts where a decision line's check icon does, and so does the title.
-    return h_flex().id(`thread-${row.task}`).h(24).gap(7).items_center().cursor_pointer().text_size(12.5)
-      .text_color(selected ? t.foreground : t.dim).hover(s => s.text_color(t.foreground))
+    return h_flex().id(`thread-${row.task}`).h(24).gap(8).items_center().cursor_pointer().text_size(13)
+      .text_color(selected ? t.foreground : row.closed ? t.dim : t.muted).hover(s => s.text_color(t.foreground))
       .tooltip(tip).accessibility_label(tip)
       .on_click((_e, cx) => this.openThread(row.task, cx))
-      .child(h_flex().w(14).h(14).pl(1).flex_none().items_center()
-        .child(div().size(9).rounded_full().border(1.5).border_color(t.dim)))
-      .child(div().flex_1().min_w(0).truncate().child(row.title));
+      .child(svg(ICON('hook')).size(14).flex_none().text_color(t.dim))
+      .child(div().min_w(0).truncate().child(row.title))
+      // In progress: the dots breathe only while its own worker is at work, and rest dim otherwise.
+      .when(row.tone === 'running', el => el.child(atWork.has(row.task) ? this.workingDots(t)
+        : h_flex().flex_none().gap(3).items_center().opacity(.4).children([0, 1, 2].map(() => div().size(4).rounded_full().bg(t.muted)))))
+      .when(row.tone === 'blocked' || row.tone === 'review', el => el.child(div().flex_none().size(6).rounded_full()
+        .bg(this.toneColor(row.tone, t))));
+  }
+  // The name of a thread the reply under it is about.
+  aboutLine(item, t) {
+    const selected = this.detail && this.thread === item.task;
+    return h_flex().id(`about-${item.key}`).h(20).gap(8).items_center().cursor_pointer().text_size(12.5)
+      .text_color(selected ? t.foreground : t.dim).hover(s => s.text_color(t.foreground))
+      .tooltip(word(this.lang, 'openThread')).accessibility_label(item.title)
+      .on_click((_e, cx) => this.openThread(item.task, cx))
+      .child(svg(ICON('hook-up')).size(14).flex_none().text_color(t.dim))
+      .child(div().min_w(0).truncate().child(item.title));
   }
 
+  // The coordinator asking: a quiet card with the thread's name, the question, and its answers as
+  // rows (a letter, the answer, why, and a mark on the one the coordinator recommends). Picking one
+  // sends it and leaves that row alone with a check; a question answered in the user's own words
+  // keeps only its text.
   question(item, t, cx) {
-    const thread = h_flex().id(`ask-${item.key}`).flex_none().h(22).px(8).gap(6).rounded(7).items_center().bg(t.raised)
-      .text_size(13).font_medium().whitespace_nowrap().cursor_pointer().hover(s => s.bg(t.hover))
-      .on_click((_e, cx) => this.openThread(item.task, cx))
-      .child(div().size(6).rounded(3).bg(item.open ? t.blocked : t.dim)).child(item.title);
-    const block = v_flex().gap(8)
-      .child(h_flex().items_start().gap(8).child(thread)
-        .child(div().flex_1().min_w(0).whitespace_normal().text_color(item.open ? t.foreground : t.muted).child(item.text)));
     const sending = this.pending.some(p => p.question === item.key && !p.failed);
     const live = Boolean(this.pmTerminal()) && !sending;
-    if (!item.open || !item.options.length) return block;
-    return block.child(h_flex().flex_wrap().gap(8).children(item.options.map((option, i) =>
-      h_flex().id(`opt-${item.key}-${i}`).h(30).px(12).rounded(9).items_center().bg(t.raised).border_1().border_color(t.border)
-        .text_size(13).font_medium().text_color(t.foreground)
-        .when(live, el => el.cursor_pointer().hover(s => s.bg(t.hover).border_color(t.input || t.border))
-          .on_click((_e, cx) => this.say(answerText(item.title, option), cx, item.key)))
-        .when(!live, el => el.opacity(.5).tooltip(word(this.lang, sending ? 'sending' : 'offline')))
-        .child(option))));
+    const picked = item.chosen >= 0, asking = item.open && !picked;
+    const option = (i, chosen) => {
+      const row = h_flex().id(`opt-${item.key}-${i}`).px(10).py(9).gap(12).rounded(10).items_center()
+        .child(h_flex().size(28).flex_none().rounded(7).items_center().justify_center().bg(chosen ? t.hover : t.raised)
+          .text_size(12.5).font_medium().text_color(t.muted).child(String.fromCharCode(65 + i)))
+        .child(v_flex().flex_1().min_w(0).gap(1)
+          .child(h_flex().gap(8).items_center()
+            .child(div().min_w(0).whitespace_normal().text_color(t.foreground).child(item.options[i]))
+            .when(item.recommended && i === 0, el => el.child(h_flex().flex_none().h(18).px(6).rounded(5).items_center()
+              .bg(withAlpha(t.accent, .14)).text_color(t.accent).text_size(11).font_medium().child(word(this.lang, 'recommended')))))
+          .when(Boolean(item.notes[i]), el => el.child(div().whitespace_normal().text_size(12.5).text_color(t.muted).child(item.notes[i]))));
+      if (chosen) return row.bg(t.raised).child(this.icon('check', 16).text_color(t.muted));
+      if (!live) return row.opacity(.5).tooltip(word(this.lang, sending ? 'sending' : 'offline'));
+      return row.cursor_pointer().hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => this.say(answerText(item.title, item.options[i]), cx, item.key));
+    };
+    const rows = picked ? [option(item.chosen, true)] : asking ? item.options.map((_o, i) => option(i, false)) : [];
+    // The thread's name opens the thread; its color is the row's, so it brightens under the pointer.
+    const name = h_flex().id(`ask-${item.key}`).gap(4).items_center().cursor_pointer().text_size(12)
+      .text_color(t.dim).hover(s => s.text_color(t.foreground))
+      .tooltip(word(this.lang, 'openThread')).accessibility_label(item.title)
+      .on_click((_e, cx) => this.openThread(item.task, cx))
+      .child(div().min_w(0).truncate().child(item.title)).child(this.icon('chevron', 12));
+    const card = v_flex().w_full().p(6).gap(2).rounded(14).border_1()
+      .child(v_flex().px(10).pt(6).pb(rows.length ? 6 : 4).gap(3)
+        .child(h_flex().child(name))
+        .child(div().whitespace_normal().text_color(asking ? t.foreground : t.muted).child(item.text)))
+      .children(rows);
+    // A question that waits is a lifted surface with the message box's border; one that is settled
+    // is an outline on the canvas, so the two differ in a light theme too.
+    return div().w_full().max_w(560).child(asking ? this.lift(card.bg(t.surface).border_color(t.input || t.border), t, 14)
+      : card.border_color(t.border));
   }
 
   // What one item of a coordinator turn looks like.
   turnPart(item, t, cx) {
     if (item.kind === 'pm') {
       const whole = () => div().w_full().pt(3).text_size(14).text_color(t.foreground)
-        .child(TextView.markdown(`md-${item.key}`, viewMarkdown(item.text)).selectable(true));
+        .child(TextView.markdown(`md-${item.key}`, viewMarkdown(item.text)).selectable(true)
+          .on_link_click((url, cx) => this.followLink(url, cx)));
       if (!item.long) return whole();
       // A long reply shows its opening paragraph until it is opened. The newest one is open, and so
       // stays every reply that arrived while this project was on screen: history folds, the live
@@ -407,17 +448,10 @@ export default class PmProject extends View {
         .when(Boolean(item.quote), el => el.tooltip(`“${item.quote}”`))
         .child(this.icon('check', 14)).child(div().flex_1().min_w(0).whitespace_normal().child(item.text));
     }
-    if (item.kind === 'threads') {
-      // Open work is a card of rows; a thread that is over is one quiet line.
-      const open = item.rows.filter(row => !row.closed), over = item.rows.filter(row => row.closed);
-      const card = () => this.lift(v_flex().w_full().rounded(14).overflow_hidden().bg(t.surface).border_1().border_color(t.border)
-        .children(open.map((row, i) => this.threadRow(row, i === 0, t))), t, 14);
-      if (!over.length) return card();
-      return v_flex().w_full().gap(4).when(open.length > 0, el => el.child(card()).child(div().h(4)))
-        .children(over.map(row => this.closedRow(row, t)));
-    }
+    if (item.kind === 'threads') return v_flex().w_full().children(item.rows.map(row => this.threadLine(row, t, this.atWork)));
+    if (item.kind === 'about') return this.aboutLine(item, t);
     if (item.kind === 'question') return this.question(item, t, cx);
-    // typing: the only looping motion here.
+    // typing: the coordinator is at work.
     return h_flex().h(28).gap(5).items_center().loop('opacity', { from: .35, to: 1, period: 1400 })
       .children([0, 1, 2].map(() => div().size(6).rounded(3).bg(t.muted)));
   }
@@ -440,9 +474,16 @@ export default class PmProject extends View {
           .when(!isDarkTheme(t) && !b.failed, el => el.border_1().border_color(t.border))
           .when(Boolean(b.failed), el => el.border_1().border_color(withAlpha(t.blocked, .6))));
     }
+    // The names of the threads a reply is about sit close above it; the rest follows at the turn's rhythm.
+    const part = item => this.fade(this.turnPart(item, t, cx), item.key, cx);
+    const head = b.parts.filter(item => item.kind === 'about' || item.kind === 'pm');
+    const rest = b.parts.filter(item => item.kind !== 'about' && item.kind !== 'pm');
+    // The avatar arrives with its turn's first part, not a frame before it.
     return h_flex().w_full().items_start().gap(12)
-      .child(b.bare ? div().w(28).flex_none() : this.avatar(t))
-      .child(v_flex().flex_1().min_w(0).gap(12).children(b.parts.map(item => this.fade(this.turnPart(item, t, cx), item.key, cx))));
+      .child(b.bare ? div().w(28).flex_none() : this.fade(this.avatar(t), b.parts[0].key, cx))
+      .child(v_flex().flex_1().min_w(0).gap(12)
+        .when(head.length > 0, el => el.child(v_flex().w_full().gap(2).children(head.map(part))))
+        .children(rest.map(part)));
   }
 
   header(pm, waiting, target, t) {
@@ -465,7 +506,92 @@ export default class PmProject extends View {
       .child(h_flex().gap(4).items_center()
         .child(bell)
         .child(this.iconButton('pm-terminal', 'terminal', terminal ? word(this.lang, 'openPm') : word(this.lang, 'noPmTerminal'),
-          terminal ? () => this.focusTerminal(terminal.address) : null, t)));
+          terminal ? () => this.focusTerminal(terminal.address) : null, t))
+        .child(this.iconButton('pm-threads', 'panel', word(this.lang, this.listResting() || this.detail ? 'hideThreads' : 'showThreads'),
+          cx => this.togglePanel(cx), t)));
+  }
+
+  // A session's status as the app's agents list marks it: spinner, dot or ring, never a word.
+  sessionMark(status, t) {
+    if (status === 'working') return svg(SPINNER).size(12).flex_none().text_color(t.working ?? t.ansi2).spin(900);
+    const dot = div().flex_none().size(7).rounded_full();
+    return status === 'blocked' ? dot.bg(t.blocked) : status === 'done' ? dot.bg(t.done ?? t.accent) : dot.border(1.5).border_color(t.idle ?? t.dim);
+  }
+
+  // The panel at rest: what is open in this project, who is working in it, and what ended last.
+  threadsPanel(pm, t) {
+    const lang = this.lang;
+    const list = threadList(pm, this.state.tasks, this.events, terminals(), agents(), spaces().flatMap(s => s.tabs || []));
+    const group = (key, rows) => v_flex()
+      .child(h_flex().h(26).px(8).gap(6).items_center().text_size(11).font_medium().text_color(t.dim)
+        .child(word(lang, key)).child(String(rows.length)))
+      .children(rows);
+    // Every row starts with a 16px box for its mark, so the groups' marks and words line up.
+    const lead = el => h_flex().w(16).flex_none().items_center().justify_center().child(el);
+    // The marks sit on the title's line (19px), not the middle of a row with several lines.
+    const onTitle = el => h_flex().h(19).flex_none().items_center().child(el);
+    const ring = color => h_flex().size(14).flex_none().rounded_full().items_center().justify_center().border(1.5).border_color(color);
+    // What a thread is now, as a mark: an arc that turns while its worker is at work, a ring with a
+    // core in the status color while it waits for the user or is in review, a dim ring with a dim
+    // core when paused, a bare ring when not started.
+    const stateMark = row => row.group === 'working'
+      ? (row.working ? svg(SPINNER).size(14).flex_none().text_color(t.working ?? t.ansi2).spin(900)
+        : svg(SPINNER).size(14).flex_none().text_color(t.dim))
+      : row.group === 'parked' ? ring(t.dim)
+        : row.group === 'paused' ? ring(t.dim).child(div().size(6).rounded_full().bg(t.dim))
+          : ring(this.toneColor(row.tone, t)).child(div().size(6).rounded_full().bg(this.toneColor(row.tone, t)));
+    const now = Date.now();
+    const openRow = row => {
+      const at = eventTime(row.updated);
+      return h_flex().id(`list-${row.task}`).px(8).py(7).gap(9).rounded(8).items_start().cursor_pointer()
+        .hover(s => s.bg(t.hover)).tooltip([statusLabel(lang, row.status), row.title].join(' · '))
+        .on_click((_e, cx) => this.openThread(row.task, cx))
+        .child(onTitle(lead(stateMark(row))))
+        .child(v_flex().flex_1().min_w(0).gap(1)
+          .child(h_flex().gap(8).items_baseline()
+            .child(div().flex_1().min_w(0).truncate().text_size(13.5).font_medium()
+              .text_color(row.group === 'parked' || row.group === 'paused' ? t.muted : t.foreground).child(row.title))
+            .when(at > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(age(Math.max(0, now - at))))))
+          // What it waits for is read whole; a step of work is one line.
+          .when(Boolean(row.latest), el => el.child(row.waiting
+            ? div().whitespace_normal().text_size(12).text_color(t.muted).child(row.latest)
+            : div().truncate().text_size(12).text_color(t.dim).child(row.latest)))
+          .when(Boolean(row.branch), el => el.child(h_flex().pt(3).gap(6).items_center().text_color(t.dim)
+            .child(svg(ICON('hook')).size(12).flex_none())
+            .child(div().min_w(0).truncate().font_family('monospace').text_size(11).child(row.branch)))));
+    };
+    const byGroup = ['waiting', 'review', 'working', 'paused', 'parked']
+      .map(key => [`group_${key}`, list.open.filter(row => row.group === key).map(openRow)]);
+    const sessions = list.sessions.map(row => {
+      const icon = !row.program?.icon ? this.icon('agent', 16).text_color(t.dim)
+        : row.program.tint ? svg(row.program.icon).size(16).flex_none().text_color(t.foreground) : image(row.program.icon).size(16).flex_none();
+      return h_flex().id(`session-${row.address}`).h(32).px(8).gap(9).rounded(8).items_center().cursor_pointer()
+        .hover(s => s.bg(t.hover))
+        .tooltip([row.label, `${word(lang, `session_${row.status}`)} · ${row.address}`, word(lang, 'openSession')].join('\n'))
+        .on_click(() => this.focusTerminal(row.address))
+        .child(lead(icon))
+        // The name and the smaller monospace address share a baseline.
+        .child(h_flex().flex_1().min_w(0).gap(9).items_baseline()
+          .child(div().flex_1().min_w(0).truncate().text_size(13.5).text_color(row.status === 'idle' ? t.muted : t.foreground).child(row.label))
+          .child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(row.address)))
+        .child(h_flex().w(14).flex_none().justify_center().child(this.sessionMark(row.status, t)));
+    });
+    // What ended: the conversation's quiet line (a ring and the title), in this list's columns.
+    const finished = list.finished.map(row => {
+      const tip = [statusLabel(lang, row.status, row.cleanup), row.title].join(' · ');
+      return h_flex().id(`list-${row.task}`).h(28).px(8).gap(9).rounded(8).items_center().cursor_pointer().text_size(12.5)
+        .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .tooltip(tip).accessibility_label(tip)
+        .on_click((_e, cx) => this.openThread(row.task, cx))
+        .child(lead(div().size(9).rounded_full().border(1.5).border_color(t.dim)))
+        .child(div().flex_1().min_w(0).truncate().child(row.title));
+    });
+    const groups = [...byGroup, ['groupSessions', sessions], ['groupFinished', finished]]
+      .filter(([, rows]) => rows.length).map(([key, rows]) => group(key, rows));
+    return v_flex().w(PANEL).h_full().flex_none().pt(12).bg(t.chrome).border_l(1).border_color(t.border)
+      .child(h_flex().h(32).flex_none().px(20).items_center().text_size(15).font_semibold().child(word(lang, 'threads')))
+      .child(v_flex().id('thread-list').flex_1().min_h(0).px(12).pt(8).pb(16).gap(12).overflow_y_scrollbar()
+        .children(groups.length ? groups : [div().px(8).text_size(13).text_color(t.dim).child(word(lang, 'noThreads'))]));
   }
 
   panel(t, today) {
@@ -484,7 +610,7 @@ export default class PmProject extends View {
         run('terminal.open', { argv, folder: argv[2], place: 'tab', name: `diff ${task.branch}` });
         run('layout.select', { stack: STAGE, child: WORK });
       } : null, t))
-      .child(this.iconButton('thread-close', 'close', word(lang, 'close'), cx => { this.panelOpen = false; cx.notify(); }, t));
+      .child(this.iconButton('thread-close', 'close', word(lang, 'close'), cx => { this.detail = false; cx.notify(); }, t));
     const meta = h_flex().flex_wrap().gap(8).items_center().text_size(12).text_color(t.dim)
       .when(Boolean(status), el => el.child(this.pill(statusLabel(lang, status, Boolean(stateTask?.cleanup)),
         tn === 'quiet' ? t.muted : this.toneColor(tn, t))))
@@ -526,12 +652,18 @@ export default class PmProject extends View {
     const wanted = shared(SHARED)?.pm || '';
     if (wanted !== this.pmName) {
       // Another project: its own log, no bubbles or panel from the last one.
-      this.pmName = wanted; this.events = []; this.pending = []; this.panelOpen = false; this.thread = ''; this.threadTask = null;
+      this.pmName = wanted; this.events = []; this.pending = []; this.detail = false; this.thread = ''; this.threadTask = null;
       this.seen = null; this.count = 0; this.settle = 0; this.away = false; this.unfolded = new Map(); this.newest = '';
       cx.timer.after(0, cx => this.readLog(cx));
     }
     const root = h_flex().id('pm-project-root').size_full().min_w(0).min_h(0).overflow_hidden()
-      .bg(t.canvas).text_size(14).text_color(t.foreground);
+      .bg(t.canvas).text_size(14).text_color(t.foreground)
+      .on_size_change((size, cx) => {
+        const wide = size.width >= WIDE;
+        if (wide !== this.wide) { this.wide = wide; cx.notify(); }
+        // The first measure places the panel; only later changes slide.
+        if (!this.measuring) { this.measuring = true; cx.timer.after(60, cx => { this.measured = true; cx.notify(); }); }
+      });
     const pm = this.pm();
     if (!pm) {
       const note = this.pmName && this.state.pms.length ? word(lang, 'noProject') : word(lang, 'pick');
@@ -543,7 +675,8 @@ export default class PmProject extends View {
     const items = timeline(this.events, this.state.tasks, {
       pending: this.pending, today, typing: Boolean(working) || this.pending.some(p => !p.failed),
     });
-    const blocks = turns(items);
+    const blocks = turns(items, pm.pane || '');
+    this.atWork = workingTasks(terminals(), agents());
     const newest = newestReply(items);
     if (this.newest && newest !== this.newest && !this.unfolded.has(this.newest)) this.unfolded.set(this.newest, true);
     this.newest = newest;
@@ -579,10 +712,15 @@ export default class PmProject extends View {
       .child(body)
       .child(center(this.composer('say', this.input, this.draft, Boolean(pmTerm), word(lang, 'say', pm.project || pm.name),
         word(lang, 'offline'), cx => this.sendMain(cx), t, 16, true)).pb(20).pt(4));
-    // The thread panel slides open from the right edge; it keeps its content while it closes.
+    // The side panel slides from the right edge. At rest it is the thread list (when the window is
+    // wide, or the header's icon asked for it); a thread's detail takes its place while one is open,
+    // and stays drawn while a panel that rests closed slides shut.
+    const resting = this.listResting();
+    const content = this.detail || (!resting && this.thread) ? this.panel(t, today) : this.threadsPanel(pm, t);
     const panel = h_flex().h_full().flex_none().overflow_hidden().justify_end()
-      .w(this.panelOpen ? PANEL : 0).transition('width', { duration: 200, easing: 'ease-out' })
-      .when(Boolean(this.thread), el => el.child(this.panel(t, today)));
+      .w(resting || this.detail ? PANEL : 0)
+      .when(this.measured, el => el.transition('width', { duration: 200, easing: 'ease-out' }))
+      .child(content);
     return root.child(main).child(panel);
   }
 }

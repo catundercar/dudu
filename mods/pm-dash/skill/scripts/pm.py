@@ -218,6 +218,40 @@ def note(task, text, **extra):
                by=PANE or "user", text=text, **extra)
 
 
+class Why(argparse.Action):
+    """`--why TEXT` explains the `--option` right before it (kept as {place of that option: text})."""
+
+    def __call__(self, parser, namespace, value, option_string=None):
+        given = getattr(namespace, "option", None) or []
+        if not given:
+            parser.error("--why explains an answer: put it right after that answer's --option")
+        namespace.why = {**(getattr(namespace, "why", None) or {}), len(given) - 1: value}
+
+
+def quick_answers(a):
+    """The answers a question offers: (titles, fields for the task and its conversation event).
+    --why gives the --option before it one line of explanation; --recommend says the first answer is
+    the one the PM would pick. An answer is kept as written, and it alone is what a pick sends back."""
+    raw = [o.strip() for o in getattr(a, "option", None) or []]
+    why = {i: (text or "").strip() for i, text in (getattr(a, "why", None) or {}).items()}
+    recommend = bool(getattr(a, "recommend", False))
+    if recommend and not (raw and raw[0]):
+        sys.exit("--recommend marks the first answer as your pick: give that answer with --option")
+    if any(text and not (i < len(raw) and raw[i]) for i, text in why.items()):
+        sys.exit("--why explains the --option before it, and that one is empty")
+    kept = [i for i, title in enumerate(raw) if title]
+    titles = [raw[i] for i in kept]
+    fields = {"options": titles} if titles else {}
+    if any(why.get(i) for i in kept):
+        fields["option_notes"] = [why.get(i, "") for i in kept]
+    if recommend:
+        fields["recommended"] = True
+    return titles, fields
+
+
+QUESTION_FIELDS = ("options", "option_notes", "recommended")
+
+
 def slugify(text):
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:40].strip("-")
@@ -285,10 +319,9 @@ def cmd_new(a):
         if getattr(a, f):
             task[f] = getattr(a, f)
     # A question for the user that belongs to no task yet: a blocked entry of its own, with its quick answers.
-    options = [o.strip() for o in getattr(a, "option", None) or [] if o.strip()]
-    if options:
-        task["options"] = options
-    note(task, a.note or f"registered ({task['status']})", **({"options": options} if options else {}))
+    options, asked = quick_answers(a)
+    task.update(asked)
+    note(task, a.note or f"registered ({task['status']})", **asked)
     save(task)
     print(task["id"])
     return task["id"]
@@ -304,15 +337,15 @@ def cmd_update(a):
             task[f] = value
     # Quick answers the user can pick in the project view; they belong to the question being asked now,
     # so a status change without new ones drops the old ones.
-    options = [o.strip() for o in getattr(a, "option", None) or [] if o.strip()]
-    offered = bool(options) and task.get("options") != options
-    if options:
-        task["options"] = options
-    elif any(c.startswith("status=") for c in changes):
-        task.pop("options", None)
+    options, asked = quick_answers(a)
+    offered = bool(options) and {f: task.get(f) for f in QUESTION_FIELDS if f in task} != asked
+    if options or any(c.startswith("status=") for c in changes):
+        for f in QUESTION_FIELDS:
+            task.pop(f, None)
+        task.update(asked)
     if a.note or changes or offered:
         text = "; ".join(x for x in [", ".join(changes), a.note] if x) or " / ".join(options)
-        note(task, text, **({"options": options} if options else {}))
+        note(task, text, **asked)
     save(task)
     print(f"{task['id']}: {task['status']}")
     # A merged task that the PM dispatched is cleaned up at once; its worker, worktree and branch have no further use.
@@ -657,10 +690,15 @@ def worker_placement():
     return ["--parent", PANE[3:], "--outlive-parent", "--no-notify"] if PANE.startswith("hc:") else ["--no-parent"]
 
 
+def worktree_home(repo):
+    """Where a project's worktrees are made in the desktop app."""
+    return Path.home() / ".herdr" / "worktrees" / Path(repo).name
+
+
 def dispatch_hc(a, repo, brief):
     """Dispatch from a PM in the herdr desktop app: a git worktree and a herdr-core terminal for the worker."""
     base = a.base or base_branch(repo)
-    path = Path.home() / ".herdr" / "worktrees" / Path(repo).name / a.branch.replace("/", "-")
+    path = worktree_home(repo) / a.branch.replace("/", "-")
     if path.exists():
         sys.exit(f"{path} already exists")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -912,7 +950,8 @@ def cmd_hook_turn(a):
         # The agent's Stop hook carries the final message of the turn (Claude Code and Codex name it so).
         reply = (data.get("last_assistant_message") or "").strip()
         if repo and reply:
-            record(repo, "pm", text=reply)
+            # `by`: which session spoke, so the project view can tell this PM's ledger entries from a worker's.
+            record(repo, "pm", text=reply, **({"by": PANE} if PANE else {}))
     turn_log(f"{event}: turn")
 
 
@@ -1279,7 +1318,9 @@ def dash_state():
                     "agent": rec.get("agent", ""),
                     # The project's conversation log; read-only here, so its folder is not created.
                     "conversation": str(PROJECTS / project_slug(rec["repo"]) / "conversation.jsonl")
-                    if rec.get("repo") else ""})
+                    if rec.get("repo") else "",
+                    # Sessions under either folder work in this project (the project view lists them).
+                    "worktrees": str(worktree_home(rec["repo"])) if rec.get("repo") else ""})
 
     def owner_pm(t):
         repo = str(Path(t["repo"]).resolve())
@@ -1399,13 +1440,17 @@ def main():
     for f in ("owner", "workspace", "pane", "agent", "branch", "worktree", "base", "brief", "slug", "note"):
         n.add_argument(f"--{f}")
     n.add_argument("--option", action="append", metavar="TEXT",
-                   help="a quick answer the user can pick in the project view (repeat for more; with --status blocked)")
+                   help="an answer the user can pick in the project view (repeat for more; with --status blocked)")
+    n.add_argument("--why", action=Why, metavar="TEXT", help="one line that explains the --option right before it")
+    n.add_argument("--recommend", action="store_true", help="the first --option is the one you recommend")
     u = sub.add_parser("update")
     u.add_argument("id")
     for f in FIELDS + ["note"]:
         u.add_argument(f"--{f}", choices=ACTIVE + CLOSED if f == "status" else None)
     u.add_argument("--option", action="append", metavar="TEXT",
-                   help="a quick answer the user can pick in the project view (repeat for more; with --status blocked)")
+                   help="an answer the user can pick in the project view (repeat for more; with --status blocked)")
+    u.add_argument("--why", action=Why, metavar="TEXT", help="one line that explains the --option right before it")
+    u.add_argument("--recommend", action="store_true", help="the first --option is the one you recommend")
     u.add_argument("--keep", action="store_true",
                    help="with --status merged: keep the worker, worktree and branch (no automatic retire)")
     l = sub.add_parser("log")

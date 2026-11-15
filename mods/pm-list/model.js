@@ -74,11 +74,22 @@ export function track(changed, rows, now) {
 
 export const HEADER = 30, ROW = 30, COMPACT_ROW = 28, PAD = 6, MAX_ROWS = 6;
 // The block's height in px: the header alone with no PM, at most MAX_ROWS rows
-// (the rest scroll). The rail keeps a sliver so the block still gets its width.
-export function listHeight(count, compact) {
+// (the rest scroll). The rail keeps a sliver so the block still gets its width,
+// and so does a list without its header (see underNav) while it has no PM.
+export function listHeight(count, compact, header = true) {
   const rows = Math.min(count, MAX_ROWS);
   if (compact) return rows * COMPACT_ROW + PAD * 2;
-  return HEADER + (rows ? rows * ROW + PAD : 0);
+  return (header ? HEADER : 0) + (rows ? rows * ROW + PAD : header ? 0 : PAD);
+}
+
+// True when the list's block comes right after pm-nav's in the same column: the PM title and the
+// board entry are then its heading, and the list draws no "PM n" header of its own.
+export function underNav(tree) {
+  const mod = node => node?.content?.mod;
+  const kids = Array.isArray(tree?.children) ? tree.children : [];
+  const at = kids.findIndex(kid => mod(kid) === 'pm-list');
+  if (at >= 0) return at > 0 && mod(kids[at - 1]) === 'pm-nav';
+  return kids.some(kid => underNav(kid));
 }
 
 // Copies of pm-dash/model.js (a mod cannot import from another mod's folder);

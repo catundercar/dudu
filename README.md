@@ -44,7 +44,7 @@ The hooks are `SessionStart`, which tells a new session whether the project has 
 
 Codex runs a new hook only after you trust it: it asks when it next starts. Hooks also need the `hooks` feature, which is on by default (`codex features list` shows it; `[features]` in `~/.codex/config.toml` can turn it off). The installer does not edit `config.toml`.
 
-With `./install.sh`, if `~/.config/herdr-app` exists, the installer also copies `pm-dash`, `pm-nav`, `pm-list`, `pm-toast` and `pm-project` into its `mods/` directory and creates `layouts/pm.json` from `layouts/main.json`. The original layout is unchanged. An existing PM layout containing `pm-nav` is kept; if it has no `pm-list` block yet, the installer adds only that block (right above `agents`, after saving the first `pm.json.pm-backup`), and likewise adds a missing `pm-project` block to the `pm-stage` stack; it leaves your other edits alone. Before replacing another existing `pm.json`, the installer saves the first `pm.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
+With `./install.sh`, if `~/.config/herdr-app` exists, the installer also copies `pm-dash`, `pm-nav`, `pm-list`, `pm-toast` and `pm-project` into its `mods/` directory and creates `layouts/pm.json` from `layouts/main.json`. The original layout is unchanged. An existing PM layout containing `pm-nav` is kept; if it has no `pm-list` block yet, the installer adds only that block (right under `pm-nav`, after saving the first `pm.json.pm-backup`); a `pm-list` block that is still right above `agents`, where earlier versions put it, stays there and the installer prints how to move it; and likewise adds a missing `pm-project` block to the `pm-stage` stack; it leaves your other edits alone. Before replacing another existing `pm.json`, the installer saves the first `pm.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
 
 ```bash
 ./install.sh --desktop          # Install desktop mods even before its config directory exists
@@ -73,7 +73,7 @@ Restart running agent sessions to load the skill and hooks.
 
 ## Add it from herdr.dev
 
-This repository is also a Herdr layout: `layouts/pm.json` plus the `pm-nav`, `pm-list`, `pm-toast`, `pm-dash` and `pm-project` mods. The sidebar has the PM entry on top, then spaces, then a **PM** list (each project's PM with its live status and age; click to open the project), then agents. A project opens as one conversation with its coordinator: what you said, the PM's replies, and each task as a thread card in the place it started, showing what it is now; a thread opens in a side panel with its log, terminal and changes. Read [RECIPE.md](RECIPE.md) for its behavior, dependencies, and rebuild instructions. A public GitHub repository with the `herdr-layout` topic can appear in the [Herdr layout directory](https://herdr.dev/layouts).
+This repository is also a Herdr layout: `layouts/pm.json` plus the `pm-nav`, `pm-list`, `pm-toast`, `pm-dash` and `pm-project` mods. The sidebar has the PM entry on top with the PMs right under it (each project's PM with its live status and age; click to open the project), then spaces, then agents. A project opens as one conversation with its coordinator: what you said, the PM's replies, each task as a thread line in the place it started, showing what it is now, and the PM's questions as cards with answers to pick; the side panel lists the project's open tasks, the sessions working in it and what ended last, and shows a thread's log, terminal and changes when you open one. Read [RECIPE.md](RECIPE.md) for its behavior, dependencies, and rebuild instructions. A public GitHub repository with the `herdr-layout` topic can appear in the [Herdr layout directory](https://herdr.dev/layouts).
 
 Open **Board** and click **Set up** to copy the bundled skill into every coding agent found and add their hooks. Before setup, the board shows a centered setup block and the sidebar says **Set up**; status checks do not write files. Success shows a reminder to restart your coding agent sessions and say “act as PM for this project”, then displays the board. Errors stay visible with a retryable button. If any installed `pm.py` differs from the bundle, the normal board shows a quiet **Update** action using the same installer. Setup is checked at startup and after the action, not on the ledger polling timer.
 
@@ -192,7 +192,7 @@ Use these steps when automatic layout generation is skipped. Paths below are rel
    {"id":"pm-nav","type":"block","size":{"px":64},"content":{"mod":"pm-nav"}}
    ```
 
-   Insert this one right before the `agents` block (the mod resizes it to fit its PMs):
+   Insert this one right after it (the mod resizes it to fit its PMs):
 
    ```json
    {"id":"pm-list","type":"block","size":{"px":30},"content":{"mod":"pm-list"}}
@@ -235,8 +235,8 @@ Requests and reports are welcome in the issues.
 - `mods/pm-dash/` — desktop project/task board, including `setup.py` for per-agent skill/hooks installation and read-only status.
 - `mods/pm-dash/skill/` — the single bundled PM playbook, ledger CLI, and browser dashboard.
 - `mods/pm-nav/` — desktop sidebar entry and summary; returns to work when you navigate away from the board.
-- `mods/pm-list/` — sidebar PM list above Agents: each PM's live status and age; a click opens its project view (a remote PM: focuses it).
-- `mods/pm-project/` — the project view: the project's conversation with its PM, tasks as thread cards, a thread panel, and a message box that sends to the PM.
+- `mods/pm-list/` — sidebar PM list under the PM entry: each PM's live status and age; a click opens its project view (a remote PM: focuses it).
+- `mods/pm-project/` — the project view: the project's conversation with its PM, tasks as thread lines, questions as cards, a side panel (the thread list, or one thread), and a message box that sends to the PM.
 - `mods/pm-toast/` — the pm layout's notification mod: Herdr's toast, minus the agent notices of agents the PM dispatched.
 - `tests/test_install.py` — installation tests using temporary directories.
 

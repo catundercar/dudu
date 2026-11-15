@@ -54,6 +54,16 @@
               }
             },
             {
+              "id": "pm-list",
+              "type": "block",
+              "size": {
+                "px": 30
+              },
+              "content": {
+                "mod": "pm-list"
+              }
+            },
+            {
               "id": "spaces",
               "type": "block",
               "size": {
@@ -62,16 +72,6 @@
               "min": 90,
               "content": {
                 "mod": "spaces"
-              }
-            },
-            {
-              "id": "pm-list",
-              "type": "block",
-              "size": {
-                "px": 30
-              },
-              "content": {
-                "mod": "pm-list"
               }
             },
             {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pmRows, pmStatus, age, lastEventAt, track, listHeight, remotePmStates, HEADER, ROW, MAX_ROWS, PAD } from './model.js';
+import { pmRows, pmStatus, age, lastEventAt, track, listHeight, underNav, remotePmStates, HEADER, ROW, MAX_ROWS, PAD } from './model.js';
 import * as list from './model.js';
 import * as dash from '../pm-dash/model.js';
 
@@ -69,6 +69,20 @@ test('the block holds the header alone, then grows per row up to a cap', () => {
   assert.equal(listHeight(MAX_ROWS + 4, false), listHeight(MAX_ROWS, false));
   assert.equal(listHeight(0, true), PAD * 2);
   assert.ok(listHeight(2, true) < listHeight(2, false));
+});
+
+test('right under pm-nav the list has no header of its own', () => {
+  const block = mod => ({ id: mod, type: 'block', content: { mod } });
+  const sidebar = (...mods) => ({ id: 'root', children: [{ id: 'sidebar', children: [{ id: 'brand' }, { id: 'lists', children: mods.map(block) }] }, { id: 'stage' }] });
+  assert.equal(underNav(sidebar('pm-nav', 'pm-list', 'spaces', 'agents')), true);
+  assert.equal(underNav(sidebar('pm-nav', 'spaces', 'pm-list', 'agents')), false);   // the earlier place: it keeps "PM n"
+  assert.equal(underNav(sidebar('pm-list', 'pm-nav')), false);
+  assert.equal(underNav(sidebar('spaces')), false);
+  assert.equal(underNav(null), false);
+  // Without the header: the rows alone, and a sliver while there is no PM.
+  assert.equal(listHeight(3, false, false), listHeight(3, false) - HEADER);
+  assert.equal(listHeight(0, false, false), PAD);
+  assert.equal(listHeight(2, true, false), listHeight(2, true));
 });
 
 test('copied ledger and terminal rules stay identical to pm-dash', () => {
