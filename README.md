@@ -44,7 +44,7 @@ The hooks are `SessionStart`, which tells a new session whether the project has 
 
 Codex runs a new hook only after you trust it: it asks when it next starts. Hooks also need the `hooks` feature, which is on by default (`codex features list` shows it; `[features]` in `~/.codex/config.toml` can turn it off). The installer does not edit `config.toml`.
 
-With `./install.sh`, if `~/.config/herdr-app` exists, the installer also copies `pm-dash`, `pm-nav`, `pm-list`, `pm-toast` and `pm-project` into its `mods/` directory and creates `layouts/pm.json` from `layouts/main.json`. The original layout is unchanged. An existing PM layout containing `pm-nav` is kept; if it has no `pm-list` block yet, the installer adds only that block (right under `pm-nav`, after saving the first `pm.json.pm-backup`); a `pm-list` block that is still right above `agents`, where earlier versions put it, stays there and the installer prints how to move it; and likewise adds a missing `pm-project` block to the `pm-stage` stack; it leaves your other edits alone. Before replacing another existing `pm.json`, the installer saves the first `pm.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
+With `./install.sh`, if `~/.config/herdr-app` exists, the installer also copies `pm-dash`, `pm-nav`, `pm-list`, `pm-toast` and `pm-project` into its `mods/` directory and creates `layouts/pm.json` from `layouts/main.json`. The original layout is unchanged. An existing PM layout containing `pm-nav` is kept; if it has no `pm-list` block yet, the installer adds only that block (right under `pm-nav`, after saving the first `pm.json.pm-backup`); a `pm-list` block that is still right above `agents`, where earlier versions put it, stays there and the installer prints how to move it; likewise adds a missing `pm-project` block to the `pm-stage` stack; and adds `"window_drag": true` to its `pm-board` and `pm-project` blocks when they have no such field, so their title bars move the window; it leaves your other edits alone. Before replacing another existing `pm.json`, the installer saves the first `pm.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
 
 ```bash
 ./install.sh --desktop          # Install desktop mods even before its config directory exists
@@ -207,11 +207,13 @@ Use these steps when automatic layout generation is skipped. Paths below are rel
      "active": "work",
      "children": [
        <original work node>,
-       {"id":"pm-board","type":"block","content":{"mod":"pm-dash"}},
-       {"id":"pm-project","type":"block","content":{"mod":"pm-project"}}
+       {"id":"pm-board","type":"block","window_drag":true,"content":{"mod":"pm-dash"}},
+       {"id":"pm-project","type":"block","window_drag":true,"content":{"mod":"pm-project"}}
      ]
    }
    ```
+
+   `window_drag` lets the blank part of each page's title bar move the window, as Herdr's own top bars do; the pages keep presses on their controls and content.
 
 4. At the root object, add `"toast": "pm-toast"` (hides the toasts of agents the PM dispatched; see [Alerts](#alerts)).
 5. Save valid JSON, then select it with `herdr-app do layout.switch '{"name":"pm"}'`.

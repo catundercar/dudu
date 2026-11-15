@@ -18,3 +18,29 @@ export function isWorkerNotice(notice, terminals) {
   if (terminal.labels?.task) return true;
   return Boolean(terminal.parent && find(terminal.parent)?.labels?.pm);
 }
+
+// A copy of pm-dash/model.js's (a mod cannot import from another mod's folder); pm-dash's
+// model.test.mjs checks that it stays identical.
+// How a click brings a terminal up. One with a pane: pane.focus, which shows its own space and tab.
+// A sub-agent without a pane (Herdr's agents list peeks those) is peeked over the tab of the nearest
+// terminal up its parent chain that has a pane and is not a retired PM, else over its project's current
+// PM (`home`): a worker that outlived a PM rotated out (closed, or still open but retired). With neither, nothing: no pane is focused and the work
+// column is not shown, since that would reveal whatever space was active — another project's.
+// agent.focus is not used: on a paneless terminal it changes no tab (t5h opened OldName).
+// `paned`: the addresses that have a pane (panes()' terminals, agents()' addresses).
+export function focusPlan(address, terms, paned, home = '') {
+  const none = { focus: '', peek: '' };
+  if (!address) return none;
+  const has = new Set(paned.filter(Boolean));
+  if (has.has(address)) return { focus: address, peek: '' };
+  const byAddress = new Map(terms.map(t => [t.address, t]));
+  // A retired PM up the chain (labeled pm.retired by `pm.py rotate`, or a PM terminal that is not the
+  // project's current one) is passed over: shown on its tab, the thread would invite talking to it.
+  const retired = t => Boolean(t?.labels?.['pm.retired'] || (home && t?.labels?.pm && t.address !== home));
+  const seen = new Set([address]);
+  for (let up = byAddress.get(address)?.parent; up && !seen.has(up); up = byAddress.get(up)?.parent) {
+    if (has.has(up) && !retired(byAddress.get(up))) return { focus: up, peek: address };
+    seen.add(up);
+  }
+  return home && has.has(home) ? { focus: home, peek: address } : none;
+}

@@ -208,6 +208,7 @@
         {
           "id": "pm-board",
           "type": "block",
+          "window_drag": true,
           "content": {
             "mod": "pm-dash"
           }
@@ -215,6 +216,7 @@
         {
           "id": "pm-project",
           "type": "block",
+          "window_drag": true,
           "content": {
             "mod": "pm-project"
           }

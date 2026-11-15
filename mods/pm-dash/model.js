@@ -1,7 +1,9 @@
 const STRINGS = {
   en: {
     in_progress: 'In progress', working: 'Working', blocked: 'Blocked', review: 'Review',
+    reviewed: 'Reviewed',
     idle: 'Idle', done: 'Done', offline: 'Offline', pending: 'Pending', cancelled: 'Cancelled', unknown: 'Unknown',
+    disconnected: 'Disconnected',
     paused: 'Paused', proposed: 'Proposed', merged: 'Merged', released: 'Released', abandoned: 'Abandoned',
     cleanup: 'Merged · not retired',
     noPm: 'No PM', unassigned: 'Unassigned project',
@@ -12,7 +14,7 @@ const STRINGS = {
     nothingWaiting: 'Nothing waiting', notDesktop: 'Not in desktop', inDesktop: 'In desktop', localMachine: 'Local',
     pmProjectFallback: "PM session is not in the desktop app. Click opens the project's space.",
     pmDesktopMissing: 'PM session is not in the desktop app. Start it there and run pm.py claim.',
-    blockedWaiting: 'Blocked · Waiting for you', workingNow: 'Working…',
+    blockedWaiting: 'Blocked · Waiting for you', answered: 'Answered', workingNow: 'Working…',
     task: 'Task', projects: 'Project PMs', tasks: 'Tasks', running: 'Running',
     recent: 'Recent activity', replay: 'Replay · ', noEvents: 'No new records yet.', idleReplay: 'Idle replay',
     noLogs: 'No logs yet', openTerminal: 'Click to open its terminal', board: 'Board', readError: 'Could not read ledger. Retrying soon',
@@ -26,10 +28,37 @@ const STRINGS = {
     summaryLead: (p, r) => `${p} ${p === 1 ? 'project' : 'projects'} · ${r} ${r === 1 ? 'task' : 'tasks'} running ·`,
     summaryWaiting: w => `${w} ${w === 1 ? 'item' : 'items'} waiting`,
     summary: (p, r, w) => `${p} ${p === 1 ? 'project' : 'projects'} · ${r} ${r === 1 ? 'task' : 'tasks'} running · ${w} ${w === 1 ? 'item' : 'items'} waiting`,
+
+    // The Projects page, the project board and their dialogs. "Projects" is a name, in every language.
+    projectsTitle: 'Projects', listView: 'List', boardView: 'Board', chatView: 'Conversation',
+    pageSummary: (p, r, w) => `${p} ${p === 1 ? 'project' : 'projects'} · ${r} ${r === 1 ? 'thread' : 'threads'} working · ${w} waiting for you`,
+    count_waiting: n => `Needs you ${n}`, count_working: n => `In progress ${n}`, count_review: n => `Review ${n}`,
+    count_proposed: n => `Not started ${n}`, count_merged_today: n => `Merged ${n}`,
+    noOpen: 'No threads in progress', idlePm: 'The PM is idle; nothing is open.', noProjects: 'No projects yet. Start one with +.',
+    archivedN: n => `Archived ${n}`, archivedTitle: 'Archived', backToProjects: 'Projects',
+    archivedSummary: n => `${n} ${n === 1 ? 'project' : 'projects'} · restoring starts a new PM that takes over from the handover`,
+    pausedLine: (n, titles) => `Paused ${n}: ${titles}`, nothingPaused: 'Nothing was open', archivedOn: day => `archived ${day}`,
+    restore: 'Restore', openProject: 'Open project', archiveProject: 'Archive project', newProject: 'New project',
+    remoteProject: 'On another machine: archive it there',
+    archiveTitle: name => `Archive ${name}?`, archiveLead: 'The PM session closes, and these threads are marked paused and stop reminding you:',
+    archiveNone: 'The PM session closes. No threads are open.',
+    archiveKeep: 'The conversation, the ledger and the decisions you made all stay. On restore a new PM takes over from the handover.',
+    cancel: 'Cancel', archive: 'Archive', thread_blocked: 'Needs you', thread_in_progress: 'In progress',
+    thread_review: 'Review', thread_proposed: 'Not started',
+    folder: 'Folder', chooseFolder: 'Choose a folder…', name: 'Name', manager: 'Manager', place: 'Where',
+    newSpace: name => `New space “${name}”`, currentSpace: name => `Current space “${name}”`,
+    placeHint: 'The PM starts in this space and the project view opens.', create: 'Create · ⌘↵', creating: 'Starting the PM…',
+    ledgerOpen: (name, n, titles) => `The ledger already has ${n} open ${n === 1 ? 'item' : 'items'} for ${name} (${titles}); the new PM takes ${n === 1 ? 'it' : 'them'} over.`,
+    failedAction: text => `Failed: ${text}`,
+    endedCount: n => `Ended ${n}`, endedRecent: titles => `Latest: ${titles}`, endedMore: n => `Click to see all ${n}`,
+    showDropped: n => `Show ${n} abandoned`, hideDropped: n => `Hide ${n} abandoned`,
+    today: 'Today', yesterday: day => `Yesterday · ${day}`, earlier: 'Earlier',
   },
   zh: {
     in_progress: '进行中', working: '工作中', blocked: '阻塞', review: '待审',
+    reviewed: '审查有结果',
     idle: '空闲', done: '完成', offline: '离线', pending: '待办', cancelled: '取消', unknown: '未知',
+    disconnected: '已断开',
     paused: '暂停', proposed: '提议', merged: '已合并', released: '已发布', abandoned: '放弃',
     cleanup: '已合并 · 待回收',
     noPm: '无 PM', unassigned: '未分配项目',
@@ -40,7 +69,7 @@ const STRINGS = {
     nothingWaiting: '没有等你的事', notDesktop: '不在 desktop', inDesktop: '在 desktop', localMachine: '本机',
     pmProjectFallback: 'PM 会话不在 desktop 里，点击打开该项目的空间。',
     pmDesktopMissing: 'PM 会话不在 desktop 里。在 desktop 里启动后运行 pm.py claim。',
-    blockedWaiting: '阻塞 · 等你', workingNow: '工作中…',
+    blockedWaiting: '阻塞 · 等你', answered: '已回答', workingNow: '工作中…',
     task: '任务', projects: '项目 PM', tasks: '任务', running: '在跑',
     recent: '最近发生了什么', replay: '回放 · ', noEvents: '还没有新的记录。', idleReplay: '空闲回放',
     noLogs: '暂无日志', openTerminal: '点击跳到该终端', board: '看 板', readError: '台账读取失败，稍后重试',
@@ -54,6 +83,30 @@ const STRINGS = {
     summaryLead: (p, r) => `${p} 个项目 · ${r} 个任务在跑 ·`,
     summaryWaiting: w => `${w} 件事等你`,
     summary: (p, r, w) => `${p} 个项目 · ${r} 个任务在跑 · ${w} 件事等你`,
+
+    projectsTitle: 'Projects', listView: '列表', boardView: '看板', chatView: '对话',
+    pageSummary: (p, r, w) => `${p} 个项目 · ${r} 个线程在做 · ${w} 件等你`,
+    count_waiting: n => `等你 ${n}`, count_working: n => `进行中 ${n}`, count_review: n => `待审 ${n}`,
+    count_proposed: n => `未开始 ${n}`, count_merged_today: n => `已合并 ${n}`,
+    noOpen: '没有进行中的线程', idlePm: 'PM 空闲，没有在办的事。', noProjects: '还没有项目。点 + 新建一个。',
+    archivedN: n => `已归档 ${n}`, archivedTitle: '已归档', backToProjects: 'Projects',
+    archivedSummary: n => `${n} 个项目 · 恢复后 PM 重新启动，从交接记录接手`,
+    pausedLine: (n, titles) => `暂停 ${n}：${titles}`, nothingPaused: '归档时没有在办的事', archivedOn: day => `${day} 归档`,
+    restore: '恢复', openProject: '打开项目', archiveProject: '归档项目', newProject: '新建项目',
+    remoteProject: '在另一台机器上，到那里归档',
+    archiveTitle: name => `归档 ${name}?`, archiveLead: 'PM 会话会关掉，下面这些线程标成暂停，不再提醒你：',
+    archiveNone: 'PM 会话会关掉。现在没有在办的线程。',
+    archiveKeep: '对话、台账和你做过的决定都留着。恢复时新 PM 从交接记录接手。',
+    cancel: '取消', archive: '归档', thread_blocked: '等你', thread_in_progress: '进行中',
+    thread_review: '待审', thread_proposed: '未开始',
+    folder: '文件夹', chooseFolder: '选择文件夹…', name: '名称', manager: '管理者', place: '放在哪',
+    newSpace: name => `新开 space「${name}」`, currentSpace: name => `放进当前 space「${name}」`,
+    placeHint: 'PM 在这个 space 里启动，项目视图直接打开。', create: '创建 · ⌘↵', creating: '正在启动 PM…',
+    ledgerOpen: (name, n, titles) => `台账里已有 ${name} 的 ${n} 件没结束的事（${titles}），新 PM 会接着管。`,
+    failedAction: text => `没有成功：${text}`,
+    endedCount: n => `已结束 ${n}`, endedRecent: titles => `最近：${titles}`, endedMore: n => `点开看全部 ${n} 条`,
+    showDropped: n => `显示放弃的 ${n} 条`, hideDropped: n => `隐藏放弃的 ${n} 条`,
+    today: '今天', yesterday: day => `昨天 · ${day}`, earlier: '更早',
   },
 };
 export function word(lang, key, ...args) {
@@ -93,9 +146,14 @@ export function pmStatusText(lang, row) {
   return [label(lang, row.live), row.agent].filter(Boolean).join(' · ');
 }
 
+// A task in progress whose terminal is gone (`pm.py state`: offline) is no work going on.
+export const disconnected = row => Boolean(row?.offline) && row.status === 'in_progress';
+
 export function taskStatusText(lang, row) {
   if (row.cleanup) return word(lang, 'cleanup');
-  if (row.status === 'blocked') return word(lang, 'blockedWaiting');
+  if (disconnected(row)) return word(lang, 'disconnected');
+  // Answered (pm.py's `answered`): it waits for the PM now, not for the user.
+  if (row.status === 'blocked') return word(lang, row.answered ? 'answered' : 'blockedWaiting');
   if (['review', 'paused', 'proposed', 'done', 'merged', 'released', 'abandoned', 'cancelled'].includes(row.status)) return label(lang, row.status);
   return row.live === 'working' ? word(lang, 'workingNow') : label(lang, row.status);
 }
@@ -143,11 +201,17 @@ export function mergeStates(local, remote = {}) {
   for (const [machine, state] of [['', local], ...Object.entries(remote).filter(([name]) => name)]) {
     if (!state || !['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) continue;
     const key = value => machine ? `${machine}/${value || ''}` : value || '';
+    // A review thread is shown as the task it reviews (foldReviews): its reports reach that task, as what
+    // the review says, never as the task's own status (a review's done is not the task's).
+    const tasks = foldReviews(state.tasks);
+    const into = new Map(tasks.filter(t => t.review).map(t => [t.review.id, t.id]));
+    const asReview = e => !into.has(e.task) ? e : { ...e, status: '', review: e.status && e.status !== 'in_progress' ? 'reviewed' : 'review',
+      text: String(e.text || '').replace(/^status=\w+;?\s*/, '') };
     merged.pms.push(...state.pms.map(p => ({ ...p, machine, sourceName: p.name, name: key(p.name) })));
-    merged.tasks.push(...state.tasks.map(t => ({ ...t, machine, sourceId: t.id, sourcePm: t.pm,
+    merged.tasks.push(...tasks.map(t => ({ ...t, machine, sourceId: t.id, sourcePm: t.pm,
       id: key(t.id), pm: key(t.pm) })));
-    merged.events.push(...state.events.map(e => ({ ...e, machine, key: key(e.key),
-      pm: key(e.pm), task: e.task ? key(e.task) : '' })));
+    merged.events.push(...state.events.map(asReview).map(e => ({ ...e, machine, key: key(e.key),
+      pm: key(e.pm), task: e.task ? key(into.get(e.task) || e.task) : '' })));
   }
   merged.events.sort((a, b) => (Date.parse((a.at || '').replace(' ', 'T')) || 0) -
     (Date.parse((b.at || '').replace(' ', 'T')) || 0));
@@ -165,22 +229,83 @@ export function boardFrame(width) {
   return { width: w, inset, wide, feedWidth, gap, graphWidth: w - inset * 2 - feedWidth - gap };
 }
 
-export function fitBoard(state, width, height, fixedHeight) {
+// `view`: the board's own state, by PM name: which ended lists are open (`open`), which show their
+// abandoned tasks (`dropped`), and today ("YYYY-MM-DD") for their day headings.
+export function fitBoard(state, width, height, fixedHeight, view = {}) {
   const frame = boardFrame(width);
-  const natural = layout(state, frame.graphWidth, height, 1, frame.wide);
+  // The scale follows the folded board: an opened ended list adds height that scrolls.
+  const folded = layout(state, frame.graphWidth, height, 1, frame.wide, { ...view, open: [] });
   const fixed = fixedHeight ?? (frame.wide ? 160 : 210 + Math.min(5, state.events.length) * 30);
-  const scale = Math.max(.6, Math.min(1, (height - fixed) / natural.height));
-  return { ...(scale === 1 ? natural : layout(state, frame.graphWidth, height, scale, frame.wide)), frame, scale };
+  const scale = Math.max(.6, Math.min(1, (height - fixed) / folded.height));
+  const same = scale === 1 && !view.open?.length;
+  return { ...(same ? folded : layout(state, frame.graphWidth, height, scale, frame.wide, view)), frame, scale };
 }
 
-// Urgency tiers are deliberately equal for blocked/review; stable sort keeps
-// the ledger order within each tier. Filtering first leaves the source untouched.
-const urgency = task => ['blocked', 'review'].includes(task.status) ? 0 : task.status === 'in_progress' ? 1 : 2;
+// ---- Bundles: one PM's tasks on the board ---------------------------------------
 
-export function layout(state, width = 980, _height = 640, scale = 1, wide = width >= 1300) {
-  const w = Math.max(560, width), rows = [], wires = [], taskGroups = [];
-  const you = { id: 'you', title: 'dudu', x: 0, y: 0, w: wide ? 176 : 148, h: 148 };
-  rows.push(you);
+// Active tasks bundle by status, the one waiting for the user first; an unknown status (or none)
+// follows in a bundle of its own. Ended tasks fold into one node; abandoned ones (and cancelled)
+// hide behind it.
+export const BUNDLES = ['blocked', 'review', 'in_progress', 'proposed', 'paused'];
+export const ENDED = ['done', 'merged', 'released'];
+export const DROPPED = ['abandoned', 'cancelled'];
+const newestFirst = (a, b) => String(b.updated || '').localeCompare(String(a.updated || ''));
+const bundleRank = status => BUNDLES.includes(status) ? BUNDLES.indexOf(status) : BUNDLES.length;
+
+// Stable throughout: ledger order within a bundle, and among ended tasks of the same minute.
+export function boardGroups(tasks) {
+  const bundles = [], ended = [], dropped = [];
+  for (const task of tasks) {
+    if (ENDED.includes(task.status)) ended.push(task);
+    else if (DROPPED.includes(task.status)) dropped.push(task);
+    else {
+      const status = task.status || '';
+      let bundle = bundles.find(b => b.status === status);
+      if (!bundle) bundles.push(bundle = { status, tasks: [] });
+      bundle.tasks.push(task);
+    }
+  }
+  bundles.sort((a, b) => bundleRank(a.status) - bundleRank(b.status));
+  return { bundles, ended: ended.sort(newestFirst), dropped: dropped.sort(newestFirst) };
+}
+// What an opened ended list shows: the ended tasks, and the abandoned ones only when asked.
+export const endedList = ({ ended, dropped }, showDropped) =>
+  showDropped ? [...ended, ...dropped].sort(newestFirst) : ended;
+
+export const bundleLabel = (lang, status) =>
+  ['blocked', 'review', 'in_progress', 'proposed'].includes(status) ? word(lang, `thread_${status}`) : label(lang, status);
+
+const DAY = /^\d{4}-\d{2}-\d{2}/;
+export function previousDay(day) {
+  if (!DAY.test(String(day || ''))) return '';
+  const [y, m, d] = day.slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+}
+// A newest-first list cut into days: today, yesterday, then each older date; the undated last.
+export function endedDays(tasks, today, lang) {
+  const days = [];
+  for (const task of tasks) {
+    const key = DAY.exec(String(task.updated || ''))?.[0] || '';
+    if (days.at(-1)?.key !== key) days.push({ key, tasks: [], title: !key ? word(lang, 'earlier') :
+      key === today ? word(lang, 'today') : key === previousDay(today) ? word(lang, 'yesterday', key.slice(5)) : key.slice(5) });
+    days.at(-1).tasks.push(task);
+  }
+  return days;
+}
+// "HH:MM" on `day`, else "MM-DD HH:MM", from the ledger's "YYYY-MM-DD HH:MM".
+export function endedTime(updated, day) {
+  const text = String(updated || '');
+  if (!DAY.test(text)) return '';
+  return day && text.startsWith(day) ? text.slice(11, 16) : text.slice(5, 16);
+}
+
+export function layout(state, width = 980, _height = 640, scale = 1, wide = width >= 1300, view = {}) {
+  const w = Math.max(560, width), rows = [], wires = [], guides = [], links = [], routes = {};
+  const open = view.open || [], showDropped = view.dropped || [];
+  // A board scoped to one project (scopeState) starts at its PM: there is no hub to wire from.
+  const hub = !state.project;
+  const you = { id: 'you', title: 'dudu', x: 0, y: 0, w: hub ? (wide ? 176 : 148) : 0, h: hub ? 148 : 0 };
+  if (hub) rows.push(you);
   const groups = [...state.pms];
   for (const task of state.tasks) {
     if (!groups.some(p => (p.name || '') === (task.pm || ''))) groups.push({ name: task.pm || '',
@@ -188,9 +313,12 @@ export function layout(state, width = 980, _height = 640, scale = 1, wide = widt
   }
   const fit = Math.min(1, (w - 560) / 420);
   const pw = wide ? 260 : 168 + Math.round(46 * fit);
-  const px = you.w + (wide ? 150 : 20 + Math.round(64 * fit));
-  const tx = px + pw + (wide ? 84 : 20 + Math.round(24 * fit));
-  const rowHeight = wide ? 36 : 32, laneGap = wide ? 14 : 10;
+  const px = hub ? you.w + (wide ? 150 : 20 + Math.round(64 * fit)) : 0;
+  // Room between the PMs and the tasks: each bundle's trunk, then its fork into the rows.
+  const reach = hub ? (wide ? 120 : 32 + Math.round(52 * fit)) : (wide ? 200 : 56 + Math.round(104 * fit));
+  const tx = px + pw + reach, fork = tx - Math.min(44, Math.round(reach * .4));
+  const rowHeight = wide ? 36 : 32, rowGap = 4, labelHeight = 18, bundleGap = 10, laneGap = wide ? 14 : 10;
+  const endedHeight = rowHeight + 6, entryHeight = 26, dayHeight = 20;
   const machines = [...new Set(groups.map(p => p.machine || ''))].map((machine, i) => ({
     machine, number: i + 1, title: machine || word(state.lang, 'localMachine'),
   }));
@@ -207,36 +335,93 @@ export function layout(state, width = 980, _height = 640, scale = 1, wide = widt
   const bodyTop = Math.max(28, chipY + 26);
   let y = bodyTop;
   for (const p of groups) {
-    const tasks = state.tasks.filter(t => (t.pm || '') === (p.name || '')).sort((a, b) => urgency(a) - urgency(b));
-    const span = Math.max(48, tasks.length * rowHeight);
+    const pm = p.name || '', base = { pm, machine: p.machine };
+    const parts = boardGroups(state.tasks.filter(t => (t.pm || '') === pm));
     const latest = [...state.events].reverse().find(e => e.pm === p.name);
-    rows.push({ ...p, id: pmId(p.name), type: 'pm', title: p.project || (p.sourceName ?? p.name) || word(state.lang, 'noPm'),
+    const pmRow = { ...p, id: pmId(p.name), type: 'pm', title: p.project || (p.sourceName ?? p.name) || word(state.lang, 'noPm'),
       machineNumber: machines.length > 1 ? machines.find(m => m.machine === (p.machine || '')).number : null,
-      latest: eventText(latest, state.lang), x: px, y: y + (span - 48) / 2, w: pw, h: 48 });
-    const top = y + (span - tasks.length * rowHeight) / 2;
-    if (tasks.length) taskGroups.push({ id: `group:${p.name || ''}`, pm: p.name || '', x: tx, y: top,
-      w: w - tx, h: tasks.length * rowHeight });
-    tasks.forEach((t, i) => rows.push({ ...t, task: t.id, id: taskId(t.id), type: 'task',
-      first: i === 0, x: tx, y: top + i * rowHeight, w: w - tx, h: rowHeight }));
-    y += span + laneGap;
+      latest: eventText(latest, state.lang), x: px, y, w: pw, h: 48 };
+    rows.push(pmRow);
+    const top = y, anchors = [], link = (id, from, to, extra) => links.push({ id, owner: pmRow, from, to, ...extra });
+    let bottom = y;
+    for (const bundle of parts.bundles) {
+      rows.push({ ...base, id: `label:${pm}:${bundle.status}`, type: 'label', status: bundle.status,
+        title: bundleLabel(state.lang, bundle.status), count: bundle.tasks.length, x: tx + 2, y, w: w - tx - 2, h: labelHeight });
+      y += labelHeight + 4;
+      const members = bundle.tasks.map((t, i) => {
+        const row = { ...t, task: t.id, id: taskId(t.id), type: 'task', first: i === 0, x: tx, y, w: w - tx, h: rowHeight };
+        rows.push(row); y += rowHeight + rowGap;
+        return row;
+      });
+      bottom = y - rowGap; y = bottom + bundleGap + 4;
+      anchors.push(members[0].y + rowHeight / 2, members.at(-1).y + rowHeight / 2);
+      if (members.length === 1) {
+        link(members[0].id, pmRow, members[0]);
+        routes[members[0].id] = [members[0].id];
+        continue;
+      }
+      // One trunk from the PM to the bundle's fork, then a branch to each of its tasks.
+      const middle = (members[0].y + members.at(-1).y + rowHeight) / 2, trunk = `trunk:${pm}:${bundle.status}`;
+      const junction = { ...base, id: `junction:${pm}:${bundle.status}`, type: 'junction', status: bundle.status,
+        members: members.map(r => r.id), x: fork - 3, y: middle - 3, w: 6, h: 6 };
+      rows.push(junction);
+      link(trunk, pmRow, junction, { members: junction.members });
+      for (const row of members) {
+        link(row.id, junction, row, { trunk });
+        routes[row.id] = [trunk, row.id];
+      }
+    }
+    if (parts.ended.length || parts.dropped.length) {
+      const expanded = open.includes(pm), showing = showDropped.includes(pm);
+      // One static line for all of them. "Ended N" never counts the abandoned ones.
+      const node = { ...base, id: `ended:${pm}`, type: 'ended', count: parts.ended.length, dropped: parts.dropped.length,
+        open: expanded, showDropped: showing, recent: parts.ended.slice(0, 3).map(t => t.title || t.sourceId || t.id),
+        peek: parts.ended.slice(0, 6), x: tx, y, w: w - tx, h: endedHeight };
+      rows.push(node);
+      link(node.id, pmRow, node, { ended: true });
+      for (const t of [...parts.ended, ...parts.dropped]) routes[taskId(t.id)] = [node.id];
+      anchors.push(y + endedHeight / 2);
+      y += endedHeight; bottom = y;
+      const list = expanded ? endedList(parts, showing) : [];
+      if (list.length) {
+        // Opened in place under the node, by day, along one straight guide (not a wire per task).
+        y += 8;
+        for (const day of endedDays(list, view.today, state.lang)) {
+          rows.push({ ...base, id: `day:${pm}:${day.key}`, type: 'day', title: day.title, x: tx + 34, y, w: w - tx - 34, h: dayHeight });
+          y += dayHeight + 2;
+          for (const t of day.tasks) {
+            rows.push({ ...t, task: t.id, id: taskId(t.id), type: 'task', entry: true, time: endedTime(t.updated, day.key),
+              x: tx + 26, y, w: w - tx - 26, h: entryHeight });
+            y += entryHeight + 1;
+          }
+        }
+        bottom = y - 1;
+        guides.push({ ...base, id: `guide:${pm}`, x: tx + 18, y: node.y + endedHeight,
+          h: bottom - entryHeight / 2 - node.y - endedHeight });
+      }
+    }
+    // The PM sits at the middle of its folded rows; an opened list grows below without moving it.
+    const middle = anchors.length ? (anchors[0] + anchors.at(-1)) / 2 : top + 24;
+    pmRow.y = Math.max(top, middle - 24);
+    y = Math.max(bottom, pmRow.y + pmRow.h) + laneGap;
   }
   const bodyBottom = Math.max(bodyTop + you.h, y - (groups.length ? laneGap : 0));
   const height = bodyBottom + 32;
   you.y = bodyTop + (bodyBottom - bodyTop - you.h) / 2;
   // Keep column positions/widths; only the hub's own width scales. Build
   // wires from these same rows so static curves and moving packets agree.
-  for (const row of [...rows, ...taskGroups]) { row.y *= scale; row.h *= scale; }
+  for (const row of [...rows, ...guides]) { row.y *= scale; row.h *= scale; }
   you.w *= scale;
-  const wire = (id, from, to, pm) => {
+  const wire = (id, from, to, pm, extra) => {
     const a = [from.x + from.w, from.y + from.h / 2], b = [to.x, to.y + to.h / 2];
     const mx = (a[0] + b[0]) / 2;
-    wires.push({ id, pm, from: from.id, to: to.id, points: [a, [mx, a[1]], [mx, b[1]], b], straight: a[1] === b[1] });
+    wires.push({ id, pm, from: from.id, to: to.id, points: [a, [mx, a[1]], [mx, b[1]], b], straight: a[1] === b[1], ...extra });
   };
   for (const pm of rows.filter(r => r.type === 'pm')) {
-    wire(pm.id, you, pm, pm.name || '');
-    for (const task of rows.filter(r => r.type === 'task' && (r.pm || '') === (pm.name || ''))) wire(task.id, pm, task, pm.name || '');
+    if (hub) wire(pm.id, you, pm, pm.name || '');
+    for (const { id, owner, from, to, ...extra } of links) if (owner === pm) wire(id, from, to, pm.name || '', extra);
   }
-  return { rows, wires, taskGroups, machines, pmX: px, taskX: tx,
+  return { rows, wires, guides, routes, machines, pmX: px, taskX: tx,
     bodyTop: bodyTop * scale, bodyBottom: bodyBottom * scale, width: w, height: height * scale };
 }
 
@@ -280,11 +465,13 @@ export function pmColor(name) {
 export function counts(state) {
   const review = state.tasks.filter(t => t.status === 'review').length;
   const blocked = state.tasks.filter(t => t.status === 'blocked').length;
+  // A blocked task the user has answered (pm.py's `answered`) waits for the PM, not for the user.
+  const asking = state.tasks.filter(t => t.status === 'blocked' && !t.answered);
   const running = state.tasks.filter(t => t.status === 'in_progress' && t.worker === 'working').length;
   // Only blocked work waits for the user; review is the PM's job.
-  const waiting = blocked;
+  const waiting = asking.length;
   const groups = new Map();
-  for (const task of state.tasks.filter(t => t.status === 'blocked')) {
+  for (const task of asking) {
     const pm = state.pms.find(p => p.name === task.pm);
     const name = pm?.project || (pm?.sourceName ?? pm?.name) || task.project || word(state.lang, 'unassigned');
     const key = JSON.stringify([task.machine || '', pm?.name || name]);
@@ -308,9 +495,11 @@ export function pointAt(points, u) {
   const v = 1 - u, c = [v*v*v, 3*v*v*u, 3*v*u*u, u*u*u];
   return { x: points.reduce((s,p,i) => s + c[i]*p[0], 0), y: points.reduce((s,p,i) => s + c[i]*p[1], 0) };
 }
+// A retired PM's terminal (`pm.py rotate` labels it pm.retired=<project>) is nobody's: not the
+// project's PM, and not the terminal of a task that was parked on it.
 function liveTerminalsFor(row, terms) {
   const machine = row.machine || '';
-  return terms.filter(t => t.state === 'live' &&
+  return terms.filter(t => t.state === 'live' && !t.labels?.['pm.retired'] &&
     (machine ? t.address?.startsWith(`${machine}/`) : !t.address?.includes('/')));
 }
 export function terminalFor(row, terms) {
@@ -339,9 +528,34 @@ export function terminalTargetFor(row, terms) {
     (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
   return { terminal: candidates[0], exact: false };
 }
+// How a click brings a terminal up. One with a pane: pane.focus, which shows its own space and tab.
+// A sub-agent without a pane (Herdr's agents list peeks those) is peeked over the tab of the nearest
+// terminal up its parent chain that has a pane and is not a retired PM, else over its project's current
+// PM (`home`): a worker that outlived a PM rotated out (closed, or still open but retired). With neither, nothing: no pane is focused and the work
+// column is not shown, since that would reveal whatever space was active — another project's.
+// agent.focus is not used: on a paneless terminal it changes no tab (t5h opened OldName).
+// `paned`: the addresses that have a pane (panes()' terminals, agents()' addresses).
+export function focusPlan(address, terms, paned, home = '') {
+  const none = { focus: '', peek: '' };
+  if (!address) return none;
+  const has = new Set(paned.filter(Boolean));
+  if (has.has(address)) return { focus: address, peek: '' };
+  const byAddress = new Map(terms.map(t => [t.address, t]));
+  // A retired PM up the chain (labeled pm.retired by `pm.py rotate`, or a PM terminal that is not the
+  // project's current one) is passed over: shown on its tab, the thread would invite talking to it.
+  const retired = t => Boolean(t?.labels?.['pm.retired'] || (home && t?.labels?.pm && t.address !== home));
+  const seen = new Set([address]);
+  for (let up = byAddress.get(address)?.parent; up && !seen.has(up); up = byAddress.get(up)?.parent) {
+    if (has.has(up) && !retired(byAddress.get(up))) return { focus: up, peek: address };
+    seen.add(up);
+  }
+  return home && has.has(home) ? { focus: home, peek: address } : none;
+}
 
 // A PM's activity never makes a different worker's wire active.
 export function wireFlows(wire, rows) {
+  // A bundle's trunk flows while any of its tasks does; the ended node's line never does.
+  if (wire.members) return wire.members.some(id => wireFlows({ to: id }, rows));
   const target = rows.find(row => row.id === wire.to);
   if (!target || target.live !== 'working') return false;
   return target.type === 'pm' || (target.type === 'task' &&
@@ -396,4 +610,155 @@ export function arcHops(samples, reverse = false) {
       distance, duration: distance / PACKET_SPEED * 1000 });
   }
   return hops;
+}
+
+// ---- The Projects page ------------------------------------------------------
+
+export const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', pi: 'pi' };
+export const agentName = kind => AGENT_NAMES[kind] || kind || '';
+export const projectName = pm => pm?.project || String(pm?.sourceName ?? pm?.name ?? '').replace(/^pm-/, '');
+
+// What a board shows: one project's PM, threads and events (`project`: its PM's name), or every
+// project that is not archived. Tasks no PM owns stay on the all-projects board.
+export function scopeState(state, project = '') {
+  const keep = project ? pm => pm.name === project : pm => !pm.archived;
+  const pms = state.pms.filter(keep), shown = new Set(pms.map(pm => pm.name));
+  const hidden = new Set(state.pms.filter(pm => !keep(pm)).map(pm => pm.name));
+  const mine = pm => project ? shown.has(pm) : !hidden.has(pm);
+  return { ...state, project, pms, tasks: state.tasks.filter(t => mine(t.pm)), events: state.events.filter(e => mine(e.pm)) };
+}
+
+const OPEN = ['blocked', 'in_progress', 'review', 'proposed'];
+// A project's numbers as `pm.py state` counts them (`counts`); a ledger from before that field
+// counts its own open tasks the same way. `today`: "YYYY-MM-DD".
+export function projectCounts(pm, tasks, today = '') {
+  const c = pm?.counts;
+  if (c && typeof c === 'object') {
+    return Object.fromEntries(['working', 'waiting', 'review', 'proposed', 'merged_today'].map(k => [k, Number(c[k]) || 0]));
+  }
+  const mine = tasks.filter(t => (t.pm || '') === (pm?.name || ''));
+  const n = status => mine.filter(t => t.status === status).length;
+  // An in-progress task whose terminal is gone (disconnected) is no work going on, as pm.py counts it.
+  return { working: mine.filter(t => t.status === 'in_progress' && !disconnected(t)).length, waiting: mine.filter(t => t.status === 'blocked' && !t.answered).length, review: n('review'), proposed: n('proposed'),
+    merged_today: mine.filter(t => t.status === 'merged' && today && String(t.updated || '').startsWith(today)).length };
+}
+// The card's quiet numbers, most urgent first, without the zeros.
+export const COUNT_ORDER = ['waiting', 'working', 'review', 'proposed', 'merged_today'];
+export const countChips = counts => COUNT_ORDER.filter(k => counts[k] > 0).map(k => [k, counts[k]]);
+
+export function lastEventAt(events, pm) {
+  let at = 0;
+  for (const e of events) {
+    if (e?.pm !== pm) continue;
+    const ms = new Date(String(e.at || '').replace(' ', 'T')).getTime();
+    if (ms > at) at = ms;
+  }
+  return at;
+}
+const UNITS = [[86400000, 'd', '天'], [3600000, 'h', '小时'], [60000, 'm', '分钟']];
+// A copy of pm-list's age (the sidebar and the cards read alike); pm-list's test keeps them identical.
+export function age(ms, lang) {
+  const unit = UNITS.find(([size]) => ms >= size), zh = lang === 'zh';
+  if (!unit) return zh ? '刚刚' : '<1m';
+  return zh ? `${Math.floor(ms / unit[0])} ${unit[2]}` : `${Math.floor(ms / unit[0])}${unit[1]}`;
+}
+export const archivedDay = value => /^\d{4}-(\d{2}-\d{2})/.exec(String(value || ''))?.[1] || String(value || '');
+
+// The cards of the Projects page from a merged state (mergeStates): those in work, most recently
+// active first, and the archived ones, newest archive first. `lines`: {pm name: lastPmLine(...)}.
+export function projectCards(state, lines = {}, today = '') {
+  const cards = state.pms.map(pm => ({
+    key: pm.name, name: projectName(pm), repo: pm.repo || '', machine: pm.machine || '', status: pm.status || '',
+    agent: agentName(pm.agent), archived: pm.archived || null, counts: projectCounts(pm, state.tasks, today),
+    at: lastEventAt(state.events, pm.name), line: lines[pm.name] || [],
+    paused: state.tasks.filter(t => (t.pm || '') === pm.name && t.status === 'paused').map(t => t.title || t.sourceId || t.id),
+  }));
+  return { active: cards.filter(c => !c.archived).sort((a, b) => b.at - a.at || a.name.localeCompare(b.name)),
+    archived: cards.filter(c => c.archived).sort((a, b) => String(b.archived).localeCompare(String(a.archived))) };
+}
+export const pageTotals = cards => ({ projects: cards.length,
+  working: cards.reduce((n, c) => n + c.counts.working, 0), waiting: cards.reduce((n, c) => n + c.counts.waiting, 0) });
+
+// The PM's newest words in a conversation log (JSON lines): the first line of its last `pm` event,
+// as text and link pieces ([title](thread:id) keeps its title), without markdown marks.
+export function lastPmLine(text) {
+  let last = '';
+  for (const line of String(text || '').split('\n')) {
+    try { const e = JSON.parse(line); if (e?.type === 'pm' && typeof e.text === 'string' && e.text.trim()) last = e.text; }
+    catch (_) { /* not an event */ }
+  }
+  const first = last.split('\n').map(l => l.trim()).find(Boolean) || '';
+  const plain = s => s.replace(/\*\*|__|`/g, '').replace(/^[-*>#]+\s*/, '');
+  const pieces = [], links = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let at = 0, m;
+  while ((m = links.exec(first))) {
+    if (m.index > at) pieces.push({ text: plain(first.slice(at, m.index)) });
+    pieces.push({ text: plain(m[1]), link: m[2] });
+    at = m.index + m[0].length;
+  }
+  if (at < first.length) pieces.push({ text: plain(first.slice(at)) });
+  return pieces.filter(p => p.text);
+}
+
+// The threads archiving pauses: a project's open ones, those waiting for the user first; a review
+// thread goes with the task it reviews (foldReviews).
+export function archiveThreads(state, pm) {
+  return foldReviews(state.tasks).filter(t => (t.pm || '') === pm && OPEN.includes(t.status))
+    .sort((a, b) => OPEN.indexOf(a.status) - OPEN.indexOf(b.status));
+}
+
+// ---- New project --------------------------------------------------------------
+
+export const folderName = path => String(path || '').replace(/\/+$/, '').split('/').pop() || '';
+export const KINDS = ['claude', 'codex', 'pi'];
+// Open work the ledger already keeps under this project name: the new PM takes it over.
+export function ledgerOpen(state, name) {
+  const key = String(name || '').trim().toLowerCase();
+  return key ? state.tasks.filter(t => [...OPEN, 'paused'].includes(t.status) && String(t.project || '').toLowerCase() === key) : [];
+}
+// What the form runs: pm.py start for the chosen folder, name, agent and space (new | current).
+export function startArgv(script, form) {
+  return [script, 'start', '--repo', form.repo, '--name', String(form.name || '').trim() || folderName(form.repo),
+    '--kind', form.kind || 'claude', '--space', form.space === 'current' ? 'current' : 'new'];
+}
+
+// ---- Esc ----------------------------------------------------------------------
+
+// Esc goes back one layer, one layer a press (page = shared('pm-dash')): a task's hover card (or the
+// ended node's preview) closes first; then the opened ended lists fold; then one project's board goes
+// back to that project's conversation, the archived projects back to the list, and the Projects page
+// (list or board) back to the page it covered, as a second Projects click does ('back', which pm-nav decides). A dialog over the page has the keyboard and
+// closes itself. Only while the stage shows this page (shown); otherwise null, and the key goes on.
+export function escapeTarget(shown, page, { hoverCard = false, ended = false } = {}) {
+  if (!shown) return null;
+  if (hoverCard) return { hoverCard: true };
+  // Only a board on screen has ended lists to fold: the list and archived pages go on.
+  if (ended && (page?.project || page?.view === 'board')) return { ended: true };
+  if (page?.project) return { project: page.project };
+  if (page?.view === 'archived') return { view: 'list' };
+  return { back: true };
+}
+
+// A review thread (`pm.py review`: a task with `review_of`) is part of the task it reviews: it leaves
+// the list and rides on that task as `review`, so one piece of work is one row and counts once. While
+// the review is open the task reads as what the review is: waiting on the user (blocked, with the
+// review's `answered`) when the review asks, else in review; a task that itself waits on the user, or
+// is paused, or a paused review, leaves the task's own status. A review whose task is not in the list
+// stays a row of its own, so nothing goes missing, and so does an open review of a task that is over
+// (done, abandoned: nothing of it is in review). pm.py's counts use the same rule (folded_status).
+// pm-project, pm-dash, pm-nav and pm-list keep identical copies (pm-project's model.test.mjs checks).
+export function foldReviews(tasks) {
+  const list = (Array.isArray(tasks) ? tasks : []).filter(Boolean);
+  const over = status => ['merged', 'released', 'done', 'abandoned'].includes(status);
+  const byId = new Map(list.map(t => [t.id, t]));
+  const reviews = new Map(list.filter(t => t.review_of && t.review_of !== t.id && byId.has(t.review_of) &&
+    (over(t.status) || !over(byId.get(t.review_of).status))).map(t => [t.review_of, t]));
+  if (!reviews.size) return list;
+  const fold = (t, r) => {
+    const quiet = over(r.status) || r.status === 'paused' || ['blocked', 'paused'].includes(t.status);
+    if (quiet) return { ...t, review: r };
+    return r.status === 'blocked' ? { ...t, review: r, status: 'blocked', answered: Boolean(r.answered) } : { ...t, review: r, status: 'review' };
+  };
+  return list.filter(t => !(t.review_of && reviews.get(t.review_of) === t))
+    .map(t => reviews.has(t.id) ? fold(t, reviews.get(t.id)) : t);
 }

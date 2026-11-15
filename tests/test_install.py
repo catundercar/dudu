@@ -26,8 +26,8 @@ MAIN = {
     ]
 }
 PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
-PM_BOARD = {"id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}}
-PM_PROJECT = {"id": "pm-project", "type": "block", "content": {"mod": "pm-project"}}
+PM_BOARD = {"id": "pm-board", "type": "block", "window_drag": True, "content": {"mod": "pm-dash"}}
+PM_PROJECT = {"id": "pm-project", "type": "block", "window_drag": True, "content": {"mod": "pm-project"}}
 MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
 
 
@@ -401,6 +401,43 @@ class InstallTest(unittest.TestCase):
         own = target.read_bytes()
         self.assertIn("already contains pm-nav", self.run_install())
         self.assertEqual(target.read_bytes(), own)
+
+    def test_existing_layout_gets_window_drag(self):
+        # A pm layout from before the pages' title bars moved the window, unmarked and edited by the person.
+        self.seed_layout()
+        target = self.desktop / "layouts/pm.json"
+        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        board, project = layout["children"][1]["children"][1:]
+        del board["window_drag"], project["window_drag"]
+        layout["background"] = "custom"
+        target.write_text(json.dumps(layout))
+        before = target.read_bytes()
+        message = f"Let the pm-board and pm-project title bars move the window in {target}"
+        self.assertIn(f"Would {message}", self.run_install("--dry-run"))
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIn(message, self.run_install())
+        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        expected = copy.deepcopy(layout)
+        expected["children"][1]["children"][1:] = copy.deepcopy([PM_BOARD, PM_PROJECT])
+        self.assertEqual(json.loads(target.read_text()), expected)
+        self.assertIn("already contains pm-nav", self.run_install())
+        # The person's own choice stays: an explicit false, and nodes that only share a block's id
+        # (another mod in it, or a column), whichever block they stand for.
+        stage = expected["children"][1]["children"]
+        stage[2]["window_drag"] = False
+        stage[1] = {"id": "pm-board", "type": "block", "content": {"mod": "other"}}
+        stage.append({"id": "pm-project", "type": "block", "content": {"mod": "other"}})
+        stage.append({"id": "pm-project", "type": "column", "content": {"mod": "pm-project"}, "children": []})
+        target.write_text(json.dumps(expected))
+        own = target.read_bytes()
+        self.assertIn("already contains pm-nav", self.run_install())
+        self.assertEqual(target.read_bytes(), own)
+        # Beside those, a real pm-project block without the field gains it, and only it.
+        stage[2] = {"id": "pm-project", "type": "block", "content": {"mod": "pm-project"}}
+        target.write_text(json.dumps(expected))
+        self.assertIn(f"Let the pm-project title bar move the window in {target}", self.run_install())
+        stage[2]["window_drag"] = True
+        self.assertEqual(json.loads(target.read_text()), expected)
 
     def test_uninstall_keeps_ledger_and_other_hooks(self):
         self.seed_layout()

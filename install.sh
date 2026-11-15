@@ -33,7 +33,10 @@ TOAST_HINT = f'"toast": "{TOAST}"'
 # The PM list sits right under the PM entry (pm-nav); the mod sizes its own block.
 PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
 # The project view: a child of the pm-stage stack, beside the work column and the board.
-PM_PROJECT = {"id": "pm-project", "type": "block", "content": {"mod": "pm-project"}}
+# Both pages draw a title bar at their top: window_drag lets a press on its blank space move the
+# window (and a double-click maximize it), as on Herdr's own bars; the mods keep every other press.
+PM_PROJECT = {"id": "pm-project", "type": "block", "window_drag": True, "content": {"mod": "pm-project"}}
+PM_BOARD = {"id": "pm-board", "type": "block", "window_drag": True, "content": {"mod": "pm-dash"}}
 MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
 setup = installer.Setup(args, repo=repo)
 write_json, remove_path = installer.write_json, installer.remove_path
@@ -55,6 +58,13 @@ def has_mod(node, name):
     return node.get("id") == name or (isinstance(content, dict) and content.get("mod") == name)
 
 
+def is_block(node, block):
+    """The node is this installer's block: its id, type and mod, not only a matching id or mod."""
+    content = node.get("content")
+    return (node.get("id") == block["id"] and node.get("type") == block["type"]
+            and isinstance(content, dict) and content.get("mod") == block["content"]["mod"])
+
+
 def insert_pm_list(children):
     nav = [i for i, child in enumerate(children) if isinstance(child, dict) and has_mod(child, "pm-nav")]
     children.insert(nav[0] + 1 if nav else len(children), dict(PM_LIST, size=dict(PM_LIST["size"])))
@@ -66,7 +76,7 @@ def manual_layout(reason):
     print('In sidebar-lists.children, insert first: {"id":"pm-nav","type":"block","size":{"px":64},"content":{"mod":"pm-nav"}}')
     print(f'and right after it: {json.dumps(PM_LIST, separators=(",", ":"))}')
     print('Replace the work column with: {"id":"pm-stage","type":"stack","active":"work","children":[<original work node>,'
-          '{"id":"pm-board","type":"block","content":{"mod":"pm-dash"}},' + json.dumps(PM_PROJECT, separators=(",", ":")) + ']}')
+          + json.dumps(PM_BOARD, separators=(",", ":")) + ',' + json.dumps(PM_PROJECT, separators=(",", ":")) + ']}')
     print(f'At the root, add: {TOAST_HINT}')
     print("Keep the original work node intact; if main.json is missing, obtain the default layout from your Herdr desktop installation first.")
 
@@ -116,6 +126,16 @@ def install_layout():
                     back_up(target)
                     print(f"{prefix}Add the pm-project block to {target}")
                     changed = True
+                pages = [node for node in nodes(existing) if "window_drag" not in node
+                         and any(is_block(node, block) for block in (PM_BOARD, PM_PROJECT))]
+                if pages:
+                    # Blocks from before the pages' title bars moved the window: only these blocks gain the flag.
+                    for node in pages:
+                        node["window_drag"] = True
+                    back_up(target)
+                    bars = "title bar" if len(pages) == 1 else "title bars"
+                    print(f"{prefix}Let the {' and '.join(node['id'] for node in pages)} {bars} move the window in {target}")
+                    changed = True
                 if "toast" not in existing:
                     if existing.get("generated_by") == generated_by:
                         # A layout this installer generated before pm-toast existed.
@@ -148,7 +168,7 @@ def install_layout():
         insert_pm_list(sidebar["children"])
         children = parents[0]["children"]
         children[children.index(work)] = {"id": "pm-stage", "type": "stack", "active": "work", "children": [
-            work, {"id": "pm-board", "type": "block", "content": {"mod": "pm-dash"}},
+            work, dict(PM_BOARD, content=dict(PM_BOARD["content"])),
             dict(PM_PROJECT, content=dict(PM_PROJECT["content"]))]}
     except (OSError, ValueError, AttributeError) as error:
         manual_layout(str(error))

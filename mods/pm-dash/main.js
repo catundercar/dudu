@@ -1,7 +1,8 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
-import { theme, home, appHome, exec, readTextFile, watchFolder, terminals, agents, run, props, closeOverlay, layout as desktopLayout } from 'herdr';
-import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalTargetFor, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText } from './model.js';
+import { theme, home, appHome, exec, readTextFile, watchFolder, terminals, agents, panes, run, props, closeOverlay, openOverlay, layout as desktopLayout } from 'herdr';
+import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime } from './model.js';
+import { page, pageView, pageHeader, projectHeader, keepPress, dialogView, initDialog, restoreProject, readLines, archivePopup, NEW_DIALOG, openProject, showPage } from './projects.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
 
@@ -9,9 +10,27 @@ import { FlowLayer, boardVisible } from './flow.js';
 const MOD_FOLDER = 'mods/pm-dash/';
 const STAGE = 'pm-stage', WORK = 'work';
 
+function findMod(node, mod) {
+  if (node?.content?.mod === mod) return node;
+  for (const child of node?.children ?? []) {
+    const found = findMod(child, mod);
+    if (found) return found;
+  }
+  return null;
+}
+
 export default class PmDash extends View {
   init(_props, cx) {
     this.state = { pms: [], tasks: [], events: [] };
+    // Opened as one of its own dialogs (new project, archive): only what the dialog needs.
+    if (props()?.dialog) { initDialog(this, cx); return; }
+    // The Projects page: every project merged (allState), the PM's newest sentence per local project
+    // (lines), and which board shows (scope: one project's PM name, or '' for all of them).
+    this.allState = this.state; this.lines = {}; this.scope = ''; this.hoverCard = null;
+    // The ended nodes, by PM name: opened in place, showing their abandoned tasks, under the pointer.
+    this.endedOpen = new Set(); this.showDropped = new Set(); this.hoverEnded = null;
+    // The page's keyboard, for Esc: taken each time the stage turns to this page, and on a click in it.
+    this.keys = cx.focus_handle(); this.onStage = false;
     this.setupStatus = null; this.setupError = ''; this.setupBusy = false; this.setupDone = false;
     this.localState = this.state; this.remoteStates = {};
     this.primed = false; this.size = { width: 980, height: 640 };
@@ -69,6 +88,20 @@ export default class PmDash extends View {
     });
   }
   text(key, ...args) { return word(this.state.lang, key, ...args); }
+  today() {
+    const d = new Date(), pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+  openNew() { openOverlay(NEW_DIALOG); }
+  openArchive(pm) { openOverlay(archivePopup(pm, archiveThreads(this.localState, pm).length)); }
+  restore(card, cx) { restoreProject(this, card, cx); }
+  // Another board (all projects, or one): its rows start over, with no packets for what was already there.
+  rescope(scope, cx) {
+    this.scope = scope; this.primed = false; this.queue = []; this.trip = null; this.serial++;
+    this.shown = {}; this.shownStatus = {}; this.shownLive = {}; this.statuses = {}; this.hoverTask = null; this.hoverPm = null;
+    this.endedOpen.clear(); this.hoverEnded = null;
+    this.publish(cx);
+  }
   async checkSetup() {
     try {
       const result = await exec('python3', [appHome() + '/' + MOD_FOLDER + 'setup.py', '--status', '--claude-home', home() + '/.claude']);
@@ -110,12 +143,19 @@ export default class PmDash extends View {
       block.child(this.setupButton(t, 'setup'));
     }
     return v_flex().id('setup-root').size_full().min_w(0).min_h(0).bg(t.canvas).text_color(t.foreground).text_size(13)
-      .child(v_flex().id('setup-scroll').size_full().overflow_scroll().p(24)
+      .child(keepPress(this, v_flex().id('setup-scroll')).size_full().overflow_scroll().p(24)
         .child(v_flex().w_full().flex_1().items_center().justify_center().child(block)));
   }
   geometry() {
     return fitBoard(this.state, this.size.width, this.size.height,
-      this.measuredWidth === this.size.width ? this.fixedHeight : undefined);
+      this.measuredWidth === this.size.width ? this.fixedHeight : undefined,
+      { open: [...this.endedOpen], dropped: [...this.showDropped], today: this.today() });
+  }
+  // The ended node's preview shows while the pointer is on a folded node.
+  peeking() { return this.hoverEnded !== null && !this.endedOpen.has(this.hoverEnded); }
+  toggle(set, pm, cx) {
+    if (set.has(pm)) set.delete(pm); else set.add(pm);
+    cx.notify();
   }
   refresh(cx) {
     if (this.loading) { this.again = true; return; }
@@ -129,6 +169,7 @@ export default class PmDash extends View {
         this.localState = next; this.error = '';
         this.setLedgerHome(next.home, cx);
         this.publish(cx);
+        if (!page().project && page().view !== 'board') { this.lines = await readLines(next.pms); cx.notify(); }
       } catch (e) { this.error = String(e); cx.notify(); }
       finally {
         this.loading = false;
@@ -163,7 +204,8 @@ export default class PmDash extends View {
     });
   }
   publish(cx) {
-    const next = mergeStates(this.localState, this.remoteStates);
+    this.allState = mergeStates(this.localState, this.remoteStates);
+    const next = scopeState(this.allState, this.scope);
     const known = new Set([...this.state.pms, ...this.state.tasks, ...this.state.events].map(row => row.machine));
     const fresh = newEvents(this.primed ? this.state : null, next).filter(e => known.has(e.machine));
     this.state = next; this.primed = true;
@@ -201,13 +243,14 @@ export default class PmDash extends View {
     const replay = !this.queue.length;
     if (replay && (!this.auto || Date.now() - this.lastEvent < 20000 || !this.recent.length)) return;
     const event = replay ? this.recent[this.replayIndex++ % this.recent.length] : this.queue.shift();
-    const g = this.geometry(), chat = g.wires.find(w => w.id === pmId(event.pm));
-    const task = g.wires.find(w => w.id === taskId(event.task));
+    // A task's route: its bundle's trunk, then its own branch; an ended task's, the ended node's line.
+    const g = this.geometry(), chat = pmId(event.pm), task = (event.task && g.routes[taskId(event.task)]) || [];
     const routes = event.kind === 'prompt' || event.kind === 'reply' ? [chat] :
-      event.kind === 'dispatch' && event.by === 'user' ? [chat, task] : [task];
-    const valid = routes.filter(Boolean);
+      event.kind === 'dispatch' && event.by === 'user' ? [chat, ...task] : task;
+    const valid = routes.filter(id => g.wires.some(w => w.id === id));
     const reverse = event.kind === 'reply' || event.kind === 'report';
-    this.trip = { event, replay, routes: valid.map(w => w.id), reverse, token: ++this.serial };
+    if (reverse) valid.reverse(); // Back toward the PM: the branch first, then the trunk.
+    this.trip = { event, replay, routes: valid, reverse, token: ++this.serial };
     if (!valid.length) { this.land(cx); return; }
     cx.notify();
   }
@@ -223,7 +266,8 @@ export default class PmDash extends View {
         this.shownStatus[taskId(e.task)] = e.status || this.shownStatus[taskId(e.task)] || row?.status;
       }
     }
-    if (e.task) this.tag(taskId(e.task), e.status, cx);
+    // A review's event (mergeStates) tags its task with what the review is, and leaves the task's status.
+    if (e.task) this.tag(taskId(e.task), e.review || e.status, cx);
     else this.tag(pmId(e.pm), e.status, cx);
     this.trip = null; cx.notify();
     cx.timer.after(400, cx => this.next(cx));
@@ -252,8 +296,8 @@ export default class PmDash extends View {
   }
   taskPill(row, t, scale, maxWidth, id = `status:${row.id}`) {
     const px = n => n * scale, font = n => Math.max(10, px(n));
-    const waiting = !row.cleanup && row.status === 'blocked';
-    const running = !row.cleanup && row.status === 'in_progress';
+    const waiting = !row.cleanup && row.status === 'blocked' && !row.answered;
+    const running = !row.cleanup && row.status === 'in_progress' && !disconnected(row);
     const review = !row.cleanup && row.status === 'review';
     const color = waiting ? t.blocked : review ? t.accent : running ? t.ansi2 : t.dim;
     return div().id(id).max_w(maxWidth).flex_shrink_0().truncate()
@@ -269,7 +313,7 @@ export default class PmDash extends View {
     const previous = this[key];
     if (previous && ['x', 'y', 'width', 'height'].every(k => previous[k] === bounds[k])) return;
     this[key] = bounds;
-    if (this.hoverTask) cx.notify();
+    if (this.hoverTask || this.peeking()) cx.notify();
   }
   taskInfoCard(row, g, t) {
     if (!this.stageBounds || !this.boardBounds) return null;
@@ -326,8 +370,76 @@ export default class PmDash extends View {
     return Popup.new(`task-info-popup:${row.id}`, div().w(position.w).h(0))
       .absolute().left(position.x).top(position.y).w(position.w).h(0).anchor('top_left').content(card);
   }
+  // The ended node's preview: its newest few, right-aligned under (or over) the node like a task's card.
+  endedPeek(row, g, t) {
+    if (!this.stageBounds || !this.boardBounds) return null;
+    const scale = g.scale, px = n => n * scale, font = n => Math.max(10, px(n)), today = this.today();
+    const viewport = { top: this.boardBounds.y - this.stageBounds.y,
+      bottom: this.boardBounds.y + this.boardBounds.height - this.stageBounds.y };
+    const line = Math.max(18, px(24)), more = Math.max(16, px(22)), pad = px(8);
+    const position = hoverCardPosition(row, g.height, viewport, pad * 2 + row.peek.length * line + more, scale);
+    if (!position) return null;
+    const width = Math.min(px(360), row.w);
+    const fill = [t.raised, t.popover, t.selected].find(color => color && color !== t.surface) || t.raised;
+    const card = v_flex().id(`ended-peek:${row.pm}`).w(width).max_h(position.h).flex_none().px(px(6)).py(pad)
+      .rounded(px(12)).bg(fill).overflow_hidden();
+    for (const task of row.peek) {
+      card.child(h_flex().h(line).flex_none().px(px(8)).gap(px(10)).items_center().text_size(font(12.5))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(task.title || task.sourceId || task.id))
+        .child(div().flex_none().text_color(t.muted)
+          .child([taskStatusText(this.state.lang, task), endedTime(task.updated, today)].filter(Boolean).join(' · '))));
+    }
+    card.child(div().h(more).flex_none().line_height(`${more}px`).px(px(8)).text_size(font(11.5)).text_color(t.dim)
+      .child(this.text('endedMore', row.count)));
+    return Popup.new(`ended-peek-popup:${row.pm}`, div().w(width).h(0))
+      .absolute().left(row.x + row.w - width).top(position.y).w(width).h(0).anchor('top_left').content(card);
+  }
+  bundleColor(status, t) {
+    return status === 'blocked' ? t.blocked : status === 'review' ? t.accent : status === 'in_progress' ? t.ansi2 : t.muted;
+  }
+  // What the board draws around the ledger's rows: a bundle's heading and fork, the ended node, its day headings.
+  bundleRow(row, t, scale) {
+    const px = n => n * scale, font = n => Math.max(10, px(n)), pm = row.pm;
+    if (row.type === 'label') return h_flex().absolute().left(row.x).top(row.y).h(row.h).gap(px(6)).items_center()
+      .text_size(font(11.5)).opacity(this.dim(pm)).transition('opacity', 160)
+      .child(div().font_semibold().text_color(this.bundleColor(row.status, t)).child(row.title))
+      .child(div().text_color(t.dim).child(String(row.count)));
+    if (row.type === 'junction') return div().absolute().left(row.x).top(row.y + row.h / 2 - row.w / 2).w(row.w).h(row.w)
+      .rounded(row.w / 2).bg(this.projectColor(pm, t)).opacity((row.flows ? 1 : .5) * this.dim(pm)).transition('opacity', 160);
+    if (row.type === 'day') return div().absolute().left(row.x).top(row.y).h(row.h).line_height(`${row.h}px`)
+      .text_size(font(11)).text_color(t.dim).opacity(this.dim(pm)).child(row.title);
+    // The ended node: a filled block, never an outline. Click opens it in place; the eye shows the abandoned.
+    const tip = this.text(row.showDropped ? 'hideDropped' : 'showDropped', row.dropped);
+    return h_flex().id(row.id).absolute().left(row.x).top(row.y).w(row.w).h(row.h).pl(px(12)).pr(px(8)).gap(px(10))
+      .items_center().rounded(px(10)).bg(t.raised).text_size(font(13)).text_color(t.muted).cursor_pointer()
+      .opacity(this.dim(pm)).transition('opacity', 160)
+      .on_hover((over, cx) => {
+        if (over) this.hoverEnded = pm;
+        else if (this.hoverEnded === pm) this.hoverEnded = null;
+        cx.notify();
+      })
+      .on_click((_e, cx) => this.toggle(this.endedOpen, pm, cx))
+      .child(svg('mods/pm-dash/check.svg').size(px(15)).flex_none().text_color(t.muted))
+      .child(div().flex_none().font_semibold().text_color(t.foreground).child(this.text('endedCount', row.count)))
+      .child(div().flex_1().min_w(0).truncate().text_size(font(12.5)).text_color(t.dim)
+        .child(row.recent.length ? this.text('endedRecent', row.recent.join(' · ')) : ''))
+      .when(row.dropped > 0, el => el.child(h_flex().id(`dropped:${pm}`).flex_none().gap(px(4)).px(px(6)).py(px(3))
+        .rounded(px(6)).items_center().text_size(font(11.5)).text_color(row.showDropped ? t.foreground : t.dim)
+        .when(row.showDropped, el => el.bg(t.surface)).hover(s => s.bg(t.surface))
+        .tooltip(tip).accessibility_label(tip)
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          if (!this.showDropped.has(pm)) this.endedOpen.add(pm); // Shown where they are: in the opened list.
+          this.toggle(this.showDropped, pm, cx);
+        })
+        .child(svg(`mods/pm-dash/${row.showDropped ? 'eye' : 'eye-off'}.svg`).size(px(14)).flex_none()
+          .text_color(row.showDropped ? t.foreground : t.dim))
+        .child(String(row.dropped))))
+      .child(svg(`mods/pm-dash/${row.open ? 'chevron-down' : 'chevron'}.svg`).size(px(14)).flex_none().text_color(t.muted));
+  }
   row(row, t, cx, total, scale) {
     const px = n => n * scale, font = n => Math.max(10, px(n));
+    if (['label', 'junction', 'ended', 'day'].includes(row.type)) return this.bundleRow(row, t, scale);
     const dark = !row.type && isDarkTheme(t);
     if (!row.type) return v_flex().absolute().left(row.x).top(row.y).w(row.w).h(row.h)
       .rounded(px(20)).bg(dark ? t.raised : t.foreground).text_color(dark ? t.foreground : t.background).px(px(12)).py(px(12))
@@ -384,8 +496,8 @@ export default class PmDash extends View {
           .flex_none().rounded(px(10)).items_center().justify_center().text_size(font(11.5)).font_bold()
           .bg(t.blocked).text_color(solidText(t.blocked, t)).child(String(row.waiting))));
     } else {
-      const waiting = !row.cleanup && row.status === 'blocked';
-      const running = !row.cleanup && row.status === 'in_progress';
+      const waiting = !row.cleanup && row.status === 'blocked' && !row.answered;
+      const running = !row.cleanup && row.status === 'in_progress' && !disconnected(row);
       const review = !row.cleanup && row.status === 'review';
       const statusColor = waiting ? t.blocked : review ? t.accent : running ? t.ansi2 : t.dim;
       el = el.on_hover((over, cx) => {
@@ -396,8 +508,23 @@ export default class PmDash extends View {
         // Scrolling dismisses the old card; a fresh pointer position can open
         // the current row even if native hover stayed on the same element.
         if (this.hoverTask !== row.task) { this.hoverTask = row.task; cx.notify(); }
-      })
-        .when(!row.first, el => el.child(div().absolute().left(px(12)).right(px(12)).top(0).h(1).bg(t.border)))
+      });
+      if (row.entry) {
+        // An opened ended list's row, hung on the list's guide 8px to its left (layout).
+        const dropped = DROPPED.includes(row.status);
+        el = el.px(px(8)).rounded(px(6)).text_size(font(12.5)).text_color(t.muted)
+          .child(div().absolute().left(-10.5).top(row.h / 2 - 2.5).w(5).h(5).rounded(2.5).bg(t.dim))
+          .child(div().id(`title:${row.id}`).flex_1().min_w(0).truncate()
+            .when(dropped, el => el.line_through().text_color(t.dim)).child(row.title))
+          .when(Boolean(row.branch) && row.w >= 360, el => el.child(div().max_w(Math.min(130, row.w * .22)).truncate()
+            .px(px(6)).rounded(px(5)).bg(t.raised).font_family('monospace').text_size(font(11)).opacity(.7).child(row.branch)))
+          .child(div().flex_none().font_family('monospace').text_size(font(11)).text_color(t.dim).child(row.time || ''))
+          .child(div().id(`status:${row.id}`).flex_none().text_size(font(11.5)).text_color(t.dim)
+            .opacity(this.tags[row.id] ? .4 : 1).transition('opacity', 180).child(taskStatusText(this.state.lang, row)));
+        if (row.terminal) el = el.cursor_pointer().hover(s => s.bg(t.surface)).on_click(() => this.openTerminal(row));
+        return el;
+      }
+      el = el.rounded(px(8)).bg(waiting ? withAlpha(t.blocked, .12) : t.surface)
         .child(this.dot(statusColor, waiting || running || review, t, px(8)))
         // Nudge only the title: row edges and packet endpoints stay aligned.
         .child(div().id(`title:${row.id}`).relative().left(px(this.nudges[row.id] || 0)).spring('left', { response: 320, damping: .35 })
@@ -407,27 +534,77 @@ export default class PmDash extends View {
         .bg(t.raised).text_color(t.muted).font_family('monospace').text_size(font(11)).opacity(waiting || running ? 1 : .7).child(row.branch));
       el = el.child(this.taskPill(row, t, scale, row.w * .48));
     }
-    if (row.terminal) el = el.cursor_pointer().hover(s => s.bg(t.raised)).on_click(() => {
-      run('agent.focus', { terminal: row.terminal.address });
-      const overlay = props()?.overlay;
-      if (overlay) closeOverlay(overlay);
-      else run('layout.select', { stack: STAGE, child: WORK });
-    });
+    if (row.terminal) el = el.cursor_pointer().hover(s => s.bg(t.raised)).on_click(() => this.openTerminal(row));
     return el;
+  }
+  openTerminal(row) {
+    // A task's fallback is its project's current PM, by the PM's own terminal (never a folder match).
+    const terms = terminals(), pm = row.type === 'task' && this.state.pms.find(p => p.name === row.pm);
+    const plan = focusPlan(row.terminal.address, terms, [...panes().map(p => p.terminal), ...agents().map(a => a.address)],
+      pm ? terminalFor({ ...pm, type: 'pm' }, terms)?.address || '' : '');
+    // Nowhere to show it: nothing moves, since showing work would reveal whatever space is active.
+    if (!plan.focus) return;
+    run('pane.focus', { terminal: plan.focus });
+    const overlay = props()?.overlay;
+    if (overlay) closeOverlay(overlay);
+    else run('layout.select', { stack: STAGE, child: WORK });
+    if (plan.peek) run('terminal.peek', { terminal: plan.peek });
   }
   eventLine(e) {
     const task = this.state.tasks.find(t => t.id === e.task);
     const text = eventText(e, this.state.lang);
-    return task ? this.text('line', task.title, text || taskStatusText(this.state.lang, task)) : text;
+    const said = e.review ? `${label(this.state.lang, e.review)}${text ? `: ${text}` : ''}` : text;
+    return task ? this.text('line', task.title, said || taskStatusText(this.state.lang, task)) : said;
   }
   render(cx) {
+    if (this.dialog) return dialogView(this, theme());
+    const onStage = !props()?.overlay && boardVisible(desktopLayout());
+    if (onStage && !this.onStage) cx.timer.after(0, () => this.keys.focus());
+    this.onStage = onStage;
+    // Esc, one layer a press (escapeTarget). A dialog over the page has the keyboard: its Esc closes only it.
+    return v_flex().id('pm-dash-keys').size_full().min_w(0).min_h(0).track_focus(this.keys)
+      .on_mouse_down('left', () => this.keys.focus())
+      .on_key_down((e, cx) => {
+        const to = e.keystroke === 'escape' ? escapeTarget(this.onStage, page(),
+          { hoverCard: Boolean(this.hoverTask) || this.peeking(), ended: this.endedOpen.size > 0 }) : null;
+        if (!to) return;
+        cx.stop_propagation();
+        if (to.hoverCard) { this.hoverTask = null; this.hoverEnded = null; cx.notify(); }
+        else if (to.ended) { this.endedOpen.clear(); cx.notify(); }
+        else if (to.project) openProject(to.project);
+        else if (to.view) showPage(to.view);
+        // The same way back as a second Projects click; without pm-nav there is none, so the workspace.
+        else if (findMod(desktopLayout(), 'pm-nav')) run('pm-nav.back');
+        else run('layout.select', { stack: STAGE, child: WORK });
+      })
+      .child(this.content(cx));
+  }
+  content(cx) {
     if (this.setupStatus === null || this.setupStatus === 'missing') return this.setupView(theme());
-    const t = theme(), g = this.geometry(), terms = terminals(), live = agents();
+    const t = theme(), view = page(), scope = view.project || '';
+    if (scope !== this.scope) cx.timer.after(0, cx => this.rescope(scope, cx));
+    if (!scope && view.view !== 'board') {
+      // No board on screen: its flow layer stops ticking (a packet in flight starts again with the board).
+      if (this.flowKey !== 'page') {
+        this.flowKey = 'page'; this.flowUpdate?.cancel();
+        this.flowUpdate = cx.timer.after(0, () => this.flowLayer.set_props({ overlay: false, wires: [], packet: null,
+          geometry: [], onComplete: this.packetFinished }));
+      }
+      return pageView(this, view.view === 'archived' ? 'archived' : 'list', t);
+    }
+    const pm = scope && this.allState.pms.find(p => p.name === scope);
+    return v_flex().id('pm-page').size_full().min_w(0).min_h(0).bg(t.canvas).text_color(t.foreground)
+      .child(pm ? projectHeader(this, pm, t) : pageHeader(this, 'board', t))
+      .child(this.board(cx));
+  }
+  board(cx) {
+    const g = this.geometry(), terms = terminals(), live = agents(), t = theme();
     const px = n => n * g.scale, font = n => Math.max(10, px(n));
-    const rows = g.rows.map(r => this.presentation(r, terms, live));
+    const rows = g.rows.map(r => ['label', 'junction', 'ended', 'day'].includes(r.type) ? r : this.presentation(r, terms, live));
+    for (const row of rows) if (row.type === 'junction') row.flows = wireFlows(row, rows);
     const total = counts({ lang: this.state.lang, pms: this.state.pms, tasks: rows.filter(r => r.type === 'task').map(r => ({...r, worker:r.live})) });
     for (const pm of rows.filter(r => r.type === 'pm')) {
-      pm.waiting = rows.filter(r => r.type === 'task' && (r.pm || '') === (pm.name || '') && r.status === 'blocked').length;
+      pm.waiting = rows.filter(r => r.type === 'task' && (r.pm || '') === (pm.name || '') && r.status === 'blocked' && !r.answered).length;
     }
     const stage = div().id('board-stage').relative().w(g.width).h(g.height).flex_none()
       .on_mouse_move((event, cx) => this.hoverBounds('stageBounds', event.bounds, cx));
@@ -440,20 +617,22 @@ export default class PmDash extends View {
         .line_height(`${machine.h}px`).rounded(px(5)).bg(t.raised).text_color(t.muted)
         .font_family('monospace').text_size(font(11)).truncate().tooltip(machine.label).child(machine.label));
     }
-    for (const group of g.taskGroups) {
-      stage.child(div().absolute().left(group.x).top(group.y).w(group.w).h(group.h).rounded(px(12))
-        .bg(t.surface).opacity(this.dim(group.pm)).transition('opacity', 160));
-    }
     const tr = this.trip, flowing = [];
     for (const wire of g.wires) {
       if (wireFlows(wire, rows)) {
         flowing.push({ id: wire.id, points: wire.points, color: this.projectColor(wire.pm, t), opacity: this.dim(wire.pm) });
         continue;
       }
-      const p = wire.points, b = PathBuilder.stroke(1.6).move_to(...p[0]);
+      // The ended node's line is neutral and never flows.
+      const p = wire.points, b = PathBuilder.stroke(wire.ended ? 1.3 : 1.6).move_to(...p[0]);
       b.cubic_bezier_to(...p[3], ...p[1], ...p[2]);
-      stage.child(window.paint_path(b.build(), this.projectColor(wire.pm, t))
+      stage.child(window.paint_path(b.build(), wire.ended ? t.dim : this.projectColor(wire.pm, t))
         .id(`wire:${wire.id}`).absolute().left(0).top(0).size_full().opacity(.5 * this.dim(wire.pm)).transition('opacity', 160));
+    }
+    // An opened ended list hangs on one straight guide, not a wire per task.
+    for (const guide of g.guides) {
+      stage.child(div().absolute().left(guide.x - .5).top(guide.y).w(1).h(guide.h).bg(t.dim)
+        .opacity(.5 * this.dim(guide.pm)).transition('opacity', 160));
     }
     const flowProps = { overlay: Boolean(props()?.overlay), wires: flowing,
       packet: tr ? { token: tr.token, routes: tr.routes, reverse: tr.reverse,
@@ -477,6 +656,11 @@ export default class PmDash extends View {
     if (hovered) {
       const info = this.taskInfoCard(hovered, g, t);
       if (info) stage.child(info);
+    }
+    const peek = this.peeking() && rows.find(row => row.type === 'ended' && row.pm === this.hoverEnded);
+    if (peek && peek.peek?.length) {
+      const card = this.endedPeek(peek, g, t);
+      if (card) stage.child(card);
     }
 
     const small = g.frame.width < 800;
@@ -553,12 +737,12 @@ export default class PmDash extends View {
           .child(div().h(36).overflow_hidden().whitespace_normal().text_size(13.5).line_height('18px').text_color(t.muted).child(total.conclusion)))
         .child(stats))
       .child(main);
-    return v_flex().id('root').size_full().bg(t.canvas).text_color(t.foreground).text_size(13)
+    return keepPress(this, v_flex().id('root')).w_full().flex_1().min_h(0).bg(t.canvas).text_color(t.foreground).text_size(13)
       .on_mouse_move((event, cx) => this.hoverBounds('boardBounds', event.bounds, cx))
-      .on_size_change((size,cx) => { if (size.width !== this.size.width || size.height !== this.size.height) { this.size=size; this.hoverTask=null; cx.notify(); } })
+      .on_size_change((size,cx) => { if (size.width !== this.size.width || size.height !== this.size.height) { this.size=size; this.hoverTask=null; this.hoverEnded=null; cx.notify(); } })
       .child(div().relative().flex_1().min_h(0).min_w(0).w_full()
         .child(div().id('scroll').size_full().overflow_scroll()
-          .on_scroll_wheel((_event, cx) => { if (this.hoverTask) { this.hoverTask=null; cx.notify(); } }).child(card))
+          .on_scroll_wheel((_event, cx) => { if (this.hoverTask || this.hoverEnded !== null) { this.hoverTask=null; this.hoverEnded=null; cx.notify(); } }).child(card))
         .child(Scrollbar.new('scroll').absolute().inset_0().mode('always')));
   }
 }

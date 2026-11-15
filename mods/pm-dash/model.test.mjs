@@ -1,12 +1,12 @@
 import test from 'node:test';
-import { summary, fitSummary, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from '../pm-nav/model.js';
+import { summary, waitingCount, navText, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from '../pm-nav/model.js';
 import * as nav from '../pm-nav/model.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, pmId, taskId, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText } from './model.js';
+import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, focusPlan, pmId, taskId, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText, scopeState, projectCards, projectCounts, countChips, pageTotals, startArgv, folderName, ledgerOpen, lastPmLine, boardGroups, endedList, endedDays, endedTime, previousDay } from './model.js';
 
 const setupSummary = (installed = [], ready = [], outdated = []) =>
   ({ summary: { detected: installed, installed, ready, outdated } });
@@ -194,45 +194,15 @@ test('a PM card names its agent quietly, and nothing when the ledger has none', 
   assert.equal(pmStatusText('en', { live: 'idle' }), 'Idle');
 });
 
-test('navigation fits whole English and Chinese phrases and always retains blocked counts', () => {
-  const counts = { projects: 5, active: 1, blocked: 4 };
-  for (const [lang, full, active, blocked, fullWidth, activeWidth] of [
-    ['en', '5 projects · 1 active', '1 active', '4 blocked', 193.75, 119],
-    ['zh', '5 项目 · 1 进行中', '1 进行中', '4 阻塞', 153.5, 101.75],
-  ]) {
-    const detail = `${full} · ${blocked}`;
-    for (const [width, text, red] of [
-      [fullWidth, full, ` · ${blocked}`], [fullWidth - .01, active, ` · ${blocked}`],
-      [activeWidth, active, ` · ${blocked}`], [activeWidth - .01, '', blocked], [0, '', blocked],
-    ]) {
-      assert.deepEqual(fitSummary(counts, lang, width), {
-        text, blocked: red, detail, minimumWidth: estimateTextWidth(blocked) + 4,
-      });
-    }
-    // Normal row: four 8px insets, 9px gap, 13px title; ~230px sidebar.
-    const at230 = fitSummary(counts, lang, 230 - 32 - 9 - estimateTextWidth(lang === 'zh' ? '看板' : 'Board', 13));
-    assert.equal(at230.text, lang === 'zh' ? full : active);
-  }
-});
-
-test('navigation without blocked work keeps active, pluralizes projects and preserves full tooltip text', () => {
-  for (const [projects, noun] of [[0, 'projects'], [1, 'project'], [2, 'projects'], [123, 'projects']]) {
-    const counts = { projects, active: 12, blocked: 0 };
-    for (const lang of ['en', undefined, 'unsupported', 'zh']) {
-      const active = lang === 'zh' ? '12 进行中' : '12 active';
-      const full = lang === 'zh' ? `${projects} 项目 · ${active}` : `${projects} ${noun} · ${active}`;
-      const threshold = estimateTextWidth(full) + 4;
-      assert.equal(fitSummary(counts, lang, threshold).text, full);
-      for (const width of [threshold - .01, 0]) {
-        assert.deepEqual(fitSummary(counts, lang, width), {
-          text: active, blocked: '', detail: full, minimumWidth: estimateTextWidth(active) + 4,
-        });
-      }
-    }
-  }
-  assert.equal(fitSummary({ projects: 0, active: 0, blocked: 0 }, 'en', 0).text, '0 active');
-  assert.equal(fitSummary({ projects: 100, active: 25, blocked: 123 }, 'en', 0).blocked, '123 blocked');
+test('the Projects entry counts projects in work and what waits, dropping words that do not fit', () => {
+  const counts = { projects: 4, active: 1, blocked: 2 };
+  assert.equal(navText(counts, 'zh', 200), '4 · 2 等你');
+  assert.equal(navText(counts, 'en', 200), '4 · 2 need you');
+  assert.equal(navText(counts, 'zh', estimateTextWidth('2 等你') + 4), '2 等你');
+  assert.equal(navText(counts, 'zh', 10), '');
+  assert.equal(navText({ projects: 3, active: 0, blocked: 0 }, 'zh', 200), '3');
   assert.equal(estimateTextWidth('项目'), estimateTextWidth('abcd'));
+  assert.equal(summary({ pms: [{}, { archived: '2026-10-31' }], tasks: [] }).projects, 1);
 });
 
 test('task status text shows cleanup in both languages and preserves false or missing behavior', () => {
@@ -327,7 +297,8 @@ test('cleanup survives local and remote rows without affecting counts or conclus
   const input = { pms: [{ name: 'pm-a', project: 'Alpha' }], tasks, events: [] };
   for (const lang of ['en', 'zh']) {
     const merged = mergeStates({ ...input, lang }, { remote: input });
-    const rows = layout(merged).rows.filter(row => row.type === 'task');
+    // Ended tasks are rows only in an opened ended list.
+    const rows = layout(merged, 980, 640, 1, false, { open: merged.pms.map(pm => pm.name) }).rows.filter(row => row.type === 'task');
     assert.deepEqual(rows.map(row => row.cleanup), [...tasks, ...tasks].map(task => task.cleanup));
     assert.deepEqual(counts({ ...merged, tasks: rows }), counts({ lang, pms: [], tasks: [] }));
   }
@@ -403,7 +374,9 @@ const state = { pms: [{ name: 'pm-a', project: 'a' }], tasks: [
 test('layout retains every task, groups orphans, and joins row edges at both panel sizes', () => {
   for (const [w,h] of [[980,640], [1600,900]]) {
     const g = layout(state,w,h);
-    assert.equal(g.rows.length,6); assert.equal(g.wires.length,5);
+    assert.equal(g.rows.filter(r => r.type === 'task').length,3); assert.equal(g.rows.filter(r => r.type === 'pm').length,2);
+    // Hub to both PMs; pm-a's two-task bundle is a trunk and two branches; the orphan's single task, one line.
+    assert.equal(g.wires.length,6);
     for (const wire of g.wires) {
       const a = g.rows.find(r => r.id === wire.from), b = g.rows.find(r => r.id === wire.to);
       assert.deepEqual(pointAt(wire.points,0), {x:a.x+a.w,y:a.y+a.h/2});
@@ -411,9 +384,9 @@ test('layout retains every task, groups orphans, and joins row edges at both pan
       assert.ok(b.x+b.w <= w); assert.ok(b.y+b.h <= g.height);
     }
     const tasks = g.rows.filter(r => r.type === 'task');
-    assert.equal(tasks[0].y,g.bodyTop);
+    assert.equal(tasks[0].y,g.bodyTop + 22); // under its bundle's heading
     assert.equal(tasks[0].h,w >= 1300 ? 36 : 32);
-    assert.equal(tasks[1].y,tasks[0].y + tasks[0].h);
+    assert.equal(tasks[1].y,tasks[0].y + tasks[0].h + 4);
     assert.ok(tasks[2].y-(tasks[1].y+tasks[1].h) >= 10);
     const hub = g.rows[0];
     assert.equal(hub.y+hub.h/2, (g.bodyTop+g.bodyBottom)/2);
@@ -437,10 +410,10 @@ test('layout fits narrow boards without overlapping columns and floors width at 
   assert.deepEqual(layout(state, 400), layout(state, 560));
 });
 
-test('normal and wide geometry use the mockup column widths and contiguous task groups', () => {
+test('normal and wide geometry use the mockup column widths and bundle rows under their heading', () => {
   for (const [width, wide, hubWidth, pmX, pmWidth, taskX, rowHeight] of [
-    [1164, false, 148, 232, 214, 490, 32],
-    [1462, true, 176, 326, 260, 670, 36],
+    [1164, false, 148, 232, 214, 530, 32],
+    [1462, true, 176, 326, 260, 706, 36],
   ]) {
     const g = layout(state, width, 900, 1, wide);
     assert.equal(g.rows[0].w, hubWidth);
@@ -448,13 +421,12 @@ test('normal and wide geometry use the mockup column widths and contiguous task 
     assert.equal(g.taskX, taskX);
     assert.ok(g.rows.filter(r => r.type === 'pm').every(r => r.w === pmWidth));
     assert.ok(g.rows.filter(r => r.type === 'task').every(r => r.h === rowHeight));
-    for (const group of g.taskGroups) {
-      const tasks = g.rows.filter(r => r.type === 'task' && (r.pm || '') === group.pm);
-      assert.equal(tasks[0].y, group.y);
-      assert.equal(tasks.at(-1).y + tasks.at(-1).h, group.y + group.h);
-      assert.ok(tasks.every(r => r.x === group.x && r.w === group.w));
+    for (const label of g.rows.filter(r => r.type === 'label')) {
+      const tasks = g.rows.filter(r => r.type === 'task' && (r.pm || '') === label.pm && (r.status || '') === label.status);
+      assert.equal(label.count, tasks.length);
+      assert.equal(tasks[0].y, label.y + label.h + 4);
+      assert.ok(tasks.every((r, i) => r.x === g.taskX && r.y === tasks[0].y + i * (rowHeight + 4)));
       assert.deepEqual(tasks.map(r => r.first), tasks.map((_, i) => i === 0));
-      assert.equal(group.h, tasks.length * rowHeight);
     }
   }
 });
@@ -529,21 +501,24 @@ test('height scaling keeps columns, non-overlapping rows, centered hub and conne
   }
 });
 
-test('each task retains its own curved route at the group left edge at every scale', () => {
+test('each task keeps its own curved branch from its bundle\'s fork at every scale', () => {
   const input = { pms: [{ name: 'a' }], tasks: Array.from({ length: 9 }, (_, i) => ({ id: String(i), pm: 'a' })), events: [] };
   for (const width of [560, 980, 1462]) {
     for (const scale of [.6, .8, 1]) {
-      const g = layout(input, width, 300, scale), group = g.taskGroups[0];
+      const g = layout(input, width, 300, scale), fork = g.rows.find(r => r.type === 'junction');
+      const pm = g.rows.find(r => r.type === 'pm'), trunk = g.wires.find(w => w.to === fork.id);
+      assert.deepEqual(trunk.points[0], [pm.x + pm.w, pm.y + pm.h / 2]);
+      assert.ok(pm.x + pm.w < fork.x && fork.x + fork.w < g.taskX);
       const wires = g.wires.filter(w => w.to.startsWith('task:'));
       assert.equal(wires.length, input.tasks.length);
       assert.equal(new Set(wires.map(w => w.to)).size, input.tasks.length);
-      const first = g.rows.find(r => r.type === 'task'), last = g.rows.at(-1);
-      assert.equal(group.y, first.y);
-      assert.ok(Math.abs(group.y + group.h - last.y - last.h) < 1e-8);
+      const first = g.rows.find(r => r.type === 'task'), last = g.rows.filter(r => r.type === 'task').at(-1);
+      assert.ok(Math.abs(fork.y + fork.h / 2 - (first.y + last.y + last.h) / 2) < 1e-8); // the fork faces the bundle's middle
       for (const wire of wires) {
-        const row = g.rows.find(r => r.id === wire.to), pm = g.rows.find(r => r.id === wire.from);
-        assert.deepEqual(wire.points[0], [pm.x + pm.w, pm.y + pm.h / 2]);
-        assert.deepEqual(wire.points[3], [group.x, row.y + row.h / 2]);
+        const row = g.rows.find(r => r.id === wire.to);
+        assert.equal(wire.from, fork.id); assert.equal(wire.trunk, trunk.id);
+        assert.deepEqual(wire.points[0], [fork.x + fork.w, fork.y + fork.h / 2]);
+        assert.deepEqual(wire.points[3], [g.taskX, row.y + row.h / 2]);
         assert.equal(wire.points[1][1], wire.points[0][1]);
         assert.equal(wire.points[2][1], wire.points[3][1]);
         assert.ok(wire.points[1][0] > wire.points[0][0] && wire.points[2][0] < wire.points[3][0]);
@@ -552,17 +527,22 @@ test('each task retains its own curved route at the group left edge at every sca
   }
 });
 
-test('urgency order is stable within each PM and machine and never mutates the ledger', () => {
+test('bundles follow urgency, keep ledger order within each, per PM and machine, and never mutate the ledger', () => {
   const statuses = ['paused', 'review', 'in_progress', 'blocked', 'proposed', 'review', 'in_progress', 'merged'];
   const input = { pms: [{ name: 'a' }, { name: 'empty' }], tasks: statuses.map((status, i) => ({
     id: String(i), pm: 'a', status, cleanup: status === 'merged',
   })), events: [] };
   const state = mergeStates(input, { 'remote-a': input, 'remote-b': input });
   const original = structuredClone(state), g = layout(state);
-  for (const group of g.taskGroups) {
-    assert.deepEqual(g.rows.filter(r => r.type === 'task' && r.pm === group.pm).map(r => r.sourceId), ['1', '3', '5', '2', '6', '0', '4', '7']);
+  for (const pm of g.rows.filter(r => r.type === 'pm' && r.sourceName === 'a')) {
+    assert.deepEqual(g.rows.filter(r => r.type === 'task' && r.pm === pm.name).map(r => r.sourceId), ['3', '1', '5', '2', '6', '4', '0']);
+    assert.deepEqual(g.rows.filter(r => r.type === 'label' && r.pm === pm.name).map(r => r.status),
+      ['blocked', 'review', 'in_progress', 'proposed', 'paused']);
+    assert.equal(g.rows.find(r => r.id === `ended:${pm.name}`).count, 1); // the merged one
   }
-  assert.equal(g.taskGroups.length, 3); // Empty PMs do not draw an empty container.
+  assert.equal(g.rows.filter(r => r.type === 'ended').length, 3);
+  // Empty PMs draw no heading, fork or ended node.
+  assert.equal(g.rows.filter(r => r.type !== 'pm' && String(r.pm).endsWith('empty')).length, 0);
   assert.deepEqual(state, original);
 });
 
@@ -712,6 +692,66 @@ test('PM presentation uses fallback for navigation without borrowing its agent o
   assert.equal(board.presentation(row, [], live).live, 'offline');
 });
 
+test('a board row on a paneless sub-agent brings up its PM\'s space and peeks it, never a neighbour by address', () => {
+  // 2026-11-15: t5h (dudu's, no pane yet) opened OldName, where t5c/t5g of appkit are.
+  const terms = [{ address: 't52', state: 'live', labels: { pm: 'dudu' } },
+    { address: 't5c', state: 'live', labels: { pm: 'appkit' } },
+    { address: 't5g', state: 'live', labels: { task: 'appkit-pairing-redesign' }, parent: 't5c' },
+    { address: 't5h', state: 'live', labels: { task: 'dudu-window-drag-review' }, parent: 't52' }];
+  const row = { id: 'task:dudu-window-drag-review', type: 'task', task: 'dudu-window-drag-review', pane: 'hc:t5h' };
+  const commands = [], panes = [{ pane: 'p1', terminal: 't52' }, { pane: 'p2', terminal: 't5c' }];
+  const board = modWithIO('./main.js', { focusPlan, terminalFor, terminals: () => terms, panes: () => panes,
+    agents: () => panes.map(p => ({ address: p.terminal, pane: p.pane })), props: () => ({}), closeOverlay: () => {},
+    run: (name, args) => commands.push([name, args]) });
+  board.state = { pms: [{ name: 'pm-dudu', project: 'dudu', pane: 'hc:t52' }, { name: 'pm-appkit', project: 'appkit' }] };
+  const task = { ...row, pm: 'pm-dudu', terminal: terminalFor(row, terms) };
+  board.openTerminal(task);
+  assert.deepEqual(commands, [['pane.focus', { terminal: 't52' }], ['layout.select', { stack: 'pm-stage', child: 'work' }],
+    ['terminal.peek', { terminal: 't5h' }]]);
+  // t52 rotated out and closed (the worker outlives it): over the current PM t5p, found by its pm label.
+  commands.length = 0;
+  terms[0] = { ...terms[0], state: 'exited' }; terms.push({ address: 't5p', state: 'live', labels: { pm: 'dudu' } });
+  panes[0] = { pane: 'p3', terminal: 't5p' };
+  board.openTerminal(task);
+  assert.deepEqual(commands.map(([name, args]) => [name, args.terminal || args.child]),
+    [['pane.focus', 't5p'], ['layout.select', 'work'], ['terminal.peek', 't5h']]);
+  // Its PM has no pane either: nothing runs — never the other project's space that happens to be active.
+  commands.length = 0;
+  panes.splice(0, 1);
+  board.openTerminal(task);
+  assert.deepEqual(commands, []);
+});
+
+test('a toast for an agent opens it as the board does, and does nothing when it has nowhere to show', async () => {
+  const toastModel = await import('../pm-toast/model.js');
+  assert.equal(toastModel.focusPlan.toString(), focusPlan.toString());
+  const terms = [{ address: 't52', state: 'live', labels: { pm: 'dudu' } }, { address: 't5c', state: 'live', labels: { pm: 'appkit' } },
+    { address: 't7', state: 'live', parent: 't52' }, { address: 't8', state: 'live', parent: 't404' }];
+  const commands = [], closed = [];
+  const source = readFileSync(new URL('../pm-toast/main.js', import.meta.url), 'utf8')
+    .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmToast extends View', 'return class');
+  const stubs = { View: class {}, focusPlan: toastModel.focusPlan, terminals: () => terms,
+    panes: () => [{ pane: 'p1', terminal: 't52' }, { pane: 'p2', terminal: 't5c' }],
+    agents: () => [{ address: 't52', pane: 'p1' }, { address: 't5c', pane: 'p2' }],
+    layout: () => ({ id: 'root', children: [{ id: 'pm-stage', active: 'pm-project' }] }),
+    run: (name, args) => commands.push([name, args]), closeOverlay: id => closed.push(id) };
+  const Toast = new Function(...Object.keys(stubs), source)(...Object.values(stubs));
+  const toast = new Toast();
+  toast.goTo('t7');
+  assert.deepEqual(commands, [['pane.focus', { terminal: 't52' }], ['layout.select', { stack: 'pm-stage', child: 'work' }],
+    ['terminal.peek', { terminal: 't7' }]]);
+  commands.length = 0;
+  toast.goTo('t8');
+  assert.deepEqual(commands, []);
+  toast.goTo('t5c');
+  assert.deepEqual(commands, [['pane.focus', { terminal: 't5c' }], ['layout.select', { stack: 'pm-stage', child: 'work' }]]);
+  // The terminal list unreadable: nothing runs (the click then only closes the toast).
+  commands.length = 0;
+  const Broken = new Function(...Object.keys(stubs), source)(...Object.values({ ...stubs, terminals: () => { throw new Error('gone'); } }));
+  new Broken().goTo('t7');
+  assert.deepEqual(commands, []);
+});
+
 test('missing PM session hints explain project fallback and desktop claim in both languages', () => {
   assert.equal(word('en', 'pmProjectFallback'), "PM session is not in the desktop app. Click opens the project's space.");
   assert.equal(word('zh', 'pmProjectFallback'), 'PM 会话不在 desktop 里，点击打开该项目的空间。');
@@ -798,11 +838,35 @@ test('failed machines leave local rows intact and do not discard healthy remote 
 });
 
 test('navigation summary counts ledger task states, not worker activity or closed tasks', () => {
-  assert.deepEqual(summary({pms:[{},{}],tasks:[
-    {status:'in_progress',worker:'blocked'}, {status:'in_progress'},
-    {status:'blocked'}, {status:'review',worker:'working'}, {status:'merged'}, {status:'paused'}
+  assert.deepEqual(summary({pms:[{name:'pm-a'},{name:'pm-b'}],tasks:[
+    {pm:'pm-a',status:'in_progress',worker:'blocked'}, {pm:'pm-b',status:'in_progress'},
+    {pm:'pm-a',status:'blocked'}, {pm:'pm-a',status:'review',worker:'working'}, {pm:'pm-b',status:'merged'},
+    {pm:'pm-b',status:'paused'}
   ]}), {projects:2,active:2,blocked:1});
   assert.deepEqual(summary({pms:[],tasks:[]}), {projects:0,active:0,blocked:0});
+});
+
+test('what waits on the entry is the sum of the listed projects\' badges', () => {
+  // As `pm.py state` gives it: OldName's tasks sit in appkit's repo, so they count
+  // there; homenet has no PM and is not in the list, so its blocked tasks are not counted.
+  const state = { pms: [
+    { name: 'pm-dudu', counts: { waiting: 1 } }, { name: 'pm-appkit', counts: { waiting: 3 } },
+    { name: 'pm-old', archived: '2026-10-31', counts: { waiting: 2 } },
+  ], tasks: [
+    { pm: 'pm-dudu', project: 'dudu', status: 'blocked' }, { pm: 'pm-appkit', project: 'appkit', status: 'blocked' },
+    { pm: 'pm-appkit', project: 'OldName', status: 'blocked' }, { pm: 'pm-appkit', project: 'OldName', status: 'blocked' },
+    { pm: '', project: 'homenet', status: 'blocked' }, { pm: '', project: 'homenet', status: 'blocked' },
+    { pm: 'pm-old', project: 'old', status: 'blocked' }, { pm: 'pm-old', project: 'old', status: 'blocked' },
+  ] };
+  const badges = state.pms.filter(pm => !pm.archived).reduce((n, pm) => n + waitingCount(pm, state.tasks), 0);
+  assert.equal(summary(state).blocked, badges);
+  assert.equal(summary(state).blocked, 4);
+  assert.equal(navText(summary(state), 'zh', 200), '2 · 4 等你');
+  // A ledger from before `counts` falls back to the PM's own blocked tasks, as the list does.
+  const old = { ...state, pms: state.pms.map(({ counts, ...pm }) => pm) };
+  assert.equal(summary(old).blocked, 4);
+  // Other machines add their own listed projects.
+  assert.equal(summary(state, { dev: { pms: [{ name: 'pm-x', counts: { waiting: 2 } }], tasks: [] } }).blocked, 6);
 });
 
 test('dashboard counts blocked work as waiting and running workers without counting idle or closed work', () => {
@@ -816,6 +880,14 @@ test('dashboard counts blocked work as waiting and running workers without count
   assert.deepEqual(counts({lang:'zh',pms:[{name:'pm-a',project:'Alpha'}],tasks:[{pm:'pm-a',status:'review'}]}),
     {running:0,review:1,blocked:0,waiting:0,conclusion:'现在没有等你的事。'});
   assert.deepEqual(counts({lang:'zh',pms:[],tasks:[]}), {running:0,review:0,blocked:0,waiting:0,conclusion:'现在没有等你的事。'});
+  // A blocked task the user has answered (pm.py's `answered`) waits for the PM: not counted, as on the bell.
+  assert.deepEqual(counts({lang:'zh',pms:[{name:'pm-a',project:'Alpha'}],tasks:[{pm:'pm-a',status:'blocked',answered:true}]}),
+    {running:0,review:0,blocked:1,waiting:0,conclusion:'现在没有等你的事。'});
+  assert.equal(projectCounts({ name: 'pm-a' }, [{ pm: 'pm-a', status: 'blocked', answered: true }, { pm: 'pm-a', status: 'blocked' }]).waiting, 1);
+  // Its row on the board says so, quietly.
+  assert.equal(taskStatusText('zh', { status: 'blocked', answered: true }), '已回答');
+  assert.equal(taskStatusText('en', { status: 'blocked', answered: true }), 'Answered');
+  assert.equal(taskStatusText('zh', { status: 'blocked' }), '阻塞 · 等你');
 });
 test('project colors are stable theme tokens, independent of project order', () => {
   const names = ['dudu', 'Sample App', '测试项目', ''];
@@ -920,4 +992,208 @@ test('the pm layout hides every agent notice of an agent the PM dispatched', asy
   assert.equal(isWorkerNotice(notice('t9'), [{ address: 't1', labels: { pm: '' } }, { address: 't9', parent: 't1' }]), false);
   assert.equal(isWorkerNotice({ ...notice('t9'), action: { name: 'pane.focus', args: { terminal: 't9' } } }, terms), false);
   for (const props of [null, undefined, {}, { title: 'x finished' }]) assert.equal(isWorkerNotice(props, terms), false);
+});
+
+test('a retired PM terminal is neither the PM nor a task\'s terminal', () => {
+  const old = { address: 't3b', state: 'live', cwd: '/r/dudu', labels: { 'pm.retired': 'dudu' } };
+  const pm = { type: 'pm', name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:t3b' };
+  assert.equal(terminalFor(pm, [old]), undefined);
+  assert.equal(terminalTargetFor(pm, [old]).terminal, undefined);
+  assert.equal(terminalFor({ type: 'task', task: 'dudu-y', pane: 'hc:t3b' }, [old]), undefined);
+  const next = { address: 't3k', state: 'live', cwd: '/r/dudu', labels: { pm: 'dudu' } };
+  assert.equal(terminalFor(pm, [old, next]), next);
+});
+
+test('Projects cards take their numbers from counts and keep archived projects apart', () => {
+  const state = { lang: 'zh', pms: [
+    { name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', agent: 'claude', counts: { working: 1, waiting: 0, review: 2, proposed: 6, merged_today: 0 } },
+    { name: 'pm-ll', project: 'appkit', agent: 'codex', counts: { working: 0, waiting: 2, review: 0, proposed: 0, merged_today: 2 } },
+    { name: 'pm-homenet', project: 'homenet', archived: '2026-10-31' },
+  ], tasks: [
+    // Tasks disagree with counts on purpose: the card shows the ledger's counts.
+    { id: 'a', pm: 'pm-dudu', status: 'blocked', title: 'x' },
+    { id: 'b', pm: 'pm-homenet', status: 'paused', paused_from: 'blocked', title: '光猫配置 DMZ' },
+  ], events: [{ pm: 'pm-ll', at: '2026-11-14 22:00' }, { pm: 'pm-dudu', at: '2026-11-14 22:30' }] };
+  const { active, archived } = projectCards(state);
+  assert.deepEqual(active.map(c => [c.name, c.agent]), [['dudu', 'Claude Code'], ['appkit', 'Codex']]);
+  assert.deepEqual(countChips(active[0].counts), [['working', 1], ['review', 2], ['proposed', 6]]);
+  assert.deepEqual(countChips(active[1].counts), [['waiting', 2], ['merged_today', 2]]);
+  assert.deepEqual(pageTotals(active), { projects: 2, working: 1, waiting: 2 });
+  assert.deepEqual(archived.map(c => [c.name, c.paused]), [['homenet', ['光猫配置 DMZ']]]);
+  // A ledger without counts counts its own tasks.
+  assert.equal(projectCounts({ name: 'pm-dudu' }, state.tasks).waiting, 1);
+  // Without counts, an in-progress task whose terminal is gone is not working; one with a terminal is.
+  const gone = [{ id: 'g', pm: 'pm-x', status: 'in_progress', offline: true }];
+  assert.equal(projectCounts({ name: 'pm-x' }, gone).working, 0);
+  assert.equal(projectCounts({ name: 'pm-x' }, [...gone, { id: 'l', pm: 'pm-x', status: 'in_progress' }]).working, 1);
+  assert.equal(word('zh', 'projectsTitle'), 'Projects');
+  assert.equal(word('en', 'projectsTitle'), 'Projects');
+});
+
+test('a project board keeps only that project; the all-projects board leaves archived ones out', () => {
+  const state = { pms: [{ name: 'pm-a' }, { name: 'pm-b' }, { name: 'pm-z', archived: '2026-10-31' }],
+    tasks: [{ id: 't1', pm: 'pm-a' }, { id: 't2', pm: 'pm-b' }, { id: 't3', pm: 'pm-z' }, { id: 't4', pm: '' }],
+    events: [{ key: 'e1', pm: 'pm-a' }, { key: 'e2', pm: 'pm-b' }, { key: 'e3', pm: 'pm-z' }] };
+  const one = scopeState(state, 'pm-a');
+  assert.deepEqual([one.pms.map(p => p.name), one.tasks.map(t => t.id), one.events.map(e => e.key)], [['pm-a'], ['t1'], ['e1']]);
+  const g = layout(one, 980);
+  assert.deepEqual(g.rows.map(r => r.id), ['pm:pm-a', 'label:pm-a:', 'task:t1']);   // no hub: the board starts at its PM
+  assert.deepEqual(g.wires.map(w => w.id), ['task:t1']);
+  const all = scopeState(state, '');
+  assert.deepEqual([all.pms.map(p => p.name), all.tasks.map(t => t.id)], [['pm-a', 'pm-b'], ['t1', 't2', 't4']]);
+  assert.equal(layout(all, 980).rows[0].id, 'you');
+});
+
+test('the new-project form runs pm.py start with its folder, name, agent and space', () => {
+  const script = '/app/mods/pm-dash/skill/scripts/pm.py';
+  assert.deepEqual(startArgv(script, { repo: '/Users/x/project/repos/homenet', name: '', kind: 'claude', space: 'new' }),
+    [script, 'start', '--repo', '/Users/x/project/repos/homenet', '--name', 'homenet', '--kind', 'claude', '--space', 'new']);
+  assert.deepEqual(startArgv(script, { repo: '/r/a/', name: ' home net ', kind: 'pi', space: 'current' }).slice(4),
+    ['--name', 'home net', '--kind', 'pi', '--space', 'current']);
+  assert.equal(folderName('/r/homenet/'), 'homenet');
+  const open = ledgerOpen({ tasks: [{ project: 'homenet', status: 'blocked' }, { project: 'HomeNet', status: 'paused' },
+    { project: 'homenet', status: 'merged' }, { project: 'other', status: 'blocked' }] }, 'homenet');
+  assert.equal(open.length, 2);
+});
+
+test('a card shows the PM\'s newest line, links as their titles', () => {
+  const log = [
+    JSON.stringify({ type: 'pm', text: 'old' }),
+    JSON.stringify({ type: 'pm', text: '在出 Projects 的设计稿；[输入框草稿不丢](thread:dudu-keep-drafts) 由 t1h 在做。\n- 第二行' }),
+    JSON.stringify({ type: 'thread', text: 'not the PM' }), 'not json'].join('\n');
+  assert.deepEqual(lastPmLine(log), [{ text: '在出 Projects 的设计稿；' },
+    { text: '输入框草稿不丢', link: 'thread:dudu-keep-drafts' }, { text: ' 由 t1h 在做。' }]);
+  assert.deepEqual(lastPmLine(''), []);
+});
+
+test('a task in progress whose terminal is gone reads as disconnected on the board', () => {
+  for (const [lang, text] of [['en', 'Disconnected'], ['zh', '已断开']]) {
+    assert.equal(taskStatusText(lang, { status: 'in_progress', offline: true, live: 'in_progress' }), text);
+    // What waits for the user, or is in review, says so still.
+    assert.equal(taskStatusText(lang, { status: 'blocked', offline: true }), word(lang, 'blockedWaiting'));
+    assert.equal(taskStatusText(lang, { status: 'review', offline: true }), word(lang, 'review'));
+  }
+  assert.equal(taskStatusText('zh', { status: 'in_progress', live: 'working' }), '工作中…');
+  const rows = layout({ lang: 'zh', pms: [{ name: 'pm-a', project: 'a' }], events: [],
+    tasks: [{ id: 'a-1', pm: 'pm-a', title: 'T', status: 'in_progress', offline: true }] }).rows;
+  assert.equal(rows.find(r => r.type === 'task').offline, true);  // the row carries what state said
+});
+
+test('Esc leaves a project board for its conversation and the Projects page for what it covered', async () => {
+  const { escapeTarget } = await import('./model.js');
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: 'dudu' }), { project: 'dudu' });
+  assert.deepEqual(escapeTarget(true, { view: 'archived', project: '' }), { view: 'list' });
+  for (const page of [{ view: 'list', project: '' }, { view: 'board', project: '' }, {}, null, undefined]) {
+    assert.deepEqual(escapeTarget(true, page), { back: true });
+  }
+  // The page is not on screen (another stage child, or an overlay copy): Esc is not ours.
+  assert.equal(escapeTarget(false, { view: 'board', project: 'dudu' }), null);
+  assert.equal(escapeTarget(false, { view: 'list' }), null);
+  // One layer a press: an open hover card closes before the page goes anywhere.
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: 'dudu' }, { hoverCard: true }), { hoverCard: true });
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: '' }, { hoverCard: true }), { hoverCard: true });
+  assert.equal(escapeTarget(false, { view: 'board' }, { hoverCard: true }), null);
+  // Then the opened ended lists fold, before the page goes anywhere.
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: 'dudu' }, { ended: true }), { ended: true });
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: '' }, { hoverCard: true, ended: true }), { hoverCard: true });
+  assert.equal(escapeTarget(false, { view: 'board' }, { ended: true }), null);
+  // A list opened on the board stays open behind the list or archived page; Esc there is the page's.
+  assert.deepEqual(escapeTarget(true, { view: 'list', project: '' }, { ended: true }), { back: true });
+  assert.deepEqual(escapeTarget(true, { view: 'archived', project: '' }, { ended: true }), { view: 'list' });
+});
+
+// ---- Many tasks: bundles by status, one ended node -------------------------------------
+
+const board = (tasks, pm = 'pm-a') => ({ lang: 'zh', project: pm, pms: [{ name: pm }], events: [],
+  tasks: tasks.map(t => ({ pm, title: `T ${t.id}`, ...t })) });
+
+test('active tasks bundle by status: a trunk per bundle forks into a branch per task and flows only with its work', () => {
+  const input = board([{ id: 'r1', status: 'review' }, { id: 'w1', status: 'in_progress' }, { id: 'b1', status: 'blocked' },
+    { id: 'w2', status: 'in_progress' }, { id: 'x', status: 'later' }, { id: 'p1', status: 'paused' }, { id: 'w3', status: 'in_progress' }]);
+  assert.deepEqual(boardGroups(input.tasks).bundles.map(b => [b.status, b.tasks.map(t => t.id)]), [['blocked', ['b1']],
+    ['review', ['r1']], ['in_progress', ['w1', 'w2', 'w3']], ['paused', ['p1']], ['later', ['x']]]);
+  const g = layout(input, 980);
+  assert.deepEqual(g.rows.filter(r => r.type === 'label').map(r => `${r.title} ${r.count}`), ['等你 1', '待审 1', '进行中 3', '暂停 1', 'later 1']);
+  // A single task's bundle is one line from the PM; the three in progress share one trunk.
+  assert.deepEqual(g.wires.map(w => w.id), ['task:b1', 'task:r1', 'trunk:pm-a:in_progress', 'task:w1', 'task:w2', 'task:w3', 'task:p1', 'task:x']);
+  assert.deepEqual(g.routes['task:w2'], ['trunk:pm-a:in_progress', 'task:w2']);
+  assert.deepEqual(g.routes['task:b1'], ['task:b1']);
+  const working = ids => g.rows.map(r => r.type === 'task' ? { ...r, live: ids.includes(r.task) ? 'working' : 'idle' } : r);
+  const trunk = g.wires.find(w => w.id === 'trunk:pm-a:in_progress'), branch = id => g.wires.find(w => w.id === `task:${id}`);
+  assert.equal(wireFlows(trunk, working([])), false);
+  assert.equal(wireFlows(trunk, working(['b1'])), false); // another bundle's work leaves this trunk still
+  assert.equal(wireFlows(trunk, working(['w2'])), true);
+  assert.equal(wireFlows(branch('w2'), working(['w2'])), true);
+  assert.equal(wireFlows(branch('w1'), working(['w2'])), false); // only the working task's own branch
+});
+
+const ended = [
+  { id: 'w', status: 'in_progress' }, { id: 'd1', status: 'done', updated: '2026-11-15 00:54' },
+  { id: 'a1', status: 'abandoned', updated: '2026-11-15 00:50' }, { id: 'm1', status: 'merged', updated: '2026-11-14 22:26', cleanup: true },
+  { id: 'r1', status: 'released', updated: '2026-11-14 21:36' }, { id: 'd2', status: 'done', updated: '2026-11-15 00:10' },
+  { id: 'c1', status: 'cancelled', updated: '2026-11-13 09:00' },
+];
+
+test('ended tasks fold into one node on one still line, and its count leaves the abandoned out', () => {
+  const input = board(ended), parts = boardGroups(input.tasks);
+  assert.deepEqual(parts.ended.map(t => t.id), ['d1', 'd2', 'm1', 'r1']); // newest first
+  assert.deepEqual(parts.dropped.map(t => t.id), ['a1', 'c1']);
+  const g = layout(input, 980), node = g.rows.find(r => r.type === 'ended');
+  assert.deepEqual([node.count, node.dropped, node.open, node.showDropped], [4, 2, false, false]);
+  assert.deepEqual(node.recent, ['T d1', 'T d2', 'T m1']);
+  assert.deepEqual(node.peek.map(t => t.id), ['d1', 'd2', 'm1', 'r1']);
+  assert.deepEqual(g.rows.filter(r => r.type === 'task').map(r => r.task), ['w']); // folded: no row per ended task
+  const line = g.wires.filter(w => w.to === node.id);
+  assert.equal(line.length, 1); assert.equal(g.wires.length, 2);
+  for (const id of ['d1', 'a1', 'c1']) assert.deepEqual(g.routes[`task:${id}`], [node.id]);
+  assert.equal(wireFlows(line[0], g.rows.map(r => ({ ...r, live: 'working' }))), false); // never flows
+  // A PM with only abandoned work still has the node, to hold the eye.
+  const only = layout(board([ended[2]]), 980).rows.find(r => r.type === 'ended');
+  assert.deepEqual([only.count, only.dropped], [0, 1]);
+  // Opening the list moves neither the PM nor the board's scale: the list scrolls.
+  const opened = layout(input, 980, 640, 1, false, { open: ['pm-a'] });
+  assert.equal(opened.rows.find(r => r.type === 'pm').y, g.rows.find(r => r.type === 'pm').y);
+  assert.ok(opened.height > g.height);
+  const height = 200 + g.height * .8;
+  assert.ok(Math.abs(fitBoard(input, 980, height, 200).scale - .8) < 1e-8);
+  assert.equal(fitBoard(input, 980, height, 200, { open: ['pm-a'] }).scale, fitBoard(input, 980, height, 200).scale);
+});
+
+test('the eye shows the abandoned in the opened list without counting them; another PM\'s switch is its own', () => {
+  const input = board(ended);
+  const g = view => layout(input, 980, 640, 1, false, { today: '2026-11-15', ...view });
+  const list = view => g(view).rows.filter(r => r.entry).map(r => r.task);
+  assert.deepEqual(list({}), []);
+  assert.deepEqual(list({ dropped: ['pm-a'] }), []); // folded still
+  assert.deepEqual(list({ open: ['pm-a'] }), ['d1', 'd2', 'm1', 'r1']);
+  assert.deepEqual(list({ open: ['pm-a'], dropped: ['pm-a'] }), ['d1', 'a1', 'd2', 'm1', 'r1', 'c1']);
+  assert.deepEqual(list({ open: ['pm-b'], dropped: ['pm-b'] }), []);
+  assert.deepEqual(endedList(boardGroups(input.tasks), true).map(t => t.id), ['d1', 'a1', 'd2', 'm1', 'r1', 'c1']);
+  const shown = g({ open: ['pm-a'], dropped: ['pm-a'] }), node = shown.rows.find(r => r.type === 'ended');
+  assert.deepEqual([node.count, node.dropped, node.showDropped], [4, 2, true]);
+  // The opened list hangs on one straight guide from the node to its last row: no wire per task.
+  assert.equal(shown.wires.length, g({}).wires.length);
+  const [guide] = shown.guides, last = shown.rows.filter(r => r.entry).at(-1);
+  assert.equal(shown.guides.length, 1);
+  assert.equal(guide.y, node.y + node.h);
+  assert.equal(guide.y + guide.h, last.y + last.h / 2);
+  assert.ok(guide.x > node.x && guide.x < last.x);
+});
+
+test('an opened ended list groups by day: today, yesterday, then each date, the undated last', () => {
+  const tasks = [{ id: 'a', updated: '2026-11-15 00:54' }, { id: 'b', updated: '2026-11-15 00:10' },
+    { id: 'c', updated: '2026-11-14 22:29' }, { id: 'd', updated: '2026-11-13 09:46' }, { id: 'e', updated: '2026-10-31 23:44' }, { id: 'f' }];
+  for (const [lang, titles] of [['zh', ['今天', '昨天 · 11-14', '11-13', '10-31', '更早']],
+    ['en', ['Today', 'Yesterday · 11-14', '11-13', '10-31', 'Earlier']]]) {
+    const days = endedDays(tasks, '2026-11-15', lang);
+    assert.deepEqual(days.map(d => d.title), titles);
+    assert.deepEqual(days.map(d => d.tasks.map(t => t.id)), [['a', 'b'], ['c'], ['d'], ['e'], ['f']]);
+  }
+  assert.equal(previousDay('2026-11-01'), '2026-10-31');
+  assert.equal(previousDay('2026-01-01'), '2025-12-31');
+  assert.equal(endedTime('2026-11-14 22:29', '2026-11-15'), '11-14 22:29');
+  const input = board([...tasks].reverse().map(t => ({ ...t, status: 'done' })));
+  const rows = layout(input, 980, 640, 1, false, { open: ['pm-a'], today: '2026-11-15' }).rows;
+  assert.deepEqual(rows.filter(r => r.type === 'day' || r.entry).map(r => r.entry ? `${r.task} ${r.time}` : r.title),
+    ['今天', 'a 00:54', 'b 00:10', '昨天 · 11-14', 'c 22:29', '11-13', 'd 09:46', '10-31', 'e 23:44', '更早', 'f ']);
 });

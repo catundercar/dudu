@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pmRows, pmStatus, age, lastEventAt, track, listHeight, underNav, remotePmStates, HEADER, ROW, MAX_ROWS, PAD } from './model.js';
+import { pmRows, pmStatus, splitArchived, archivedDay, age, lastEventAt, track, listHeight, underNav, remotePmStates, HEADER, ROW, MAX_ROWS, PAD } from './model.js';
 import * as list from './model.js';
 import * as dash from '../pm-dash/model.js';
+import * as nav from '../pm-nav/model.js';
 
 const term = (address, extra = {}) => ({ address, state: 'live', labels: {}, ...extra });
 
-test('rows show PM-<project>, live status by terminal, most urgent first then by name', () => {
+test('rows show the project name, live status by terminal, most urgent first then by name', () => {
   const state = { pms: [
     { name: 'pm-zeta', project: 'zeta', pane: 'hc:t1', status: 'idle' },
     { name: 'pm-alpha', project: 'alpha', pane: 'hc:t2', status: 'idle' },
@@ -20,7 +21,7 @@ test('rows show PM-<project>, live status by terminal, most urgent first then by
     { address: 't4', status: 'working' }];
   const rows = pmRows(state, {}, terms, live);
   assert.deepEqual(rows.map(r => [r.label, r.status]), [
-    ['PM-alpha', 'blocked'], ['PM-zeta', 'done'], ['PM-beta', 'working'], ['PM-gamma', 'working'], ['PM-delta', 'idle']]);
+    ['alpha', 'blocked'], ['zeta', 'done'], ['beta', 'working'], ['gamma', 'working'], ['delta', 'idle']]);
   assert.equal(rows[1].program.icon, 'icons/claude.svg');
   const beta = rows.find(r => r.key === 'pm-beta');
   assert.equal(beta.terminal, null);
@@ -87,7 +88,11 @@ test('right under pm-nav the list has no header of its own', () => {
 
 test('copied ledger and terminal rules stay identical to pm-dash', () => {
   assert.equal(list.LEDGER_HOME_SH, dash.LEDGER_HOME_SH);
-  for (const name of ['terminalFor', 'terminalTargetFor']) assert.equal(list[name].toString(), dash[name].toString());
+  for (const name of ['terminalFor', 'terminalTargetFor', 'focusPlan']) assert.equal(list[name].toString(), dash[name].toString());
+});
+
+test('pm-nav counts what waits with the same rule as the rows\' badges', () => {
+  assert.equal(nav.waitingCount.toString(), list.waitingCount.toString());
 });
 
 test('PMs on other machines come from pm-nav\'s cache and match their own machine\'s terminals', () => {
@@ -107,4 +112,37 @@ test('PMs on other machines come from pm-nav\'s cache and match their own machin
   assert.equal(away.terminal.address, 'dev/t2');
   assert.equal(away.exact, false);
   for (const text of ['', '{', 'null', '{"states":[]}']) assert.deepEqual(remotePmStates(text), {});
+});
+
+test('an age reads in the largest whole unit, in the view\'s language', () => {
+  assert.equal(list.age.toString(), dash.age.toString());   // the Projects cards use the same words
+  const spans = [0, 59_000, 60_000, 16 * 3_600_000, 2 * 86_400_000 + 5];
+  assert.deepEqual(spans.map(ms => age(ms)), ['<1m', '<1m', '1m', '16h', '2d']);
+  assert.deepEqual(spans.map(ms => age(ms, 'en')), ['<1m', '<1m', '1m', '16h', '2d']);
+  assert.deepEqual(spans.map(ms => age(ms, 'zh')), ['刚刚', '刚刚', '1 分钟', '16 小时', '2 天']);
+});
+
+test('a retired PM terminal is not the PM', () => {
+  const pm = { name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:t3b', status: 'idle' };
+  const old = { address: 't3b', state: 'live', cwd: '/r/dudu', labels: { 'pm.retired': 'dudu' }, status: 'working' };
+  // Neither by the recorded pane nor as the project folder's terminal.
+  const [row] = pmRows({ pms: [pm] }, {}, [old], [{ address: 't3b', status: 'working' }]);
+  assert.deepEqual([row.terminal, row.exact, row.status], [null, false, 'idle']);
+  const next = { address: 't3k', state: 'live', cwd: '/r/dudu', labels: { pm: 'dudu' }, status: 'working' };
+  assert.equal(pmRows({ pms: [pm] }, {}, [old, next], []).at(0).terminal.address, 't3k');
+});
+
+test('archived projects leave the list for the fold, newest first; waiting comes from counts', () => {
+  const state = { pms: [
+    { name: 'pm-dudu', project: 'dudu', status: 'working', archived: null, counts: { waiting: 0 } },
+    { name: 'pm-homenet', project: 'homenet', archived: '2026-10-31' },
+    { name: 'pm-dsh-dudu', project: 'dsh-dudu', archived: '2026-11-04 10:12' },
+    { name: 'pm-liquid', project: 'appkit', counts: { waiting: 2 } },
+    { name: 'pm-hub', project: 'hub' },
+  ], tasks: [{ id: 'x', pm: 'pm-hub', status: 'blocked' }, { id: 'y', pm: 'pm-homenet', status: 'paused' }] };
+  const { active, archived } = splitArchived(pmRows(state, {}, [], []));
+  assert.deepEqual(active.map(r => r.label).sort(), ['appkit', 'dudu', 'hub']);
+  assert.ok(active.every(r => !r.label.startsWith('PM-')));
+  assert.deepEqual(archived.map(r => [r.label, archivedDay(r.archived)]), [['dsh-dudu', '11-04'], ['homenet', '10-31']]);
+  assert.deepEqual(active.map(r => [r.label, r.waiting]).sort(), [['appkit', 2], ['dudu', 0], ['hub', 1]]);
 });

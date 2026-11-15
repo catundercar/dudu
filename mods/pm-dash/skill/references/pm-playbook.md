@@ -1,6 +1,6 @@
 # PM playbook
 
-You coordinate; agents write the code. Review everything before it reaches the base branch. The user has authorized automatic merges: after review and verification pass, merge without asking. Ask the user only about real product decisions.
+You coordinate; agents write the code. That includes changes to the pm skill itself: dispatch them to a thread like any other work. A Claude Code PM is started without the Edit tool (Write stays, for briefs). Review everything before it reaches the base branch. The user has authorized automatic merges: after review and verification pass, merge without asking. Ask the user only about real product decisions.
 
 ## 1. Intake
 
@@ -9,7 +9,7 @@ Classify each request:
 - **New task from the user:** dispatch it (§2).
 - **"Manage `<terminal>`" / "你来管 <terminal>":** take over an existing agent. Register it with `pm.py new --pane hc:<t> --agent <name> --branch <its branch> --owner pm`, read its screen (`hc read <t> | tail -80`), then continue at §3.
 - **`proposed` task or handoff from a worker:** read its brief, then dispatch it or adopt the worker's branch.
-- **`review` task:** review and merge it (§5–§6).
+- **`review` task:** review it (§4) and merge it (§5).
 - **"Status?" / "看下状态":** run `pm.py status` (§8).
 
 ## 2. Dispatch
@@ -18,11 +18,26 @@ Classify each request:
 2. Start the agent:
    ```bash
    pm.py dispatch "<title>" --repo <repo> --branch dev/<topic> --label <topic> \
-     --brief <file> --name <agent-name> --prep "<prep from profile>" [--effort xhigh]
+     --brief <file> --name <agent-name> --prep "<prep from profile>" --profile <light|standard|hard|deep>
    ```
    The title is the thread's name wherever the user meets it (the conversation, the side panel, the board): a few words, not a sentence. The scope belongs in the brief.
 
-   This creates a git worktree under `~/.herdr/worktrees/<project>/` (one per task), runs the prep command (with `$MAIN` set to the main checkout), starts the worker in a terminal of its own that the user can open from the board (codex by default; kind, model and effort come from `~/.claude/pm/config.json` unless given on the command line), sends the brief and records the task. It prints the worker's terminal (`pane=hc:<t>`). If it reports that the brief was not delivered, the worker stopped at a startup dialog: see `herdr-recipes.md`. The text that was sent, report section included, is kept in `sent/<id>.md` in the ledger home; resend that file, not the brief. Use `xhigh` for release, security or protocol-risky work.
+   Work split from a task already in the ledger (one registered by another session, or one you split into parts) takes `--parent <that task's id>`: the project view lists the parts under that task, and each part links back to it. `pm.py new --parent <id>` does the same for an entry you register by hand; `pm.py update <id> --parent <id>` adds it to an existing task (`--parent ""` removes it).
+
+   This creates a git worktree under `~/.herdr/worktrees/<project>/` (one per task), runs the prep command (with `$MAIN` set to the main checkout), starts the worker in a terminal of its own that the user can open from the board (the profile gives its kind, model, effort and advisor; without one, `config.json`'s `worker`, else codex; `--kind`, `--model` and `--effort` win), sends the brief and records the task. It prints the worker's terminal (`pane=hc:<t>`). If it reports that the brief was not delivered, the worker stopped at a startup dialog: see `herdr-recipes.md`. The text that was sent, report section included, is kept in `sent/<id>.md` in the ledger home; resend that file, not the brief.
+
+   **Choosing the worker profile (`--profile`).** Pick a word, not a model; `config.json`'s `profiles` says what each one runs:
+
+   | Profile | For | Examples |
+   | --- | --- | --- |
+   | light (Sonnet · medium) | Mechanical, small, the result checked at a glance | wording or translation, a rename, one more test, read-only fact finding |
+   | standard (Opus · default) | Most features and bugs | a mod's UI, a `pm.py` command, an ordinary fix |
+   | hard (Opus · xhigh + Fable advisor) | Costly when wrong, many steps to think through | release, security, protocol compatibility, concurrency, migrations, refactors across modules; also the first escalation |
+   | deep (Fable · high) | Hours long, a fuzzy goal, carried through to a finished result | an architecture design, a root-cause investigation through to its report, a task hard did not get done |
+
+   Start at standard unless the task is plainly light or hard; failing upward (escalate, §4) is cheaper than starting high. Right after dispatching, log the profile and one line of why: `pm.py log <id> "hard: changes how rotate hands over the terminal"`. **Deep, or any Fable worker, asks the user first:** `dispatch` then registers the task as blocked with a question card and starts nothing; once the user agrees, run the same dispatch with `--confirmed` (or with `--profile hard` if the user picks that). Hard and below are yours to pick.
+
+   **Without Fable** (Bedrock, Vertex, a gateway, or an account without it), `config.json` says `"fable": false`: hard runs as Opus · xhigh without the advisor, deep is not offered, and escalation ends at hard. A Fable worker that is started anyway carries `--fallback-model opus`, which Claude switches to without a word; the dispatch note says so (`Fable 不可用时会退到 opus`).
 3. Wait in the background for the worker's report in the ledger. Never poll in the foreground:
    ```bash
    pm.py wait <id> --timeout 3600
@@ -32,36 +47,64 @@ Classify each request:
 ## 3. While agents work
 
 - **Agent asks a question:** answer it directly when the user has already decided the point (check the ledger log and memory). Otherwise ask the user, then reply with `hc send <t> "[from <your terminal>] ..."`. Log the answer with `pm.py log`.
-- **A task waits for the user's decision:** `pm.py update <id> --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`. The project view shows the note as your question on a card and each option as an answer to pick; picking one sends you `【<task title>】<answer>` as the user's turn. When an answer alone does not say what it means, follow its `--option` with `--why "<one line>"`; put the answer you would pick first and add `--recommend`. Leave out `--option` when the answer is open; the user types it.
-- **Something else waits for the user's decision** (a push, a cleanup, a choice that belongs to no task yet): give it a ledger entry of its own, `pm.py new "<what it is about>" --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`, and close it with `pm.py update <id> --status done --note "<the answer>"` once the user has answered. Say it once in your reply (§9). After that the project view, the board and `pm.py status` keep showing what waits, so later replies do not list it again.
+- **A task waits for the user's decision:** `pm.py update <id> --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`. The project view shows the note as your question on a card and each option as an answer to pick; picking one sends you `【<task title>】<answer>` as the user's turn. When an answer alone does not say what it means, follow its `--option` with `--why "<one line>"`; put the answer you would pick first and add `--recommend`. Leave out `--option` when the answer is open; the user types it. Once the user has answered, the task shows as Answered and no longer counts as waiting. `blocked` means only that the task waits for the user: record the answer by moving the task on, `pm.py update <id> --status in_progress --note "<the answer>"` (or `--status done`), never with `--status blocked`, which `update` refuses on an answered task. To ask a follow-up, run `update --status blocked --ask --note "<the question>"` (it is a new question card).
+- **Something else waits for the user's decision** (a push, a cleanup, a choice that belongs to no task yet): give it a ledger entry of its own, `pm.py new "<what it is about>" --status blocked --note "<the question>" --option "<answer>" --option "<answer>"`, and close it with `pm.py update <id> --status done --note "<the answer>"` once the user has answered (a follow-up question: `update --status blocked --ask`; the answer is never recorded with `--status blocked`). Say it once in your reply (§9). After that the project view, the board and `pm.py status` keep showing what waits, so later replies do not list it again.
 - **Agent stalls:** if it is blocked on an approval or question UI, see `herdr-recipes.md`.
+- **Agent is stuck on the work itself** (it reports it cannot get further, and that is not a decision for the user): escalate it (§4, "Escalate").
 - **Do not read a worker's screen to follow its work.** `hc read` is only for a worker stuck where it cannot report, such as a startup dialog (`herdr-recipes.md`); its report comes through `pm.py wait`.
 - **Scope creep:** new scripts, frameworks, large evidence trees or many commits. Stop it early: tell it to trim, then log the correction.
 
 ## 4. Review
 
-Keep the reading out of your own context (§10): for anything larger than a small diff, hand the review to a fresh subagent (the Agent tool) with the brief, the branch and the checklist below, and act on the findings it returns. Check a claim yourself only when the decision depends on it.
+Keep the reading out of your own context (§10). For anything larger than a small diff, start a reviewer thread:
 
-Before merging, check each item:
+```bash
+pm.py review <id>          # a read-only reviewer in the task's worktree, thread <id>-review
+pm.py wait <id>-review     # in the background, as in §2; returns its numbered findings
+```
 
-1. **Diff against the brief:** `git diff --stat <base>...<branch>`, then read the source changes. Flag anything outside the brief.
+It writes the reviewer's brief itself: the task's brief, the range `<base>...<branch>`, the checklist below and the project's checks (§5), and it shows up in the project view as a thread of its own. The reviewer commits nothing and changes no files (a Claude Code reviewer is started without Edit, Write and NotebookEdit), and reports with `--status done`, so the review never waits in the merge queue. The reviewer runs on another model than the worker, picked by the review table from the profile the task was dispatched with: light and deep are reviewed by Opus, standard and hard by Fable (`config.json`'s `review` changes entries); with `"fable": false`, Sonnet takes Fable's place, never Opus, so the model that wrote the code does not review it. A Fable reviewer carries `--fallback-model sonnet`, and the review note says so. A Fable reviewer picked this way is a review, not a deep dispatch, so nobody is asked. A `--model`, or a `reviewer` key in `config.json`, overrides the table; a task without a profile is reviewed as before, by `reviewer`, else `worker`. Running `review` again after fixes starts a fresh reviewer under the same id, and counts one more round on the task (`rounds`) when the previous review reported blockers: not after a report that starts with `无阻塞` / `no blockers`, not after a review that never reported, and not once the review thread is closed. The review thread is closed together with the task when the task is merged or retired; `pm.py retire <id>-review` closes it alone and ends its reviewer. A small diff you may read yourself. Check a claim yourself only when the decision depends on it.
+
+The checklist:
+
+1. **Diff against the brief:** `git diff --stat <base>...<branch>`, then the source changes. Flag anything outside the brief.
 2. **Red lines:** no `git add -A` debris, no secrets, no third-party assets, no touching the user's running apps or system settings.
-3. **Correctness:** look at edge cases the agent could not have seen, such as destructive file operations, protocol compatibility with old peers, signing and notarization, and OS-version behaviour. When a claim is cheap to test, test it yourself in the scratch directory.
-4. **Visual or UX results:** look at the evidence image yourself.
+3. **Correctness:** edge cases the agent could not have seen, such as destructive file operations, protocol compatibility with old peers, signing and notarization, and OS-version behaviour. When a claim is cheap to test, test it in a scratch directory.
+4. **Visual or UX results:** look at the evidence image.
 
-Send findings back as one numbered brief to the same agent. Ask for an added fix commit, not a rewrite.
+Send findings back as one numbered brief to the same agent, and log them on the task (`pm.py log <id> "<findings>"`). Ask for an added fix commit, not a rewrite.
+
+### Escalate
+
+A failed review is the signal to try a stronger profile, one step at a time: light → standard → hard → deep (with `"fable": false`, hard is the top: `escalate` from hard says so and starts nothing). The first failed review still goes back to the same worker. Escalate when:
+
+- the same task's second review fails too (`rounds` is 1 and this review found blockers again), or
+- the worker reports that it is stuck on the work itself, not on a decision for the user.
+
+```bash
+pm.py escalate <id> --why "<a few words>" [--profile <profile>]
+pm.py wait <id>            # in the background again, as in §2
+```
+
+Without `--profile` it goes one step up from the profile the task runs on; a task without one (dispatched before profiles) names it. It starts a new worker with a fresh context, in the same worktree and on the same branch, and sends it the review findings so far (the review thread's reports and the task's latest ledger entries), then the original brief from `sent/<id>.md`, with the note that the previous worker's commits are on the branch to carry on from. The two never work in the worktree at once: first the old worker stops (this task's own worker is interrupted if it is in a turn, and waited for until it is idle; then git's `index.lock` must be gone), then the new one starts, then the old worker's terminal ends. Only a worker that `dispatch`, `escalate` or `reattach` started for this task is interrupted or ended (an hc terminal labelled with the task; in the herdr TUI, the pane recorded as `worker_pane`), never a PM's or a session taken over with `pm.py new --pane`; while such a session is still working, `escalate` changes nothing and says so. The task id stays; `rounds` starts again at 0 and the review thread is closed (its findings went to the new worker); `escalations` records `{from, to, why, at}` and the log says `escalated to hard (Opus·xhigh): <why>` (`升级到 hard（Opus·xhigh）：<why>` with `"lang": "zh"`). The wait that was running for the old worker ends when its terminal does; start a new one.
+
+- **To deep, or to any Fable worker:** ask the user first. `escalate` then blocks the task with a question card and starts nothing; the old worker keeps its terminal. Once the user agrees, run `pm.py escalate <id> --profile deep --confirmed`. Never pass `--confirmed` without the user's yes.
+- **The new worker exits at once with its advisor** (the account has not agreed to Fable's billing, or has no Fable): the task is blocked with a question and the old worker is kept. Once the user has run `/model fable`, escalate again; if the user has no Fable, pass `--advisor none` for hard without the advisor and set `"fable": false` in `config.json`. The same two answers come on the card when a dispatch's worker exits at once with its advisor.
+- **Deep did not get it done either:** there is nothing above it. Ask the user how to go on.
 
 ## 5. Merge
 
-In the main checkout:
-
 ```bash
-git merge --no-ff --no-commit <branch>
+pm.py land <id> [--message "<what the user gets>"] [--keep]
 ```
 
-Then run the profile's full verification list. Resolve conflicts using the profile's notes. Commit with a message that says what the user gets, ending with the session attribution line. Then run `pm.py update <id> --status merged --commit <sha>`. For a task you dispatched, this also retires it (§7): the worker's terminal, the worktree and the branch are removed. Add `--keep` when the same worker has follow-up work coming.
+In the task's main checkout it merges the branch (`--no-ff --no-commit`), runs the project's checks (600 s for all of them together; `--timeout` changes it) and commits only when every one passes; then it marks the task merged, which retires a dispatched task (§7) unless you pass `--keep`, for follow-up work by the same worker. It prints the commit, how many checks ran and what was removed. The checks are `projects/<project>/verify` in the ledger home, one shell command per line run from the main checkout (`#` starts a comment); write it from the profile's verification list once. A file with only comments counts as none. The message defaults to `merge <branch>: <title>`; pass `--message` when the profile wants another one (an attribution line, for example).
 
-If verification fails after the merge, abort it (`git merge --abort`) and send the failure to the agent.
+- **Exit 1, a check failed or ran out of time:** the merge is aborted and the main checkout is clean again; it prints the command and the last 20 lines of its output. Send the failure to the agent.
+- **Exit 2, refused, nothing changed:** no checks, a dirty main checkout, the main checkout not on the base branch, the branch already merged, or git would not start the merge (for example untracked files in the way). It says which; fix that and land again.
+- **Exit 4, conflicts:** the merge is aborted; it lists the files. Merge by hand: `git merge --no-ff --no-commit <branch>`, resolve with the profile's notes, run the checks, commit, then `pm.py update <id> --status merged --commit <sha>`. If that is more than a few lines, send the conflict to the worker to rebase instead.
+- **Exit 5, the merge could not be undone** (a check changed a file the merge touched, so git refuses to abort): it prints what the main checkout holds. Clean it up by hand before anything else lands.
+- Stopped by a signal (`^C`, a kill), `land` aborts the merge before it exits.
 
 ## 6. Release and install
 
@@ -110,6 +153,7 @@ You are replaceable on purpose. The PM is the project's record on disk: the ledg
 - **Record a decision when the user makes it:** `pm.py decide "<decision>" --quote "<the user's words>"`. That covers preferences ("no right-angle wires"), scope calls and things you were told not to touch. If it is not in the ledger or the decisions file, your successor will not know it.
 - **When to rotate.** `pm.py context` prints what this session holds. Above the limit (200k tokens; `PM_ROTATE_TOKENS`), a line starting with `[pm]` appears with the user's next prompt. Finish the step in hand, reach a point where nothing is half merged, then rotate. Also rotate when the user asks, or when you notice you are re-reading things you already decided.
 - **How to rotate:** `pm.py rotate --notes "<what the ledger and decisions do not say>"`. Notes are for what is in flight: what you promised the user, what the user is about to check, a worker you are waiting on and what to do when it reports. It opens the new PM in a tab of your space, moves the registration to it and retires this session: say so to the user and stop acting as PM. The new session may stop at a startup dialog (folder trust, development channels for a Discord PM); that is the user's to confirm, so tell them.
+- **A project's life:** `pm.py start` opens it (a space of its own, a PM that begins with the handover), `pm.py archive` puts it away (the PM's terminal ends, open tasks are paused with their status kept in `paused_from`, the record stays) and `pm.py restore` brings it back (the tasks return to their status and a fresh PM starts from the handover). The record on disk is the same throughout; only the session comes and goes.
 - **When you are the fresh session:** run `pm.py handover` first and work from what it prints (decisions, notes, open work with the latest log lines, the last exchanges with the user, taken from the project's conversation log). To look further back, run `pm.py conversation --last 40` (`--type user,pm` for the talk alone); do not open the previous transcript. Tell the user in a few sentences what you took over and what is waiting for them.
 
 ## Red lines (always)

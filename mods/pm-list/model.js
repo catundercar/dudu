@@ -10,8 +10,15 @@ export function pmStatus(pm, terminal, exact, live) {
   return raw === 'error' ? 'blocked' : RANK[raw] ? raw : 'idle';
 }
 
+// The project's own name: the sidebar sits under the Projects entry, so no "PM-" before it.
 export function pmName(pm) {
-  return `PM-${pm.project || String(pm.name || '').replace(/^pm-/, '')}`;
+  return pm.project || String(pm.name || '').replace(/^pm-/, '');
+}
+
+// How many of a project's threads wait for the user: the ledger's `counts`, else its blocked tasks the user has not answered.
+export function waitingCount(pm, tasks) {
+  if (Number.isFinite(pm?.counts?.waiting)) return pm.counts.waiting;
+  return (Array.isArray(tasks) ? tasks : []).filter(t => t?.pm === pm?.name && t.status === 'blocked' && !t.answered).length;
 }
 
 // local: this computer's `pm.py state`; remote: {machine: state} as pm-nav caches it.
@@ -23,9 +30,23 @@ export function pmRows(local, remote, terms, live) {
     const { terminal, exact } = terminalTargetFor(row, terms);
     return { key: machine ? `${machine}/${pm.name}` : pm.name, label: pmName(pm), machine,
       terminal: terminal || null, exact, status: pmStatus(pm, terminal, exact, live),
-      program: exact ? terminal.program : null, seed: lastEventAt(state.events, pm.name) };
+      program: exact ? terminal.program : null, seed: lastEventAt(state.events, pm.name),
+      project: pm.project || '', archived: pm.archived || null, waiting: waitingCount(pm, state.tasks) };
   })).sort((a, b) => RANK[b.status] - RANK[a.status] || a.label.localeCompare(b.label) ||
     a.machine.localeCompare(b.machine));
+}
+
+// The sidebar's two parts: projects in work, and the archived ones folded at the bottom
+// (newest archive first). `pm.py state` gives an archived PM its date, else null.
+export function splitArchived(rows) {
+  return { active: rows.filter(r => !r.archived),
+    archived: rows.filter(r => r.archived).sort((a, b) => String(b.archived).localeCompare(String(a.archived))) };
+}
+
+// "2026-10-31…" as "10-31"; anything else as written.
+export function archivedDay(value) {
+  const m = /^\d{4}-(\d{2}-\d{2})/.exec(String(value || ''));
+  return m ? m[1] : String(value || '');
 }
 
 // pm-nav's cache of other machines' states: {at, states: {machine: state}}. Its
@@ -39,11 +60,13 @@ export function remotePmStates(text) {
   } catch (_) { return {}; }
 }
 
-// "<1m", "5m", "3h", "2d": the largest whole unit.
-const UNITS = [[86400000, 'd'], [3600000, 'h'], [60000, 'm']];
-export function age(ms) {
-  const unit = UNITS.find(([size]) => ms >= size);
-  return unit ? `${Math.floor(ms / unit[0])}${unit[1]}` : '<1m';
+// How long ago, in the largest whole unit: "<1m", "5m", "3h", "2d"; in a Chinese view "刚刚",
+// "5 分钟", "3 小时", "2 天".
+const UNITS = [[86400000, 'd', '天'], [3600000, 'h', '小时'], [60000, 'm', '分钟']];
+export function age(ms, lang) {
+  const unit = UNITS.find(([size]) => ms >= size), zh = lang === 'zh';
+  if (!unit) return zh ? '刚刚' : '<1m';
+  return zh ? `${Math.floor(ms / unit[0])} ${unit[2]}` : `${Math.floor(ms / unit[0])}${unit[1]}`;
 }
 
 // The ledger's newest event for a PM ("YYYY-MM-DD HH:MM", local time), in ms; 0 if none.
@@ -72,7 +95,7 @@ export function track(changed, rows, now) {
   return dirty ? next : changed;
 }
 
-export const HEADER = 30, ROW = 30, COMPACT_ROW = 28, PAD = 6, MAX_ROWS = 6;
+export const HEADER = 30, ROW = 30, COMPACT_ROW = 28, PAD = 6, MAX_ROWS = 8;
 // The block's height in px: the header alone with no PM, at most MAX_ROWS rows
 // (the rest scroll). The rail keeps a sliver so the block still gets its width,
 // and so does a list without its header (see underNav) while it has no PM.
@@ -96,9 +119,11 @@ export function underNav(tree) {
 // model.test.mjs checks that they stay identical.
 export const LEDGER_HOME_SH = 'if [ -n "$PM_HOME" ]; then printf %s "$PM_HOME"; ' +
   'elif [ -d "$HOME/.claude/pm" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
+// A retired PM's terminal (`pm.py rotate` labels it pm.retired=<project>) is nobody's: not the
+// project's PM, and not the terminal of a task that was parked on it.
 function liveTerminalsFor(row, terms) {
   const machine = row.machine || '';
-  return terms.filter(t => t.state === 'live' &&
+  return terms.filter(t => t.state === 'live' && !t.labels?.['pm.retired'] &&
     (machine ? t.address?.startsWith(`${machine}/`) : !t.address?.includes('/')));
 }
 export function terminalFor(row, terms) {
@@ -124,4 +149,51 @@ export function terminalTargetFor(row, terms) {
   candidates.sort((a, b) => Number(Boolean(b.program?.agent)) - Number(Boolean(a.program?.agent)) ||
     (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
   return { terminal: candidates[0], exact: false };
+}
+// How a click brings a terminal up. One with a pane: pane.focus, which shows its own space and tab.
+// A sub-agent without a pane (Herdr's agents list peeks those) is peeked over the tab of the nearest
+// terminal up its parent chain that has a pane and is not a retired PM, else over its project's current
+// PM (`home`): a worker that outlived a PM rotated out (closed, or still open but retired). With neither, nothing: no pane is focused and the work
+// column is not shown, since that would reveal whatever space was active — another project's.
+// agent.focus is not used: on a paneless terminal it changes no tab (t5h opened OldName).
+// `paned`: the addresses that have a pane (panes()' terminals, agents()' addresses).
+export function focusPlan(address, terms, paned, home = '') {
+  const none = { focus: '', peek: '' };
+  if (!address) return none;
+  const has = new Set(paned.filter(Boolean));
+  if (has.has(address)) return { focus: address, peek: '' };
+  const byAddress = new Map(terms.map(t => [t.address, t]));
+  // A retired PM up the chain (labeled pm.retired by `pm.py rotate`, or a PM terminal that is not the
+  // project's current one) is passed over: shown on its tab, the thread would invite talking to it.
+  const retired = t => Boolean(t?.labels?.['pm.retired'] || (home && t?.labels?.pm && t.address !== home));
+  const seen = new Set([address]);
+  for (let up = byAddress.get(address)?.parent; up && !seen.has(up); up = byAddress.get(up)?.parent) {
+    if (has.has(up) && !retired(byAddress.get(up))) return { focus: up, peek: address };
+    seen.add(up);
+  }
+  return home && has.has(home) ? { focus: home, peek: address } : none;
+}
+
+// A review thread (`pm.py review`: a task with `review_of`) is part of the task it reviews: it leaves
+// the list and rides on that task as `review`, so one piece of work is one row and counts once. While
+// the review is open the task reads as what the review is: waiting on the user (blocked, with the
+// review's `answered`) when the review asks, else in review; a task that itself waits on the user, or
+// is paused, or a paused review, leaves the task's own status. A review whose task is not in the list
+// stays a row of its own, so nothing goes missing, and so does an open review of a task that is over
+// (done, abandoned: nothing of it is in review). pm.py's counts use the same rule (folded_status).
+// pm-project, pm-dash, pm-nav and pm-list keep identical copies (pm-project's model.test.mjs checks).
+export function foldReviews(tasks) {
+  const list = (Array.isArray(tasks) ? tasks : []).filter(Boolean);
+  const over = status => ['merged', 'released', 'done', 'abandoned'].includes(status);
+  const byId = new Map(list.map(t => [t.id, t]));
+  const reviews = new Map(list.filter(t => t.review_of && t.review_of !== t.id && byId.has(t.review_of) &&
+    (over(t.status) || !over(byId.get(t.review_of).status))).map(t => [t.review_of, t]));
+  if (!reviews.size) return list;
+  const fold = (t, r) => {
+    const quiet = over(r.status) || r.status === 'paused' || ['blocked', 'paused'].includes(t.status);
+    if (quiet) return { ...t, review: r };
+    return r.status === 'blocked' ? { ...t, review: r, status: 'blocked', answered: Boolean(r.answered) } : { ...t, review: r, status: 'review' };
+  };
+  return list.filter(t => !(t.review_of && reviews.get(t.review_of) === t))
+    .map(t => reviews.has(t.id) ? fold(t, reviews.get(t.id)) : t);
 }

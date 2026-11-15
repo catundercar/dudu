@@ -6,8 +6,8 @@
 
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { props, closeOverlay, run, theme, terminals, layout } from "herdr";
-import { isWorkerNotice } from "./model.js";
+import { props, closeOverlay, run, theme, terminals, agents, panes, layout } from "herdr";
+import { isWorkerNotice, focusPlan } from "./model.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -28,6 +28,21 @@ export default class PmToast extends View {
     this.hidden = isWorkerNotice(p, workers);
     if (this.hidden) closeOverlay(p.overlay);
   }
+  // An agent notice's agent.focus, as pm-project opens a terminal (focusPlan): its own pane, else
+  // peeked over an ancestor's; with neither nothing moves, since showing work would reveal whatever
+  // space is active. Focusing the agent that already has focus changes nothing pm-nav sees, so the
+  // board (or a project view) is left here too.
+  goTo(address) {
+    let plan;
+    try {
+      plan = focusPlan(address, terminals(), [...panes().map((p) => p.terminal), ...agents().map((a) => a.address)]);
+    } catch (_) { return; } // unreadable: the click only closes the toast
+    if (!plan.focus) return;
+    run("pane.focus", { terminal: plan.focus });
+    const stage = find(layout(), "pm-stage");
+    if (stage?.active && stage.active !== "work") run("layout.select", { stack: "pm-stage", child: "work" });
+    if (plan.peek) run("terminal.peek", { terminal: plan.peek });
+  }
   render(cx) {
     if (this.hidden) return div();
     const t = theme();
@@ -44,13 +59,8 @@ export default class PmToast extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_click(() => {
-        if (p.action?.name) run(p.action.name, p.action.args ?? {});
-        // Focusing the agent that already has focus changes nothing pm-nav sees, so leave the board
-        // (or a project view) here.
-        const stage = find(layout(), "pm-stage");
-        if (p.action?.name === "agent.focus" && stage?.active && stage.active !== "work") {
-          run("layout.select", { stack: "pm-stage", child: "work" });
-        }
+        if (p.action?.name === "agent.focus") this.goTo(p.action.args?.terminal);
+        else if (p.action?.name) run(p.action.name, p.action.args ?? {});
         closeOverlay(p.overlay);
       })
       .child(p.icon ? image(p.icon).w(18).h(18).flex_none() : div().size(8).rounded(4).flex_none().bg(t[DOT[p.level] ?? "accent"]))
