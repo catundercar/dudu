@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest something dudu should do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The [roadmap](https://github.com/catundercar/dudu#roadmap) lists what is already planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: What you would like to happen. A sketch or example is welcome.
+    validations:
+      required: true
+  - type: input
+    id: agents
+    attributes:
+      label: Coding agents you use
+      placeholder: Claude Code, Codex, pi, ...
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead

@@ -1,0 +1,70 @@
+name: Bug report
+description: Something in dudu does not work as the guide says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please check the [guide](https://github.com/catundercar/dudu/blob/main/docs/guide.md) first; the details below help reproduce the problem.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a manager session in the project
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: herdr
+    attributes:
+      label: Herdr version
+      description: Output of `herdr-app --version`.
+      placeholder: herdr-app 0.1.16
+    validations:
+      required: true
+  - type: textarea
+    id: agents
+    attributes:
+      label: Coding agents and versions
+      description: Which agent manages the project and which ones work on its tasks, each with its version (for example `claude --version`, `codex --version`).
+      placeholder: |
+        Manager: Codex 0.x
+        Workers: Claude Code 2.x
+    validations:
+      required: true
+  - type: dropdown
+    id: state
+    attributes:
+      label: Does `pm.py state` work?
+      description: Run `python3 <skill folder>/scripts/pm.py state` (see [Get started](https://github.com/catundercar/dudu/blob/main/docs/guide.md#get-started) for the path). Paste any error below.
+      options:
+        - "Yes, it prints the projects and tasks"
+        - "No, it fails (error below)"
+        - "Not tried"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: dudu version or commit
+      description: The release you installed, or `git rev-parse --short HEAD` in your checkout.
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: macOS 15.4
+  - type: textarea
+    id: logs
+    attributes:
+      label: Errors or logs
+      description: Error output, the `pm.py state` error, or a screenshot. Remove anything private.
+      render: text

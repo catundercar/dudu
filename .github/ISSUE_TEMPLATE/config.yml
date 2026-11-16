@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Guide
+    url: https://github.com/catundercar/dudu/blob/main/docs/guide.md
+    about: Install, getting started, configuration, alerts and uninstalling.
+  - name: Website
+    url: https://catundercar.github.io/dudu/
+    about: What dudu is, with a short demo.

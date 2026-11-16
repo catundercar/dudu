@@ -1,5 +1,7 @@
 # dudu
 
+[![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/catundercar/dudu/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Website](https://img.shields.io/badge/website-catundercar.github.io%2Fdudu-black)](https://catundercar.github.io/dudu/)
+
 Manage all your coding agents from one session. Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.
 
 ![dudu board: a task is dispatched, comes back for review, another one gets blocked](demo.gif)
