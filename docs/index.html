@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dudu · manage all your coding agents from one session</title>
+<meta name="description" content="Manage all your coding agents from one session. Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)">
+<meta property="og:title" content="dudu">
+<meta property="og:description" content="Manage all your coding agents from one session.">
+<meta property="og:image" content="preview.png">
+<link rel="icon" href="dudu.svg" type="image/svg+xml">
+<script>
+(() => {
+  let mode = "system";
+  try { mode = localStorage.getItem("theme") || "system"; } catch {}
+  const q = matchMedia("(prefers-color-scheme: dark)");
+  const apply = () => {
+    const root = document.documentElement;
+    if (mode === "system") delete root.dataset.theme; else root.dataset.theme = mode;
+    document.querySelectorAll("button.theme").forEach((b) => { b.dataset.mode = mode; b.title = "Theme: " + mode; });
+  };
+  q.addEventListener("change", apply);
+  window.cycleTheme = () => {
+    mode = { system: "light", light: "dark", dark: "system" }[mode];
+    try { mode === "system" ? localStorage.removeItem("theme") : localStorage.setItem("theme", mode); } catch {}
+    apply();
+  };
+  apply();
+  document.addEventListener("DOMContentLoaded", apply);
+})();
+</script>
+<style>
+:root {
+  --bg: #fafafa;
+  --card: #ffffff;
+  --ink: #111112;
+  --ink2: #4a4a50;
+  --ink3: #85858c;
+  --line: #e4e4e7;
+  --code: #f4f4f5;
+  --ok: #2f8a4c;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 18px 48px -18px rgba(0,0,0,.22);
+}
+:root[data-theme="dark"] {
+  --bg: #0b0b0c;
+  --card: #151517;
+  --ink: #f2f2f3;
+  --ink2: #b3b3ba;
+  --ink3: #7a7a82;
+  --line: #26262a;
+  --code: #131315;
+  --ok: #7cc58f;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 24px 64px -24px rgba(0,0,0,.85);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b0b0c;
+    --card: #151517;
+    --ink: #f2f2f3;
+    --ink2: #b3b3ba;
+    --ink3: #7a7a82;
+    --line: #26262a;
+    --code: #131315;
+    --ok: #7cc58f;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 24px 64px -24px rgba(0,0,0,.85);
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 76px; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-underline-offset: 3px; text-decoration-color: var(--line); }
+a:hover { text-decoration-color: currentColor; }
+code, pre { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+code { font-size: .9em; background: var(--code); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+img { display: block; max-width: 100%; height: auto; }
+svg { display: block; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+/* bar */
+nav { position: sticky; top: 0; z-index: 10; backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px); background: color-mix(in srgb, var(--bg) 78%, transparent); border-bottom: 1px solid var(--line); }
+nav .wrap { display: flex; align-items: center; gap: 8px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 9px; margin-right: auto; font-weight: 650; font-size: 17px; letter-spacing: -.01em; text-decoration: none; }
+.brand svg { width: 22px; height: 22px; }
+.icon-btn { position: relative; display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--line); background: transparent; color: var(--ink2); cursor: pointer; padding: 0; flex: none; text-decoration: none; transition: color .15s, border-color .15s, background-color .15s; }
+.icon-btn:hover { color: var(--ink); border-color: color-mix(in srgb, var(--ink) 22%, var(--line)); }
+.icon-btn:active { transform: translateY(1px); }
+.icon-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn.bare { border-color: transparent; }
+.icon-btn.bare:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); border-color: transparent; }
+.theme svg { display: none; }
+.theme[data-mode="system"] .i-system, .theme[data-mode="light"] .i-light, .theme[data-mode="dark"] .i-dark { display: block; }
+
+/* hero */
+.hero { padding: 88px 0 48px; }
+.eyebrow { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); margin: 0 0 16px; }
+h1 { font-size: clamp(36px, 6vw, 60px); line-height: 1.04; letter-spacing: -.04em; margin: 0 0 22px; font-weight: 700; max-width: 13em; }
+.lede { font-size: 19px; color: var(--ink2); margin: 0 0 36px; max-width: 32em; }
+
+/* command */
+.cmd { display: flex; align-items: center; gap: 4px; max-width: 760px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 6px 6px 6px 18px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+.cmd pre { flex: 1; min-width: 0; margin: 0; overflow-x: auto; font-size: 14px; line-height: 1.6; padding: 6px 0; scrollbar-width: none; }
+.cmd pre::-webkit-scrollbar { display: none; }
+.cmd .p { color: var(--ink3); user-select: none; }
+.copy .i-check { display: none; color: var(--ok); }
+.copy.done .i-copy { display: none; }
+.copy.done .i-check { display: block; }
+
+/* figures */
+figure { margin: 0; }
+.shot { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow); background: #0d0d0f; }
+.shot img { width: 100%; }
+figcaption { margin-top: 12px; font-size: 13px; color: var(--ink3); }
+.demo { padding: 8px 0 24px; }
+
+/* sections */
+section { padding: 72px 0 0; }
+h2 { font-size: clamp(24px, 3.2vw, 30px); letter-spacing: -.03em; line-height: 1.2; margin: 0 0 12px; font-weight: 660; }
+.sub { color: var(--ink2); margin: 0 0 32px; max-width: 34em; }
+
+.points { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.points li { background: var(--card); padding: 26px 28px 28px; min-width: 0; }
+.points .ic { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); margin-bottom: 16px; }
+.points .ic svg { width: 18px; height: 18px; }
+.points h3 { font-size: 16.5px; letter-spacing: -.01em; margin: 0 0 6px; font-weight: 640; }
+.points p { margin: 0; color: var(--ink2); font-size: 15px; }
+
+.board { padding-top: 40px; }
+
+.install { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.install > div { background: var(--card); padding: 26px 28px; min-width: 0; }
+.install h3 { font-size: 15px; margin: 0 0 8px; font-weight: 640; }
+.install p { margin: 0 0 14px; color: var(--ink2); font-size: 15px; }
+.install p:last-child { margin-bottom: 0; }
+.install .cmd { box-shadow: none; background: var(--code); }
+.needs { list-style: none; margin: 28px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 20px; color: var(--ink2); font-size: 14.5px; }
+.needs li { display: flex; align-items: center; gap: 8px; }
+.needs li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--ink3); flex: none; }
+.next { margin: 24px 0 0; color: var(--ink2); max-width: 40em; }
+
+footer { margin-top: 96px; border-top: 1px solid var(--line); padding: 24px 0 40px; font-size: 13.5px; color: var(--ink3); }
+footer .wrap { display: flex; align-items: center; gap: 6px; }
+footer .wrap > span { margin-right: auto; display: flex; align-items: center; gap: 8px; }
+footer .brand-mark svg { width: 16px; height: 16px; }
+
+@media (max-width: 720px) {
+  .wrap { padding: 0 16px; }
+  .hero { padding: 56px 0 36px; }
+  .lede { font-size: 17px; }
+  .points, .install { grid-template-columns: minmax(0, 1fr); }
+  .points li, .install > div { padding: 22px 20px; }
+  .cmd { padding-left: 14px; }
+  .cmd pre { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  section { padding-top: 56px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 10.5v3.75a4.25 4.25 0 0 0 8.5 0V10.5"/><path d="M12 10.5v3.75a4.25 4.25 0 0 0 8.5 0V10.5"/><circle cx="7.75" cy="5.4" r="1.7" fill="currentColor" stroke="none"/><circle cx="16.25" cy="5.4" r="1.7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="github" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></symbol>
+  <symbol id="book" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.25c1.9-.7 3.75-.55 5.5.6v9.4c-1.75-1.15-3.6-1.3-5.5-.6z"/><path d="M13.5 3.25c-1.9-.7-3.75-.55-5.5.6v9.4c1.75-1.15 3.6-1.3 5.5-.6z"/></symbol>
+  <symbol id="copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.25" y="5.25" width="8.5" height="8.5" rx="2"/><path d="M10.75 5.25V4a1.75 1.75 0 0 0-1.75-1.75H4A1.75 1.75 0 0 0 2.25 4v5A1.75 1.75 0 0 0 4 10.75h1.25"/></symbol>
+  <symbol id="check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.25 8.5l3 3 6.5-7"/></symbol>
+</svg>
+
+<nav><div class="wrap">
+  <a class="brand" href="./" aria-label="dudu home"><svg aria-hidden="true"><use href="#mark"/></svg>dudu</a>
+  <a class="icon-btn bare" href="https://github.com/catundercar/dudu/blob/main/docs/guide.md" aria-label="Guide" title="Guide"><svg aria-hidden="true"><use href="#book"/></svg></a>
+  <a class="icon-btn bare" href="https://github.com/catundercar/dudu" aria-label="dudu on GitHub" title="Source on GitHub"><svg aria-hidden="true"><use href="#github"/></svg></a>
+  <button class="icon-btn theme" type="button" aria-label="Theme" title="Theme: system" onclick="cycleTheme()">
+    <svg class="i-system" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="5.75"/><path d="M8 2.25v11.5A5.75 5.75 0 0 0 8 2.25z" fill="currentColor" stroke="none"/></svg>
+    <svg class="i-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06"/></svg>
+    <svg class="i-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.6A5.75 5.75 0 0 1 6.4 2.5a5.75 5.75 0 1 0 7.1 7.1z"/></svg>
+  </button>
+</div></nav>
+
+<main class="wrap">
+  <header class="hero">
+    <p class="eyebrow">For the Herdr desktop app · MIT</p>
+    <h1>Manage all your coding agents from one session.</h1>
+    <p class="lede">Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.</p>
+    <div class="cmd">
+      <pre id="get"><span class="p">$ </span>git clone https://github.com/catundercar/dudu.git &amp;&amp; cd dudu &amp;&amp; ./install.sh</pre>
+      <button class="icon-btn bare copy" type="button" data-copy="get" aria-label="Copy command" title="Copy"><svg class="i-copy" aria-hidden="true"><use href="#copy"/></svg><svg class="i-check" aria-hidden="true"><use href="#check"/></svg></button>
+    </div>
+  </header>
+
+  <figure class="demo">
+    <div class="shot"><img src="demo.gif" width="960" height="624" alt="dudu board: a task is dispatched, comes back for review, another one gets blocked"></div>
+    <figcaption>The recording uses invented demo data.</figcaption>
+  </figure>
+
+  <section id="what">
+    <h2>One session that keeps the whole picture</h2>
+    <p class="sub">For each project, one agent session acts as its manager. It hands out the work, checks what comes back, and keeps a task ledger that survives restarts.</p>
+    <ul class="points">
+      <li>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.25" y="2.25" width="5.5" height="5.5" rx="1.5"/><rect x="10.25" y="2.25" width="5.5" height="5.5" rx="1.5"/><rect x="2.25" y="10.25" width="5.5" height="5.5" rx="1.5"/><rect x="10.25" y="10.25" width="5.5" height="5.5" rx="1.5"/></svg></div>
+        <h3>Every project at a glance</h3>
+        <p>A board shows every project and task: what is running, what is in review, what is waiting for you. Progress is kept in a ledger, visible across projects and machines.</p>
+      </li>
+      <li>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.75A2.25 2.25 0 0 1 5.25 2.5h7.5A2.25 2.25 0 0 1 15 4.75v5a2.25 2.25 0 0 1-2.25 2.25H8.5L5 15v-3h0A2 2 0 0 1 3 10z"/><path d="M6.25 6.25h5.5M6.25 8.75h3.5"/></svg></div>
+        <h3>Open a project, talk to it</h3>
+        <p>A project opens as one conversation with its manager: what you said, its replies, each task as a thread where it started, and its questions as cards with answers to pick.</p>
+      </li>
+      <li>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="3.75" r="1.75"/><circle cx="5" cy="14.25" r="1.75"/><circle cx="13" cy="8" r="1.75"/><path d="M5 5.5v7"/><path d="M5 5.5c0 2.5 2 2.5 4.25 2.5h2"/></svg></div>
+        <h3>Dispatch, review, merge</h3>
+        <p>It hands tasks to coding agents in their own worktrees, reviews what they bring back, and merges it. You step in only where a decision is yours.</p>
+      </li>
+      <li>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="14" height="12" rx="2.25"/><path d="M5.25 7.25L7.5 9.25 5.25 11.25M9.5 11.25h3.25"/></svg></div>
+        <h3>Any coding agent</h3>
+        <p>Any coding agent can manage a project or work on its tasks. Claude Code and Codex are tested; pi, Gemini CLI, opencode and others can be configured.</p>
+      </li>
+    </ul>
+
+    <figure class="board">
+      <div class="shot"><img src="preview.png" width="3612" height="1580" alt="The dudu board: five projects, their managers and their tasks, with what is running, in review and blocked"></div>
+      <figcaption>The board, with invented demo data.</figcaption>
+    </figure>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <p class="sub">Choose either path. Both copy the skill into each coding agent they find and add its hooks.</p>
+    <div class="install">
+      <div>
+        <h3>From herdr.dev</h3>
+        <p>Add the layout from the <a href="https://herdr.dev/layouts">Herdr layout directory</a>, open <b>Board</b>, then click <b>Set up</b>. No checkout needed.</p>
+      </div>
+      <div>
+        <h3>From the repository</h3>
+        <p>Clone it and run the installer from its root:</p>
+        <div class="cmd">
+          <pre id="get2">git clone https://github.com/catundercar/dudu.git
+cd dudu
+./install.sh</pre>
+          <button class="icon-btn bare copy" type="button" data-copy="get2" aria-label="Copy command" title="Copy"><svg class="i-copy" aria-hidden="true"><use href="#copy"/></svg><svg class="i-check" aria-hidden="true"><use href="#check"/></svg></button>
+        </div>
+      </div>
+    </div>
+    <ul class="needs" aria-label="Requirements">
+      <li>Herdr desktop app</li>
+      <li>A coding agent CLI</li>
+      <li>Python 3</li>
+      <li>Git</li>
+    </ul>
+    <p class="next">Then restart your agent sessions, open one in your project inside Herdr, and ask it to manage the project. The <a href="https://github.com/catundercar/dudu/blob/main/docs/guide.md">guide</a> covers getting started, configuration and uninstalling.</p>
+  </section>
+</main>
+
+<footer><div class="wrap">
+  <span><span class="brand-mark"><svg aria-hidden="true"><use href="#mark"/></svg></span>dudu · <a href="https://github.com/catundercar/dudu/blob/main/LICENSE">MIT License</a></span>
+  <a class="icon-btn bare" href="https://github.com/catundercar/dudu/blob/main/docs/guide.md" aria-label="Guide" title="Guide"><svg aria-hidden="true"><use href="#book"/></svg></a>
+  <a class="icon-btn bare" href="https://github.com/catundercar/dudu" aria-label="dudu on GitHub" title="Source on GitHub"><svg aria-hidden="true"><use href="#github"/></svg></a>
+</div></footer>
+
+<script>
+document.querySelectorAll("button.copy").forEach((b) => {
+  b.addEventListener("click", async () => {
+    const text = document.getElementById(b.dataset.copy).textContent.replace(/^\$ /, "").trim();
+    try { await navigator.clipboard.writeText(text); } catch { return; }
+    b.classList.add("done"); b.title = "Copied";
+    setTimeout(() => { b.classList.remove("done"); b.title = "Copy"; }, 1400);
+  });
+});
+</script>
+</body>
+</html>

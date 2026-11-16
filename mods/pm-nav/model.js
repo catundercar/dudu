@@ -9,21 +9,32 @@ export function shouldReturnToWork(shown, wasShown, focus, previousFocus) {
 }
 
 // The stage page the Projects page covers, for the next Projects click to come back to: the stage's
-// child, and for a project's conversation (pm-project) or its board (pm-board), which project.
+// child, and for a project's conversation (pm-project) or its board (pm-board), which project (a
+// remote one's key is "<machine>/<name>", and its conversation keeps the machine).
 export function pageBefore(active, projectPage, dashPage) {
   if (!active) return null;
-  if (active === 'pm-project') return projectPage?.pm ? { child: active, pm: projectPage.pm } : null;
+  if (active === 'pm-project') return projectPage?.pm ? { child: active, pm: projectPage.pm,
+    ...(projectPage.machine ? { machine: projectPage.machine } : {}) } : null;
   if (active === 'pm-board') return dashPage?.project ? { child: active, pm: dashPage.project } : null;
   return { child: active };
 }
 
 // Where Projects goes from the Projects page: the page it covered, or the workspace when none was
 // recorded, the stage no longer has that child, or its project is gone (archived or removed).
+// pms: every listed PM by its key (projectKeys).
 export function pageBack(page, children = [], pms = []) {
   const work = { child: 'work' };
   if (!page || !children.includes(page.child)) return work;
   if ('pm' in page && !pms.some(pm => pm?.name === page.pm && !pm.archived)) return work;
   return page;
+}
+
+// The PMs of this computer and of other machines, named by their keys as pm-list and the board name
+// them: a remote one "<machine>/<name>".
+export function projectKeys(local, remote = {}) {
+  const pms = state => (Array.isArray(state?.pms) ? state.pms : []);
+  return [...pms(local), ...Object.entries(remote || {}).filter(([machine]) => machine)
+    .flatMap(([machine, state]) => pms(state).map(pm => ({ ...pm, name: `${machine}/${pm?.name}` })))];
 }
 
 // A copy of pm-list's waitingCount (a mod cannot import from another mod's folder);

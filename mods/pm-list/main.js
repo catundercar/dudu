@@ -1,11 +1,11 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, panes, shared, setShared, openOverlay } from 'herdr';
-import { foldReviews, pmRows, splitArchived, archivedDay, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH, focusPlan } from './model.js';
+import { foldReviews, pmRows, splitArchived, archivedDay, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH, focusPlan, opensProject, projectShared } from './model.js';
 
 // Like pm-nav, the list reads the ledger through the original pm-dash bundle.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
-// A local PM's row opens its project view (pm-project), named through shared('pm-project').
+// A PM's row opens its project view (pm-project), named through shared('pm-project') (projectShared).
 const STAGE = 'pm-stage', WORK = 'work', PROJECT = 'pm-project', BOARD = 'pm-board';
 // Threads archiving would pause (pm-dash's archiveThreads): the popup's height counts them.
 const OPEN = ['blocked', 'in_progress', 'review', 'proposed'];
@@ -105,14 +105,15 @@ export default class PmList extends View {
     this.asked = ask;
     run('layout.resize', { id: node.id, px });
   }
-  // A local PM opens in the project view when the layout has one; a remote PM (or an older layout) focuses its terminal.
+  // A PM opens in the project view when the layout has one, on this computer or another machine
+  // (pm-project reads that machine's ledger); only an older layout focuses its terminal.
   viewable(row) {
-    return !row.machine && Boolean(find(layout(), n => n.id === STAGE)?.children?.some(c => c.id === PROJECT));
+    return opensProject(row, find(layout(), n => n.id === STAGE));
   }
   open(row) {
     const stage = find(layout(), n => n.id === STAGE);
     if (this.viewable(row)) {
-      setShared(PROJECT, { pm: row.key });
+      setShared(PROJECT, projectShared(row));
       if (stage.active !== PROJECT) run('layout.select', { stack: STAGE, child: PROJECT });
       return;
     }
@@ -185,7 +186,8 @@ export default class PmList extends View {
     const tip = row => [row.machine ? `${row.label} · ${row.machine}` : row.label, word(lang, row.status),
       this.viewable(row) ? [!row.exact && word(lang, 'notDesktop'), word(lang, 'view')].filter(Boolean).join('\n')
         : !row.exact && word(lang, row.terminal ? 'project' : 'away')].filter(Boolean).join('\n');
-    const focused = row => viewing ? row.key === viewing && !row.machine
+    // Keys match across machines: a remote PM's is "<machine>/<name>" here, in pm-project and on the board.
+    const focused = row => viewing ? row.key === viewing
       : row.exact && live.some(a => a.address === row.terminal.address && a.focused);
     const base = (row, el) => el.id(`pm-${row.key}`).flex_none().items_center()
       .when(focused(row), el => el.bg(t.selected)).hover(s => s.bg(t.hover))

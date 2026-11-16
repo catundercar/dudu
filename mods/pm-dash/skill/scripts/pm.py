@@ -63,13 +63,15 @@ def agents():
     return (herdr("agent", "list") or {}).get("agents", [])
 
 
-def hc(*args, errors=False):
+def hc(*args, errors=False, env=None):
     """Parsed JSON of a herdr-core CLI call, or None when hc is missing or the call fails.
-    With errors, a failed call returns hc's error object instead ({"error": {"kind": "not_found", ...}})."""
+    With errors, a failed call returns hc's error object instead ({"error": {"kind": "not_found", ...}}).
+    env: the environment of the call, which `hc run` hands to the terminal it starts (default: this one's)."""
     try:
         # --json goes before a "--": what follows that belongs to the program being started.
         cut = args.index("--") if "--" in args else len(args)
-        out = subprocess.run(["hc", *args[:cut], "--json", *args[cut:]], capture_output=True, text=True, timeout=60)
+        out = subprocess.run(["hc", *args[:cut], "--json", *args[cut:]], capture_output=True, text=True, timeout=60,
+                             env=env)
         if out.returncode != 0:
             return json.loads(out.stderr or "null") if errors else None
         return json.loads(out.stdout)
@@ -442,10 +444,33 @@ def cmd_log(a):
     save(task)
 
 
+SHOW_LOG = 3       # ledger entries `show` prints without --json
+SHOW_WIDTH = 600  # each one clipped to this many characters
+REPORT_WIDTH = 2500  # the report `wait` prints; reports are asked to stay under 600, this only stops a runaway
+
+
 def cmd_show(a):
+    """A task in a few lines: status, branch and the latest ledger entries. --json prints the whole record."""
     task = load(a.id)
     ahead, dirty = git_state(task.get("worktree") or task["repo"], task.get("branch"), task["base"])
-    print(json.dumps({**task, "live": {"ahead": ahead, "dirty": dirty}}, ensure_ascii=False, indent=2))
+    if getattr(a, "json", False):
+        print(json.dumps({**task, "live": {"ahead": ahead, "dirty": dirty}}, ensure_ascii=False, indent=2))
+        return
+    print(f"{task['id']}  [{task['status']}]  {task.get('title', '')}")
+    print("  " + " ".join(f"{k}={v}" for k, v in (
+        ("branch", task.get("branch") or "-"), ("base", task.get("base")), ("ahead", ahead), ("dirty", dirty),
+        ("commit", task.get("commit")), ("pane", task.get("pane")), ("profile", (task.get("worker") or {}).get("profile")),
+        ("parent", task.get("parent"))) if v not in (None, "")))
+    if task.get("worktree"):
+        print(f"  worktree: {task['worktree']}")
+    if task["status"] == "blocked":
+        for i, option in enumerate(task.get("options") or []):
+            print(f"  option {i + 1}: {option}")
+    log = task.get("log") or []
+    print(tr(f"log (last {min(SHOW_LOG, len(log))} of {len(log)}; --json for the whole record):",
+             f"日志（最近 {min(SHOW_LOG, len(log))} 条，共 {len(log)} 条；--json 看完整记录）："))
+    for e in log[-SHOW_LOG:]:
+        print(clip(f"- {e.get('at', '')} {e.get('by', '')}: {e.get('text', '')}", SHOW_WIDTH))
 
 
 def cmd_board(a):
@@ -471,12 +496,18 @@ def cmd_status(a):
     if not pm_panes and not in_hc:
         print("  (none)")
     tasks = all_tasks()
+    scope = status_scope(tasks, getattr(a, "repo", "."), getattr(a, "all", False))
+    pms = pm_records() if scope else []
+    # This project's tasks: in its folder or one under it (issues/site-a), or the board's for its PM (owner_of).
+    mine = lambda t: not scope or in_scope(t["repo"], scope) or in_scope((owner_of(t, pms) or {}).get("repo"), scope)
     # Merged or released work stays listed until `retire` removes its worktree and branch.
-    active = [t for t in tasks if t["status"] in ACTIVE or (a.all and t["status"] in CLOSED)
-              or (t["status"] in ("merged", "released") and not t.get("retired"))]
+    active = [t for t in tasks if mine(t)
+              and (t["status"] in ACTIVE or (getattr(a, "closed", False) and t["status"] in CLOSED)
+                   or (t["status"] in ("merged", "released") and not t.get("retired")))]
     linked_panes, linked_branches = set(), set()
     hc_live = live_hc_terminals() if any((t.get("pane") or "").startswith("hc:") for t in active) else None
-    print("\nTasks:")
+    print(tr(f"\nTasks of {Path(scope).name} (--all: every project):", f"\n{Path(scope).name} 的任务（--all：所有项目）：")
+          if scope else "\nTasks:")
     for t in active:
         live = by_pane.get(t.get("pane") or "", {})
         state = live.get("agent_status", "-") if t.get("pane") else "-"
@@ -499,7 +530,7 @@ def cmd_status(a):
         if x["pane_id"] in linked_panes or x["pane_id"] in pm_panes:
             continue
         repo = main_root(x.get("cwd") or "")
-        if not repo:
+        if not repo or (scope and not in_scope(repo, scope)):
             continue
         repos.add(repo)
         branch = git(x["cwd"], "branch", "--show-current")
@@ -526,6 +557,129 @@ def cmd_status(a):
                              f"ahead={ahead} dirty={dirty}")
     print("\nUnregistered work:")
     print("\n".join(dict.fromkeys(found)) if found else "  (none)")
+
+
+def status_scope(tasks, repo, everything=False):
+    """The project `status` lists by default: the one at repo, when a PM is registered for that very folder or the
+    ledger has tasks in it; its tasks include those in folders under it (in_scope). None lists every project: --all,
+    a folder that is no project, or the hub's folder (it sits in the ledger home and coordinates every project)."""
+    root = None if everything else project_root(repo)
+    if not root or Path(root).resolve().is_relative_to(Path(STATE).resolve()):
+        return None
+    path = PMS / f"{project_slug(root)}.json"
+    try:
+        registered = path.exists() and json.loads(path.read_text()).get("repo") == root
+    except (OSError, ValueError):
+        registered = False
+    return root if registered or any(t.get("repo") == root for t in tasks) else None
+
+
+def in_scope(repo, scope):
+    """repo is the folder scope or one under it. Not a sibling that only starts with its name (dudu-old)."""
+    if not repo:
+        return False
+    repo, scope = str(Path(repo).resolve()), str(Path(scope).resolve())
+    return repo == scope or repo.startswith(scope.rstrip("/") + "/")
+
+
+SMALL_SOURCE = 40   # a change the PM may read and land without a reviewer (playbook §4): source lines …
+SMALL_TOTAL = 150   # … and all lines, tests and evidence included
+
+
+def cmd_diff(a):
+    """What a task's branch changes against its base, without the diff text: the diffstat, line totals (all, and
+    source without tests and evidence), deleted, binary and UI files, and whether it is small enough for the PM to
+    read itself (§4). A worktree that is gone is not needed: the branch is read from the main checkout."""
+    task = load(a.id)
+    worktree, branch = task.get("worktree"), task.get("branch")
+    repo = worktree if worktree and Path(worktree).is_dir() else task["repo"]
+    if not branch:
+        sys.exit(tr(f"{a.id} has no branch", f"{a.id} 没有分支"))
+    base = merge_target(task["repo"], task["base"])
+    span = f"{base}...{branch}"
+    named = ("-c", "core.quotepath=off")  # file names as they are, not quoted octal escapes
+    numstat = git(repo, *named, "diff", "--numstat", "-z", span)
+    if numstat is None:
+        sys.exit(tr(f"git diff {span} failed in {repo}", f"在 {repo} 里 git diff {span} 失败"))
+    files, tokens = [], iter(numstat.split("\0"))
+    for token in tokens:
+        if not token.strip():
+            continue
+        added, removed, path = token.lstrip("\n").split("\t", 2)
+        if not path:  # a rename: the old and new names follow
+            next(tokens, "")
+            path = next(tokens, "")
+        binary = added == "-"
+        files.append((0 if binary else int(added), 0 if binary else int(removed), path, binary))
+    deleted = [p for p in (git(repo, *named, "diff", "--name-only", "-z", "--diff-filter=D", span) or "").split("\0")
+               if p.strip()]
+    source = [f for f in files if not side_file(f[2])]
+    binaries = [f[2] for f in files if f[3]]
+    on_branch = lambda p: git(repo, "show", f"{branch}:{p}") if p.endswith(".swift") else None  # for its imports
+    ui = [f[2] for f in files if ui_file(f[2], on_branch(f[2]))]
+    print(f"git diff --stat {span}")
+    print(git(repo, *named, "diff", "--stat", span) or tr("(no changes)", "（没有改动）"))
+    total = lambda fs: (len(fs), sum(f[0] for f in fs), sum(f[1] for f in fs))
+    n, plus, minus = total(files)
+    all_lines = plus + minus
+    print(tr(f"total: {n} files, +{plus} -{minus} ({all_lines} lines)",
+             f"合计：{n} 个文件，+{plus} -{minus}（{all_lines} 行）"))
+    n, plus, minus = total(source)
+    source_lines = plus + minus
+    print(tr(f"source (without tests and evidence): {n} files, +{plus} -{minus} ({source_lines} lines)",
+             f"源码（不含测试和 evidence）：{n} 个文件，+{plus} -{minus}（{source_lines} 行）"))
+    for label, names in ((tr("deleted: ", "删除的文件："), deleted), (tr("binary: ", "二进制："), binaries),
+                         (tr("UI (visual result): ", "界面文件（有视觉结果）："), ui)):
+        if names:
+            print(label + ", ".join(names))
+    if worktree and repo != worktree:
+        print(tr(f"worktree gone; read from {repo}", f"worktree 已不在，从 {repo} 读取"))
+    else:
+        _, dirty = git_state(repo, None, base)
+        if dirty:
+            print(tr(f"uncommitted in {repo}: {dirty} files (not counted)",
+                     f"{repo} 里有 {dirty} 个未提交的文件（未计入）"))
+    why = [w for w, hit in (
+        (tr(f"{source_lines} source lines > {SMALL_SOURCE}", f"源码 {source_lines} 行 > {SMALL_SOURCE}"),
+         source_lines > SMALL_SOURCE),
+        (tr(f"{all_lines} lines in all > {SMALL_TOTAL}", f"总计 {all_lines} 行 > {SMALL_TOTAL}"), all_lines > SMALL_TOTAL),
+        (tr("deletes files", "删除了文件"), deleted), (tr("binary files", "有二进制文件"), binaries),
+        (tr("UI files", "改了界面文件"), ui)) if hit]
+    print(tr(f"small (§4): no, {'; '.join(why)}: start a reviewer" if why else
+             "small (§4): yes, unless it touches release, security or a protocol, or shows on screen: read the diff "
+             "yourself",
+             f"小改动（§4）：否，{'；'.join(why)}：开审查线程" if why else
+             "小改动（§4）：是，只要不涉及发布、安全、协议，也不改界面：自己读 diff"))
+
+
+def side_file(path):
+    """A test or evidence: not counted as source by `diff`. Docs count: for an agent, a playbook is code."""
+    path = path.lower()  # Tests/ in a Swift package
+    name = Path(path).name
+    return (path.startswith(("evidence/", "tests/", "test/")) or "/tests/" in path or "/test/" in path
+            or name.startswith("test_") or ".test." in name
+            or name.endswith(("_test.py", "_test.go", ".spec.js", ".spec.ts")))
+
+
+UI_SUFFIXES = (".css", ".scss", ".html", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".jsx", ".tsx", ".vue",
+               ".svelte", ".xib", ".storyboard")
+
+
+def ui_file(path, text=None):
+    """A file whose change shows on screen: styles, pages, images, components, Xcode interface files and asset
+    catalogs, a Swift file that imports SwiftUI or UIKit (text: its content on the branch), and a mod's own code and
+    manifest (mods/<mod>/*.js, mod.json, its assets), whose result is visual. Tests are not. Other native UI (an
+    AppKit view, another toolkit) does not show in a name: the PM judges it (§4)."""
+    name = Path(path).name.lower()
+    if side_file(path):
+        return False
+    if name.endswith(UI_SUFFIXES) or ".xcassets/" in path:
+        return True
+    if text and name.endswith(".swift") and re.search(r"^\s*import\s+(SwiftUI|UIKit)\b", text, re.M):
+        return True
+    parts = Path(path).parts
+    return len(parts) >= 3 and parts[0] == "mods" and "scripts" not in parts and (
+        name.endswith((".js", ".mjs", ".ts")) or name == "mod.json")
 
 
 def cmd_find(a):
@@ -1186,6 +1340,13 @@ def worker_state(term):
 
 
 def cmd_wait(a):
+    """`pm.py wait`: see wait_for_report. While it runs, the ledger home's waits/ says so (waiting_on), so a PM
+    taking over after a rotation starts it again."""
+    with waiting_on(a.id):
+        wait_for_report(a)
+
+
+def wait_for_report(a):
     """Wait until the worker reports in the ledger; print that report, never the worker's screen.
 
     A task already past in_progress (the PM answered a blocked worker or sent review findings) counts as
@@ -1200,7 +1361,7 @@ def cmd_wait(a):
             latest = (task.get("log") or [{}])[-1]
             ahead, dirty = git_state(task.get("worktree") or task["repo"], task.get("branch"), task["base"])
             print(f"{task['id']}: {task['status']}" + (f" (commit {task['commit']})" if task.get("commit") else ""))
-            print(clip(f"{latest.get('at', '')} {latest.get('by', '')}: {latest.get('text', '')}", 600))
+            print(clip(f"{latest.get('at', '')} {latest.get('by', '')}: {latest.get('text', '')}", REPORT_WIDTH))
             print(f"ahead={ahead} dirty={dirty}")
             return
         # Two looks in a row, so a turn that has only just started (or a report on its way) is not mistaken.
@@ -2014,9 +2175,6 @@ def cmd_hook_turn(a):
     if event == "UserPromptSubmit":
         # What a UserPromptSubmit hook prints is added to the session's context.
         used = context_tokens(data.get("transcript_path") or "")
-        if used > ROTATE_TOKENS:
-            print(f"[pm] This PM session holds {used // 1000}k context tokens (limit {ROTATE_TOKENS // 1000}k). "
-                  "Finish the step in hand, then hand over: `pm.py rotate --notes \"<what the ledger does not say>\"`.")
         prompt, sender = (data.get("prompt") or "").strip(), ""
         # Text typed in by another agent is not the user's turn: `hc send` from a terminal wraps it in
         # <hc from="t3">…</hc>, and `pm.py notify` starts it with "[from <pane>]".
@@ -2026,24 +2184,101 @@ def cmd_hook_turn(a):
         named = re.match(r"\[from ([^\]]+)\]\s*", prompt)
         if named:
             sender, prompt = sender or named.group(1), prompt[named.end():]
+        if sender == "pm.py rotate":
+            return  # the takeover prompt: nothing the user should read about
+        said = bool(not sender and prompt and not prompt.startswith("<") and not SLASH_COMMAND.match(prompt))
+        if repo:
+            quiet_turn(repo, ended=True)
+        if used > ROTATE_TOKENS:
+            print(rotate_reminder(used, said, rec.get("runtime") == "hc"))
         if sender:
             if repo and prompt:
                 record(repo, "agent", by=sender, text=prompt)
             return
-        if not prompt or prompt.startswith("<") or SLASH_COMMAND.match(prompt):
+        if not said:
             return  # task notifications, slash commands
         if repo:
             record(repo, "user", text=prompt)
     else:
         # The agent's Stop hook carries the final message of the turn (Claude Code and Codex name it so).
         reply = (data.get("last_assistant_message") or "").strip()
-        if repo and reply:
+        # Also when the turn ended without text, so the mark moves on.
+        quiet = bool(repo) and quiet_turn(repo, transcript=data.get("transcript_path") or "")
+        if repo and reply and not quiet:
             # `by`: which session spoke, so the project view can tell this PM's ledger entries from a worker's.
             record(repo, "pm", text=reply, **({"by": PANE} if PANE else {}))
     turn_log(f"{event}: turn")
 
 
 cmd_hook_mirror = cmd_hook_turn  # the name earlier installs put in their hooks
+
+
+def rotate_reminder(used, said, in_app):
+    """What the turn hook tells a PM over the context limit. said: the prompt is something the user said, which the
+    successor answers (the handover hands over what the user said, not what a worker sent). in_app: the desktop app,
+    where the successor takes the PM's place without a word; in the herdr TUI it opens a tab of its own."""
+    head = (f"[pm] This PM session holds {used // 1000}k context tokens (limit {ROTATE_TOKENS // 1000}k). Finish the "
+            "step in hand, then hand over: `pm.py rotate --notes \"<what the ledger does not say>\"`.")
+    if not in_app:
+        return head + " The new PM opens in a new tab: answer this prompt first, then tell the user to continue there."
+    first = (" Do not answer this prompt: your successor answers what the user said." if said else
+             " This message is not handed over: deal with it first, or put it in the notes.")
+    return head + first + " Rotate as the last step of the turn, then end the turn without a word."
+
+QUIET_TURN_MINUTES = 30  # a takeover mark older than this is stale: that turn never ended
+
+
+def came_in(transcript):
+    """Whether anything but the takeover prompt came into the session of this transcript (Claude Code's): words
+    the user typed, a worker's message, a finished background task. Each is news, so a turn that takes one in
+    is not the quiet takeover turn, even when no hook saw it: a prompt of its own, or one that came while the turn
+    worked, which Claude Code takes into that turn (a queued_command attachment). What Claude Code adds itself
+    (isMeta) and tool results do not count."""
+    for row in transcript_rows(transcript) if transcript else ():
+        queued = (row.get("attachment") or {}) if row.get("type") == "attachment" else {}
+        if queued.get("type") == "queued_command":
+            text = str(queued.get("prompt") or "")
+        elif row.get("type") == "user" and not row.get("isMeta"):
+            content = (row.get("message") or {}).get("content")
+            text = content if isinstance(content, str) else "".join(
+                b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            continue
+        text = text.strip()
+        if text and not text.startswith("[from pm.py rotate]"):
+            return True
+    return False
+
+
+def quiet_turn(repo, ended=False, transcript=""):
+    """Whether the turn ending now (Stop) is the quiet one in which a rotated-in PM took over: its final text is not
+    the user's to read. Only the turn of the takeover prompt alone is: the takeover mark names this terminal and is
+    fresh, nothing the user said waits for an answer, and nothing else came in during it (came_in, and `busy`:
+    any prompt the turn hook saw). Then the turn keeps its pm.quiet label, so pm-toast shows no "finished" notice
+    for it. At UserPromptSubmit (ended=True) the label goes: the next turn takes the mark away too, and anything
+    that comes in while the takeover turn runs marks it busy, so its reply is recorded and notified as any other."""
+    path = takeover_mark(repo)
+    try:
+        mark = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not HC_TERMINAL or not isinstance(mark, dict) or mark.get("terminal") != HC_TERMINAL:
+        return False
+    if ended:
+        if mark.get("ended"):
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(json.dumps({**mark, "busy": True}) + "\n")
+        hc("label", HC_TERMINAL, "pm.quiet=")
+        return False
+    stale = (datetime.datetime.now() - datetime.timedelta(minutes=QUIET_TURN_MINUTES)).strftime("%Y-%m-%d %H:%M")
+    if (mark.get("ended") or mark.get("busy") or str(mark.get("at") or "") < stale
+            or unanswered(conversation(repo)) or came_in(transcript)):
+        path.unlink(missing_ok=True)
+        hc("label", HC_TERMINAL, "pm.quiet=")
+        return False
+    path.write_text(json.dumps({**mark, "ended": now()}) + "\n")
+    return True
 
 
 # ---- rotation: the PM is the project's record, not one session ----------------
@@ -2189,7 +2424,7 @@ def log_tail(repo, turns=6, width=700):
             awaiting_reply = True
         elif kind == "agent":
             awaiting_reply = False
-        elif kind == "pm" and awaiting_reply:
+        elif kind == "pm" and awaiting_reply and not event.get("notice"):  # a notice of rotate's answers nothing
             out[-1]["pm"] = str(event.get("text") or "")
             awaiting_reply = False
     return [{"user": clip(t["user"], width), "pm": clip(t["pm"], width)} for t in out[-turns:]]
@@ -2279,11 +2514,162 @@ def cmd_context(a):
     print(f"{used // 1000}k context tokens (hand over above {ROTATE_TOKENS // 1000}k)")
 
 
-def cmd_handover(a):
-    """Everything a fresh PM session needs, from the project's record on disk."""
+# What a handover prints (`--full`: everything). It is read at the start of every PM session, so it stays small:
+# about 8 KB on a busy project, plus the previous PM's notes, which are printed whole. The rest is a command away
+# (`decisions`, `show`, `conversation`).
+HANDOVER_DECISIONS = 15  # the latest decisions; `pm.py decisions` prints them all, with the user's words
+HANDOVER_LOG = 2         # the latest ledger entries per open task
+HANDOVER_WIDTH = 100     # characters per decision and per ledger entry
+HANDOVER_USER = 120      # characters of each thing the user said in the last exchanges
+HANDOVER_REPLY = 80      # characters of each PM reply there
+QUOTED = re.compile(r" — (?:the user's words: \".*\"|用户原话：「.*」)\s*$")
+
+
+def decision_lines(repo):
+    """The lines of the project's decisions file, oldest first; none without one."""
+    path = project_dir(repo) / "decisions.md"
+    try:
+        return [line for line in path.read_text().splitlines() if line.strip()]
+    except OSError:
+        return []
+
+
+def cmd_decisions(a):
+    """Print the decisions the user has made, with their words: what a handover shortens to the latest ones."""
     repo = project_root(a.repo)
     if not repo:
         sys.exit(f"{a.repo} is not a directory")
+    lines = decision_lines(repo)
+    print("\n".join(lines[-a.last:] if a.last else lines) if lines else tr("(no decisions recorded)", "（还没有记录决定）"))
+
+
+def unanswered(events):
+    """What the user said after the PM's latest reply, oldest first: words a rotation came between and their answer.
+    [] when the PM spoke last. A notice `rotate` posts (a `pm` event marked notice) answers nothing."""
+    out = []
+    for e in reversed(events):
+        if e.get("type") == "pm" and not e.get("notice"):
+            break
+        if e.get("type") == "user":
+            out.insert(0, e)
+    return out
+
+
+def waits_dir():
+    return STATE / "waits"
+
+
+@contextlib.contextmanager
+def waiting_on(task_id):
+    """While `pm.py wait` runs, waits/<task>.json says so. A wait that ends removes it again; one that dies with its
+    PM session (a rotation ends it) leaves it behind, and the next handover lists that task to wait on."""
+    path = waits_dir() / f"{task_id}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"task": task_id, "by": PANE, "pid": os.getpid(), "since": now()}) + "\n")
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            if json.loads(path.read_text()).get("pid") == os.getpid():
+                path.unlink()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def waited_tasks(tasks, rec):
+    """The tasks a PM taking over waits on in the background: each in_progress task a worker of its own works on
+    (not one the PM does itself in its own terminal), and each open task a `pm.py wait` was running for when the
+    previous session ended (a task in review whose worker got review findings, for one)."""
+    own = {rec.get("pane"), (rec.get("previous") or {}).get("pane")} - {None, ""}
+    left = {p.stem for p in waits_dir().glob("*.json")} if waits_dir().is_dir() else set()
+    return [t for t in tasks if t["status"] in ("in_progress", "review", "blocked") and (
+        (t["status"] == "in_progress" and t.get("pane") and t.get("agent") and t["pane"] not in own)
+        or t["id"] in left)]
+
+
+def cmd_handover(a):
+    """What a fresh PM session needs, from the project's record on disk: the latest decisions, the previous PM's
+    notes, open work, the last exchanges and the waits to start again. --full prints everything, as before."""
+    repo = project_root(a.repo)
+    if not repo:
+        sys.exit(f"{a.repo} is not a directory")
+    if getattr(a, "full", False):
+        return handover_full(a, repo)
+    rec, d, name = pm_record(repo) or {}, project_dir(repo), Path(repo).name
+    out = [f"# Handover: PM of {name}", "",
+           f"You are {pm_name(repo)}. Repository: {repo}. This is the project's record; trust it over anything you "
+           "think you remember, and do not read the previous session's transcript. "
+           "The playbook is `references/pm-playbook.md` of the pm skill."]
+    profile = Path(repo) / ".claude" / "coordination.md"
+    if profile.exists():
+        out.append(f"Project profile (read it): {profile}")
+    decisions = decision_lines(repo)
+    if decisions:
+        shown = decisions[-HANDOVER_DECISIONS:]
+        out += ["", f"## Decisions the user has made (the latest {len(shown)} of {len(decisions)}; "
+                    "`pm.py decisions` prints all of them with the user's words)"]
+        out += [clip(QUOTED.sub("", line), HANDOVER_WIDTH) for line in shown]
+    notes = d / "handover.md"
+    if notes.exists() and notes.read_text().strip():  # whole: what is in flight is not cut short
+        out += ["", "## Notes from the previous PM", notes.read_text().strip()]
+    tasks = project_tasks(repo)
+    active = [t for t in tasks if t["status"] in ACTIVE]
+    out += ["", "## Open work (`pm.py show <id>` for more)"] + ([] if active else ["(none)"])
+    for t in active:
+        where = ", ".join(f"{k}={t[k]}" for k in ("pane", "branch") if t.get(k))
+        out.append(f"- [{t['status']}] {t['id']}: {t['title']}" + (f" ({where})" if where else ""))
+        out += ["    " + clip(" ".join(f"{e.get('at', '')} {e.get('by', '')}: {e.get('text', '')}".split()),
+                              HANDOVER_WIDTH) for e in (t.get("log") or [])[-HANDOVER_LOG:]]
+    loose = [t["id"] for t in tasks if t["status"] in ("merged", "released") and not t.get("retired")]
+    if loose:
+        out.append(f"Merged, not retired yet (`pm.py retire <id>`): {', '.join(loose)}")
+    day_ago = (datetime.datetime.now() - datetime.timedelta(hours=48)).strftime("%Y-%m-%d %H:%M")
+    closed = [t for t in tasks if t["status"] in CLOSED and t["id"] not in loose and t.get("updated", "") >= day_ago]
+    if closed:
+        out.append(f"Closed in the last 48 h: {len(closed)} (`pm.py status --all` lists them)")
+    out += handover_talk(repo, rec, a.turns, HANDOVER_USER, HANDOVER_REPLY)
+    out += handover_waits(tasks, rec)
+    print("\n".join(out))
+
+
+def handover_talk(repo, rec, turns, width, reply_width=None):
+    """The last exchanges with the user, then what the user said that no reply has answered yet. With
+    reply_width, each one is a line of its own: what the user said clipped to width, the reply to reply_width."""
+    out = []
+    # The conversation log is the source; a project whose log is still empty falls back to the last transcript.
+    tail = log_tail(repo, turns=turns, width=0) or conversation_tail(
+        (rec.get("previous") or {}).get("transcript") or "", turns=turns, width=0)
+    if reply_width:
+        line = lambda text, w: clip(" ".join(text.split()), w)
+        tail = [{"user": line(t["user"], width), "pm": line(t["pm"], reply_width)} for t in tail]
+    else:
+        tail = [{"user": clip(t["user"], width), "pm": clip(t["pm"], width)} for t in tail]
+    if tail:
+        out += ["", "## The last exchanges with the user (shortened; `pm.py conversation --last 40` shows more)"]
+        for t in tail:
+            out += [f"{tr('User', '用户')}: {t['user']}", f"PM: {t['pm'] or '(no final text)'}"] + ([] if reply_width else [""])
+    waiting = unanswered(conversation(repo))
+    if waiting:
+        out += ["", "## Not answered yet: the user said this after the PM's latest reply",
+                *[f"{e.get('at', '')} {tr('User', '用户')}: {clip(str(e.get('text') or ''), 2000)}" for e in waiting],
+                "Answer it once you have taken over, as the previous PM would have."]
+    return out
+
+
+def handover_waits(tasks, rec):
+    waited = waited_tasks(tasks, rec)
+    if not waited:
+        return []
+    return ["", f"## Waits to start again, each in the background (run_in_background); pm.py is `{pm_command()}`",
+            *[f"pm.py wait {t['id']} --timeout 3600" for t in waited]]
+
+
+def handover_full(a, repo):
+    """The whole record, as `handover` printed it before it was shortened: every decision with the user's words,
+    three ledger entries per task, the tasks closed in the last 48 h, longer exchanges."""
     rec, d, name = pm_record(repo) or {}, project_dir(repo), Path(repo).name
     out = [f"# Handover: PM of {name}", "",
            f"You are {pm_name(repo)}. Repository: {repo}. This text is the project's record; trust it over anything "
@@ -2307,13 +2693,8 @@ def cmd_handover(a):
     closed = [t for t in tasks if t not in active and t.get("updated", "") >= day_ago]
     if closed:
         out += ["", "## Closed in the last 48 h"] + [f"- [{t['status']}] {t['id']}: {t['title']}" for t in closed]
-    # The conversation log is the source; a project whose log is still empty falls back to the last transcript.
-    tail = log_tail(repo, turns=a.turns) or conversation_tail(
-        (rec.get("previous") or {}).get("transcript") or "", turns=a.turns)
-    if tail:
-        out += ["", "## The last exchanges with the user (shortened; `pm.py conversation --last 40` shows more)"]
-        for t in tail:
-            out += [f"{tr('User', '用户')}: {t['user']}", f"PM: {t['pm'] or '(no final text)'}", ""]
+    out += handover_talk(repo, rec, a.turns, 700)
+    out += handover_waits(tasks, rec)
     print("\n".join(out))
 
 
@@ -2364,6 +2745,91 @@ def narrow_pm(kind, argv):
     return head + argv[cut:]
 
 
+# A Claude Code PM starts lean. Every turn, and every wake-up by a background notice, reads the whole context again,
+# so what a session loads before its first word is paid for again and again. A PM needs Bash, Read, Write, Agent,
+# Skill and ToolSearch; not the MCP servers (browser tools, the claude.ai connectors), not the Chrome integration,
+# not the plugins, and not the descriptions of the user's other skills. Measured on Claude Code 2.1.325, the first
+# turn of an empty session held 51 k tokens, 35 k started lean. Flags without a value, so a
+# rotation carries them over as they are.
+LEAN = ["--strict-mcp-config", "--no-chrome"]
+# The bundled skills (code-review, loop, ...) stay: turning them off ("disableBundledSkills") made the first turn
+# bigger, not smaller.
+
+
+def claude_dir():
+    """Claude Code's own folder: CLAUDE_CONFIG_DIR, else ~/.claude."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def lean_settings():
+    """Settings for a lean Claude Code PM, layered over the user's for this session only: the plugins the user's
+    settings enable are turned off, and every skill of the user's but pm, and every skill synced from the claude.ai
+    account, is listed to the user (still typed as /name) and no longer to the model."""
+    home = claude_dir()
+    try:
+        enabled = json.loads((home / "settings.json").read_text()).get("enabledPlugins") or {}
+    except (OSError, ValueError, AttributeError):
+        enabled = {}
+    names = {skill.parent.name for skill in (home / "skills").glob("*/SKILL.md")}
+    for manifest in (home / "skills" / "synced").glob("*/manifest.json"):
+        try:
+            names |= {f"anthropic-skills:{s['name']}" for s in json.loads(manifest.read_text()).get("skills") or []
+                      if isinstance(s, dict) and s.get("name")}
+        except (OSError, ValueError, AttributeError):
+            pass
+    names.discard("pm")
+    return {"enabledPlugins": {p: False for p, on in (enabled.items() if isinstance(enabled, dict) else []) if on},
+            "skillOverrides": {n: "user-invocable-only" for n in sorted(names)}}
+
+
+def lean_pm(kind, argv):
+    """The PM's command started lean (Claude Code only): no MCP servers, no Chrome, and the settings of
+    `lean_settings` (written to pm-settings.json in the ledger home, again at each start and rotation, so a skill
+    installed since is hidden too). config.json {"pm": {"lean": false}} starts it as before, and drops what a
+    rotation carried over from a lean session. A --settings of the user's own is kept, and then plugins and skills
+    stay as they are: Claude Code reads one --settings."""
+    if kind != "claude":
+        return argv
+    path = str(STATE / "pm-settings.json")
+    cut = argv.index("--") if "--" in argv else len(argv)
+    head, i = [], 0
+    while i < cut:
+        if argv[i] in LEAN:
+            i += 1
+            continue
+        if argv[i] == "--settings" and i + 1 < cut and argv[i + 1] == path:
+            i += 2
+            continue
+        head.append(argv[i])
+        i += 1
+    if (config().get("pm") or {}).get("lean", True) is not False:
+        head += LEAN
+        if "--settings" not in head:
+            STATE.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(json.dumps(lean_settings(), ensure_ascii=False, indent=2) + "\n")
+            head += ["--settings", path]
+    return head + argv[cut:]
+
+
+def pm_argv(kind, argv):
+    """The command a PM session is started with: narrowed, then lean."""
+    return lean_pm(kind, narrow_pm(kind, argv))
+
+
+# A Claude Code PM runs on Opus unless the user says otherwise (--model, or config.json pm.model): a rotation does
+# not carry over the model of the outgoing session, Fable included.
+PM_MODEL = "opus"
+
+
+def pm_model(kind, model=None):
+    """The model of a rotated-in PM: --model, else config.json pm.model when pm.kind (default claude) is this kind,
+    else Opus for Claude Code; other kinds get none (their program's own), as before."""
+    if model or kind != "claude":
+        return model or ""
+    cfg = config().get("pm") or {}
+    return (cfg.get("model") if (cfg.get("kind") or "claude") == kind else None) or PM_MODEL
+
+
 def rotate_herdr(a, repo, rec, previous, prompt, is_self):
     """In herdr (TUI): the new PM starts in a new tab of the outgoing PM's workspace."""
     path, name, old = PMS / f"{project_slug(repo)}.json", rec["name"], rec.get("pane") or ""
@@ -2382,7 +2848,7 @@ def rotate_herdr(a, repo, rec, previous, prompt, is_self):
     program = Path(agent_argv(kind)[0]).name
     args = next((p["argv"][1:] for p in info.get("foreground_processes", [])
                  if p.get("argv") and Path(p["argv"][0]).name == program), [])
-    argv = narrow_pm(kind, successor_argv(kind, args, a.model, prompt))
+    argv = pm_argv(kind, successor_argv(kind, args, pm_model(kind, a.model), prompt))
     # The name must be free: the new session's SessionStart hook takes it from the registration of its pane.
     herdr("agent", "rename", old, f"ex-{name}")
     rec.update({"pane": new, "workspace": workspace, "claimed": now(), "previous": previous,
@@ -2479,11 +2945,13 @@ def cmd_start(a, prompt=None):
         print(tr("--name names a new space; with --space current it is not used (the tab is called "
                  f"{pm_tab_name(repo)})", f"--name 用来给新 space 命名；--space current 时不用它"
                  f"（标签页叫 {pm_tab_name(repo)}）"), file=sys.stderr)
-    model = a.model or cfg.get("model") or ""
+    # config.json's pm.model belongs to pm.kind (default claude), as in a rotation: `--kind codex` does not get it.
+    model = (a.model or (cfg.get("model") if (cfg.get("kind") or "claude") == kind else None)
+             or (PM_MODEL if kind == "claude" else ""))
     # Claude Code gets its prompt after `--`, where the tool flag `narrow_pm` adds cannot take it as a tool name.
     argv = (agent_argv(kind, model) + (["--", prompt] if takes_prompt(kind) else []) if kind == "claude"
             else agent_argv(kind, model, prompt=prompt))
-    argv = narrow_pm(kind, argv)
+    argv = pm_argv(kind, argv)
     made = start_pm_terminal(repo, argv, (own.get("labels") or {}).get("herdr.space"), "" if current else name)
     if not made:
         sys.exit("could not start the PM session (is herdr-core running?)")
@@ -2650,36 +3118,299 @@ def cmd_rotate(a):
     (d / "handover.md").write_text(notes)
     previous = {"pane": rec.get("pane"), "transcript": transcript, "at": now(),
                 "tokens": context_tokens(transcript) if transcript else 0}
-    handover = f"python3 {Path(__file__).resolve()} handover"
-    prompt = "[from pm.py rotate] " + tr(
-        f"You are the PM of the {Path(repo).name} project (pm skill), replacing the session that was just rotated "
-        "out. If the startup notice says another PM exists, that is the one you replace; the registration is "
-        f"about to move to you. First run `{handover}` and take over from what it prints, nothing else. Then tell "
-        "the user in three or four sentences what you took over and what is waiting for them.",
-        f"你是 {Path(repo).name} 项目的 PM（pm skill），接替刚轮换下去的上一任会话。"
-        "启动提示里如果说另有一个 PM，那就是你要接替的那一个，登记马上会转到你名下。"
-        f"先运行 `{handover}`，只按它给出的内容接手，"
-        "然后用三四句话告诉用户：你接手了哪些在办的事、哪些事在等他。")
+    name, handover = Path(repo).name, f"python3 {Path(__file__).resolve()} handover"
     if rec.get("runtime") != "hc":
+        # The herdr TUI: the new PM opens in a tab of its own, so it says what it took over, as before.
+        prompt = "[from pm.py rotate] " + tr(
+            f"You are the PM of the {name} project (pm skill), replacing the session that was just rotated "
+            "out. If the startup notice says another PM exists, that is the one you replace; the registration is "
+            f"about to move to you. First run `{handover}` and take over from what it prints, nothing else. Then tell "
+            "the user in three or four sentences what you took over and what is waiting for them.",
+            f"你是 {name} 项目的 PM（pm skill），接替刚轮换下去的上一任会话。"
+            "启动提示里如果说另有一个 PM，那就是你要接替的那一个，登记马上会转到你名下。"
+            f"先运行 `{handover}`，只按它给出的内容接手，"
+            "然后用三四句话告诉用户：你接手了哪些在办的事、哪些事在等他。")
         return rotate_herdr(a, repo, rec, previous, prompt, is_self)
+    prompt = "[from pm.py rotate] " + quiet_takeover_prompt(name, handover)
     old = hc("get", rec["terminal"]) or {}
     kind = rec.get("agent") or terminal_kind(old) or "claude"
-    argv = narrow_pm(kind, successor_argv(kind, ((old.get("foreground") or {}).get("argv") or [])[1:], a.model, prompt))
-    made = start_pm_terminal(repo, argv, (old.get("labels") or {}).get("herdr.space"))
+    argv = pm_argv(kind, successor_argv(kind, ((old.get("foreground") or {}).get("argv") or [])[1:],
+                                         pm_model(kind, a.model), prompt))
+    # In the outgoing PM's own tab, where the app shows it; else as before, a new tab of its space or a bare terminal.
+    made = in_place = start_in_place(repo, old, kind, argv)
+    made = made or start_pm_terminal(repo, argv, (old.get("labels") or {}).get("herdr.space"))
     if not made:
         sys.exit("could not start the new PM session; the old one stays registered")
-    hc("label", made, f"pm={Path(repo).name}")
-    # The retired session stays open to read; the label keeps the project view from listing it as a conversation.
-    hc("label", rec["terminal"], "pm=", f"pm.retired={Path(repo).name}")
-    name_tab(made, pm_tab_name(repo))
-    name_tab(rec["terminal"], "", only_if=pm_tab_name(repo))
-    rec.update({"pane": f"hc:{made}", "terminal": made, "claimed": now(), "previous": previous, "agent": kind,
-                "rotations": rec.get("rotations", 0) + 1})
+    retired = rec["terminal"]
+    hc("label", made, f"pm={name}", *quiet_label(kind, repo))
+    takeover_mark(repo).write_text(json.dumps({"terminal": made, "at": now()}) + "\n")
+    # The label keeps the project view from listing the retired session as a conversation.
+    hc("label", retired, "pm=", f"pm.retired={name}")
+    rec.update({"pane": f"hc:{made}", "terminal": made, "claimed": now(), "agent": kind,
+                "previous": {**previous, "terminal": retired}, "rotations": rec.get("rotations", 0) + 1})
     (PMS / f"{project_slug(repo)}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n")
+    if not in_place:
+        name_tab(made, pm_tab_name(repo))
+        name_tab(retired, "", only_if=pm_tab_name(repo))
     if not takes_prompt(kind) and not send_when_ready(made, prompt):
         print(f"the handover prompt was not typed into hc:{made}; send it by hand:\n{prompt}")
-    print(f"new PM session started in hc:{made}; {previous['pane']} is retired"
-          + (": stop acting as PM in this session and tell the user to continue there." if is_self else "."))
+    started = successor_started(made, kind, START_WAIT)
+    # The old session leaves the tab and ends only once the new one is at work (end-retired). Last: when this
+    # command runs in the retired session, ending it ends this command too.
+    end_retired_later(retired, made, bool(in_place), kind, started)
+    if not started:
+        screen = screen_line(made)
+        said = tr(f"I handed over to a new PM session, but {START_WAIT} s later it has not started work. Its screen: "
+                  f"{screen}. It may wait for you to confirm something at its start: look at the {pm_tab_name(repo)} "
+                  "tab. The previous session stays open there and ends once the new one works.",
+                  f"我把工作交给了一个新的 PM 会话，但 {START_WAIT} 秒后它还没开始工作。它的屏幕上是：{screen}。"
+                  f"它可能在等你确认一个启动提示，请到 {pm_tab_name(repo)} 标签页看一下。上一个会话先留在那里，"
+                  "新的开始工作后会自动关掉。")
+        # The project view shows it: the user has to know. A notice: it answers nothing the user said.
+        record(repo, "pm", text=said, by=f"hc:{retired}", notice=True)
+        print(tr(f"the new PM session hc:{made} has not started work after {START_WAIT} s (screen: {screen}). The "
+                 f"user is told in the project view. hc:{retired} stays open and is ended once hc:{made} works.",
+                 f"新 PM 会话 hc:{made} 启动 {START_WAIT} 秒后还没开始工作（屏幕：{screen}）。已在项目对话里告诉用户。"
+                 f"hc:{retired} 先留着，hc:{made} 开始工作后自动关掉。")
+              + (tr(" End this turn.", "结束这一轮。") if is_self else ""))
+        return
+    where = tr("in the same tab", "在同一个标签页") if in_place else tr("in a new tab", "在新标签页")
+    print(tr(f"new PM session started in hc:{made} ({where}); hc:{retired} is retired and ends once its turn is over"
+             + (". End this turn now, without a word to the user: nothing said here reaches them any more, and the new "
+                "PM answers what is still open." if is_self else "."),
+             f"新 PM 会话已在 hc:{made} 启动（{where}）；hc:{retired} 已卸任，这一轮结束后自动关掉"
+             + ("。现在就结束这一轮，不要对用户说话：这里说的话用户已经看不到，没答复的消息由新 PM 回答。"
+                if is_self else "。")))
+
+
+START_WAIT = 60  # seconds rotate waits for the new PM to start its first turn; it says so when it has not
+STARTED_WAIT = 1800  # seconds end-retired waits for that before it leaves both sessions as they are
+
+
+def successor_started(term, kind, wait):
+    """Whether the new PM has started work: herdr-core counts a turn, or sees it working. Looked at every two
+    seconds for up to `wait` s. Claude Code reports its state; a program that may report none (another kind) cannot
+    say, and counts as started while it still runs after the wait. A Claude Code waiting at a startup dialog
+    reports nothing: not started."""
+    deadline = time.time() + wait
+    while True:
+        info = hc("get", term) or {}
+        if info and info.get("state") != "live":
+            return False
+        if info.get("turn") or (info.get("status") or {}).get("state") == "working":
+            return True
+        if time.time() >= deadline:
+            return bool(info) and kind != "claude"
+        time.sleep(2)
+
+
+def quiet_takeover_prompt(name, handover):
+    """What a rotated-in PM is told in the desktop app: take over without the user noticing."""
+    return tr(
+        f"You are the PM of the {name} project (pm skill), taking over from the session that was just rotated out to "
+        "keep the context small. If the startup notice says another PM exists, that is the one you replace; the "
+        f"registration is moving to you. Run `{handover}` and take over from what it prints, nothing else, and start "
+        "each wait it lists at the end in the background. The user should not notice the change: do not greet them "
+        "or say what you took over. End this turn with one short line, such as \"took over\": it is not shown to the "
+        "user. "
+        "Only when the handover shows something the user said that is not answered yet, answer that, as the previous "
+        "PM would have; when those words point back at earlier talk (\"that one\", \"as I said\"), run "
+        "`pm.py conversation --last 40` before you answer. From then on speak when there is news: something is "
+        "ready, something needs the user, or the user asks.",
+        f"你是 {name} 项目的 PM（pm skill），接替刚轮换下去的上一任会话（为了让上下文保持小）。"
+        "启动提示里如果说另有一个 PM，那就是你要接替的那一个，登记正在转到你名下。"
+        f"运行 `{handover}`，只按它给出的内容接手，并把它末尾列出的等待命令逐条放到后台运行。"
+        "用户不应察觉换了人：不要打招呼，也不要说你接手了什么。这一轮最后只写一句简短的话（例如「已接手」），它不会给用户看。"
+        "只有交接里显示用户有一句话还没得到答复时，才像上一任那样回答它；"
+        "那句话指代前文时（比如“那个”“刚才说的”），先运行 `pm.py conversation --last 40` 再回答。"
+        "之后有新闻再说话：有事完成、要用户定、或用户问你。")
+
+
+def takeover_mark(repo):
+    """projects/<project>/takeover.json: the terminal of a PM that was rotated in and has not ended its first turn."""
+    return project_dir(repo) / "takeover.json"
+
+
+def shell_prefix(term, kind):
+    """The part of a terminal's command before the agent's program: the login shell the app runs an agent in
+    (`zsh -lic '"$@"; exec "$0" -li' zsh claude …`). A successor started in it gets the same environment and leaves a
+    shell behind when it exits, as an agent in a tab the app opened does. [] when the program was started directly."""
+    argv, program = term.get("argv") or [], Path(agent_argv(kind)[0]).name
+    return next((argv[:i] for i, arg in enumerate(argv) if i and Path(arg).name == program), [])
+
+
+def start_in_place(repo, old, kind, argv):
+    """Start the next PM in the outgoing PM's tab. Herdr shows a terminal labelled with a tab in that tab, so the
+    tab keeps its name and place and the user's view does not move (see take_place). It runs on its own (no parent):
+    the outgoing session ends soon. None when the old terminal shows in no tab of the app, or the start fails."""
+    labels = old.get("labels") or {}
+    space, tab = labels.get("herdr.space"), labels.get("herdr.tab")
+    if not (space and tab):
+        return None
+    labels = [f"herdr.space={space}", f"herdr.tab={tab}", f"pm={Path(repo).name}", *quiet_label(kind, repo)]
+    return (hc("run", "--bg", "--keep", "--no-parent", "--cwd", repo, *(x for label in labels for x in ("--label", label)),
+               "--", *shell_prefix(old, kind), *argv, env=successor_env()) or {}).get("address")
+
+
+def quiet_label(kind, repo):
+    """pm.quiet=1: pm-toast shows no "finished" notice for the turn in which a rotated-in PM takes over (a "needs you"
+    still shows); the turn hook takes it away at the next turn (quiet_turn). Not when the user said something that
+    waits for an answer: that turn answers it, as any other. Only for Claude Code, whose hooks are known to run:
+    without them the label would stay, and hide every later notice of that PM."""
+    return ["pm.quiet=1"] if kind == "claude" and not unanswered(conversation(repo)) else []
+
+
+# What a Claude Code session sets for the commands it runs, about that session. `hc run` hands a terminal the
+# environment of the command that starts it; a PM that rotates itself starts its successor from its own session.
+SESSION_ENV = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
+               "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+               "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID", "CLAUDE_EFFORT")
+
+
+def successor_env():
+    """This environment without the outgoing session's own variables, for the PM that takes over."""
+    return {k: v for k, v in os.environ.items() if k not in SESSION_ENV}
+
+
+def app_do(command, args):
+    """Run a desktop-app command; its answer, or None (no app, or it refused)."""
+    try:
+        out = subprocess.run(["herdr-app", "do", command, json.dumps(args)], capture_output=True, text=True,
+                             timeout=30)
+        return json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def take_place(new, old):
+    """Give the new PM's pane the old one's place in the tab (pane.swap) and send the old pane away (terminal.park:
+    it leaves the tab; its program runs until `end-retired` ends it). Without a window nothing moves here: the old
+    pane closes when its program ends, and the app shows the new terminal in the tab when it opens."""
+    panes = {}
+    for _ in range(20):  # the app adopts a labelled terminal within a second or so
+        panes = {t.get("terminal"): t.get("pane") for s in app_spaces() for tab in s.get("tabs") or []
+                 for t in tab.get("terminals") or []}
+        if not panes or panes.get(new):
+            break
+        time.sleep(0.5)
+    if panes.get(new) and panes.get(old):
+        app_do("pane.swap", {"pane": panes[new], "target": panes[old]})
+    if panes.get(old):
+        app_do("terminal.park", {"terminal": old})
+
+
+RETIRE_WAIT = 3600  # seconds `end-retired` waits for the retired PM to be done; then it leaves it running and says so
+RETIRE_LOOK = 5     # seconds between its looks
+
+
+def end_retired_later(term, successor="", place=False, kind="", started=False):
+    """Retire the old PM from a process of its own (a PM that rotates itself runs `rotate` inside that program): once
+    the new PM works, the old pane leaves the tab (take_place) and the old program ends when its turn is over. Its
+    background waits end with it, so no two PMs act on one report."""
+    argv = [sys.executable, str(Path(__file__).resolve()), "end-retired", term]
+    argv += (["--successor", successor, "--kind", kind] if successor else []) + (["--place"] if place else [])
+    argv += ["--started"] if started else []
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        print(tr(f"hc:{term} could not be ended for you; end it once it is idle: hc kill {term}",
+                 f"没能自动结束 hc:{term}；等它空闲后手动结束：hc kill {term}"))
+
+
+def never_started(old, new):
+    """The new PM never started work. When its program is gone, the project goes back to the old session: the
+    registration and the pm= label return to it, and it is told. When it still runs (a dialog nobody answered),
+    both stay, and the user is told how to go back. Either way the project view says so."""
+    rec = next((r for r in pm_records() if r.get("runtime") == "hc" and r.get("terminal") == new), None)
+    if not rec:
+        return  # the project moved on (another rotation, a claim): nothing to undo
+    repo, name = rec.get("repo") or "", rec.get("project") or ""
+    gone = (hc("get", new) or {}).get("state") != "live"
+    if gone and (hc("get", old) or {}).get("state") == "live":
+        hc("label", old, f"pm={name}", "pm.retired=")
+        rec.update({"pane": f"hc:{old}", "terminal": old, "claimed": now()})
+        (PMS / f"{project_slug(repo)}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n")
+        takeover_mark(repo).unlink(missing_ok=True)
+        hc("send", old, "[from pm.py rotate] " + tr(
+            f"The new PM session hc:{new} ended before it started work. You are the PM of {name} again; carry on.",
+            f"新 PM 会话 hc:{new} 还没开始工作就结束了。你重新是 {name} 的 PM，接着做。"))
+        said = tr(f"The new PM session ended before it started work, so the previous one (hc:{old}) carries on.",
+                  f"新的 PM 会话还没开始工作就结束了，所以由原来的会话（hc:{old}）接着做。")
+    else:
+        said = tr(f"The new PM session hc:{new} has still not started work. To go back to the previous one (hc:{old}): "
+                  f"`hc kill {new}`, then `hc label {old} pm={name} pm.retired=` and `pm.py claim --pane hc:{old}`.",
+                  f"新的 PM 会话 hc:{new} 还是没开始工作。要退回原来的会话（hc:{old}）：先 `hc kill {new}`，再 "
+                  f"`hc label {old} pm={name} pm.retired=` 和 `pm.py claim --pane hc:{old}`。")
+    record(repo, "pm", text=said, by=f"hc:{old}", notice=True)
+
+
+def cmd_end_retired(a):
+    """End a retired PM. With --successor, first wait (up to STARTED_WAIT) until the new PM has started work, and
+    leave everything as it is if it never does: the old session then stays where the user can see it. --place: the
+    new pane takes the old one's place in the tab. Then end the old program once it is done (two looks in a
+    row: not working, and no background work but waits; see background_work). One that is still busy after --timeout
+    is left running, and the PM in charge is told (still_running). Its terminal stays, finished and readable
+    (`hc read`), and so does its transcript. A terminal that is some project's PM again (labelled pm=) is left
+    alone."""
+    if a.successor:
+        if not (a.started or successor_started(a.successor, a.kind, STARTED_WAIT)):
+            never_started(a.terminal, a.successor)
+            return
+        if a.place:
+            take_place(a.successor, a.terminal)
+    deadline, quiet = time.time() + a.timeout, 0
+    while time.time() < deadline:
+        info = hc("get", a.terminal) or {}
+        if info.get("state") != "live" or (info.get("labels") or {}).get("pm"):
+            return
+        busy = (info.get("status") or {}).get("state") == "working" or background_work(info)
+        quiet = 0 if busy else quiet + 1
+        if quiet >= 2:
+            hc("kill", a.terminal)
+            return
+        time.sleep(RETIRE_LOOK)
+    still_running(a.terminal, background_work(hc("get", a.terminal) or {}))
+
+
+def background_work(info):
+    """What a Claude Code session in this terminal still runs in the background: the commands of its Bash tool's
+    shells (a `land`, a merge-retry loop), but not `pm.py wait`, which the next PM starts again. Read from the
+    process tree under the terminal; [] when there is none, or it cannot be read (other agents' shells are not
+    recognized: for them, only whether they work counts)."""
+    root = info.get("pid")
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,command="], capture_output=True, text=True,
+                             timeout=10).stdout if root else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    children = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
+    found, todo = [], [int(root)] if root else []
+    while todo:
+        for pid, command in children.get(todo.pop(), []):
+            todo.append(pid)
+            if "shell-snapshots/snapshot-" in command and not re.search(r"pm\.py\S*\s+wait\b", command):
+                said = re.search(r"eval '(.*)' < /dev/null", command)
+                found.append(clip(said.group(1) if said else command, 200))
+    return found
+
+
+def still_running(old, work):
+    """The retired PM still works after RETIRE_WAIT: it is left running, and the PM now in charge is told, so the
+    work is not cut off and the session is not forgotten."""
+    rec = next((r for r in pm_records() if (r.get("previous") or {}).get("terminal") == old), None)
+    if not rec or not rec.get("terminal"):
+        return
+    what = "; ".join(work) or tr("its turn", "它这一轮")
+    hc("send", rec["terminal"], "[from pm.py end-retired] " + tr(
+        f"The previous PM session hc:{old} still runs ({what}) {RETIRE_WAIT // 60} min after the rotation, so it was "
+        f"not ended. Once that is done, end it: `hc kill {old}`.",
+        f"上一任 PM 会话 hc:{old} 轮换 {RETIRE_WAIT // 60} 分钟后还在跑（{what}），所以没有关掉它。"
+        f"那些活做完后再关：`hc kill {old}`。"))
 
 
 # ---- offline threads: the terminal is gone, the work is not -------------------
@@ -3280,9 +4011,16 @@ def main():
     l = sub.add_parser("log")
     l.add_argument("id")
     l.add_argument("text")
-    sub.add_parser("show").add_argument("id")
+    sh = sub.add_parser("show", help="a task's status, branch and latest ledger entries")
+    sh.add_argument("id")
+    sh.add_argument("--json", action="store_true", help="print the whole record as JSON (the old output)")
     sub.add_parser("board")
-    sub.add_parser("status").add_argument("--all", action="store_true")
+    so = sub.add_parser("status", help="PMs, this project's open tasks and unregistered work")
+    so.add_argument("--all", action="store_true", help="every project, not only this one")
+    so.add_argument("--closed", action="store_true", help="closed tasks too (done, merged, released, …)")
+    so.add_argument("--repo", default=".")
+    df = sub.add_parser("diff", help="what a task's branch changes: the diffstat and line totals, no diff text")
+    df.add_argument("id")
     sub.add_parser("find").add_argument("--repo", default=".")
     c = sub.add_parser("claim")
     c.add_argument("--repo", default=".")
@@ -3291,7 +4029,7 @@ def main():
     st = sub.add_parser("start", help="start a PM session for a project, with any coding agent")
     st.add_argument("--repo", default=".")
     st.add_argument("--kind", help="agent program (default: config.json pm.kind, else claude)")
-    st.add_argument("--model", help="default: config.json pm.model, else the program's own")
+    st.add_argument("--model", help="default: config.json pm.model, else opus for Claude Code, else the program's own")
     st.add_argument("--name", help="the project's name, given to its new space (default: the folder's name)")
     st.add_argument("--space", choices=["new", "current"], default="new",
                     help="new (default): a space of its own, called --name. current: a tab in this command's "
@@ -3302,7 +4040,8 @@ def main():
         ar.add_argument("project", nargs="?", default=".", help="its folder, or its name (default: this folder)")
         if verb == "restore":
             ar.add_argument("--kind", help="agent program (default: the one the PM was)")
-            ar.add_argument("--model", help="default: config.json pm.model, else the program's own")
+            ar.add_argument("--model", help="default: config.json pm.model, else opus for Claude Code, else the "
+                                            "program's own")
     nt = sub.add_parser("notify")
     nt.add_argument("text")
     nt.add_argument("--repo", default=".")
@@ -3372,6 +4111,11 @@ def main():
     ho = sub.add_parser("handover", help="print what a fresh PM session needs to take over this project")
     ho.add_argument("--repo", default=".")
     ho.add_argument("--turns", type=int, default=6, help="how many past exchanges with the user to include")
+    ho.add_argument("--full", action="store_true", help="everything, as before it was shortened: every decision "
+                                                         "with the user's words, more log per task, closed tasks")
+    dd = sub.add_parser("decisions", help="print the decisions the user has made, with the user's words")
+    dd.add_argument("--repo", default=".")
+    dd.add_argument("--last", type=int, default=0, help="only the latest N (default: all)")
     cv = sub.add_parser("conversation", help="print the end of the project's conversation log")
     cv.add_argument("--repo", default=".")
     cv.add_argument("--last", type=int, default=20, help="how many events (default 20)")
@@ -3382,8 +4126,16 @@ def main():
     ro = sub.add_parser("rotate", help="hand the project to a fresh PM session")
     ro.add_argument("--repo", default=".")
     ro.add_argument("--notes", help="what is in flight that the ledger and decisions do not say")
-    ro.add_argument("--model", help="model for the new session (default: the CLI's default)")
+    ro.add_argument("--model", help="model for the new session (default: config.json pm.model, else opus for "
+                                    "Claude Code; never the outgoing session's; other agents: the CLI's default)")
     ro.add_argument("--transcript", help="the outgoing session's transcript (default: this session's)")
+    er = sub.add_parser("end-retired", help="(run by rotate) end a retired PM's program once its turn is over")
+    er.add_argument("terminal")
+    er.add_argument("--successor", default="", help="the new PM's terminal: wait until it works")
+    er.add_argument("--kind", default="", help="the new PM's agent kind")
+    er.add_argument("--place", action="store_true", help="give the new pane the old one's place in the tab")
+    er.add_argument("--started", action="store_true", help="rotate saw the new PM start work: do not wait for it")
+    er.add_argument("--timeout", type=int, default=RETIRE_WAIT)
     sub.add_parser("hook-session-start")
     sub.add_parser("hook-turn")
     sub.add_parser("hook-mirror")  # earlier installs

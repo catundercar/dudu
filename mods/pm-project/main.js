@@ -10,12 +10,14 @@ import {
   draftFiles, withFiles, withoutFile, notFiles, pickedPaths, addFiles, messageText, afterSend, fileName, isImage, pasteName, attachmentsDir, pastesIn,
   CHOOSE_FILES, SAVE_CLIPBOARD_IMAGE, PANEL_WIDTH, panelWidth, draggedWidth, readPanelWidth, keepPressHandler,
   withAlpha, solidText, isDarkTheme, viewMarkdown, LEDGER_HOME_SH, EVENT_LIMIT,
+  projectRef, machineView, onMachine, remotePmArgv,
 } from './model.js';
 
 // The project view reads the ledger through the original pm-dash bundle, like pm-list.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
 const STAGE = 'pm-stage', WORK = 'work', BOARD = 'pm-board';
-// pm-list names the project to show here: shared('pm-project') = {pm: <PM name>}.
+// pm-list names the project to show here: shared('pm-project') = {pm: <PM name>}, or for a PM on
+// another machine {pm: '<machine>/<PM name>', machine} (see projectRef).
 const SHARED = 'pm-project';
 const ICON = name => `mods/pm-project/${name}.svg`;
 const SPINNER = 'mods/workspace-chrome/spinner.svg';
@@ -60,7 +62,9 @@ export default class PmProject extends View {
     this.state = { pms: [], tasks: [] };
     this.events = []; this.pending = []; this.seq = 0; this.pastes = [];
     this.error = ''; this.logError = '';
-    this.pmName = ''; this.logPath = '';
+    // pmName: the project's key as shared names it; machine: the machine it is on ('' here), whose
+    // ledger `state` then is (stateFor: the machine the state was read from; remoteHome: its ledger home).
+    this.pmName = ''; this.logPath = ''; this.machine = ''; this.stateFor = null; this.remoteHome = '';
     this.ledgerHome = ''; this.watching = {};
     // The side panel: the thread list while it rests, one thread's detail while `detail` is on.
     // listShown: what the header's icon asked for; until then the list shows when the window is wide.
@@ -168,17 +172,23 @@ export default class PmProject extends View {
   refresh(cx) {
     if (this.loading) { this.again = true; return; }
     this.loading = true;
+    const machine = this.machine;
     cx.spawn(async cx => {
       try {
-        const r = await exec('python3', [appHome() + PM_SCRIPT, 'state']);
+        // A project on another machine is read there, through herdr-core (its folders cannot be watched
+        // from here: the 10-second read keeps it current).
+        const r = machine ? await exec(...remotePmArgv(['state']), { on: machine, timeout: 15000 })
+          : await exec('python3', [appHome() + PM_SCRIPT, 'state']);
         if (r.code !== 0) throw new Error(r.stderr || `pm.py: ${r.code}`);
         const state = JSON.parse(r.stdout);
         if (!Array.isArray(state.pms) || !Array.isArray(state.tasks)) throw new Error('state is missing pms/tasks arrays');
-        this.state = state;
-        this.error = '';
-        this.setLedgerHome(state.home, cx);
-        this.arm(cx);
-      } catch (e) { this.error = String(e); }
+        if (machine === this.machine) {
+          this.state = state; this.stateFor = machine;
+          this.error = '';
+          if (machine) this.remoteHome = typeof state.home === 'string' ? state.home : '';
+          else { this.setLedgerHome(state.home, cx); this.arm(cx); }
+        }
+      } catch (e) { if (machine === this.machine) this.error = String(e?.message || e).trim(); }
       finally {
         this.loading = false;
         this.readLog(cx);
@@ -191,20 +201,21 @@ export default class PmProject extends View {
 
   // The last events of the selected project's log. `tail` keeps the read small however long the log grows.
   readLog(cx) {
-    const pm = this.pm(), path = pm?.conversation || '';
+    const pm = this.pm(), path = pm?.conversation || '', on = this.where();
     if (path !== this.logPath) { this.logPath = path; this.events = []; this.pastes = []; }
     if (!path) { cx.notify(); return; }
     if (this.logLoading) { this.logAgain = true; return; }
     this.logLoading = true;
     cx.spawn(async cx => {
       try {
-        const r = await exec('sh', ['-c', 'test -f "$1" || exit 0; tail -n "$2" "$1"', 'sh', path, String(EVENT_LIMIT * 2)]);
+        const r = await exec('sh', ['-c', 'test -f "$1" || exit 0; tail -n "$2" "$1"', 'sh', path, String(EVENT_LIMIT * 2)], on);
         if (r.code !== 0) throw new Error(r.stderr || `tail: ${r.code}`);
         if (path === this.logPath) {
           this.events = parseConversation(r.stdout);
           this.pending = settlePending(this.pending, this.events);
-          // The screenshots pasted into this project, for the messages the log has with image marks.
-          const dir = attachmentsDir(pm);
+          // The screenshots pasted into this project, for the messages the log has with image marks
+          // (one on another machine has none here to show).
+          const dir = on.on ? '' : attachmentsDir(pm);
           try {
             const ls = dir ? await exec('sh', ['-c', 'cd "$1" 2>/dev/null && ls -1 || true', 'sh', dir]) : null;
             if (path === this.logPath && ls?.code === 0) this.pastes = pastesIn(dir, ls.stdout);
@@ -222,11 +233,11 @@ export default class PmProject extends View {
 
   // The open thread's whole ledger entry: its log, branch, worktree and base.
   readThread(cx) {
-    const id = this.thread;
-    if (!id || !this.ledgerHome) return;
+    const id = this.thread, home = this.machine ? this.remoteHome : this.ledgerHome, on = this.where();
+    if (!id || !home) return;
     cx.spawn(async cx => {
       try {
-        const text = await readTextFile(`${this.ledgerHome}/tasks/${id}.json`);
+        const text = await readTextFile(`${home}/tasks/${id}.json`, on);
         if (id === this.thread) this.threadTask = text ? JSON.parse(text) : null;
       } catch (_) { /* Keep what is shown. */ }
       cx.notify();
@@ -234,15 +245,22 @@ export default class PmProject extends View {
   }
 
   pm() {
-    return this.state.pms.find(p => p.name === this.pmName) || null;
+    if (this.stateFor !== this.machine) return null;
+    const name = projectRef({ pm: this.pmName, machine: this.machine }).name;
+    return this.state.pms.find(p => p.name === name) || null;
   }
+  // exec/readTextFile's options for the project's machine; {} here.
+  where() { return this.machine ? { on: this.machine } : {}; }
+  // The terminals and agents as the project's machine sees them (machineView).
+  terms() { return machineView(terminals(), this.machine); }
+  live() { return machineView(agents(), this.machine); }
   pmTerminal() {
     const row = pmRow(this.pm());
-    return row ? terminalFor(row, terminals()) || null : null;
+    return row ? terminalFor(row, this.terms()) || null : null;
   }
   threadTerminal() {
     const task = this.threadTask || this.state.tasks.find(t => t.id === this.thread);
-    return task ? terminalFor(taskRow(task), terminals()) || null : null;
+    return task ? terminalFor(taskRow(task), this.terms()) || null : null;
   }
   // The reattach icon: pm.py brings the thread's agent back (its session resumed, or a new agent given
   // the thread's context) in a terminal under the PM, and the ledger then names that terminal.
@@ -252,7 +270,8 @@ export default class PmProject extends View {
     this.reattaching = id; this.reattachError = null;
     cx.spawn(async cx => {
       try {
-        const r = await exec('env', reattachArgv(appHome() + PM_SCRIPT, id), { timeout: 150000 });
+        const r = this.machine ? await exec(...remotePmArgv(['reattach', id]), { on: this.machine, timeout: 150000 })
+          : await exec('env', reattachArgv(appHome() + PM_SCRIPT, id), { timeout: 150000 });
         if (r.code !== 0) throw new Error(String(r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop());
       } catch (e) {
         this.reattachError = { id, text: String(e.message || e) };
@@ -349,7 +368,7 @@ export default class PmProject extends View {
     this.showThreadDraft('');
   }
   showThreadDraft(id) {
-    this.threadKey = draftKey('thread', id);
+    this.threadKey = draftKey('thread', id && onMachine(id, this.machine));
     const drafts = this.drafts();
     this.threadDraft = draftText(drafts, this.threadKey);
     this.threadFiles = draftFiles(drafts, this.threadKey);
@@ -367,7 +386,8 @@ export default class PmProject extends View {
   // on its way still has that send as its draft), and into its box when it shows. What is not a
   // file is named by the red mark.
   attach(key, paths, cx) {
-    if (!key) return;
+    // A file here means nothing to a PM on another machine.
+    if (!key || this.machine) return;
     const rejected = notFiles(paths);
     if (rejected.length) this.attachError = { key, text: word(this.lang, 'notAFile', rejected.map(p => fileName(String(p))).join(', ')) };
     else if (this.attachError?.key === key) this.attachError = null;
@@ -392,6 +412,7 @@ export default class PmProject extends View {
   // The clipboard's image saved in the project's attachments folder; a clipboard without one leaves
   // the box as it was (the paste had no text either).
   pasteImage(which, cx) {
+    if (this.machine) return;
     const key = this.keyOf(which), dir = attachmentsDir(this.pm());
     if (!dir) { this.failedAttach(key, word(this.lang, 'noPasteFolder'), cx); return; }
     const now = new Date(), stamp = pasteName(now);
@@ -407,6 +428,7 @@ export default class PmProject extends View {
   }
   // The paperclip: the system's file picker, several files at once. Cancelling it is no error.
   pickFiles(which, cx) {
+    if (this.machine) return;
     const key = this.keyOf(which);
     cx.spawn(async cx => {
       try {
@@ -422,8 +444,9 @@ export default class PmProject extends View {
     });
   }
 
+  // `hc send` reaches a terminal on another machine by its "<machine>/<id>" address.
   send(address, text) {
-    return exec('env', sendArgv(address, text), { timeout: 20000 }).then(r => {
+    return exec('env', sendArgv(onMachine(address, this.machine), text), { timeout: 20000 }).then(r => {
       if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc send: ${r.code}`);
     });
   }
@@ -562,9 +585,10 @@ export default class PmProject extends View {
     cx.notify();
   }
   // Where a terminal can be shown (focusPlan): over its own pane, an ancestor's, or this project's PM's.
+  // `address` as the project's machine names it (see machineView); the plan's are the app's.
   terminalPlace(address) {
-    return focusPlan(address, terminals(), [...panes().map(p => p.terminal), ...agents().map(a => a.address)],
-      this.pmTerminal()?.address || '');
+    return focusPlan(onMachine(address, this.machine), terminals(), [...panes().map(p => p.terminal), ...agents().map(a => a.address)],
+      onMachine(this.pmTerminal()?.address || '', this.machine));
   }
   // With nowhere to show it, nothing moves: showing work would reveal another project's space.
   focusTerminal(address) {
@@ -667,9 +691,11 @@ export default class PmProject extends View {
         .bg(withAlpha(t.blocked, .14)).text_color(t.blocked).text_size(12.5).font_semibold()
         .tooltip(word(this.lang, 'attachFailed', failed)).accessibility_label(word(this.lang, 'attachFailed', failed))
         .child('!'))) : null;
+    // A project on another machine takes no files from here: the clip shows why, dimmed.
+    const local = !this.machine, clipTip = word(this.lang, local ? 'attach' : 'remoteAttach');
     const clip = h_flex().id(`${id}-attach`).size(32).mb(6).flex_none().rounded(9).items_center().justify_center()
-      .text_color(t.muted).tooltip(word(this.lang, 'attach')).accessibility_label(word(this.lang, 'attach'))
-      .when(enabled, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+      .text_color(t.muted).tooltip(clipTip).accessibility_label(clipTip).when(!local, el => el.opacity(.45))
+      .when(enabled && local, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => this.pickFiles(which, cx)))
       .child(this.icon('clip', 16));
     // The box keeps its presses without the page's keyboard: its textarea takes the keyboard itself.
@@ -680,7 +706,7 @@ export default class PmProject extends View {
         if (enabled && e.keystroke === 'enter') { cx.stop_propagation(); onSend(cx); }
       })
       // Files dragged from Finder (or anywhere) onto the box.
-      .when(enabled, el => el.on_drop((e, cx) => this.attach(this.keyOf(which), e?.paths || [], cx)))
+      .when(enabled && local, el => el.on_drop((e, cx) => this.attach(this.keyOf(which), e?.paths || [], cx)))
       .when(Boolean(mark), el => el.child(mark))
       .when(Boolean(cards), el => el.child(cards))
       .child(h_flex().w_full().items_end().gap(2)
@@ -881,7 +907,7 @@ export default class PmProject extends View {
   // ring: null while nothing waits, else what a click on the bell calls: it names the row to go to
   // (-1: none, as when it opened a thread instead).
   header(pm, waiting, ring, t) {
-    const terminal = pm ? terminalTargetFor(pmRow(pm), terminals()).terminal : null;
+    const terminal = pm ? terminalTargetFor(pmRow(pm), this.terms()).terminal : null;
     const bellTip = waiting ? word(this.lang, 'waitingCount', waiting) : word(this.lang, 'nothingWaiting');
     const bell = h_flex().id('bell').relative().size(32).flex_none().rounded(10).items_center().justify_center()
       .text_color(t.muted).tooltip(bellTip).accessibility_label(bellTip)
@@ -897,7 +923,7 @@ export default class PmProject extends View {
     return h_flex().h(56).flex_none().px(28).gap(10).items_center().border_b(1).border_color(t.border)
       .child(div().flex_none().text_size(15).font_semibold().child(pm?.project || pm?.name || 'PM'))
       .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(12).text_color(t.dim)
-        .child(shortPath(pm?.repo, home())))
+        .child(this.machine ? `${this.machine} · ${pm?.repo || ''}` : shortPath(pm?.repo, home())))
       .when(Boolean(this.error || this.logError), el => el.child(div().id('read-error').text_color(t.blocked)
         .tooltip(`${word(this.lang, 'readError')}: ${this.logError || this.error}`).child('!')))
       .child(keepPress(this.views(t), this.keyFocus))
@@ -1004,7 +1030,7 @@ export default class PmProject extends View {
   // The panel at rest: what is open in this project, who is working in it, and what ended last.
   threadsPanel(pm, t, width) {
     const lang = this.lang;
-    const list = threadList(pm, this.tasks || this.state.tasks, this.events, terminals(), agents(), spaces().flatMap(s => s.tabs || []), lang);
+    const list = threadList(pm, this.tasks || this.state.tasks, this.events, this.terms(), this.live(), spaces().flatMap(s => s.tabs || []), lang);
     const group = (key, rows) => v_flex()
       .child(h_flex().h(26).px(8).gap(6).items_center().text_size(11).font_medium().text_color(t.dim)
         .child(word(lang, key)).child(String(rows.length)))
@@ -1082,18 +1108,19 @@ export default class PmProject extends View {
     // A task with a folded review reads as the list shows it (foldReviews), not as its ledger file says.
     const status = (stateTask?.review ? stateTask.status : task.status) || '', answered = Boolean(stateTask?.answered);
     const tn = tone(status, Boolean(stateTask?.cleanup), offline, answered);
-    const argv = diffArgv(task), engine = engineLabel(task);
+    // The diff opens a terminal here; a thread on another machine has its branch there.
+    const argv = this.machine ? null : diffArgv(task), engine = engineLabel(task);
     const log = (Array.isArray(task.log) ? task.log : []).slice(-60);
     // Waiting for the user: its question at the top, answered here as its card would be (with or without one
     // in the conversation; a waiting review's when one is folded in, see detailQuestion).
     const asks = stateTask ? detailQuestion(stateTask, this.state.tasks.find(x => x.id === this.thread), this.threadTask,
       this.items || []) : null;
     // Split into sub-threads: they are listed under its status, and it links back from each of them.
-    const parts = subThreads(this.tasks || this.state.tasks, this.thread, terminals(), agents(), lang, this.state.retired_parts);
+    const parts = subThreads(this.tasks || this.state.tasks, this.thread, this.terms(), this.live(), lang, this.state.retired_parts);
     const parent = parentThread(this.state.tasks, { ...task, id: this.thread });
     // Its review thread (foldReviews): its status and latest report, and its reviewer's terminal.
-    const review = reviewRow(stateTask, terminals(), agents(), lang);
-    const reviewTerminal = review ? terminalFor(taskRow(stateTask.review), terminals()) || null : null;
+    const review = reviewRow(stateTask, this.terms(), this.live(), lang);
+    const reviewTerminal = review ? terminalFor(taskRow(stateTask.review), this.terms()) || null : null;
     // The terminal icon opens the thread's terminal; with that terminal gone it reattaches the thread.
     // A task that never had a terminal and was split into sub-threads shows none.
     const does = terminalAction(terminal, { offline, pane: task.pane }, this.reattaching === this.thread, parts.length);
@@ -1108,7 +1135,7 @@ export default class PmProject extends View {
             terminal ? () => this.focusTerminal(terminal.address) : null, t);
     const actions = h_flex().gap(2).items_center()
       .when(does !== 'hidden', el => el.child(terminalIcon))
-      .child(this.iconButton('thread-diff', 'diff', argv ? word(lang, 'diff') : word(lang, 'noDiff'), argv ? () => {
+      .child(this.iconButton('thread-diff', 'diff', argv ? word(lang, 'diff') : word(lang, this.machine ? 'remoteDiff' : 'noDiff'), argv ? () => {
         run('terminal.open', { argv, folder: argv[2], place: 'tab', name: word(lang, 'diffTab', task.branch) });
         run('layout.select', { stack: STAGE, child: WORK });
       } : null, t))
@@ -1173,7 +1200,14 @@ export default class PmProject extends View {
     const t = theme();
     this.lang = this.state.lang;
     const lang = this.lang;
-    const wanted = shared(SHARED)?.pm || '';
+    const ref = projectRef(shared(SHARED)), wanted = ref.key;
+    if (ref.machine !== this.machine) {
+      // A project on another machine (or back here): that machine's ledger, read now.
+      // The language stays until that ledger gives its own.
+      this.machine = ref.machine; this.state = { pms: [], tasks: [], lang: this.state.lang }; this.stateFor = null;
+      this.error = ''; this.logError = ''; this.remoteHome = '';
+      cx.timer.after(0, cx => this.refresh(cx));
+    }
     if (wanted !== this.pmName) {
       // Another project: its own log, no bubbles or panel from the last one.
       this.pmName = wanted; this.events = []; this.pending = []; this.detail = false; this.thread = ''; this.threadTask = null;
@@ -1202,13 +1236,16 @@ export default class PmProject extends View {
       });
     const pm = this.pm();
     if (!pm) {
-      const note = this.pmName && this.state.pms.length ? word(lang, 'noProject') : word(lang, 'pick');
+      // A project on another machine says what it waits for, or why it cannot be read: never a blank page.
+      const remote = this.machine && this.stateFor !== this.machine;
+      const note = remote ? (this.error ? word(lang, 'remoteError', this.machine, this.error) : word(lang, 'remoteLoading', this.machine))
+        : this.pmName && this.state.pms.length ? word(lang, 'noProject') : word(lang, 'pick');
       // No header here: nothing on the page moves the window.
       return keepPress(root, this.keyFocus).items_center().justify_center().child(div().max_w(360).text_color(t.dim).whitespace_normal().child(note));
     }
     const now = new Date(), today = iso(now), yesterday = iso(new Date(now.getTime() - 86400000));
     const pmTerm = this.pmTerminal();
-    const working = pmTerm && agents().find(a => a.address === pmTerm.address)?.status === 'working';
+    const working = pmTerm && this.live().find(a => a.address === pmTerm.address)?.status === 'working';
     const items = timeline(this.events, this.state.tasks, {
       pending: this.pending, today, typing: Boolean(working) || this.pending.some(p => !p.failed), pastes: this.pastes || [],
       pm: pm.name,
@@ -1220,7 +1257,7 @@ export default class PmProject extends View {
     // askKey): answered meanwhile, or asked anew, it lets go.
     if (this.answering && !stops.some(s => (s.thread ? askKey(s.thread) : s.key) === this.answering.key)) this.answering = null;
     const blocks = timelineRows(turns(items, pm.pane || ''));
-    this.atWork = workingTasks(terminals(), agents());
+    this.atWork = workingTasks(this.terms(), this.live());
     const newest = newestReply(items);
     if (this.newest && newest !== this.newest && !this.unfolded.has(this.newest)) this.unfolded.set(this.newest, true);
     this.newest = newest;

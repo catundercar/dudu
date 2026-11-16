@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pageBefore, pageBack, shouldReturnToWork, summary } from './model.js';
+import * as nav from './model.js';
 
 const CHILDREN = ['work', 'pm-board', 'pm-project'];
 const PMS = [{ name: 'dudu' }, { name: 'herdr' }, { name: 'old', archived: true }];
@@ -52,4 +53,15 @@ test('the in-progress count leaves out a task whose terminal is gone', () => {
   assert.equal(summary(state([gone])).active, 0);
   assert.equal(summary(state([gone, { id: 'l', pm: 'pm-issues', status: 'in_progress', offline: false }])).active, 1);
   assert.equal(summary(state([]), { mbp: state([{ ...gone, id: 'r' }]) }).active, 0);
+});
+
+test("a remote project's conversation is come back to with its machine; gone from that machine, work", () => {
+  const remote = { box: { pms: [{ name: 'pm-dudu' }], tasks: [] } };
+  const pms = nav.projectKeys({ pms: PMS }, remote);
+  assert.deepEqual(pms.map(pm => pm.name), ['dudu', 'herdr', 'old', 'box/pm-dudu']);
+  const page = { pm: 'box/pm-dudu', machine: 'box' };
+  assert.deepEqual(roundTrip('pm-project', page, {}, pms), { child: 'pm-project', pm: 'box/pm-dudu', machine: 'box' });
+  assert.deepEqual(roundTrip('pm-project', page, {}, nav.projectKeys({ pms: PMS }, {})), { child: 'work' });
+  // Its board (pm-dash scoped to the merged name) the same way.
+  assert.deepEqual(roundTrip('pm-board', {}, { project: 'box/pm-dudu' }, pms), { child: 'pm-board', pm: 'box/pm-dudu' });
 });

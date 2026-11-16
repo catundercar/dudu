@@ -146,3 +146,28 @@ test('archived projects leave the list for the fold, newest first; waiting comes
   assert.deepEqual(archived.map(r => [r.label, archivedDay(r.archived)]), [['dsh-dudu', '11-04'], ['homenet', '10-31']]);
   assert.deepEqual(active.map(r => [r.label, r.waiting]).sort(), [['appkit', 2], ['dudu', 0], ['hub', 1]]);
 });
+
+// The bug: on a computer connected to another machine's herdr-core, a click on that machine's project
+// focused its PM's terminal (`!row.machine` kept remote rows out of the project view).
+test("a remote project's row opens the project view, named by its key and machine, not its terminal", async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmList extends View', 'return class');
+  const stage = { id: 'pm-stage', active: 'work', children: [{ id: 'work' }, { id: 'pm-board' }, { id: 'pm-project' }] };
+  const calls = [];
+  const stubs = { View: class {}, opensProject: list.opensProject, projectShared: list.projectShared, focusPlan: list.focusPlan,
+    layout: () => ({ id: 'root', children: [stage] }), terminals: () => [], panes: () => [{ terminal: 'box/t73' }], agents: () => [],
+    run: (name, args) => calls.push([name, args]), setShared: (key, value) => calls.push(['shared', key, value]) };
+  const Mod = new Function('scope', `with (scope) { ${source} }`)(new Proxy(stubs, {
+    has: (target, name) => name in target || !(name in globalThis), get: (target, name) => target[name],
+  }));
+  const [row] = pmRows({ pms: [] }, { box: { pms: [{ name: 'pm-dudu', project: 'dudu', pane: 'hc:t73' }], tasks: [] } },
+    [term('box/t73', { labels: { pm: 'dudu' } })], []);
+  assert.equal(row.terminal.address, 'box/t73');
+  Object.create(Mod.prototype).open(row);
+  assert.deepEqual(calls, [['shared', 'pm-project', { pm: 'box/pm-dudu', machine: 'box' }],
+    ['layout.select', { stack: 'pm-stage', child: 'pm-project' }]]);
+  // A local row is named as before; an older layout without the project page still focuses the terminal.
+  assert.deepEqual(list.projectShared({ key: 'pm-dudu', machine: '' }), { pm: 'pm-dudu' });
+  assert.equal(list.opensProject(row, { id: 'pm-stage', children: [{ id: 'work' }] }), false);
+});

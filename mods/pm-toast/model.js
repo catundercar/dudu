@@ -19,6 +19,23 @@ export function isWorkerNotice(notice, terminals) {
   return Boolean(terminal.parent && find(terminal.parent)?.labels?.pm);
 }
 
+// The notices the pm layout hides: an agent the PM dispatched (isWorkerNotice), and the
+// "finished" notice of a PM that has just been rotated in (`pm.py rotate` labels its terminal
+// pm.quiet=1 for the first turn, which says nothing to the person, and the next turn takes the
+// label away) or rotated out (pm.retired=<project>: its last turn ends after it handed over).
+// A "needs you" still shows: a PM stuck at a prompt must be seen.
+export function isHiddenNotice(notice, terminals) {
+  if (isWorkerNotice(notice, terminals)) return true;
+  const address = notice?.action?.args?.terminal;
+  if (notice?.action?.name !== 'agent.focus' || !address || !Array.isArray(terminals)) return false;
+  // By its title ("<program> finished"): a level alone does not tell a "needs you" apart. A title that says
+  // neither (another language) shows: fail open.
+  const title = String(notice.title ?? '');
+  const finished = /\bfinished\b/i.test(title) && !/needs you/i.test(title) && !['warning', 'error'].includes(notice.level);
+  const labels = terminals.find(t => t?.address === address)?.labels;
+  return finished && Boolean(labels?.['pm.quiet'] || labels?.['pm.retired']);
+}
+
 // A copy of pm-dash/model.js's (a mod cannot import from another mod's folder); pm-dash's
 // model.test.mjs checks that it stays identical.
 // How a click brings a terminal up. One with a pane: pane.focus, which shows its own space and tab.

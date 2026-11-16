@@ -7,7 +7,7 @@ focus handle was overwritten by the timeline's keys, and the next render threw i
 track_focus). This check starts a second Herdr of its own: its own app home with this
 repo's mods and pm layout, a copy of the ledger, and its own herdr-core session. It
 shows the Projects page (list and board), one project's conversation and board, one
-thread's detail and a toast. For each it changes a ledger file once (the mods' folder
+thread's detail, a project on an unreachable machine and a toast. For each it changes a ledger file once (the mods' folder
 watches) and re-renders every mod until the page's mod has rendered at least 3 times,
 then reads the errors from the app's log.
 
@@ -56,6 +56,8 @@ DRIVER = "pm-list"
 # Marks a run folder, so a later run deletes only what an earlier one made.
 MARK = ".render-check"
 PROJECT = "pm-project"
+# A machine name no herdr-core knows, for the remote project page's error state.
+UNREACHABLE = "render-check-nowhere"
 SAFE = re.compile(r"^[\w.-]+$")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 RECORD = re.compile(r"^(\d{4}-\d\d-\d\dT\S+)\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+(\S+):\s(.*)$")
@@ -110,6 +112,10 @@ function page(spec) {
   } else if (what === 'chat') {
     setShared(PROJECT, { pm: arg });
     run('layout.select', { stack: STAGE, child: PROJECT });
+  } else if (what === 'chat-remote') {
+    // arg: "<machine>/<PM name>", a project as pm-list names one on another machine.
+    setShared(PROJECT, { pm: arg, machine: arg.slice(0, arg.indexOf('/')) });
+    run('layout.select', { stack: STAGE, child: PROJECT });
   } else if (what === 'board') {
     setShared('pm-dash', { view: 'board', project: arg });
     run('layout.select', { stack: STAGE, child: BOARD });
@@ -121,7 +127,8 @@ function page(spec) {
 function report(view) {
   let found = null;
   try { found = typeof view.pm === 'function' ? Boolean(view.pm()) : null; } catch (_) { found = null; }
-  return { pm: view.pmName ?? null, found, events: Array.isArray(view.events) ? view.events.length : null,
+  return { pm: view.pmName ?? null, machine: view.machine ?? null, error: view.error ? String(view.error) : '',
+    found, events: Array.isArray(view.events) ? view.events.length : null,
     detail: view.detail ?? null, thread: view.thread ?? null, threadTask: view.threadTask === undefined ? null : Boolean(view.threadTask) };
 }
 function listen(view, cx) {
@@ -577,6 +584,11 @@ class Check:
             ("project-board", [page(f"board:{pm}")], "pm-dash", None),
             ("thread", [page(f"chat:{pm}"), self.project_shown, f"{PROJECT}.rc-thread:{thread}"], PROJECT,
              lambda s: s.get("detail") is True and s.get("thread") == thread and s.get("threadTask") is True),
+            # A project on a machine this private core does not know: the project page (never its
+            # terminal) says it cannot read it there, and renders on without errors.
+            ("remote-unreachable", [page(f"chat-remote:{UNREACHABLE}/{pm}")], PROJECT,
+             lambda s: s.get("pm") == f"{UNREACHABLE}/{pm}" and s.get("machine") == UNREACHABLE
+             and s.get("found") is False and bool(s.get("error"))),
             ("toast", [page("toast")], "pm-toast", None),
         ]
         steps = []

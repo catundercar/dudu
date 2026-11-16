@@ -827,7 +827,7 @@ test('the thread\'s terminal icon runs pane.focus on its PM, shows work, then pe
     .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmProject extends View', 'return class');
   const calls = [];
   const View = class {};
-  const stubs = { focusPlan: model.focusPlan, terminals: () => terms, panes: () => panes, agents: () => agents,
+  const stubs = { focusPlan: model.focusPlan, onMachine: model.onMachine, terminals: () => terms, panes: () => panes, agents: () => agents,
     run: (name, args) => calls.push([name, args]) };
   // Every other import is a do-nothing stand-in: only the click's own commands matter here.
   const blank = new Proxy(function () {}, { get: (_, key) => (key === Symbol.toPrimitive ? () => 0 : blank), apply: () => blank });
@@ -1504,4 +1504,81 @@ test('a folded review reads as its task: what it waits for, its terminal, and it
   assert.deepEqual(threadList(pm, [], merged).finished.map(r => r.task), ['dudu-drag']);
   // A review whose task the log never names stays a row of its own.
   assert.deepEqual(threadList(pm, [], events.slice(1)).finished.map(r => r.task), ['dudu-drag-review']);
+});
+
+test("a project on another machine: its key, its terminals as that machine names them, pm.py run there", async () => {
+  assert.deepEqual(model.projectRef({ pm: 'box/pm-dudu', machine: 'box' }), { key: 'box/pm-dudu', machine: 'box', name: 'pm-dudu' });
+  assert.deepEqual(model.projectRef({ pm: 'pm-dudu' }), { key: 'pm-dudu', machine: '', name: 'pm-dudu' });
+  // A machine that does not prefix the key is not trusted: the key is read as a local PM's.
+  assert.deepEqual(model.projectRef({ pm: 'pm-dudu', machine: 'box' }), { key: 'pm-dudu', machine: '', name: 'pm-dudu' });
+  assert.deepEqual(model.projectRef(null), { key: '', machine: '', name: '' });
+
+  // The ledger there says hc:t73; this app lists that terminal as box/t73, beside a local t73 of another PM.
+  const terms = [{ address: 't73', state: 'live', labels: { pm: 'other' } },
+    { address: 'box/t73', state: 'live', labels: { pm: 'dudu' } },
+    { address: 'box/t9', state: 'live', parent: 'box/t73', labels: { task: 'dudu-a' } },
+    { address: 'vps/t73', state: 'live', labels: { pm: 'dudu' } }];
+  const seen = model.machineView(terms, 'box');
+  assert.deepEqual(seen.map(t => [t.address, t.parent ?? '']), [['t73', ''], ['t9', 't73']]);
+  assert.equal(model.machineView(terms, ''), terms);
+  const pm = { name: 'pm-dudu', project: 'dudu', pane: 'hc:t73' };
+  assert.equal(model.terminalFor(model.pmRow(pm), seen).address, 't73');
+  assert.equal(model.terminalFor(model.taskRow({ id: 'dudu-a', pane: 'hc:t9' }), seen).address, 't9');
+  // Focused and sent to by the app's own address again.
+  assert.equal(model.onMachine('t73', 'box'), 'box/t73');
+  assert.equal(model.onMachine('t73', ''), 't73');
+  assert.equal(model.onMachine('', 'box'), '');
+  assert.deepEqual(model.sendArgv(model.onMachine('t73', 'box'), 'hi'), ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 'box/t73', 'hi']);
+
+  // remotePmArgv: the first pm.py found under that machine's home, with the arguments as given.
+  assert.deepEqual(model.PM_SCRIPTS, dash.PM_SCRIPTS);
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join, dirname } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'pm-remote-'));
+  try {
+    const script = join(dir, model.PM_SCRIPTS[1]);
+    mkdirSync(dirname(script), { recursive: true });
+    writeFileSync(script, 'import json, os, sys\nprint(json.dumps([sys.argv[1:], os.environ.get("HC_TERMINAL_ID")]))\n');
+    const [command, args] = model.remotePmArgv(['reattach', 'a "b" $c']);
+    const out = execFileSync(command, args, { env: { HOME: dir, PATH: process.env.PATH, HC_TERMINAL_ID: 't1' }, encoding: 'utf8' });
+    assert.deepEqual(JSON.parse(out), [['reattach', 'a "b" $c'], null]);
+    rmSync(script);
+    assert.throws(() => execFileSync(command, args, { env: { HOME: dir, PATH: process.env.PATH }, stdio: 'pipe' }), /pm.py not found/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a remote project's view reads that machine's ledger and sends to its terminals by their app address", async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmProject extends View', 'return class');
+  const calls = [];
+  const blank = new Proxy(function () {}, { get: (_, key) => (key === Symbol.toPrimitive ? () => 0 : blank), apply: () => blank });
+  const stubs = { View: class {}, projectRef: model.projectRef, machineView: model.machineView, onMachine: model.onMachine,
+    remotePmArgv: model.remotePmArgv, sendArgv: model.sendArgv, pmRow: model.pmRow, terminalFor: model.terminalFor,
+    terminals: () => [{ address: 't73', state: 'live', labels: { pm: 'dudu' } }, { address: 'box/t73', state: 'live', labels: { pm: 'dudu' } }],
+    agents: () => [], panes: () => [],
+    exec: async (command, args, options) => { calls.push([command, args, options]); return { code: 0, stdout: '', stderr: '' }; },
+    readTextFile: async (path, options) => { calls.push(['read', path, options]); return null; } };
+  const scope = new Proxy(stubs, {
+    has: (target, name) => name in target || !(name in globalThis),
+    get: (target, name) => (name in target ? target[name] : name === Symbol.unscopables ? undefined : blank),
+  });
+  const Mod = new Function('scope', `with (scope) { ${source} }`)(scope);
+  const pm = { name: 'pm-dudu', project: 'dudu', pane: 'hc:t73', conversation: '/Users/x/.claude/pm/projects/dudu/conversation.jsonl' };
+  const view = Object.assign(Object.create(Mod.prototype), { machine: 'box', pmName: 'box/pm-dudu', stateFor: 'box',
+    state: { pms: [pm], tasks: [] }, remoteHome: '/Users/x/.claude/pm', ledgerHome: '/here', thread: 'dudu-a', pending: [] });
+  const cx = { spawn: f => f(cx), notify() {} };
+  assert.equal(view.pm(), pm);
+  assert.equal(view.pmTerminal().address, 't73');
+  await view.send(view.pmTerminal().address, 'hi');
+  view.readLog(cx); view.readThread(cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(calls[0], ['env', ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 'box/t73', 'hi'], { timeout: 20000 }]);
+  // The log's tail and the thread's file come from that machine (exec / readTextFile `on`).
+  assert.deepEqual(calls.slice(1).map(c => [c[0], c[2]?.on]).sort(), [['read', 'box'], ['sh', 'box']]);
+  assert.equal(calls.find(c => c[0] === 'read')[1], '/Users/x/.claude/pm/tasks/dudu-a.json');
+  // Before that machine's ledger is read, the view has no project from another one's state.
+  assert.equal(Object.assign(view, { stateFor: '' }).pm(), null);
 });

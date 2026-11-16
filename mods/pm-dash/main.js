@@ -571,7 +571,7 @@ export default class PmDash extends View {
         cx.stop_propagation();
         if (to.hoverCard) { this.hoverTask = null; this.hoverEnded = null; cx.notify(); }
         else if (to.ended) { this.endedOpen.clear(); cx.notify(); }
-        else if (to.project) openProject(to.project);
+        else if (to.project) openProject(to.project, this.allState.pms.find(p => p.name === to.project)?.machine);
         else if (to.view) showPage(to.view);
         // The same way back as a second Projects click; without pm-nav there is none, so the workspace.
         else if (findMod(desktopLayout(), 'pm-nav')) run('pm-nav.back');

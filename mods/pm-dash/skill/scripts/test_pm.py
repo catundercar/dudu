@@ -19,6 +19,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 import pm  # noqa: E402
 pm.HERDR_DOCS = Path(HOME) / "no-herdr-app"  # the tests do not see this machine's Herdr docs
+pm.claude_dir = lambda: Path(HOME) / "claude"  # nor its Claude Code skills and plugins
 
 
 def row(kind, content, usage=None, side=False):
@@ -62,12 +63,15 @@ class Rotation(unittest.TestCase):
                 "owner": "pm", "base": "main", "pane": "hc:t9", "created": pm.now()}
         pm.note(task, "dispatched")
         pm.save(task)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            pm.cmd_handover(type("A", (), {"repo": repo, "turns": 6}))
-        text = out.getvalue()
-        for part in ("连线不用直角", 'the user\'s words: "不要有直角线"', "用户正要验证点击跳转", f"{name}-a", "dispatched"):
-            self.assertIn(part, text)
+        for full in (False, True):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                pm.cmd_handover(type("A", (), {"repo": repo, "turns": 6, "full": full}))
+            text = out.getvalue()
+            for part in ("连线不用直角", "用户正要验证点击跳转", f"{name}-a", "dispatched"):
+                self.assertIn(part, text)
+            # The user's words are in the whole record (and `pm.py decisions`), not in the short handover.
+            self.assertEqual('the user\'s words: "不要有直角线"' in text, full)
 
     def test_builtin_text_is_english_unless_configured(self):
         self.assertEqual(pm.tr("User", "用户"), "User")
@@ -1229,6 +1233,214 @@ class ReportAndWait(unittest.TestCase):
         self.assertNotIn("first report", out)
 
 
+class LightOutput(unittest.TestCase):
+    """What the PM reads stays short: wait prints the whole report, show and status a summary, diff only numbers."""
+
+    def run_pm(self, *argv):
+        return SubThreads.run_pm(self, *argv)
+
+    def test_wait_prints_a_long_report_whole(self):
+        ReportAndWait.make_task(self, "p-long")
+        long = "改动说明。" * 300  # 1500 characters, more than the old 600 cut
+        working = {"state": "live", "status": {"state": "working"}}
+        states, hc, sleep = iter([working] * 5), pm.hc, pm.time.sleep
+        looks = []
+
+        def fake_sleep(_):
+            looks.append(1)
+            if len(looks) == 2:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    pm.cmd_update(type("A", (), {"id": "p-long", "status": "review", "commit": "abc", "keep": False,
+                                                 "note": long}))
+        pm.hc = lambda *args, **kw: next(states, None) if args[0] == "get" else None
+        pm.time.sleep = fake_sleep
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                pm.cmd_wait(type("A", (), {"id": "p-long", "timeout": 60}))
+        finally:
+            pm.hc, pm.time.sleep = hc, sleep
+        self.assertIn(long, out.getvalue())
+        self.assertNotIn(" …", out.getvalue())
+
+    def test_show_is_short_and_json_is_the_whole_record(self):
+        repo = pm.project_root(tempfile.mkdtemp())
+        pm.save({"id": "s-show", "title": "精简", "project": "s", "repo": repo, "status": "review", "owner": "pm",
+                 "base": "main", "branch": "dev/s", "commit": "c0ffee", "created": pm.now(),
+                 "log": [{"at": f"11-15 0{i}", "by": "hc:t1", "text": f"entry {i}"} for i in range(5)]})
+        out = self.run_pm("show", "s-show")
+        self.assertIn("s-show  [review]  精简", out)
+        self.assertIn("branch=dev/s", out)
+        self.assertIn("commit=c0ffee", out)
+        self.assertEqual([n for n in range(5) if f"entry {n}" in out], [2, 3, 4])  # the last three only
+        self.assertNotIn("{", out)
+        whole = json.loads(self.run_pm("show", "s-show", "--json"))
+        self.assertEqual((len(whole["log"]), whole["commit"], set(whole["live"])), (5, "c0ffee", {"ahead", "dirty"}))
+
+    def run_status(self, *argv, panes=()):
+        saved = pm.agents, pm.herdr, pm.hc
+        pm.agents, pm.herdr, pm.hc = (lambda: list(panes)), (lambda *a, **kw: None), (lambda *a, **kw: None)
+        try:
+            return self.run_pm("status", *argv)
+        finally:
+            pm.agents, pm.herdr, pm.hc = saved
+
+    def test_status_lists_this_project_unless_all(self):
+        here, there = (pm.project_root(tempfile.mkdtemp(prefix=n)) for n in ("here-", "there-"))
+        for repo, tid, status in ((here, "here-task", "in_progress"), (there, "there-task", "in_progress"),
+                                  (here, "here-old", "done")):
+            pm.save({"id": tid, "title": tid, "project": Path(repo).name, "repo": repo, "status": status,
+                     "owner": "pm", "base": "main", "created": pm.now()})
+        mine = self.run_status("--repo", here)
+        every = self.run_status("--repo", here, "--all")
+        nowhere = self.run_status("--repo", tempfile.mkdtemp())  # no project there: everything, as before
+        self.assertIn("here-task", mine)
+        self.assertNotIn("there-task", mine)
+        self.assertTrue(all(t in out for out in (every, nowhere) for t in ("here-task", "there-task")))
+        # --all widens the projects only; closed tasks need --closed, as the old --all gave them
+        self.assertFalse(any("here-old" in out for out in (mine, every, nowhere)))
+        self.assertIn("here-old", self.run_status("--repo", here, "--closed"))
+        self.assertNotIn("there-task", self.run_status("--repo", here, "--closed"))
+
+    def test_status_in_the_hub_lists_every_project(self):
+        """The hub is registered (pms/hub.json) for a folder in the ledger home: it is no project to narrow to."""
+        hub = Path(pm.STATE) / "hub"
+        hub.mkdir(parents=True, exist_ok=True)
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        (pm.PMS / "hub.json").write_text(json.dumps({"project": "hub", "repo": str(hub), "name": "pm-hub"}))
+        repo = pm.project_root(tempfile.mkdtemp(prefix="proj-"))
+        pm.save({"id": "proj-task", "title": "proj-task", "project": Path(repo).name, "repo": repo,
+                 "status": "in_progress", "owner": "pm", "base": "main", "created": pm.now()})
+        try:
+            out = self.run_status("--repo", str(hub))
+        finally:
+            (pm.PMS / "hub.json").unlink()
+        self.assertIn("proj-task", out)
+        self.assertNotIn("(--all", out)
+        # a registration whose repo is another folder (the same slug by chance) does not narrow status either
+        other = Path(tempfile.mkdtemp()) / Path(repo).name
+        other.mkdir()
+        (pm.PMS / f"{pm.project_slug(repo)}.json").write_text(json.dumps({"repo": repo}))
+        try:
+            self.assertIn("proj-task", self.run_status("--repo", str(other)))
+        finally:
+            (pm.PMS / f"{pm.project_slug(repo)}.json").unlink()
+
+    def test_status_lists_the_folders_under_this_project(self):
+        """A PM of a plain folder (issues) owns the projects inside it (issues/site-a), as the board counts them;
+        a sibling that only starts with its name does not belong to it."""
+        here = Path(pm.project_root(tempfile.mkdtemp(prefix="nest-")))
+        (here / "site-a").mkdir()
+        sibling = Path(f"{here}-old")
+        sibling.mkdir()
+        elsewhere = pm.project_root(tempfile.mkdtemp())
+        for repo, tid, project in ((here / "site-a", "nest-sub", "site-a"), (sibling, "nest-sibling", sibling.name),
+                                   (elsewhere, "nest-named", "nestp")):
+            pm.save({"id": tid, "title": tid, "project": project, "repo": str(repo), "status": "in_progress",
+                     "owner": "pm", "base": "main", "created": pm.now()})
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        registration = pm.PMS / f"{pm.project_slug(here)}.json"
+        registration.write_text(json.dumps({"project": "nestp", "repo": str(here), "name": "pm-nestp"}))
+        try:
+            mine = self.run_status("--repo", str(here))
+        finally:
+            registration.unlink()
+        self.assertIn(pm.tr(f"Tasks of {here.name}", f"{here.name} 的任务"), mine)
+        self.assertIn("nest-sub", mine)
+        self.assertIn("nest-named", mine)  # elsewhere, but the board gives it to this PM by its project name
+        self.assertNotIn("nest-sibling", mine)
+
+    def test_status_unregistered_work_under_this_project(self):
+        here = Path(pm.project_root(tempfile.mkdtemp(prefix="scope-")))
+        pm.save({"id": "scope-task", "title": "scope-task", "project": here.name, "repo": str(here),
+                 "status": "in_progress", "owner": "pm", "base": "main", "created": pm.now()})
+        inner, outer = here / "inner", Path(tempfile.mkdtemp(prefix="outer-")).resolve()
+        for repo in (inner, outer):
+            repo.mkdir(exist_ok=True)
+            run = lambda *args: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                                                *args], check=True, capture_output=True)
+            run("init", "-q", "-b", "main")
+            (repo / "a.txt").write_text("one\n")
+            run("add", "a.txt")
+            run("commit", "-q", "-m", "init")
+            (repo / "a.txt").write_text("two\n")  # uncommitted: unregistered work
+        panes = [{"pane_id": f"w-{repo.name[:5]}", "cwd": str(repo), "agent_status": "idle", "agent": "claude",
+                  "name": repo.name, "workspace_id": ""} for repo in (inner, outer)]
+        mine = self.run_status("--repo", str(here), panes=panes)
+        every = self.run_status("--repo", str(here), "--all", panes=panes)
+        self.assertIn("pane w-inner", mine)
+        self.assertNotIn("pane w-outer", mine)
+        self.assertTrue("pane w-inner" in every and "pane w-outer" in every)
+
+    def diff_task(self, repo, tid, branch, worktree=None):
+        pm.save({"id": tid, "title": "d", "project": repo.name, "repo": str(repo), "status": "review", "owner": "pm",
+                 "base": "main", "branch": branch, "created": pm.now(), **({"worktree": worktree} if worktree else {})})
+        return self.run_pm("diff", tid)
+
+    def test_diff_prints_the_stat_and_line_totals(self):
+        repo, git = make_repo()
+        git("checkout", "-q", "dev/x")
+        (repo / "a.txt").write_text("one\ntwo\nthree\n")
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_a.py").write_text("x = 1\ny = 2\n")
+        (repo / "evidence" / "截图").mkdir(parents=True)
+        (repo / "evidence" / "截图" / "说明.md").write_text("看过了\n")
+        git("add", "a.txt", "tests/test_a.py", "evidence")
+        git("rm", "-q", "new.txt")  # added and deleted on the branch: not in the diff against main
+        git("commit", "-q", "-m", "more")
+        git("checkout", "-q", "main")
+        out = self.diff_task(repo, "d-diff", "dev/x", worktree=str(repo / "gone"))  # its worktree was removed
+        self.assertIn("git diff --stat main...dev/x", out)
+        self.assertIn("evidence/截图/说明.md", out)  # the name as it is, not quoted escapes
+        self.assertIn("total: 3 files, +5 -0 (5 lines)", out)
+        self.assertIn("source (without tests and evidence): 1 files, +2 -0 (2 lines)", out)
+        self.assertIn("worktree gone", out)
+        self.assertIn("small (§4): yes", out)
+        self.assertNotIn("+two", out)  # no diff text
+        self.assertNotIn("deleted:", out)
+        self.assertNotIn("exit:", out)
+
+    def test_diff_says_what_is_not_small(self):
+        repo, git = make_repo()
+        git("checkout", "-q", "-b", "dev/y")
+        git("rm", "-q", "a.txt")
+        (repo / "mods" / "pm-x").mkdir(parents=True)
+        (repo / "mods" / "pm-x" / "main.js").write_text("view();\n")
+        (repo / "icon.png").write_bytes(b"\x89PNG\x00\x01")
+        git("add", "mods", "icon.png")
+        git("commit", "-q", "-m", "ui")
+        git("checkout", "-q", "-b", "dev/big", "main")
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_big.py").write_text("x = 1\n" * 160)  # tests only, but past the total cap
+        git("add", "tests")
+        git("commit", "-q", "-m", "big")
+        git("checkout", "-q", "-b", "dev/swift", "main")
+        for path, text in (("Sources/App/Panel.swift", "import Foundation\nimport SwiftUI\n"),
+                           ("Sources/Core/Model.swift", "import Foundation\nstruct Model {}\n")):
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_text(text)
+        git("add", "Sources")
+        git("commit", "-q", "-m", "swift")
+        git("checkout", "-q", "main")
+        out = self.diff_task(repo, "d-swift", "dev/swift")  # a SwiftUI view shows on screen; a model does not
+        self.assertIn("UI (visual result): Sources/App/Panel.swift\n", out)
+        self.assertIn("small (§4): no, UI files", out)
+        out = self.diff_task(repo, "d-ui", "dev/y")
+        self.assertIn("deleted: a.txt", out)
+        self.assertIn("binary: icon.png", out)
+        self.assertIn("UI (visual result): icon.png, mods/pm-x/main.js", out)
+        self.assertNotIn("worktree gone", out)  # it never had one
+        self.assertIn("small (§4): no, deletes files; binary files; UI files", out)
+        out = self.diff_task(repo, "d-big", "dev/big")
+        self.assertIn("small (§4): no, 160 lines in all > 150", out)
+        self.assertEqual((pm.ui_file("mods/pm-dash/skill/scripts/pm.py"), pm.ui_file("mods/pm-x/model.test.mjs"),
+                          pm.ui_file("mods/pm-dash/skill/assets/dash.html")), (False, False, True))
+        self.assertEqual((pm.ui_file("App/Base.lproj/Main.storyboard"), pm.ui_file("App/Assets.xcassets/a/Contents.json"),
+                          pm.ui_file("App/Remote.swift", "import AppKit\n")), (True, True, False))
+        self.assertFalse(pm.ui_file("Tests/AppTests/PanelTests.swift", "import SwiftUI\n"))  # a test, not a view
+        self.assertTrue(pm.side_file("Tests/AppTests/PanelTests.swift"))
+
+
 class ConversationLog(unittest.TestCase):
     """The conversation belongs to the project: a session appends to it, a fresh one reads it."""
 
@@ -2092,7 +2304,7 @@ class LandAndReview(unittest.TestCase):
         pm.cmd_claim = lambda a: None
         try:
             pm.cmd_start(argparse.Namespace(repo=repo, kind="claude", model=""))
-            self.assertEqual(seen[-1][:3], ["claude", "--disallowedTools", "Edit,NotebookEdit"])
+            self.assertEqual(seen[-1][:5], ["claude", "--model", "opus", "--disallowedTools", "Edit,NotebookEdit"])
             self.assertEqual(seen[-1][-2], "--")  # the prompt cannot be read as one more tool name
             # A rotation carries the denial over once, and config can turn it off.
             old = seen[-1][1:]
@@ -2108,6 +2320,74 @@ class LandAndReview(unittest.TestCase):
             (Path(HOME) / "config.json").unlink()
             pm.cmd_start(argparse.Namespace(repo=repo, kind="codex", model=""))
             self.assertNotIn("--disallowedTools", seen[-1])  # other agents are started as before
+        finally:
+            pm.start_pm_terminal, pm.cmd_claim = start, claim
+            (Path(HOME) / "config.json").unlink(missing_ok=True)
+
+    def test_a_claude_pm_starts_lean_on_opus(self):
+        repo = pm.project_root(tempfile.mkdtemp())
+        claude = Path(HOME) / "claude"
+        for name in ("pm", "wecom", "other-skill"):
+            (claude / "skills" / name).mkdir(parents=True, exist_ok=True)
+            (claude / "skills" / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+        (claude / "skills" / "synced" / "b1").mkdir(parents=True, exist_ok=True)
+        (claude / "skills" / "synced" / "b1" / "manifest.json").write_text(json.dumps({"skills": [{"name": "docs"}]}))
+        (claude / "settings.json").write_text(json.dumps({"enabledPlugins": {"playwright@x": True, "off@x": False}}))
+        settings = str(Path(HOME) / "pm-settings.json")
+        seen, start, claim = [], pm.start_pm_terminal, pm.cmd_claim
+        pm.start_pm_terminal = lambda repo, argv, space=None, new_space="": seen.append(argv) or "t50"
+        pm.cmd_claim = lambda a: None
+        try:
+            pm.cmd_start(argparse.Namespace(repo=repo, kind="claude", model=None))
+            argv = seen[-1]
+            head = argv[:argv.index("--")]
+            self.assertEqual(head, ["claude", "--model", "opus", "--disallowedTools", "Edit,NotebookEdit",
+                                    "--strict-mcp-config", "--no-chrome", "--settings", settings])
+            # Plugins off and the other skills hidden from the model, for this session only; pm stays listed.
+            self.assertEqual(json.loads(Path(settings).read_text()), {
+                "enabledPlugins": {"playwright@x": False},
+                "skillOverrides": {"anthropic-skills:docs": "user-invocable-only", "wecom": "user-invocable-only",
+                                   "other-skill": "user-invocable-only"}})
+            # A rotation: no flag twice, the outgoing model (Fable) is not carried over, an explicit one wins.
+            old = ["--model", "fable"] + argv[3:]
+            rotated = pm.pm_argv("claude", pm.successor_argv("claude", old, pm.pm_model("claude"), "接手"))
+            self.assertEqual(rotated, head + ["--", "接手"])
+            self.assertNotIn("fable", rotated)
+            self.assertEqual(pm.pm_model("claude", "sonnet"), "sonnet")
+            pm.cmd_start(argparse.Namespace(repo=repo, kind="claude", model="sonnet"))
+            self.assertEqual(seen[-1][1:3], ["--model", "sonnet"])
+            # config.json's pm.model is the default; for another kind it is not used by a rotation.
+            (Path(HOME) / "config.json").write_text(json.dumps({"pm": {"model": "opus[1m]"}}))
+            self.assertEqual(pm.pm_model("claude"), "opus[1m]")
+            pm.cmd_start(argparse.Namespace(repo=repo, kind="claude", model=None))
+            self.assertEqual(seen[-1][1:3], ["--model", "opus[1m]"])
+            (Path(HOME) / "config.json").write_text(json.dumps({"pm": {"kind": "codex", "model": "gpt"}}))
+            self.assertEqual(pm.pm_model("claude"), "opus")
+            pm.cmd_start(argparse.Namespace(repo=repo, kind=None, model=None))
+            self.assertEqual(seen[-1][seen[-1].index("-m") + 1], "gpt")  # pm.kind's own model
+            pm.cmd_start(argparse.Namespace(repo=repo, kind="claude", model=None))
+            self.assertEqual(seen[-1][1:3], ["--model", "opus"])  # not codex's
+            # The README's example: pm.model belongs to claude, so `start --kind codex` (and restore) runs codex's own.
+            (Path(HOME) / "config.json").write_text(json.dumps({"pm": {"kind": "claude", "model": "opus"}}))
+            pm.cmd_start(argparse.Namespace(repo=repo, kind="codex", model=None))
+            self.assertNotIn("opus", seen[-1])
+            self.assertNotIn("-m", seen[-1][:-1])
+            self.assertEqual(pm.pm_model("codex"), "")  # a rotated codex PM: the program's own model, as before
+            # A --settings of the user's own is kept, and not doubled.
+            mine = pm.pm_argv("claude", ["claude", "--settings", "/me.json", "--", "p"])
+            self.assertEqual(mine.count("--settings"), 1)
+            self.assertIn("/me.json", mine)
+            # {"pm": {"lean": false}}: as before, and what a lean session carried over is dropped.
+            (Path(HOME) / "config.json").write_text(json.dumps({"pm": {"lean": False}}))
+            plain = pm.pm_argv("claude", pm.successor_argv("claude", old, "", "接手"))
+            for flag in ("--strict-mcp-config", "--no-chrome", "--settings"):
+                self.assertNotIn(flag, plain)
+            self.assertIn("--disallowedTools", plain)
+            # Other agents are started as before: no lean flags, no default model.
+            (Path(HOME) / "config.json").unlink()
+            pm.cmd_start(argparse.Namespace(repo=repo, kind="codex", model=None))
+            self.assertFalse({"--strict-mcp-config", "--no-chrome", "--settings", "--model"} & set(seen[-1]))
+            self.assertEqual(pm.pm_argv("pi", ["pi", "x"]), ["pi", "x"])
         finally:
             pm.start_pm_terminal, pm.cmd_claim = start, claim
             (Path(HOME) / "config.json").unlink(missing_ok=True)
@@ -2557,6 +2837,533 @@ class OutsideReads(unittest.TestCase):
         self.assertEqual(self.exempt(pm.reattach_plan(review)["argv"]),
                          [str(sent.parent), *([str(sent.parent.resolve())] if sent.parent.resolve() != sent.parent
                                               else []), *self.wanted])
+
+
+class SeamlessRotation(unittest.TestCase):
+    """A rotation the user does not notice: a short handover, the waits started again, the same tab, no greeting."""
+
+    def setUp(self):
+        self.repo = pm.project_root(tempfile.mkdtemp())
+        self.name = Path(self.repo).name
+        self.saved = (pm.hc, pm.subprocess.run, pm.end_retired_later, pm.PANE, pm.HC_TERMINAL)
+        self.calls, self.terms, self.spaces, self.envs = [], {}, [], []
+
+        def hc(*args, errors=False, env=None):
+            self.calls.append(("hc",) + args)
+            if args[0] == "run":
+                self.envs.append(env)
+            if args[0] == "get":
+                return self.terms.get(args[1])
+            if args[0] == "run":
+                return {"address": "t50"}
+            return {}
+        real = pm.subprocess.run
+
+        def run(argv, **kw):
+            if argv[0] != "herdr-app":
+                return real(argv, **kw)
+            self.calls.append(tuple(argv))
+            out = json.dumps({"ok": True} if argv[1] == "do" else {"spaces": self.spaces})
+            return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+        pm.hc, pm.subprocess.run = hc, run
+        pm.end_retired_later = lambda term, successor="", place=False, kind="", started=False: self.calls.append(
+            ("end-retired", term, successor, place, started))
+
+    def tearDown(self):
+        pm.hc, pm.subprocess.run, pm.end_retired_later, pm.PANE, pm.HC_TERMINAL = self.saved
+        for path in [*pm.PMS.glob("*.json"), *pm.TASKS.glob(f"{self.name}-*.json"), *pm.waits_dir().glob("*.json")]:
+            path.unlink()
+
+    def out(self, fn, *args):
+        text = io.StringIO()
+        with contextlib.redirect_stdout(text):
+            fn(*args)
+        return text.getvalue()
+
+    def task(self, slug, status, log=1, **fields):
+        task = {"id": f"{self.name}-{slug}", "title": slug, "project": self.name, "repo": self.repo,
+                "status": status, "owner": "pm", "base": "main", "created": pm.now(), **fields}
+        task["log"] = [{"at": pm.now(), "by": "hc:t9", "text": f"{slug} entry {i} " + "long " * 100} for i in range(log)]
+        pm.save(task)
+        return task["id"]
+
+    def register(self, **labels):
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps(
+            {"name": pm.pm_name(self.repo), "project": self.name, "repo": self.repo, "pane": "hc:t7",
+             "runtime": "hc", "terminal": "t7", "agent": "claude"}))
+        wrapper = ["/bin/zsh", "-lic", '"$@"; exec "$0" -li', "/bin/zsh"]
+        claude = ["claude", "--permission-mode", "bypassPermissions", "--", "[from pm.py start] 旧的提示"]
+        self.terms["t7"] = {"state": "live", "argv": wrapper + claude, "foreground": {"argv": claude},
+                            "labels": {"pm": self.name, **labels}, "status": {"state": "working"}}
+        self.terms["t50"] = {"state": "live", "turn": 1, "status": {"state": "working"}}  # the new PM, at work
+        return wrapper
+
+    def test_handover_is_short_and_says_where_the_rest_is(self):
+        self.register()
+        d = pm.project_dir(self.repo)
+        (d / "decisions.md").write_text("".join(f"- 2026-11-{i % 28 + 1:02d} 决定{i} " + "细" * 40
+                                                + f" — 用户原话：「原话{i}」\n" for i in range(40)))
+        (d / "handover.md").write_text("In flight: " + "a note " * 500)
+        for i in range(4):
+            self.task(f"open{i}", "in_progress", log=10, pane=f"hc:t{20 + i}", agent=f"w{i}", branch=f"dev/o{i}")
+        for i in range(30):
+            self.task(f"closed{i}", "merged", retired="2026-11-15")
+        for i in range(20):
+            pm.record(self.repo, "user", text=f"第{i}句 " + "said " * 100)
+            pm.record(self.repo, "pm", text=f"回答{i}\n\n" + "a reply " * 100)
+        args = argparse.Namespace(repo=self.repo, turns=6, full=False)
+        text = self.out(pm.cmd_handover, args)
+        notes = (d / "handover.md").read_text().strip()
+        self.assertIn(notes, text)                                # the notes whole: what is in flight is not cut
+        self.assertLessEqual(len(text.encode()) - len(notes.encode()), 8192)
+        decisions = text.split("## Decisions")[1].split("\n## ")[0]
+        self.assertIn("the latest 15 of 40; `pm.py decisions`", decisions)
+        self.assertEqual([line[:5] for line in decisions.splitlines()[1:] if line].count("- 202"), 15)
+        self.assertIn("决定39", decisions)
+        self.assertNotIn("决定24 ", decisions)
+        self.assertNotIn("原话", decisions)                     # the user's words: `pm.py decisions`
+        self.assertIn("open3 entry 9", text)
+        self.assertIn("open3 entry 8", text)
+        self.assertNotIn("open3 entry 7", text)                   # two entries per open task
+        self.assertIn("Closed in the last 48 h: 30 (", text)
+        self.assertNotIn(f"{self.name}-closed1", text)            # a count, not a list
+        self.assertEqual(text.count("\n用户: ") + text.count("\nUser: "), 6)
+        self.assertNotIn("第13句", text)
+        full = self.out(pm.cmd_handover, argparse.Namespace(repo=self.repo, turns=6, full=True))
+        self.assertIn("— 用户原话：「原话0」", full)
+        self.assertIn(f"- [merged] {self.name}-closed1: closed1", full)
+        self.assertIn("open3 entry 7", full)
+        every = self.out(pm.cmd_decisions, argparse.Namespace(repo=self.repo, last=0))
+        self.assertEqual(len(every.splitlines()), 40)
+        self.assertEqual(self.out(pm.cmd_decisions, argparse.Namespace(repo=self.repo, last=2)).count("— 用户原话"), 2)
+
+    def test_handover_lists_the_waits_to_start_again(self):
+        self.register()
+        worker = self.task("worker", "in_progress", pane="hc:t20", agent="w1")
+        self.task("own", "in_progress", pane="hc:t7")                          # the PM works on it itself
+        self.task("nopane", "in_progress", agent="w2")
+        reviewed = self.task("reviewed", "review", pane="hc:t21", agent="w3")  # findings sent, the wait was running
+        self.task("ready", "review", pane="hc:t22", agent="w4")                # reported: the PM reviews, no wait
+        merged = self.task("merged", "merged", pane="hc:t23", agent="w5")
+        pm.waits_dir().mkdir(parents=True, exist_ok=True)
+        for task_id in (reviewed, merged):  # left behind by waits that ended with the previous session
+            (pm.waits_dir() / f"{task_id}.json").write_text(json.dumps({"task": task_id, "pid": 1}))
+        text = self.out(pm.cmd_handover, argparse.Namespace(repo=self.repo, turns=6, full=False))
+        waits = text.split("## Waits to start again")[1]
+        self.assertIn(f"pm.py is `{pm.pm_command()}`", waits)
+        self.assertEqual(sorted(line for line in waits.splitlines() if line.startswith("pm.py wait")),
+                         [f"pm.py wait {reviewed} --timeout 3600", f"pm.py wait {worker} --timeout 3600"])
+        self.assertIn("## Waits to start again", self.out(pm.cmd_handover, argparse.Namespace(
+            repo=self.repo, turns=6, full=True)))
+
+    def test_a_wait_says_so_while_it_runs_and_not_after(self):
+        task_id = self.task("w", "in_progress", pane="hc:t20", agent="w1")
+        seen = []
+        real = pm.wait_for_report
+
+        def look(a):
+            seen.append(json.loads((pm.waits_dir() / f"{task_id}.json").read_text()))
+            sys.exit(2)
+        pm.wait_for_report = look
+        try:
+            with self.assertRaises(SystemExit):
+                pm.cmd_wait(argparse.Namespace(id=task_id, timeout=1))
+        finally:
+            pm.wait_for_report = real
+        self.assertEqual((seen[0]["task"], seen[0]["pid"]), (task_id, os.getpid()))
+        self.assertFalse((pm.waits_dir() / f"{task_id}.json").exists())
+
+    def test_what_the_user_said_after_the_last_reply_is_handed_over_whole(self):
+        self.register()
+        pm.record(self.repo, "user", text="先做看板")
+        pm.record(self.repo, "pm", text="好")
+        self.assertEqual(pm.unanswered(pm.conversation(self.repo)), [])
+        pm.record(self.repo, "user", text="再把连线改成曲线" + "。" * 500)
+        pm.record(self.repo, "thread", task="x", text="ledger entry")
+        pm.record(self.repo, "user", text="还有颜色")
+        self.assertEqual([e["text"][:4] for e in pm.unanswered(pm.conversation(self.repo))], ["再把连线", "还有颜色"])
+        text = self.out(pm.cmd_handover, argparse.Namespace(repo=self.repo, turns=6, full=False))
+        self.assertIn("## Not answered yet", text)
+        self.assertIn("再把连线改成曲线" + "。" * 500, text)
+        self.assertIn("还有颜色", text.split("## Not answered yet")[1])
+
+    def hook(self, event, **payload):
+        pm.sys.stdin = io.StringIO(json.dumps({"hook_event_name": event, **payload}))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                pm.cmd_hook_turn(None)
+        finally:
+            pm.sys.stdin = sys.__stdin__
+
+    def test_the_takeover_turn_says_nothing_to_the_user(self):
+        self.register()
+        rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
+        rec.update(pane="hc:t50", terminal="t50")
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps(rec))
+        pm.PANE, pm.HC_TERMINAL = "hc:t50", "t50"
+        pm.record(self.repo, "user", text="看下状态")
+        pm.record(self.repo, "pm", text="都在跑")
+        mark = pm.takeover_mark(self.repo)
+        mark.write_text(json.dumps({"terminal": "t50", "at": pm.now()}))
+        self.hook("UserPromptSubmit", prompt="[from pm.py rotate] 你是 PM，接手")
+        self.hook("Stop", last_assistant_message="已接手，三个线程在跑。")
+        self.assertEqual([e["text"] for e in pm.conversation(self.repo)], ["看下状态", "都在跑"])
+        self.assertTrue(json.loads(mark.read_text()).get("ended"))
+        self.assertNotIn(("hc", "label", "t50", "pm.quiet="), self.calls)  # pm-toast keeps quiet about that turn
+        self.hook("UserPromptSubmit", prompt="<task-notification>wait done</task-notification>")
+        self.assertFalse(mark.exists())
+        self.assertIn(("hc", "label", "t50", "pm.quiet="), self.calls)
+        self.hook("Stop", last_assistant_message="看板做好了")
+        self.assertEqual(pm.conversation(self.repo)[-1]["text"], "看板做好了")
+
+    def test_a_takeover_answers_what_the_user_asked_meanwhile(self):
+        self.register()
+        pm.PANE, pm.HC_TERMINAL = "hc:t50", "t50"
+        rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps({**rec, "pane": "hc:t50",
+                                                                                "terminal": "t50"}))
+        pm.record(self.repo, "user", text="连线为什么是直角")
+        pm.takeover_mark(self.repo).write_text(json.dumps({"terminal": "t50", "at": pm.now()}))
+        self.hook("Stop", last_assistant_message="直角是旧版的画法，已经派人改。")
+        self.assertEqual(pm.conversation(self.repo)[-1]["text"], "直角是旧版的画法，已经派人改。")
+        self.assertFalse(pm.takeover_mark(self.repo).exists())
+        self.assertIn(("hc", "label", "t50", "pm.quiet="), self.calls)
+        # A mark of another terminal, or a stale one, silences nothing.
+        pm.takeover_mark(self.repo).write_text(json.dumps({"terminal": "t51", "at": pm.now()}))
+        self.hook("Stop", last_assistant_message="第二句")
+        pm.takeover_mark(self.repo).write_text(json.dumps({"terminal": "t50", "at": "2020-01-01 00:00"}))
+        self.hook("Stop", last_assistant_message="第三句")
+        self.assertEqual([e["text"] for e in pm.conversation(self.repo)][-2:], ["第二句", "第三句"])
+
+    def takeover(self):
+        self.register()
+        pm.PANE, pm.HC_TERMINAL = "hc:t50", "t50"
+        rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps({**rec, "pane": "hc:t50",
+                                                                                "terminal": "t50"}))
+        pm.takeover_mark(self.repo).write_text(json.dumps({"terminal": "t50", "at": pm.now()}))
+        return Path(self.repo) / "t.jsonl"
+
+    def test_only_the_takeover_prompt_alone_makes_a_quiet_turn(self):
+        transcript = self.takeover()
+        human = lambda text, **kw: json.dumps({"type": "user", "message": {"content": text},
+                                               "origin": {"kind": "human"}, **kw})
+        rows = [human("[from pm.py rotate] 接手"),
+                human("[Your previous response had no visible output.]", isMeta=True),
+                json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}})]
+        transcript.write_text("\n".join(rows) + "\n")
+        self.assertFalse(pm.came_in(str(transcript)))
+        # Anything else that came in during that turn is news: the user's words, typed in on their own or taken
+        # into the turn while it worked (a queued command), a finished background wait, a worker's message.
+        for extra in (human("先别合并"),
+                      json.dumps({"type": "attachment", "attachment": {"type": "queued_command", "prompt": "先别合并",
+                                                                       "origin": {"kind": "human"}}}),
+                      json.dumps({"type": "user", "message": {"content": "<task-notification>x</task-notification>"},
+                                  "origin": {"kind": "task-notification"}}),
+                      json.dumps({"type": "attachment", "attachment": {
+                          "type": "queued_command", "prompt": '<hc from="t9">[from hc:t9] 做完了</hc>'}})):
+            transcript.write_text("\n".join(rows + [extra]) + "\n")
+            self.assertTrue(pm.came_in(str(transcript)), extra)
+        # No hook saw it (a background wait that came back mid-turn): the reply is still recorded.
+        self.hook("Stop", last_assistant_message="demo-readme 做完了，等你看。", transcript_path=str(transcript))
+        self.assertEqual(pm.conversation(self.repo)[-1]["text"], "demo-readme 做完了，等你看。")
+        self.assertFalse(pm.takeover_mark(self.repo).exists())
+        self.assertIn(("hc", "label", "t50", "pm.quiet="), self.calls)
+
+    def test_a_worker_message_during_the_takeover_turn_gets_its_reply_recorded(self):
+        transcript = self.takeover()
+        transcript.write_text(json.dumps({"type": "user", "message": {"content": "[from pm.py rotate] 接手"}}) + "\n")
+        self.hook("UserPromptSubmit", prompt='<hc from="t9">[from hc:t9] demo-readme 做完了</hc>')
+        self.assertIn(("hc", "label", "t50", "pm.quiet="), self.calls)   # its notice shows, and so does the reply
+        self.assertTrue(json.loads(pm.takeover_mark(self.repo).read_text())["busy"])
+        self.hook("Stop", last_assistant_message="demo-readme 做完了，我看一下。", transcript_path=str(transcript))
+        self.assertEqual(pm.conversation(self.repo)[-1]["text"], "demo-readme 做完了，我看一下。")
+        self.assertFalse(pm.takeover_mark(self.repo).exists())
+
+    def test_words_typed_in_during_the_takeover_turn_get_their_answer(self):
+        transcript = self.takeover()
+        transcript.write_text(json.dumps({"type": "user", "message": {"content": "[from pm.py rotate] 接手"}}) + "\n")
+        self.hook("UserPromptSubmit", prompt="先别合并")                  # typed while the takeover still runs
+        self.assertIn(("hc", "label", "t50", "pm.quiet="), self.calls)    # its answer's notice shows
+        self.assertTrue(pm.takeover_mark(self.repo).exists())
+        self.hook("Stop", last_assistant_message="好，先不合并。", transcript_path=str(transcript))
+        self.assertEqual(pm.conversation(self.repo)[-1]["text"], "好，先不合并。")
+        self.assertFalse(pm.takeover_mark(self.repo).exists())
+
+    def test_the_context_reminder_hands_over_only_what_the_user_said(self):
+        self.register()
+        pm.PANE = "hc:t7"
+        transcript = Path(self.repo) / "big.jsonl"
+        transcript.write_text(row("assistant", [{"type": "text", "text": "x"}], {"input_tokens": 999999}) + "\n")
+        said = {}
+        for prompt in ("README 写了吗", "[from hc:t3] task x is ready", "<task-notification>x</task-notification>"):
+            pm.sys.stdin = io.StringIO(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                                                   "transcript_path": str(transcript)}))
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    pm.cmd_hook_turn(None)
+            finally:
+                pm.sys.stdin = sys.__stdin__
+            said[prompt] = out.getvalue()
+        self.assertIn("Do not answer this prompt: your successor answers", said["README 写了吗"])
+        for prompt in ("[from hc:t3] task x is ready", "<task-notification>x</task-notification>"):
+            self.assertIn("not handed over: deal with it first", said[prompt])
+            self.assertNotIn("Do not answer", said[prompt])
+        for text in said.values():
+            self.assertIn("end the turn without a word", text)
+        tui = pm.rotate_reminder(300000, True, False)       # the herdr TUI: the new PM opens a tab of its own
+        self.assertIn("tell the user to continue there", tui)
+        self.assertNotIn("without a word", tui)
+
+    def test_rotate_starts_the_successor_in_the_same_tab_and_ends_the_old_one(self):
+        wrapper = self.register(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
+        self.spaces = [{"id": "sp1", "tabs": [{"id": "tb1", "name": f"PM-{self.name}", "terminals": [
+            {"terminal": "t7", "pane": "p7"}, {"terminal": "t50", "pane": "p50"}]}]}]
+        pm.PANE, pm.HC_TERMINAL = "hc:t7", "t7"
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "old", "PM_HOME": HOME}):
+            text = self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes="等 worker 汇报", model=None,
+                                                              transcript="/nonexistent"))
+        # Started from the old session: not with that session's own variables.
+        self.assertEqual((self.envs[0].get("CLAUDECODE"), self.envs[0].get("CLAUDE_CODE_SESSION_ID"),
+                          self.envs[0].get("PM_HOME")), (None, None, HOME))
+        run = next(c for c in self.calls if c[:2] == ("hc", "run"))
+        cut = run.index("--")
+        self.assertIn("--no-parent", run[:cut])
+        for label in ("herdr.space=sp1", "herdr.tab=tb1", f"pm={self.name}", "pm.quiet=1"):
+            self.assertIn(label, run[:cut])
+        self.assertEqual(list(run[cut + 1:cut + 6]), wrapper + ["claude"])   # in the same login shell
+        prompt = run[-1]
+        self.assertTrue(prompt.startswith("[from pm.py rotate] "))
+        self.assertIn("handover", prompt)
+        self.assertIn("in the background", prompt)
+        self.assertNotIn("three or four sentences", prompt)
+        self.assertFalse([c for c in self.calls if c[:2] == ("herdr-app", "do")])  # end-retired moves the panes
+        self.assertIn(("hc", "label", "t7", "pm=", f"pm.retired={self.name}"), self.calls)
+        # Last: the old session may be this one. It leaves the tab once t50 works.
+        self.assertEqual(self.calls[-1], ("end-retired", "t7", "t50", True, True))
+        rec = pm.pm_record(self.repo)
+        self.assertEqual((rec["terminal"], rec["previous"]["terminal"], rec["rotations"]), ("t50", "t7", 1))
+        self.assertEqual(json.loads(pm.takeover_mark(self.repo).read_text())["terminal"], "t50")
+        self.assertIn("等 worker 汇报", (pm.project_dir(self.repo) / "handover.md").read_text())
+        self.assertIn("same tab", text)
+        self.assertIn("End this turn now, without a word to the user", text)
+
+    def test_no_quiet_label_while_the_user_waits_for_an_answer(self):
+        self.register(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
+        pm.record(self.repo, "user", text="连线为什么是直角")
+        self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
+        run = next(c for c in self.calls if c[:2] == ("hc", "run"))
+        self.assertIn("herdr.tab=tb1", run)
+        self.assertNotIn("pm.quiet=1", run)          # the first turn answers it: its notice and dots show
+        self.assertIn(("hc", "label", "t50", f"pm={self.name}"), self.calls)
+
+    def test_a_codex_pm_rotates_in_place_without_the_quiet_label(self):
+        wrapper = self.register(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
+        rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps({**rec, "agent": "codex"}))
+        self.terms["t7"]["argv"] = wrapper + ["codex", "-c", "check_for_update_on_startup=false"]
+        self.terms["t7"]["foreground"] = {"argv": ["codex", "-c", "check_for_update_on_startup=false"]}
+        self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
+        run = next(c for c in self.calls if c[:2] == ("hc", "run"))
+        cut = run.index("--")
+        self.assertIn("herdr.tab=tb1", run[:cut])
+        self.assertNotIn("pm.quiet=1", " ".join(run))   # its hooks are not known to take the label away again
+        self.assertEqual(list(run[cut + 1:cut + 6]), wrapper + ["codex"])
+        self.assertTrue(run[-1].startswith("[from pm.py rotate] "))
+        self.assertIn(("hc", "label", "t50", f"pm={self.name}"), self.calls)
+        self.assertEqual(self.calls[-1], ("end-retired", "t7", "t50", True, True))
+
+    def test_a_new_pm_that_does_not_start_is_reported_and_the_old_one_stays(self):
+        self.register(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
+        self.terms["t50"] = {"state": "live", "turn": 0, "status": None}   # at a startup dialog: no status
+        pm.PANE, pm.HC_TERMINAL = "hc:t7", "t7"
+        pm.record(self.repo, "user", text="连线为什么是直角")                 # the prompt the rotation came with
+        with mock.patch.object(pm, "START_WAIT", 0), mock.patch.object(pm, "screen_line", lambda t: "Trust this folder?"):
+            text = self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
+        self.assertIn("has not started work", text)
+        self.assertNotIn("without a word", text)
+        told = pm.conversation(self.repo)[-1]
+        self.assertEqual((told["type"], told["by"]), ("pm", "hc:t7"))   # the user reads it in the project view
+        self.assertIn("Trust this folder?", told["text"])
+        self.assertIn(f"PM-{self.name}", told["text"])
+        self.assertFalse([c for c in self.calls if c[:2] == ("herdr-app", "do")])  # nothing parked
+        self.assertEqual(self.calls[-1], ("end-retired", "t7", "t50", True, False))  # it waits for t50 to work
+        # The notice answers nothing: what the user said is still handed over, and the takeover answers it.
+        self.assertEqual([e["text"] for e in pm.unanswered(pm.conversation(self.repo))], ["连线为什么是直角"])
+        self.assertEqual(pm.log_tail(self.repo)[-1], {"user": "连线为什么是直角", "pm": ""})
+        handover = self.out(pm.cmd_handover, argparse.Namespace(repo=self.repo, turns=6, full=False))
+        self.assertIn("连线为什么是直角", handover.split("## Not answered yet")[1])
+
+    def test_a_new_pm_that_never_starts_hands_the_project_back_or_says_how(self):
+        self.register()
+        rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps({**rec, "pane": "hc:t50",
+                                                                                "terminal": "t50"}))
+        pm.takeover_mark(self.repo).write_text(json.dumps({"terminal": "t50", "at": pm.now()}))
+        self.terms["t50"] = {"state": "live", "turn": 0, "status": None}   # still at its dialog
+        pm.never_started("t7", "t50")
+        self.assertEqual(pm.pm_record(self.repo)["terminal"], "t50")
+        told = pm.conversation(self.repo)[-1]
+        self.assertTrue(told["notice"])
+        self.assertIn("hc kill t50", told["text"])
+        self.assertIn("pm.py claim --pane hc:t7", told["text"])
+        self.terms["t50"] = {"state": "finished"}                          # it exited: back to the old session
+        pm.never_started("t7", "t50")
+        rec = pm.pm_record(self.repo)
+        self.assertEqual((rec["terminal"], rec["pane"]), ("t7", "hc:t7"))
+        self.assertIn(("hc", "label", "t7", f"pm={self.name}", "pm.retired="), self.calls)
+        self.assertTrue(any(c[:3] == ("hc", "send", "t7") and "PM of" in c[3] for c in self.calls))
+        self.assertFalse(pm.takeover_mark(self.repo).exists())
+        self.assertIn("carries on", pm.conversation(self.repo)[-1]["text"])
+        self.calls.clear()
+        pm.never_started("t7", "t99")                                      # not the registered PM: nothing
+        self.assertFalse(self.calls)
+
+    def test_rotate_outside_a_tab_starts_a_terminal_as_before(self):
+        self.register()  # no herdr.space/herdr.tab: a bare terminal
+        pm.PANE = "hc:t9"
+        text = self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
+        run = next(c for c in self.calls if c[:2] == ("hc", "run"))
+        self.assertNotIn("herdr.tab", " ".join(run))
+        self.assertEqual(run[run.index("--") + 1], "claude")
+        self.assertIn(("hc", "label", "t50", f"pm={self.name}", "pm.quiet=1"), self.calls)
+        self.assertFalse([c for c in self.calls if c[:3] == ("herdr-app", "do", "terminal.park")])
+        self.assertEqual(self.calls[-1], ("end-retired", "t7", "t50", False, True))
+        self.assertIn("new tab", text)
+        self.assertNotIn("End this turn", text)  # not run by the old PM
+
+    def test_rotate_in_the_herdr_tui_still_announces_the_takeover(self):
+        self.register()
+        rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps({**rec, "runtime": "", "pane": "w1:p1"}))
+        got = []
+        real, pm.rotate_herdr = pm.rotate_herdr, lambda a, repo, rec, previous, prompt, is_self: got.append(prompt)
+        try:
+            self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
+        finally:
+            pm.rotate_herdr = real
+        self.assertIn("three or four sentences", got[0])
+        self.assertFalse(pm.takeover_mark(self.repo).exists())
+
+    def test_end_retired_waits_for_the_turn_to_end_then_ends_the_program(self):
+        looks = iter([{"state": "live", "status": {"state": "working"}}, {"state": "live", "status": {"state": "done"}},
+                      {"state": "live", "status": {"state": "working"}}, {"state": "live", "status": {"state": "idle"}},
+                      {"state": "live", "status": {"state": "idle"}}])
+        sleep, pm.time.sleep = pm.time.sleep, lambda _: None
+        try:
+            pm.hc = lambda *args, **kw: (self.calls.append(args), next(looks) if args[0] == "get" else {})[1]
+            pm.cmd_end_retired(argparse.Namespace(terminal="t7", successor="", kind="", place=False, started=False,
+                                                  timeout=60))
+            self.assertEqual([c for c in self.calls if c[0] == "kill"], [("kill", "t7")])
+            self.assertEqual(len([c for c in self.calls if c[0] == "get"]), 5)
+            for info in ({"state": "finished"}, {"state": "live", "labels": {"pm": "x"}}, None):
+                self.calls.clear()
+                pm.hc = lambda *args, **kw: (self.calls.append(args), info if args[0] == "get" else {})[1]
+                pm.cmd_end_retired(argparse.Namespace(terminal="t7", successor="", kind="", place=False, started=False,
+                                                      timeout=60))
+                self.assertFalse([c for c in self.calls if c[0] == "kill"], info)
+        finally:
+            pm.time.sleep = sleep
+
+    def test_end_retired_waits_for_background_work_and_never_cuts_it_off(self):
+        self.register()
+        rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps(
+            {**rec, "pane": "hc:t50", "terminal": "t50", "previous": {"pane": "hc:t7", "terminal": "t7"}}))
+        idle = {"state": "live", "pid": 100, "status": {"state": "idle"}}
+        work = iter([["until pm.py land demo-x; do sleep 60; done"]] * 3 + [[], []])
+        sleep, pm.time.sleep = pm.time.sleep, lambda _: None
+        hc = pm.hc
+        try:
+            pm.hc = lambda *args, **kw: (self.calls.append(("hc",) + args), idle if args[0] == "get" else {})[1]
+            with mock.patch.object(pm, "background_work", lambda info: next(work)):
+                pm.cmd_end_retired(argparse.Namespace(terminal="t7", successor="", kind="", place=False,
+                                                      started=False, timeout=60))
+            self.assertEqual(self.calls[-1], ("hc", "kill", "t7"))   # only once the land was over, two looks in a row
+            self.assertEqual(len([c for c in self.calls if c[1] == "get"]), 5)
+            # Still busy at the end of the wait: left running, and the PM in charge is told.
+            self.calls.clear()
+            with mock.patch.object(pm, "background_work", lambda info: ["until pm.py land demo-x; do sleep 60; done"]), \
+                    mock.patch.object(pm.time, "time", side_effect=[0, 0, 0, 100, 100]):
+                pm.cmd_end_retired(argparse.Namespace(terminal="t7", successor="", kind="", place=False,
+                                                      started=False, timeout=60))
+            self.assertFalse([c for c in self.calls if c[1] == "kill"])
+            sent = [c for c in self.calls if c[:3] == ("hc", "send", "t50")]
+            self.assertEqual(len(sent), 1)
+            self.assertIn("pm.py land demo-x", sent[0][3])
+            self.assertIn("hc kill t7", sent[0][3])
+        finally:
+            pm.time.sleep, pm.hc = sleep, hc
+
+    def test_background_work_is_read_from_the_shells_under_the_terminal(self):
+        snap = "/bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval "
+        ps = "\n".join([
+            "  100     1 /bin/zsh -lic claude",
+            "  101   100 claude --model opus",
+            f"  102   101 {snap}'python3 /x/pm.py wait demo-a --timeout 3600' < /dev/null && pwd -P >| /tmp/cwd",
+            "  103   102 python3 /x/pm.py wait demo-a --timeout 3600",
+            f"  104   101 {snap}'until python3 /x/pm.py land demo-b; do sleep 60; done' < /dev/null && pwd -P >| /tmp/cwd",
+            "  105   104 python3 /x/pm.py land demo-b",
+            "  106   101 node mcp-server.js",
+            f"  200     1 {snap}'git merge other' < /dev/null && pwd -P >| /tmp/cwd"])  # another session's
+        run = lambda argv, **kw: type("R", (), {"returncode": 0, "stdout": ps, "stderr": ""})()
+        with mock.patch.object(pm.subprocess, "run", run):
+            self.assertEqual(pm.background_work({"pid": 100}), ["until python3 /x/pm.py land demo-b; do sleep 60; done"])
+            self.assertEqual(pm.background_work({}), [])
+
+    def test_end_retired_moves_the_panes_only_once_the_new_pm_works(self):
+        self.spaces = [{"id": "sp1", "tabs": [{"id": "tb1", "terminals": [{"terminal": "t7", "pane": "p7"},
+                                                                          {"terminal": "t50", "pane": "p50"}]}]}]
+        new = iter([{"state": "live", "turn": 0, "status": None}, {"state": "live", "turn": 1,
+                                                                    "status": {"state": "working"}}])
+        old = {"state": "live", "status": {"state": "idle"}}
+        sleep, pm.time.sleep = pm.time.sleep, lambda _: None
+        hc = pm.hc
+        try:
+            pm.hc = lambda *args, **kw: (self.calls.append(("hc",) + args), (next(new) if args[1] == "t50" else old)
+                                         if args[0] == "get" else {})[1]
+            pm.cmd_end_retired(argparse.Namespace(terminal="t7", successor="t50", kind="claude", place=True,
+                                                  started=False, timeout=60))
+            do = [(c[2], json.loads(c[3])) for c in self.calls if c[:2] == ("herdr-app", "do")]
+            self.assertEqual(do, [("pane.swap", {"pane": "p50", "target": "p7"}),
+                                  ("terminal.park", {"terminal": "t7"})])
+            self.assertEqual(self.calls[-1], ("hc", "kill", "t7"))
+            # A new PM that never works (it exited, or waits at a dialog past the wait): both stay as they are.
+            self.calls.clear()
+            for gone in ({"state": "exited"}, {"state": "live", "turn": 0, "status": None}):
+                pm.hc = lambda *args, **kw: (self.calls.append(("hc",) + args), gone if args[0] == "get" else {})[1]
+                with mock.patch.object(pm, "STARTED_WAIT", 0), mock.patch.object(pm, "never_started") as said:
+                    pm.cmd_end_retired(argparse.Namespace(terminal="t7", successor="t50", kind="claude", place=True,
+                                                          started=False, timeout=60))
+                said.assert_called_once_with("t7", "t50")
+            self.assertFalse([c for c in self.calls if c[:2] in (("hc", "kill"), ("herdr-app", "do"))])
+            # rotate saw a codex PM start (a program that may report no state): no second wait here.
+            self.calls.clear()
+            pm.hc = lambda *args, **kw: (self.calls.append(("hc",) + args), old if args[1] == "t7" else {}
+                                         if args[0] == "get" else {})[1]
+            pm.cmd_end_retired(argparse.Namespace(terminal="t7", successor="t50", kind="codex", place=False,
+                                                  started=True, timeout=60))
+            self.assertEqual([c for c in self.calls if c[1] == "get"], [("hc", "get", "t7")] * 2)
+            self.assertEqual(self.calls[-1], ("hc", "kill", "t7"))
+        finally:
+            pm.time.sleep, pm.hc = sleep, hc
+
+    def test_the_old_program_is_ended_from_a_process_of_its_own(self):
+        with mock.patch.object(pm.subprocess, "Popen") as popen:
+            self.saved[2]("t7", "t50", True, "claude", True)
+        argv, kw = popen.call_args
+        self.assertEqual(argv[0][1:], [str(Path(pm.__file__).resolve()), "end-retired", "t7", "--successor", "t50",
+                                       "--kind", "claude", "--place", "--started"])
+        self.assertTrue(kw["start_new_session"])  # it outlives the session that ran rotate
+
+    def test_shell_prefix_is_what_runs_the_agent(self):
+        wrapper = ["/bin/zsh", "-lic", '"$@"; exec "$0" -li', "/bin/zsh"]
+        self.assertEqual(pm.shell_prefix({"argv": wrapper + ["claude", "-c"]}, "claude"), wrapper)
+        self.assertEqual(pm.shell_prefix({"argv": ["/usr/local/bin/claude", "-c"]}, "claude"), [])
+        self.assertEqual(pm.shell_prefix({"argv": wrapper + ["codex", "-c", "x"]}, "codex"), wrapper)
+        self.assertEqual(pm.shell_prefix({}, "claude"), [])
 
 
 if __name__ == "__main__":

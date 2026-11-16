@@ -21,6 +21,10 @@ const STRINGS = {
     resizePanel: 'Drag to resize the side panel; double-click for its default width',
     sending: 'Sending…', failed: error => `Not sent: ${error}`, decision: 'Decision',
     pick: 'Pick a project in the PM list to open its conversation.', noProject: 'This PM is no longer in the ledger.',
+    remoteLoading: machine => `Reading the project from ${machine}…`,
+    remoteError: (machine, error) => `Could not read the project from ${machine}. Is that machine connected in Herdr, with the pm skill installed there?\n${error}`,
+    remoteDiff: 'The changes are on the other machine: open its terminal to see them',
+    remoteAttach: 'Files can only be attached to a project on this computer',
     empty: 'Nothing said in this project yet.', readError: 'Could not read the conversation',
     today: 'Today', yesterday: 'Yesterday', noLog: 'No log yet', agent: (program, address) => `${program} · terminal ${address}`,
     unfold: 'Show the whole reply', fold: 'Fold',
@@ -57,6 +61,10 @@ const STRINGS = {
     resizePanel: '拖动调整侧栏宽度，双击恢复默认宽度',
     sending: '正在发送…', failed: error => `没发出去：${error}`, decision: '决定',
     pick: '在 PM 列表里点一个项目，打开它的对话。', noProject: '台账里已经没有这个 PM。',
+    remoteLoading: machine => `正在从 ${machine} 读取这个项目…`,
+    remoteError: (machine, error) => `读不到 ${machine} 上的这个项目。确认这台机器在 Herdr 里已连接，并装了 pm 技能。\n${error}`,
+    remoteDiff: '改动在另一台机器上，打开它的终端查看',
+    remoteAttach: '只有这台电脑上的项目能添加附件',
     empty: '这个项目还没有对话。', readError: '对话记录读取失败',
     today: '今天', yesterday: '昨天', noLog: '暂无日志', agent: (program, address) => `${program} · 终端 ${address}`,
     unfold: '展开全文', fold: '收起',
@@ -1071,6 +1079,40 @@ export function diffArgv(task) {
 // `--` keeps a text starting with "-" (a Markdown list) from parsing as an option.
 export function sendArgv(address, text) {
   return ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', address, text];
+}
+
+// ---- a project on another machine ------------------------------------------------
+// shared('pm-project') names the project: {pm, machine?}. A remote PM is keyed "<machine>/<name>" (as
+// pm-list keys its row and pm-dash names it on the board); `name` is its name in that machine's ledger.
+export function projectRef(value) {
+  const key = typeof value?.pm === 'string' ? value.pm : '';
+  const machine = typeof value?.machine === 'string' && key.startsWith(`${value.machine}/`) ? value.machine : '';
+  return { key, machine, name: machine ? key.slice(machine.length + 1) : key };
+}
+
+// What a remote project's view reads is that machine's: its ledger (`pm.py state` there), its log and
+// task files, through Herdr's exec/readTextFile `on`. Its terminals and agents are shown to the rest
+// of the view as that machine sees them (machineView: its own only, addresses without "<machine>/"),
+// so the ledger's panes and labels match as they do at home; an address goes back out with its
+// prefix (onMachine) to be focused or sent to. Local items (machine '') pass as they are.
+export function machineView(items, machine = '') {
+  const list = Array.isArray(items) ? items : [];
+  if (!machine) return list;
+  const prefix = `${machine}/`, strip = a => typeof a === 'string' && a.startsWith(prefix) ? a.slice(prefix.length) : a;
+  return list.filter(x => typeof x?.address === 'string' && x.address.startsWith(prefix))
+    .map(x => ({ ...x, address: strip(x.address), ...(x.parent ? { parent: strip(x.parent) } : {}) }));
+}
+export const onMachine = (address, machine = '') => (machine && address ? `${machine}/${address}` : address);
+
+// A copy of pm-dash's PM_SCRIPTS (model.test.mjs checks): where pm.py lives on another machine.
+export const PM_SCRIPTS = ['.config/herdr-app/mods/pm-dash/skill/scripts/pm.py', '.claude/skills/pm/scripts/pm.py',
+  '.codex/skills/pm/scripts/pm.py', '.pi/agent/skills/pm/scripts/pm.py'];
+// `pm.py <args>` on another machine, as exec's [command, args]: the first pm.py found there, run
+// without a terminal identity (as reattachArgv); args are passed as they are, never through the shell.
+export function remotePmArgv(args, scripts = PM_SCRIPTS) {
+  return ['sh', ['-c', `for f in ${scripts.map(path => `"$HOME/${path}"`).join(' ')}; do ` +
+    'if [ -f "$f" ]; then exec env -u HC_TERMINAL_ID -u HERDR_PANE_ID python3 "$f" "$@"; fi; done; ' +
+    'echo "pm.py not found" >&2; exit 127', 'sh', ...args]];
 }
 
 // A PM from `pm.py state` as a row the terminal lookup understands (as pm-list builds it).

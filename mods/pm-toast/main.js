@@ -1,13 +1,13 @@
 // The PM layout's notifications: Herdr's shipped toast, except that the agent
-// notices ("finished" and "needs you") of an agent the PM dispatched close at
-// once and draw nothing. The PM's own notices and every other notification show.
+// notices ("finished" and "needs you") of an agent the PM dispatched, and the
+// "finished" of a PM taking over or handing over in a rotation, close at once and draw nothing. The PM's own notices and every other notification show.
 // Clicking an agent notice also leaves the board, so the agent is in view.
 // Herdr plays its own sound separately; this mod cannot silence it.
 
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { props, closeOverlay, run, theme, terminals, agents, panes, layout } from "herdr";
-import { isWorkerNotice, focusPlan } from "./model.js";
+import { isHiddenNotice, focusPlan } from "./model.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -25,7 +25,7 @@ export default class PmToast extends View {
     const p = props() ?? {};
     let workers;
     try { workers = terminals(); } catch (_) { workers = null; } // unknown: show it
-    this.hidden = isWorkerNotice(p, workers);
+    this.hidden = isHiddenNotice(p, workers);
     if (this.hidden) closeOverlay(p.overlay);
   }
   // An agent notice's agent.focus, as pm-project opens a terminal (focusPlan): its own pane, else

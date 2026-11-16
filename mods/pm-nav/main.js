@@ -1,7 +1,7 @@
 import { View, div, svg } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, watchFolder, nextCommand, layout, focused, run, shared, setShared, openOverlay } from 'herdr';
-import { summary, navText, estimateTextWidth, focusKey, shouldReturnToWork, pageBefore, pageBack, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand } from './model.js';
+import { summary, navText, estimateTextWidth, focusKey, shouldReturnToWork, pageBefore, pageBack, projectKeys, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand } from './model.js';
 
 // The sidebar deliberately depends on the original pm-dash bundle.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
@@ -189,9 +189,9 @@ export default class PmNav extends View {
     if (!current) { run('mod.open', { name: 'pm-dash' }); return; }
     if (projectsShown()) {
       // Back to the page it covered: a project's conversation or board, the workspace otherwise.
-      const back = pageBack(this.covered, (current.children ?? []).map(c => c.id), this.localState.pms);
+      const back = pageBack(this.covered, (current.children ?? []).map(c => c.id), projectKeys(this.localState, this.remoteStates));
       this.covered = null;
-      if (back.child === PROJECT) setShared(PROJECT, { pm: back.pm });
+      if (back.child === PROJECT) setShared(PROJECT, back.machine ? { pm: back.pm, machine: back.machine } : { pm: back.pm });
       if (back.child === BOARD) setShared('pm-dash', { view: 'board', project: back.pm });
       run('layout.select', { stack: STAGE, child: back.child });
       return;

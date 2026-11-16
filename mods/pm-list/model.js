@@ -36,6 +36,17 @@ export function pmRows(local, remote, terms, live) {
     a.machine.localeCompare(b.machine));
 }
 
+// A row opens the project view (pm-project) when the stage has one: a local PM's and a remote PM's
+// alike, since pm-project reads a remote project from its machine. Without that page (an older
+// layout) the row focuses the PM's terminal instead.
+export function opensProject(row, stage) {
+  return Boolean(row) && Boolean(stage?.children?.some(c => c.id === 'pm-project'));
+}
+// What shared('pm-project') is set to for a row: its key, and the machine of a remote PM.
+export function projectShared(row) {
+  return row.machine ? { pm: row.key, machine: row.machine } : { pm: row.key };
+}
+
 // The sidebar's two parts: projects in work, and the archived ones folded at the bottom
 // (newest archive first). `pm.py state` gives an archived PM its date, else null.
 export function splitArchived(rows) {

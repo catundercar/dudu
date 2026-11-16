@@ -10,7 +10,7 @@ Classify each request:
 - **"Manage `<terminal>`" / "你来管 <terminal>":** take over an existing agent. Register it with `pm.py new --pane hc:<t> --agent <name> --branch <its branch> --owner pm`, read its screen (`hc read <t> | tail -80`), then continue at §3.
 - **`proposed` task or handoff from a worker:** read its brief, then dispatch it or adopt the worker's branch.
 - **`review` task:** review it (§4) and merge it (§5).
-- **"Status?" / "看下状态":** run `pm.py status` (§8).
+- **"Status?" / "看下状态":** run `pm.py status` (§8); it lists this project's open tasks (folders under it included), `--all` every project's, `--closed` closed ones too.
 
 ## 2. Dispatch
 
@@ -42,7 +42,7 @@ Classify each request:
    ```bash
    pm.py wait <id> --timeout 3600
    ```
-   Run this with `run_in_background: true`. You are notified when it finishes. Exit 0: the task left `in_progress`; it prints the status, the worker's report (at most 600 characters) and ahead/dirty, which is all you read. Exit 2: no report by the timeout; wait again. Exit 3 (hc terminals only; a herdr TUI worker is waited on to the timeout): the worker stopped without reporting. Idle: send the `hc send` reminder it prints. Blocked or error: it sits at a prompt, read its screen and answer it. Exited or removed: there is no worker left; dispatch again or adopt the branch. Then wait again. After you answer a blocked worker or send it review findings, the next `wait` returns only on a new report, not the old one.
+   Run this with `run_in_background: true`. You are notified when it finishes. Exit 0: the task left `in_progress`; it prints the status, the worker's latest report in full (up to 2500 characters) and ahead/dirty, which is all you read; no `show` after it. Exit 2: no report by the timeout; wait again. Exit 3 (hc terminals only; a herdr TUI worker is waited on to the timeout): the worker stopped without reporting. Idle: send the `hc send` reminder it prints. Blocked or error: it sits at a prompt, read its screen and answer it. Exited or removed: there is no worker left; dispatch again or adopt the branch. Then wait again. After you answer a blocked worker or send it review findings, the next `wait` returns only on a new report, not the old one.
 
 ## 3. While agents work
 
@@ -56,7 +56,15 @@ Classify each request:
 
 ## 4. Review
 
-Keep the reading out of your own context (§10). For anything larger than a small diff, start a reviewer thread:
+Keep the reading out of your own context (§10). First size the change:
+
+```bash
+pm.py diff <id>            # diffstat, line totals and flags against the base, no diff text
+```
+
+**Small: read it yourself and land it, no reviewer.** At most 40 source lines (the `source` total: tests and evidence do not count) and 150 lines in all; no deleted files, no binary files, no UI files (styles, pages, images, a mod's code under `mods/*/`, native views: their result is visual, and the reviewer looks at it); and nothing about release, security, signing, protocols or compatibility with old peers. `diff` checks the sizes and the deleted and binary files, and ends with `small (§4): yes` or `no` with the reasons. It knows UI files by name only (web files, images, a mod's code, Xcode interface files, Swift files importing SwiftUI or UIKit), so an AppKit view or another toolkit's is yours to spot, as is the last point: if the change shows on screen, it is not small. Read `git diff <base>...<branch>` once, check it against the brief and the red lines below, then `pm.py land <id>` (§5); log one line of what you checked. If anything in it surprises you, it is not small: start a reviewer.
+
+**Anything larger,** or a small one you are unsure of, gets a reviewer thread:
 
 ```bash
 pm.py review <id>          # a read-only reviewer in the task's worktree, thread <id>-review
@@ -67,7 +75,7 @@ It writes the reviewer's brief itself: the task's brief, the range `<base>...<br
 
 The checklist:
 
-1. **Diff against the brief:** `git diff --stat <base>...<branch>`, then the source changes. Flag anything outside the brief.
+1. **Diff against the brief:** `pm.py diff <id>` (or `git diff --stat <base>...<branch>`), then the source changes. Flag anything outside the brief.
 2. **Red lines:** no `git add -A` debris, no secrets, no third-party assets, no touching the user's running apps or system settings.
 3. **Correctness:** edge cases the agent could not have seen, such as destructive file operations, protocol compatibility with old peers, signing and notarization, and OS-version behaviour. When a claim is cheap to test, test it in a scratch directory.
 4. **Visual or UX results:** look at the evidence image.
@@ -122,10 +130,12 @@ It refuses to remove an unmerged branch or a dirty worktree. A task registered w
 
 ## 8. Status and reconciliation
 
-`pm.py status` shows:
+`pm.py status` shows, for this project and the folders under it (`--all`: every project; `--closed`: closed tasks too):
 
 - the active tasks, with live agent state and git state (commits ahead, uncommitted changes);
 - **unregistered work:** busy or diverged panes and worktree branches that no task covers.
+
+`pm.py show <id>` prints one task's status, branch and last three ledger entries; `--json` the whole record, logs included, which you rarely need.
 
 Register what you find (`pm.py new ... --owner self --pane <pane>`, titled from the pane's terminal title), or ask the user what it is. `BOARD.md` in the ledger home is the human-readable board; point the user to it.
 
@@ -149,12 +159,13 @@ The length to aim for (not words to reuse). After dispatching: “I started a th
 
 You are replaceable on purpose. The PM is the project's record on disk: the ledger, the decisions file, the conversation log and the handover notes. A session is only whoever is reading that record now, so a long session can be swapped for a fresh one without the user losing anything.
 
-- **Spend context on decisions, not content.** Diffs, logs, long files and screenshots go to a subagent or a worker; you keep the conclusion. Look at one image per review, not a series.
+- **Spend context on decisions, not content.** Diffs, logs, long files and screenshots go to a subagent or a worker; you keep the conclusion. Screenshots are the reviewer's to look at, not yours.
+- **Save context:** read the handover once, at the start. Do not open large files, whole diffs (except a small one, §4) or screenshots yourself. Read the ledger through the short outputs: `wait` already prints the report, `show` and `status` without `--json`/`--all`/`--closed`, `diff` before any diff text.
 - **Record a decision when the user makes it:** `pm.py decide "<decision>" --quote "<the user's words>"`. That covers preferences ("no right-angle wires"), scope calls and things you were told not to touch. If it is not in the ledger or the decisions file, your successor will not know it.
-- **When to rotate.** `pm.py context` prints what this session holds. Above the limit (200k tokens; `PM_ROTATE_TOKENS`), a line starting with `[pm]` appears with the user's next prompt. Finish the step in hand, reach a point where nothing is half merged, then rotate. Also rotate when the user asks, or when you notice you are re-reading things you already decided.
-- **How to rotate:** `pm.py rotate --notes "<what the ledger and decisions do not say>"`. Notes are for what is in flight: what you promised the user, what the user is about to check, a worker you are waiting on and what to do when it reports. It opens the new PM in a tab of your space, moves the registration to it and retires this session: say so to the user and stop acting as PM. The new session may stop at a startup dialog (folder trust, development channels for a Discord PM); that is the user's to confirm, so tell them.
+- **When to rotate.** `pm.py context` prints what this session holds. Above the limit (200k tokens; `PM_ROTATE_TOKENS`), a line starting with `[pm]` appears with the next prompt. Finish the step in hand so nothing is half merged, then rotate. When that prompt is the user's, rotate without answering it: your successor answers it. A message from a worker or another agent is not handed over that way: deal with it first, or write it in the notes. Also rotate when the user asks, or when you notice you are re-reading things you already decided.
+- **How to rotate:** `pm.py rotate --notes "<what the ledger and decisions do not say>"`. Notes are a few lines on what is in flight: what you promised the user, what the user is about to check, what to do when a worker reports. Not the waits: `pm.py wait` records itself, and the handover lists each one to start again. Other background work is not in the handover: a `land` still running, a merge-retry loop, a terminal you started with `hc run` without `--outlive-parent`. Your session is not ended while such work runs (it waits up to an hour, then stays and your successor is told), but say in the notes what it is and what to do when it ends. The new PM is a Claude Code PM on Opus, or `config.json`'s `pm.model`; `--model` wins; never the model this session runs on. The user should not notice the change. In the desktop app the new PM starts in your tab, in your pane's place, and your terminal leaves the tab once the new PM is at work; it ends when your turn is over and no background work but waits is left (its transcript stays). So rotate as the last thing in a turn and end the turn without a word: nothing you say after it reaches the user. If the new PM has not started work after a minute (a startup dialog waits for the user, or it crashed), rotate says so and tells the user in the project view; your session stays in the tab, retired, until the new one works. If the new one ends without starting, the project comes back to your session and you are told. Outside a tab the new PM gets a tab of your space or a terminal of its own. In the herdr TUI it opens in a new tab and introduces itself: there, tell the user to continue in that tab.
 - **A project's life:** `pm.py start` opens it (a space of its own, a PM that begins with the handover), `pm.py archive` puts it away (the PM's terminal ends, open tasks are paused with their status kept in `paused_from`, the record stays) and `pm.py restore` brings it back (the tasks return to their status and a fresh PM starts from the handover). The record on disk is the same throughout; only the session comes and goes.
-- **When you are the fresh session:** run `pm.py handover` first and work from what it prints (decisions, notes, open work with the latest log lines, the last exchanges with the user, taken from the project's conversation log). To look further back, run `pm.py conversation --last 40` (`--type user,pm` for the talk alone); do not open the previous transcript. Tell the user in a few sentences what you took over and what is waiting for them.
+- **When you are the fresh session:** run `pm.py handover` first and work from what it prints: the latest decisions, the notes, open work with its latest log lines, the last exchanges with the user. It is short on purpose; `pm.py decisions` prints every decision with the user's words, `pm.py show <id>` a task, `pm.py conversation --last 40` the talk further back (`--type user,pm` for the talk alone), and `handover --full` everything. Do not open the previous transcript. Start each wait it lists at the end, in the background. After a rotation, take over quietly: no greeting and no summary (the final text of that first turn is not shown). Only if the handover shows something the user said that has no answer yet, answer it. From then on speak when there is news (§9). A PM started with `pm.py start` or `restore` does tell the user what is open.
 
 ## Red lines (always)
 

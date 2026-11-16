@@ -994,6 +994,31 @@ test('the pm layout hides every agent notice of an agent the PM dispatched', asy
   for (const props of [null, undefined, {}, { title: 'x finished' }]) assert.equal(isWorkerNotice(props, terms), false);
 });
 
+test('a PM taking over after a rotation makes no notice; the PM\'s later turns do', async () => {
+  const { isHiddenNotice } = await import('../pm-toast/model.js');
+  const notice = (terminal, title = 'Claude Code finished', level = 'success') =>
+    ({ title, level, action: { name: 'agent.focus', args: { terminal } } });
+  const terms = [{ address: 't50', state: 'live', labels: { pm: 'demo', 'pm.quiet': '1' } },
+    { address: 't9', state: 'live', parent: 't50', labels: { task: 'demo-fix' } }, { address: 't3', state: 'live' }];
+  assert.equal(isHiddenNotice(notice('t50'), terms), true);   // the quiet takeover turn
+  assert.equal(isHiddenNotice(notice('t50', 'Claude Code needs you', 'error'), terms), false); // stuck: seen
+  assert.equal(isHiddenNotice(notice('t50', 'Claude Code needs you', 'success'), terms), false); // whatever its level
+  assert.equal(isHiddenNotice(notice('t50', 'Claude Code needs you', undefined), terms), false);
+  assert.equal(isHiddenNotice(notice('t50', 'Claude Code finished', undefined), terms), true);
+  assert.equal(isHiddenNotice(notice('t50', 'Claude Code 已完成'), terms), false);               // unknown words: shown
+  // The PM that handed over: its last turn ends after the rotation, without a word for the person.
+  const retired = [{ address: 't7', state: 'live', labels: { 'pm.retired': 'demo' } }];
+  assert.equal(isHiddenNotice(notice('t7'), retired), true);
+  assert.equal(isHiddenNotice(notice('t7', 'Claude Code needs you', 'error'), retired), false);
+  assert.equal(isHiddenNotice(notice('t9'), terms), true);    // a worker, as before
+  assert.equal(isHiddenNotice(notice('t3'), terms), false);
+  terms[0].labels = { pm: 'demo' };                            // the next turn took the label away
+  assert.equal(isHiddenNotice(notice('t50'), terms), false);
+  assert.equal(isHiddenNotice(notice('t50'), null), false);    // unknown: show it
+  const source = readFileSync(new URL('../pm-toast/main.js', import.meta.url), 'utf8');
+  assert.match(source, /this\.hidden = isHiddenNotice\(p, workers\)/);
+});
+
 test('a retired PM terminal is neither the PM nor a task\'s terminal', () => {
   const old = { address: 't3b', state: 'live', cwd: '/r/dudu', labels: { 'pm.retired': 'dudu' } };
   const pm = { type: 'pm', name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:t3b' };

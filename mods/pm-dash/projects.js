@@ -31,7 +31,8 @@ export function page() {
   return value && typeof value === 'object' ? value : {};
 }
 export function showPage(view) { setShared(PAGE, { view, project: '' }); select(BOARD); }
-export function openProject(pm) { setShared(PROJECT, { pm }); select(PROJECT); }
+// A remote project (its card's key is "<machine>/<name>") opens too: pm-project reads it from that machine.
+export function openProject(pm, machine = '') { setShared(PROJECT, machine ? { pm, machine } : { pm }); select(PROJECT); }
 const shortPath = path => {
   const p = String(path || ''), h = home();
   return h && (p === h || p.startsWith(h + '/')) ? '~' + p.slice(h.length) : p;
@@ -108,7 +109,7 @@ export function projectHeader(v, pm, t) {
     .child(div().flex_none().text_size(15).font_semibold().child(projectName(pm) || 'PM'))
     .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(12).text_color(t.dim).child(shortPath(pm?.repo)))
     .child(keepPress(v, segmented('project-view', [
-      ['chat', 'chat', word(lang, 'chatView'), () => openProject(pm.name)],
+      ['chat', 'chat', word(lang, 'chatView'), () => openProject(pm.name, pm.machine)],
       ['board', 'board', word(lang, 'boardView'), () => {}],
     ], 'board', t)));
 }
@@ -147,7 +148,7 @@ function card(v, c, t, now) {
       if (over) v.hoverCard = c.key; else if (v.hoverCard === c.key) v.hoverCard = null;
       cx.notify();
     })
-    .when(local, el => el.cursor_pointer().on_click(() => openProject(c.key)))
+    .cursor_pointer().on_click(() => openProject(c.key, c.machine))
     .when(!local, el => el.tooltip(word(lang, 'remoteProject')))
     .child(h_flex().size(34).flex_none().rounded(9).bg(t.raised).items_center().justify_center().child(mark(c.status, t, 9)))
     .child(v_flex().flex_1().min_w(0).gap(5)
