@@ -4,6 +4,7 @@ All notable changes to dudu. Dates are UTC.
 
 ## Unreleased
 
+- Windows Desktop: sending a reply no longer shells out through Unix `env -u`; it runs `hc send` / `hc put` directly so the message box works without a usable `env`.
 - The README is short and points to [the guide](docs/guide.md) for the details.
 - A home page on GitHub Pages: https://catundercar.github.io/dudu/
 - A project on a remote machine opens in the project view, like a local one, instead of in its manager's terminal.

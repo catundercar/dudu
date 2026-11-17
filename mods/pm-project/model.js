@@ -172,9 +172,10 @@ export function terminalAction(terminal, task, busy = false, parts = 0) {
 }
 
 // `pm.py reattach <id>` as the project view runs it: without this app's terminal identity, so the
-// ledger records the user as the one who reattached (as sendArgv does for a send).
+// ledger records the user as the one who reattached (as sendArgv does for a send). Pass through
+// withoutTerminalEnv (and on Windows, prefer execPython instead of a bare `python3`).
 export function reattachArgv(script, id) {
-  return ['-u', 'HC_TERMINAL_ID', '-u', 'HERDR_PANE_ID', 'python3', script, 'reattach', id];
+  return ['python3', script, 'reattach', id];
 }
 
 const squash = text => String(text || '').replace(/\s+/g, ' ').trim();
@@ -1090,11 +1091,26 @@ export function diffArgv(task) {
   return ['git', '-C', tree, 'diff', `${task.base || 'main'}...${branch}`];
 }
 
-// The send command: `hc send` run without this app's terminal identity, so the
-// PM's hook records the text as the user's turn, not as another agent's.
-// `--` keeps a text starting with "-" (a Markdown list) from parsing as an option.
+// The send argv: `hc send …`. Run through withoutTerminalEnv so the PM's hook records the text as
+// the user's turn, not as another agent's. `--` keeps a text starting with "-" (a Markdown list)
+// from parsing as an option.
 export function sendArgv(address, text) {
-  return ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', address, text];
+  return ['hc', 'send', '--', address, text];
+}
+
+// Keys dropped (Unix `env -u`) so a send / put / reattach is not attributed to a terminal.
+export const SEND_ENV = ['HC_TERMINAL_ID'];
+export const REATTACH_ENV = ['HC_TERMINAL_ID', 'HERDR_PANE_ID'];
+
+// herdr's exec has no env option ({ cwd, on, timeout } only). On Unix, wrap with `env -u KEY…` so
+// HC_TERMINAL_ID / HERDR_PANE_ID are not inherited. Windows Desktop has no usable `env`, so run the
+// program as-is (the app process does not set those marks). Returns [command, args] for exec.
+export function withoutTerminalEnv(argv, { platform = '', unset = SEND_ENV } = {}) {
+  const args = Array.isArray(argv) ? argv.filter(a => a != null).map(String) : [];
+  if (!args.length) return ['hc', []];
+  if (platform === 'windows') return [args[0], args.slice(1)];
+  const drop = (Array.isArray(unset) ? unset : SEND_ENV).flatMap(k => ['-u', String(k)]);
+  return ['env', drop.concat(args)];
 }
 
 // ---- attachments for a terminal on another machine ----------------------------------
@@ -1105,7 +1121,7 @@ export function sendArgv(address, text) {
 // name) and `hc put --json` prints {path}. The message then names those paths. Here (machine ''):
 // nothing to send, the files go as they are.
 export function putArgv(address, path) {
-  return ['-u', 'HC_TERMINAL_ID', 'hc', 'put', '--json', '--', address, path];
+  return ['hc', 'put', '--json', '--', address, path];
 }
 // hc put keeps a file's name, but each character outside ASCII becomes "_" ("设计稿 v2.png" landed as
 // "____v2.png"). Such a file goes as a copy named here: image-<time>-<n>, or file-… for what is not an
@@ -1124,8 +1140,8 @@ export function uploadName(name, at = new Date(), n = 1) {
 export const uploadKey = (address, machine, path) => `${onMachine(address, machine)}\n${path}`;
 // For a message to the terminal `address` (as the machine sees it) on `machine`: one step per file,
 // {path: the file here, key (uploadKey), and either landed: where `uploaded` says it already is there,
-// or argv: exec('env', argv) that sends it, with copy: the renamed copy it sends (uploadName) in the
-// folder `stage`, to be made first}. [] for a terminal here.
+// or argv: putArgv for withoutTerminalEnv / exec that sends it, with copy: the renamed copy it sends
+// (uploadName) in the folder `stage`, to be made first}. [] for a terminal here.
 export function uploadSteps(files, address, machine = '', { uploaded = null, stage = '', at = new Date() } = {}) {
   if (!machine || !address) return [];
   const to = onMachine(address, machine);

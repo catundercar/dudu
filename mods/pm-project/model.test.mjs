@@ -734,8 +734,17 @@ test('commands, clocks and paths', () => {
   assert.deepEqual(model.diffArgv({ worktree: '/w', repo: '/r', base: 'main', branch: 'dev/x' }), ['git', '-C', '/w', 'diff', 'main...dev/x']);
   assert.deepEqual(model.diffArgv({ repo: '/r', branch: 'dev/x' }), ['git', '-C', '/r', 'diff', 'main...dev/x']);
   assert.equal(model.diffArgv({ repo: '/r' }), null);
-  assert.deepEqual(model.sendArgv('t2h', 'hi'), ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 't2h', 'hi']);
-  assert.deepEqual(model.sendArgv('t2h', '- item'), ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 't2h', '- item']);
+  assert.deepEqual(model.sendArgv('t2h', 'hi'), ['hc', 'send', '--', 't2h', 'hi']);
+  assert.deepEqual(model.sendArgv('t2h', '- item'), ['hc', 'send', '--', 't2h', '- item']);
+  // Unix keeps env -u so the PM hook records the person; Windows has no env and runs hc bare.
+  assert.deepEqual(model.withoutTerminalEnv(model.sendArgv('t2h', 'hi')),
+    ['env', ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 't2h', 'hi']]);
+  assert.deepEqual(model.withoutTerminalEnv(model.sendArgv('t2h', 'hi'), { platform: 'windows' }),
+    ['hc', ['send', '--', 't2h', 'hi']]);
+  assert.deepEqual(model.withoutTerminalEnv(model.putArgv('dev/t1', 'a.png'), { platform: 'windows' }),
+    ['hc', ['put', '--json', '--', 'dev/t1', 'a.png']]);
+  assert.deepEqual(model.withoutTerminalEnv(model.reattachArgv('/app/pm.py', 'x'), { unset: model.REATTACH_ENV }),
+    ['env', ['-u', 'HC_TERMINAL_ID', '-u', 'HERDR_PANE_ID', 'python3', '/app/pm.py', 'reattach', 'x']]);
   assert.equal(model.clock('2026-11-13 09:08', '2026-11-13'), '09:08');
   assert.equal(model.clock('2026-11-12 23:01:09', '2026-11-13'), '11-12 23:01');
   assert.equal(model.shortPath('/Users/me/project/dudu', '/Users/me'), '~/project/dudu');
@@ -1211,8 +1220,7 @@ test("the thread panel's terminal icon opens the terminal, or reattaches a threa
   assert.equal(terminalAction(null, { offline: true }, true), 'reattaching');
   assert.equal(terminalAction(null, { offline: false }), 'none');            // nothing known to bring back
   assert.equal(terminalAction(null, null), 'none');
-  assert.deepEqual(reattachArgv('/app/pm.py', 'dudu-x'),
-    ['-u', 'HC_TERMINAL_ID', '-u', 'HERDR_PANE_ID', 'python3', '/app/pm.py', 'reattach', 'dudu-x']);
+  assert.deepEqual(reattachArgv('/app/pm.py', 'dudu-x'), ['python3', '/app/pm.py', 'reattach', 'dudu-x']);
   assert.match(model.word('zh', 'reattach'), /^接回/);
   assert.equal(model.word('zh', 'reattachFailed', 'x'), '没接回：x');
 });
@@ -1563,7 +1571,7 @@ test("a project on another machine: its key, its terminals as that machine names
   assert.equal(model.onMachine('t73', 'box'), 'box/t73');
   assert.equal(model.onMachine('t73', ''), 't73');
   assert.equal(model.onMachine('', 'box'), '');
-  assert.deepEqual(model.sendArgv(model.onMachine('t73', 'box'), 'hi'), ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 'box/t73', 'hi']);
+  assert.deepEqual(model.sendArgv(model.onMachine('t73', 'box'), 'hi'), ['hc', 'send', '--', 'box/t73', 'hi']);
 
   // remotePmArgv: the first pm.py found under that machine's home, with the arguments as given.
   assert.deepEqual(model.PM_SCRIPTS, dash.PM_SCRIPTS);
@@ -1592,11 +1600,13 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   let drafts = null, failSend = false;
   const blank = new Proxy(function () {}, { get: (_, key) => (key === Symbol.toPrimitive ? () => 0 : blank), apply: () => blank });
   const stubs = { View: class {}, projectRef: model.projectRef, machineView: model.machineView, onMachine: model.onMachine,
-    remotePmArgv: model.remotePmArgv, sendArgv: model.sendArgv, pmRow: model.pmRow, terminalFor: model.terminalFor,
+    remotePmArgv: model.remotePmArgv, sendArgv: model.sendArgv, withoutTerminalEnv: model.withoutTerminalEnv,
+    SEND_ENV: model.SEND_ENV, REATTACH_ENV: model.REATTACH_ENV, pmRow: model.pmRow, terminalFor: model.terminalFor,
     pasteDir: model.pasteDir, uploadSteps: model.uploadSteps, landedPath: model.landedPath, sentFiles: model.sentFiles,
     heldFiles: model.heldFiles, sentLeftovers: model.sentLeftovers, staleArgv: model.staleArgv, staleFiles: model.staleFiles,
     localStorage: { getItem: () => drafts }, readDrafts: model.readDrafts,
     messageText: model.messageText, word: model.word, fileName: model.fileName,
+    appWindow: () => ({ platform: 'macos' }),
     terminals: () => [{ address: 't73', state: 'live', labels: { pm: 'dudu' } }, { address: 'box/t73', state: 'live', labels: { pm: 'dudu' } }],
     agents: () => [], panes: () => [],
     exec: async (command, args, options) => {
@@ -1635,9 +1645,21 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   const shot = '/here/attachments/box/pm-dudu/paste-20261116-101500.png', doc = '/Users/me/Desktop/a b.txt';
   const went = await view.deliver('t73', '看图', [shot, doc]);
   const there = name => `/home/x/.local/state/herdr-core/default/files/t73/${name}`;
-  assert.deepEqual(calls.map(c => c[1]), [model.putArgv('box/t73', shot), model.putArgv('box/t73', doc),
-    model.sendArgv('box/t73', `看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`)]);
+  const envHc = argv => model.withoutTerminalEnv(argv)[1];
+  assert.deepEqual(calls.map(c => c[1]), [envHc(model.putArgv('box/t73', shot)), envHc(model.putArgv('box/t73', doc)),
+    envHc(model.sendArgv('box/t73', `看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`))]);
   assert.equal(went, `看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`);
+  // Windows Desktop: bare hc, never `env -u` (no usable env there).
+  calls.length = 0;
+  const win = Object.assign(Object.create(Mod.prototype), view, { hostPlatform: () => 'windows' });
+  await win.send('t73', 'hi');
+  assert.deepEqual(calls[0], ['hc', ['send', '--', 'box/t73', 'hi'], { timeout: 20000 }]);
+  calls.length = 0;
+  await win.deliver('t73', '看图', [shot]);
+  assert.deepEqual(calls.map(c => [c[0], c[1]]), [
+    ['hc', ['put', '--json', '--', 'box/t73', shot]],
+    ['hc', ['send', '--', 'box/t73', `看图\n\n${there('paste-20261116-101500.png')}`]],
+  ]);
   // A file that does not go stops the send: nothing reaches the terminal, and the error names the file and machine.
   calls.length = 0;
   await assert.rejects(view.deliver('t73', 'x', [shot, '/Users/me/huge.png']),
@@ -1665,8 +1687,8 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   assert.deepEqual(calls.filter(c => c[1].includes('put')).map(c => c[1].at(-1)), ['/Users/me/huge.png']);
   calls.length = 0;
   const retried = await view.deliver('t73', 'x', [shot, '/Users/me/ok.png']);
-  assert.deepEqual(calls.map(c => c[1]), [model.putArgv('box/t73', '/Users/me/ok.png'),
-    model.sendArgv('box/t73', `x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`)]);
+  assert.deepEqual(calls.map(c => c[1]), [envHc(model.putArgv('box/t73', '/Users/me/ok.png')),
+    envHc(model.sendArgv('box/t73', `x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`))]);
   assert.equal(retried, `x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`);
   // The same when the files all went and the message itself did not: sent again, only the message goes.
   failSend = true;
@@ -1674,7 +1696,7 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   failSend = false;
   calls.length = 0;
   await view.deliver('t73', 'y', [shot]);
-  assert.deepEqual(calls.map(c => c[1]), [model.sendArgv('box/t73', `y\n\n${there('paste-20261116-101500.png')}`)]);
+  assert.deepEqual(calls.map(c => c[1]), [envHc(model.sendArgv('box/t73', `y\n\n${there('paste-20261116-101500.png')}`))]);
   // Once it went, the next send of that file copies it again (nothing is remembered past a send).
   calls.length = 0;
   await view.deliver('t73', 'y', [shot]);
@@ -1698,7 +1720,7 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   // A local project's files go as they are: no copy, the message names them here.
   calls.length = 0;
   await Object.assign(Object.create(Mod.prototype), { machine: '' }).deliver('t73', '看图', [shot]);
-  assert.deepEqual(calls.map(c => c[1]), [model.sendArgv('t73', `看图\n\n${shot}`)]);
+  assert.deepEqual(calls.map(c => c[1]), [envHc(model.sendArgv('t73', `看图\n\n${shot}`))]);
   // Before that machine's ledger is read, the view has no project from another one's state.
   assert.equal(Object.assign(view, { stateFor: '' }).pm(), null);
 });
@@ -1709,8 +1731,8 @@ test('a message to a project on another machine first copies each file beside it
   // One `hc put` per file, each once, to the terminal as "<machine>/<address>", never through the shell.
   const steps = uploadSteps([shot, doc, shot], 't7p', 'dev');
   assert.deepEqual(steps, [
-    { path: shot, key: `dev/t7p\n${shot}`, argv: ['-u', 'HC_TERMINAL_ID', 'hc', 'put', '--json', '--', 'dev/t7p', shot] },
-    { path: doc, key: `dev/t7p\n${doc}`, argv: ['-u', 'HC_TERMINAL_ID', 'hc', 'put', '--json', '--', 'dev/t7p', doc] },
+    { path: shot, key: `dev/t7p\n${shot}`, argv: ['hc', 'put', '--json', '--', 'dev/t7p', shot] },
+    { path: doc, key: `dev/t7p\n${doc}`, argv: ['hc', 'put', '--json', '--', 'dev/t7p', doc] },
   ]);
   assert.deepEqual(putArgv('dev/t1', '-x.png').slice(-3), ['--', 'dev/t1', '-x.png']);
   // A project here sends its files as they are: nothing to copy.
