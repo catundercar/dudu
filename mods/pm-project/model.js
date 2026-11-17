@@ -24,7 +24,7 @@ const STRINGS = {
     remoteLoading: machine => `Reading the project from ${machine}…`,
     remoteError: (machine, error) => `Could not read the project from ${machine}. Is that machine connected in Herdr, with the pm skill installed there?\n${error}`,
     remoteDiff: 'The changes are on the other machine: open its terminal to see them',
-    remoteAttach: 'Files can only be attached to a project on this computer',
+    remoteAttach: machine => `Attach files (or drop them here, or paste a screenshot); they are copied to ${machine} when the message is sent`,
     empty: 'Nothing said in this project yet.', readError: 'Could not read the conversation',
     today: 'Today', yesterday: 'Yesterday', noLog: 'No log yet', agent: (program, address) => `${program} · terminal ${address}`,
     unfold: 'Show the whole reply', fold: 'Fold',
@@ -39,9 +39,12 @@ const STRINGS = {
     merged: 'Merged', released: 'Released', done: 'Done', abandoned: 'Abandoned', cleanup: 'Merged · not retired',
     attach: 'Attach files (or drop them here, or paste a screenshot)', removeFile: name => `Remove ${name}`,
     attachFailed: error => `Could not attach: ${error}`, attachments: 'Attachments:',
+    uploadFailed: (name, machine, error) => `${name} was not copied to ${machine}: ${error}`,
     notAFile: names => `not a file: ${names}`, noPasteFolder: 'this project has no conversation log yet, so a pasted image has nowhere to be kept',
     engineProfile: name => `Profile: ${name}`, engineWhy: why => `Why: ${why}`, engineRounds: n => `Review rounds: ${n}`,
+    engineEscalatedTimes: n => `Escalated ${n} time${n === 1 ? '' : 's'}`,
     engineEscalated: (from, to, why) => `Escalated ${from} → ${to}${why ? `: ${why}` : ''}`,
+    engineAdvisor: name => `Advisor: ${name}`, effortDefault: 'default',
   },
   zh: {
     you: '你', waiting: '等你', waitingCount: n => `${n} 件事等你`, nothingWaiting: '没有等你的事',
@@ -64,7 +67,7 @@ const STRINGS = {
     remoteLoading: machine => `正在从 ${machine} 读取这个项目…`,
     remoteError: (machine, error) => `读不到 ${machine} 上的这个项目。确认这台机器在 Herdr 里已连接，并装了 pm 技能。\n${error}`,
     remoteDiff: '改动在另一台机器上，打开它的终端查看',
-    remoteAttach: '只有这台电脑上的项目能添加附件',
+    remoteAttach: machine => `添加附件（也可以把文件拖进来，或粘贴截图）；发送时会先传到 ${machine}`,
     empty: '这个项目还没有对话。', readError: '对话记录读取失败',
     today: '今天', yesterday: '昨天', noLog: '暂无日志', agent: (program, address) => `${program} · 终端 ${address}`,
     unfold: '展开全文', fold: '收起',
@@ -78,9 +81,12 @@ const STRINGS = {
     merged: '已合并', released: '已发布', done: '完成', abandoned: '放弃', cleanup: '已合并 · 待回收',
     attach: '添加附件（也可以把文件拖进来，或粘贴截图）', removeFile: name => `移除 ${name}`,
     attachFailed: error => `附件没加上：${error}`, attachments: '附件：',
+    uploadFailed: (name, machine, error) => `${name} 没传到 ${machine}：${error}`,
     notAFile: names => `不是文件：${names}`, noPasteFolder: '这个项目还没有对话记录，贴的图没有地方存',
     engineProfile: name => `档位：${name}`, engineWhy: why => `理由：${why}`, engineRounds: n => `评审轮数：${n}`,
+    engineEscalatedTimes: n => `升级过 ${n} 次`,
     engineEscalated: (from, to, why) => `升级 ${from} → ${to}${why ? `：${why}` : ''}`,
+    engineAdvisor: name => `顾问：${name}`, effortDefault: '默认',
   },
 };
 export function word(lang, key, ...args) {
@@ -180,7 +186,7 @@ export function eventTime(at) {
 }
 
 // Messages sent from the view show at once and give way to the same text in the
-// log. pending: [{id, text, sentAt (ms), failed?}]. A logged `user` event takes
+// log. pending: [{id, text, sentAt (ms), failed?, upload? (the failure was a file not copied to another machine: shown in words)}]. A logged `user` event takes
 // the oldest pending bubble with its text, if it was written no earlier than a
 // minute before that bubble was sent (the log keeps whole seconds).
 export function settlePending(pending, events) {
@@ -339,14 +345,24 @@ const IMAGE = /\.(png|jpe?g|gif|webp|heic|tiff?|bmp|svg)$/i;
 export const isImage = path => IMAGE.test(String(path || ''));
 // A pasted screenshot's file in the attachments folder: paste-20261114-093012.png, -2 for a second one that second.
 export function pasteName(date, n = 1) {
+  return `paste-${timeStamp(date)}${n > 1 ? `-${n}` : ''}.png`;
+}
+// 20261114-093012: a moment in a file name, this computer's time.
+function timeStamp(date) {
   const pad = (v, w = 2) => String(v).padStart(w, '0');
-  const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
-  return `paste-${stamp}${n > 1 ? `-${n}` : ''}.png`;
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 // The project's attachments folder, beside its conversation log: <ledger>/projects/<project>/attachments.
 export function attachmentsDir(pm) {
   const log = String(pm?.conversation || '');
   return log.includes('/') ? `${log.slice(0, log.lastIndexOf('/'))}/attachments` : '';
+}
+// Where a screenshot pasted into a project is kept on this computer: the project's attachments folder,
+// or for a project on another machine (whose log is there), <ledger home here>/attachments/<machine>/<name>
+// until its message is sent (see uploadSteps). '' when there is nowhere yet.
+export function pasteDir(pm, { machine = '', name = '', home = '' } = {}) {
+  if (!machine) return attachmentsDir(pm);
+  return home && name ? `${home}/attachments/${machine}/${name}` : '';
 }
 // When a pasted screenshot was saved, from its name (see pasteName): [ms, n], or null for another file.
 const PASTE = /(?:^|\/)paste-(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)(?:-(\d+))?\.png$/;
@@ -584,7 +600,7 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
     const answers = p.question || addressed(squash(p.text))?.key;
     const { text, files } = splitMessage(p.text);
     items.push({ kind: 'user', key: `pending:${p.id}`, text, pending: !p.failed, failed: p.failed || '',
-      ...(files.length ? { files } : {}), ...(answers ? { answers } : {}) });
+      ...(files.length ? { files } : {}), ...(answers ? { answers } : {}), ...(p.failed && p.upload ? { upload: true } : {}) });
     // A quick answer on its way already shows as the picked option.
     const asking = p.question && !p.failed ? questions.find(q => q.key === p.question) : null;
     if (asking && asking.chosen < 0) asking.chosen = asking.options.findIndex(o => squash(answerText(asking.title, o)) === squash(p.text));
@@ -1081,6 +1097,83 @@ export function sendArgv(address, text) {
   return ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', address, text];
 }
 
+// ---- attachments for a terminal on another machine ----------------------------------
+// An attached file is a path on this computer, which an agent on another machine cannot open. So a
+// message to a terminal there first sends each file beside that terminal with `hc put`: herdr-core
+// carries it over the machine's own connection, it lands in that machine's
+// ~/.local/state/herdr-core/<session>/files/<terminal>/ (its name kept, `-2` for a second of the same
+// name) and `hc put --json` prints {path}. The message then names those paths. Here (machine ''):
+// nothing to send, the files go as they are.
+export function putArgv(address, path) {
+  return ['-u', 'HC_TERMINAL_ID', 'hc', 'put', '--json', '--', address, path];
+}
+// hc put keeps a file's name, but each character outside ASCII becomes "_" ("设计稿 v2.png" landed as
+// "____v2.png"). Such a file goes as a copy named here: image-<time>-<n>, or file-… for what is not an
+// image, then the ASCII words of its name, then its extension ("设计稿 v2.png" → image-20261116-221514-1-v2.png).
+// '' for a name that is ASCII already: it goes as it is.
+export function uploadName(name, at = new Date(), n = 1) {
+  name = String(name ?? '');
+  if (!/[^\x20-\x7e]/.test(name)) return '';
+  const dot = name.lastIndexOf('.'), ext = dot > 0 && /^[A-Za-z0-9]{1,10}$/.test(name.slice(dot + 1)) ? name.slice(dot + 1) : '';
+  const words = ((ext ? name.slice(0, dot) : name).match(/[A-Za-z0-9]+/g) || []).join('-').slice(0, 32).replace(/-+$/, '');
+  return `${isImage(name) ? 'image' : 'file'}-${timeStamp(at)}-${n}${words ? `-${words}` : ''}${ext ? `.${ext}` : ''}`;
+}
+// A file already copied to a terminal there, by the terminal's app address and the file's path here:
+// the key of `uploaded`, which keeps where it landed until its message went (a send sent again after a
+// later file failed does not copy it twice).
+export const uploadKey = (address, machine, path) => `${onMachine(address, machine)}\n${path}`;
+// For a message to the terminal `address` (as the machine sees it) on `machine`: one step per file,
+// {path: the file here, key (uploadKey), and either landed: where `uploaded` says it already is there,
+// or argv: exec('env', argv) that sends it, with copy: the renamed copy it sends (uploadName) in the
+// folder `stage`, to be made first}. [] for a terminal here.
+export function uploadSteps(files, address, machine = '', { uploaded = null, stage = '', at = new Date() } = {}) {
+  if (!machine || !address) return [];
+  const to = onMachine(address, machine);
+  let n = 0;
+  return withFiles([], files).map(path => {
+    const key = uploadKey(address, machine, path), landed = uploaded?.get(key);
+    if (landed) return { path, key, landed };
+    const name = stage ? uploadName(fileName(path), at, n + 1) : '';
+    if (!name) return { path, key, argv: putArgv(to, path) };
+    n++;
+    return { path, key, copy: `${stage}/${name}`, argv: putArgv(to, `${stage}/${name}`) };
+  });
+}
+// Where a file landed, from `hc put --json`'s ExecResult; throws its error otherwise (the words of
+// hc's {"error":{"message"}} when it printed one).
+export function landedPath(result) {
+  const out = String(result?.stdout ?? '').trim(), err = String(result?.stderr ?? '').trim();
+  let json = null;
+  for (const text of [out, err]) {
+    try { json = JSON.parse(text); break; } catch (_) { /* not JSON */ }
+  }
+  if (result?.code === 0 && isPath(json?.path)) return json.path;
+  throw new Error(json?.error?.message || err || out || `hc put: ${result?.code}`);
+}
+// The files of a message as they are named to the terminal: each one's landed path, else its own.
+export const sentFiles = (files, landed = new Map()) => withFiles([], (files || []).map(path => landed.get(path) || path));
+
+// What waits here for another machine, in <ledger home>/attachments/<machine>/<project> (pasteDir), is
+// only kept until it went: a pasted screenshot is removed once its message was sent, and anything
+// there older than a week (left by a send that never went) when something new is put there. Not what
+// a box's draft or a failed bubble still holds: those are sent later.
+export const STALE_MINUTES = 7 * 24 * 60;
+// The files of every stored draft and every bubble still here (pending: [{files}]).
+export function heldFiles(drafts, pending = []) {
+  const held = new Set();
+  for (const d of Object.values(drafts || {})) for (const path of d?.files || []) held.add(path);
+  for (const p of pending || []) for (const path of p?.files || []) held.add(path);
+  return held;
+}
+// Of a sent message's files, those to remove: the ones in the paste folder `dir` no box or bubble still holds.
+export const sentLeftovers = (files, dir, held = new Set()) =>
+  dir ? withFiles([], files).filter(path => path.startsWith(`${dir}/`) && !held.has(path)) : [];
+// `find` of what is older than a week under <home>/attachments: each machine's projects' files, and a
+// send's folder of renamed copies left behind (see uploadSteps).
+export const staleArgv = home => ['find', `${home}/attachments`, '-mindepth', '3', '-mmin', `+${STALE_MINUTES}`];
+// That find's output as paths to remove, without the held ones.
+export const staleFiles = (out, held = new Set()) => String(out ?? '').split('\n').filter(path => isPath(path) && !held.has(path));
+
 // ---- a project on another machine ------------------------------------------------
 // shared('pm-project') names the project: {pm, machine?}. A remote PM is keyed "<machine>/<name>" (as
 // pm-list keys its row and pm-dash names it on the board); `name` is its name in that machine's ledger.
@@ -1157,8 +1250,22 @@ export function escalations(task) {
   return (Array.isArray(task?.escalations) ? task.escalations : []).filter(x => x && (x.from || x.to));
 }
 
+// How many times it was escalated: its escalations, or, for a thread off the board, the count the state keeps
+// (`escalated`, see endedEngine).
+const timesEscalated = task => escalations(task).length || Math.max(0, Math.floor(Number(task?.escalated) || 0));
+
 // Escalated at least once: the label gets a small up arrow.
-export const wasEscalated = task => escalations(task).length > 0;
+export const wasEscalated = task => timesEscalated(task) > 0;
+
+// A thread off the board (retired, or ended a day ago) as engineChip reads it: its mark in the state's
+// `ended_engines` ({task id: {profile, kind, model, effort, advisor, escalated}}, see pm.py engine_mark),
+// or null without one.
+export function endedEngine(marks, id) {
+  const mark = marks && typeof marks === 'object' && Object.hasOwn(marks, id) ? marks[id] : null;
+  if (!mark || typeof mark !== 'object' || Array.isArray(mark)) return null;
+  const { escalated, ...engine } = mark;
+  return { engine, escalated };
+}
 
 // One side of an escalation: a profile name, or a worker record ({profile, model, …}) said by its profile or label.
 const stepName = side => (side && typeof side === 'object' ? side.profile || engineLabel({ engine: side }) : side) || '?';
@@ -1183,8 +1290,21 @@ export function engineTip(lang, task) {
   const why = engineReason(task);
   if (why) lines.push(word(lang, 'engineWhy', why));
   for (const x of escalations(task)) lines.push(word(lang, 'engineEscalated', stepName(x.from), stepName(x.to), x.why || ''));
+  if (!escalations(task).length && wasEscalated(task)) lines.push(word(lang, 'engineEscalatedTimes', timesEscalated(task)));
   if (Number.isInteger(task.rounds) || /^\d+$/.test(task.rounds ?? '')) lines.push(word(lang, 'engineRounds', Number(task.rounds)));
   return lines.join('\n') || engineLabel(task);
+}
+
+// The thread list's quiet label for a row: the label without its advisor (an icon marks one), its effort said
+// even when the worker runs on the default (Opus·default), the model alone
+// for the narrowest panel, the advisor's short name, whether it was escalated, and the detail's tip.
+// Null: nothing known (a thread entered by hand, the user's own session), so no label and no room kept.
+export function engineChip(lang, task) {
+  const e = taskEngine(task);
+  if (!e) return null;
+  const plain = { ...e, advisor: '' };
+  return { label: engineLabel({ engine: { ...plain, effort: e.effort || word(lang, 'effortDefault') } }), name: engineLabel({ engine: { ...plain, effort: '' } }),
+    advisor: e.advisor ? modelName(e.advisor).split(' ')[0] : '', up: wasEscalated(task), tip: engineTip(lang, task) };
 }
 
 // How long ago, in the largest whole unit: "<1m", "5m", "3h", "2d"; in a Chinese view "刚刚",

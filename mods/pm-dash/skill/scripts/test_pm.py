@@ -650,6 +650,7 @@ class Profiles(unittest.TestCase):
         task = pm.load(task["id"])
         self.assertEqual((task["status"], task["pane"], task.get("held_in"), task["worktree"], task["worker_pane"]),
                          ("in_progress", "w2:p1", None, tree, "w2:p1"))
+        self.assertTrue(task["dispatched"])  # so `land` (update --status merged) retires it, as in the desktop app
 
     def test_reattach_uses_the_worker_record(self):
         task = {"worker": {"profile": "hard", "kind": "claude", "model": "opus", "effort": "xhigh", "advisor": "fable"},
@@ -793,6 +794,9 @@ class Profiles(unittest.TestCase):
         self.assertEqual((tasks[f"{name}-old"]["worker"], tasks[f"{name}-new"]["worker"]), ("", ""))
         self.assertEqual(tasks[f"{name}-old"]["engine"], {})
         self.assertEqual(tasks[f"{name}-new"]["engine"]["effort"], "xhigh")
+        # Escalations and review rounds ride along for the thread list's tip; a task without them has neither.
+        self.assertEqual((tasks[f"{name}-new"].get("escalations"), tasks[f"{name}-new"]["rounds"]), (None, 0))
+        self.assertNotIn("rounds", tasks[f"{name}-old"])
 
     def escalate(self, task_id, **given):
         a = argparse.Namespace(**{"id": task_id, "profile": None, "why": None, "advisor": None, "name": None,
@@ -1126,6 +1130,38 @@ class SubThreads(unittest.TestCase):
         self.assertNotIn(f"{name}-live", parts)  # on the board already
         self.assertEqual({k: parts[f"{name}-done"][k] for k in ("title", "status", "parent", "retired")},
                          {"title": "合并了", "status": "merged", "parent": f"{name}-whole", "retired": True})
+
+    def test_state_keeps_the_worker_marks_of_the_newest_ended_tasks_off_the_board(self):
+        repo = pm.project_root(tempfile.mkdtemp())
+        name = Path(repo).name
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        (pm.PMS / f"pm-{name}.json").write_text(json.dumps({"name": f"pm-{name}", "project": name, "repo": repo}))
+        pm.TASKS.mkdir(parents=True, exist_ok=True)
+        # written as the ledger has them (pm.save would stamp them updated now)
+        put = lambda t: (pm.TASKS / f"{t['id']}.json").write_text(json.dumps(t, ensure_ascii=False))
+        base = {"project": name, "repo": repo, "owner": "pm", "base": "main", "created": pm.now(), "retired": "x"}
+        hard = {"profile": "hard", "kind": "claude", "model": "opus", "effort": "xhigh", "advisor": "fable"}
+        put({**base, "id": f"{name}-up", "title": "升级过", "status": "merged", "updated": "2026-11-15 09:00",
+                 "worker": hard, "escalations": [{"from": "standard", "to": "hard", "why": "x", "at": "x"}]})
+        put({**base, "id": f"{name}-plain", "title": "默认", "status": "merged", "updated": "2026-11-15 08:00",
+                 "worker": {"profile": "standard", "kind": "claude", "model": "opus", "effort": "", "advisor": ""}})
+        put({**base, "id": f"{name}-dropped", "title": "放弃了", "status": "abandoned", "updated": "2026-11-15 10:00",
+                 "worker": hard})
+        put({**base, "id": f"{name}-byhand", "title": "手登记", "status": "done", "updated": "2026-11-15 10:00"})
+        for i in range(pm.ENDED_ENGINES):
+            put({**base, "id": f"{name}-old{i}", "title": "早的", "status": "merged", "updated": f"2026-11-0{i % 9 + 1} 08:00",
+                     "worker": {"kind": "codex"}})
+        try:
+            marks = json.loads(self.run_pm("state"))["ended_engines"]
+        finally:
+            (pm.PMS / f"pm-{name}.json").unlink()
+        self.assertEqual(marks[f"{name}-up"], {**hard, "escalated": 1})
+        self.assertEqual(marks[f"{name}-plain"], {"profile": "standard", "kind": "claude", "model": "opus"})
+        self.assertNotIn(f"{name}-dropped", marks)  # given up: not listed as ended
+        self.assertNotIn(f"{name}-byhand", marks)  # no worker record: nothing to say
+        mine = [k for k in marks if k.startswith(f"{name}-")]
+        self.assertEqual(len(mine), pm.ENDED_ENGINES)  # the newest few of this PM only
+        self.assertNotIn(f"{name}-old0", mine)
 
 
 class ReportAndWait(unittest.TestCase):
@@ -1726,6 +1762,24 @@ class ProjectLifecycle(unittest.TestCase):
         self.assertEqual([(m["name"], m["folder"]) for m in made], [(self.name, self.repo)])
         self.assertIn("[from pm.py restore]", made[0]["argv"][-1])
         self.assertIn("handover", made[0]["argv"][-1])
+
+    def test_the_handover_line_in_the_start_and_restore_prompts(self):
+        def prompts():
+            return [json.loads(c[3])["argv"][-1] for c in self.calls if c[:3] == ("herdr-app", "do", "space.new")]
+        self.quiet(pm.cmd_start, argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"))
+        self.assertIn(f"`python3 {Path(pm.__file__).resolve()} handover`", prompts()[-1])  # as before
+        self.register()
+        self.quiet(pm.cmd_archive, argparse.Namespace(project=self.repo))
+        self.terms.pop("t7")
+        with as_windows():
+            self.quiet(pm.cmd_restore, argparse.Namespace(project=self.repo, kind=None, model=None))
+        self.assertIn("[from pm.py restore]", prompts()[-1])
+        self.assertIn(f'`py -3 "{SPACED}" handover`', prompts()[-1])
+        for path in pm.PMS.glob("*.json"):
+            path.unlink()
+        with as_windows():
+            self.quiet(pm.cmd_start, argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"))
+        self.assertIn(f'`py -3 "{SPACED}" handover`', prompts()[-1])
 
     def test_start_name_and_space(self):
         self.quiet(pm.cmd_start, argparse.Namespace(repo=self.repo, kind="codex", model=None, name="家里网络",
@@ -3159,6 +3213,20 @@ class SeamlessRotation(unittest.TestCase):
         self.assertNotIn("pm.quiet=1", run)          # the first turn answers it: its notice and dots show
         self.assertIn(("hc", "label", "t50", f"pm={self.name}"), self.calls)
 
+    def test_the_handover_line_in_the_rotate_prompt(self):
+        self.register(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
+        self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
+        prompt = next(c for c in self.calls if c[:2] == ("hc", "run"))[-1]
+        self.assertIn(f"`python3 {Path(pm.__file__).resolve()} handover`", prompt)    # as before on macOS/Linux
+        for path in pm.PMS.glob("*.json"):
+            path.unlink()
+        self.calls.clear()
+        self.register(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
+        with as_windows():
+            self.out(pm.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
+        prompt = next(c for c in self.calls if c[:2] == ("hc", "run"))[-1]
+        self.assertIn(f'`py -3 "{SPACED}" handover`', prompt)
+
     def test_a_codex_pm_rotates_in_place_without_the_quiet_label(self):
         wrapper = self.register(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
         rec = json.loads((pm.PMS / f"{pm.project_slug(self.repo)}.json").read_text())
@@ -3364,6 +3432,728 @@ class SeamlessRotation(unittest.TestCase):
         self.assertEqual(pm.shell_prefix({"argv": ["/usr/local/bin/claude", "-c"]}, "claude"), [])
         self.assertEqual(pm.shell_prefix({"argv": wrapper + ["codex", "-c", "x"]}, "codex"), wrapper)
         self.assertEqual(pm.shell_prefix({}, "claude"), [])
+
+
+class TerminalUI(unittest.TestCase):
+    """A PM in the herdr terminal UI ($HERDR_PANE_ID): its workers and reviewers are herdr agents in tabs; herdr-core
+    is never used, even on a computer where `hc` is installed."""
+
+    def setUp(self):
+        self.saved = (pm.herdr, pm.hc, pm.PANE, pm.WORKSPACE, pm.time.sleep, pm.name_later)
+        self.herdr_calls, self.hc_calls, self.running = [], [], {"w1:p0": "pm-x"}  # pane: agent name
+        self.refuse = set()  # herdr commands that fail
+
+        def fake_herdr(*args):
+            self.herdr_calls.append(args)
+            if args[:2] in self.refuse:
+                return None
+            if args[:2] == ("tab", "create"):
+                return {"tab": {"tab_id": "w2:t3"}, "root_pane": {"pane_id": "w2:p3"}}
+            if args[:2] == ("agent", "start"):
+                self.running[args[args.index("--pane") + 1]] = args[2]
+            if args[:2] == ("agent", "list"):
+                return {"agents": [{"pane_id": p, "name": n, "agent_status": "idle"} for p, n in self.running.items()]}
+            if args[:2] == ("agent", "rename"):
+                if args[2] not in self.running and args[2] not in self.running.values():
+                    return None
+                pane = args[2] if args[2] in self.running else next(p for p, n in self.running.items() if n == args[2])
+                if len(args[3]) > 32 or any(n == args[3] and p != pane for p, n in self.running.items()):
+                    return None  # herdr: at most 32 characters, unique among live agents
+                self.running[pane] = args[3]
+            if args[:2] == ("pane", "close"):
+                self.running.pop(args[2], None)
+            return {"ok": True}
+        pm.herdr = fake_herdr
+        pm.hc = lambda *args, **kw: self.hc_calls.append(args) or {"address": "t99", "state": "live"}
+        pm.PANE, pm.WORKSPACE = "w1:p0", "w1"
+        pm.time.sleep = lambda _: None
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        pm.herdr, pm.hc, pm.PANE, pm.WORKSPACE, pm.time.sleep, pm.name_later = self.saved
+        for path in pm.PMS.glob("*.json"):
+            path.unlink()
+
+    def run_cmd(self, fn, a):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                fn(a)
+            except SystemExit as stop:
+                out.write(f"\nexit: {stop.code}")
+        return out.getvalue()
+
+    def test_a_herdr_command_that_prints_nothing_has_succeeded(self):
+        done = lambda code, out="", err="": subprocess.CompletedProcess([], code, out, err)
+        answers = [done(0), done(1, err='{"error":{"code":"pane_not_found"}}'),
+                   done(0, '{"id":"cli:pane:get","result":{"pane":{"workspace_id":"w1"}}}')]
+        with mock.patch.object(pm.subprocess, "run", side_effect=answers):
+            self.assertTrue(self.saved[0]("pane", "run", "w1:p4", "claude"))  # `pane run` answers nothing
+            self.assertIsNone(self.saved[0]("pane", "run", "w9:p9", "claude"))
+            self.assertEqual(self.saved[0]("pane", "get", "w1:p1"), {"pane": {"workspace_id": "w1"}})
+
+    def test_review_opens_a_tab_beside_the_worker_and_never_uses_herdr_core(self):
+        repo, git = make_repo()
+        git("branch", "-D", "dev/x")
+        tree = Path(tempfile.mkdtemp()).resolve() / "tree"
+        git("worktree", "add", "-q", str(tree), "-b", "dev/x")
+        pm.save({"id": "tui-r", "title": "加一行", "project": repo.name, "repo": str(repo), "status": "review",
+                 "owner": "pm", "base": "main", "branch": "dev/x", "worktree": str(tree), "workspace": "w2",
+                 "pane": "w2:p1", "agent": "a-worker-with-a-rather-long-name", "worker_pane": "w2:p1",
+                 "dispatched": True, "created": pm.now()})
+        review = argparse.Namespace(id="tui-r", name=None, kind="claude", model="sonnet", effort=None)
+        out = self.run_cmd(pm.cmd_review, review)
+        self.assertNotIn("exit:", out)
+        self.assertEqual(self.hc_calls, [])
+        tab = next(c for c in self.herdr_calls if c[:2] == ("tab", "create"))
+        self.assertEqual((tab[tab.index("--workspace") + 1], tab[tab.index("--cwd") + 1]), ("w2", str(tree)))
+        start = next(c for c in self.herdr_calls if c[:2] == ("agent", "start"))
+        name = start[2]
+        self.assertTrue(len(name) <= 32 and name.endswith("-review"), name)  # herdr's limit for agent names
+        self.assertEqual(start[start.index("--", 3) + 1:],
+                         ("--model", "sonnet", "--disallowedTools", "Edit,Write,NotebookEdit"))
+        prompt = next(c for c in self.herdr_calls if c[:2] == ("agent", "prompt"))
+        self.assertEqual(prompt[2], name)
+        self.assertIn("update tui-r-review --status done", prompt[3])
+        record = pm.load("tui-r-review")
+        self.assertEqual((record["pane"], record["worker_pane"], record["workspace"]), ("w2:p3", "w2:p3", "w2"))
+        self.assertIn("w2:p3", out)
+        # Run again: the previous reviewer's pane is closed first, so its name is free for the new one.
+        self.herdr_calls.clear()
+        self.run_cmd(pm.cmd_review, review)
+        closes = [c for c in self.herdr_calls if c[:2] == ("pane", "close")]
+        self.assertEqual(closes, [("pane", "close", "w2:p3")])
+        self.assertLess(self.herdr_calls.index(closes[0]),
+                        self.herdr_calls.index(next(c for c in self.herdr_calls if c[:2] == ("agent", "start"))))
+        # Retiring the task closes its review, and that closes the reviewer's pane; never the PM's own.
+        git("merge", "-q", "--no-ff", "-m", "m", "dev/x")
+        self.herdr_calls.clear()
+        self.run_cmd(pm.cmd_retire, argparse.Namespace(id="tui-r", force=False))
+        self.assertIn(("pane", "close", "w2:p3"), self.herdr_calls)
+        self.assertNotIn(("pane", "close", "w1:p0"), self.herdr_calls)
+        self.assertTrue(pm.load("tui-r-review").get("retired"))
+        self.assertEqual(self.hc_calls, [])
+
+    def register(self, pane="w1:p0", repo=None):
+        repo = repo or pm.project_root(tempfile.mkdtemp())
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        (pm.PMS / f"{pm.project_slug(repo)}.json").write_text(json.dumps(
+            {"name": pm.pm_name(repo), "project": Path(repo).name, "repo": repo, "pane": pane, "workspace": "w1",
+             "agent": "claude"}))
+        return repo
+
+    def test_rotate_names_the_new_pm_once_herdr_sees_it(self):
+        repo = self.register()
+        name = pm.pm_name(repo)
+        self.running = {"w1:p0": name, "w1:p9": f"ex-{name}"}  # w1:p9: the PM before, retired and still open
+        argv_seen, looks, inner = [], [], pm.herdr
+
+        def fake(*args):
+            if args[:2] == ("pane", "process-info"):
+                return {"process_info": {"foreground_processes": [{"argv": ["claude", "--model", "opus"]}]}}
+            if args[:2] == ("pane", "get"):
+                return {"pane": {"workspace_id": "w1"}}
+            if args[:2] == ("pane", "run"):
+                argv_seen.append(args[3])
+            if args[:2] == ("agent", "list") and argv_seen:
+                looks.append(args)
+                if len(looks) >= 3:  # herdr sees the new agent in its pane only after a few looks
+                    self.running.setdefault("w2:p3", "")
+            return inner(*args)
+        pm.herdr = fake
+        rotate = argparse.Namespace(repo=repo, notes="n", model=None, transcript="/nonexistent/t.jsonl")
+        out = self.run_cmd(pm.cmd_rotate, rotate)
+        self.assertNotIn("exit:", out)
+        self.assertEqual(self.running, {"w1:p0": f"ex2-{name}", "w1:p9": f"ex-{name}", "w2:p3": name})
+        rec = pm.pm_record(repo)
+        self.assertEqual((rec["pane"], rec["previous"]["pane"]), ("w2:p3", "w1:p0"))
+        self.assertNotIn("startup dialog", out)
+        # The words the outgoing PM gets agree with the turn hook's: tell the user to continue in the new tab.
+        self.assertIn("tell the user to continue there", out)
+        reminder = pm.rotate_reminder(300000, True, in_app=False)
+        self.assertIn("tell the user to continue there", reminder)
+        self.assertNotIn("without a word", reminder)
+        self.assertIn("three or four sentences", argv_seen[0])  # the new PM says what it took over
+        self.assertEqual(pm.retire_name("w2:p3", "pm-" + "x" * 29), True)  # clipped to herdr's 32 characters
+        self.assertEqual(self.running["w2:p3"], "ex-pm-" + "x" * 26)
+        self.running["w2:p4"] = "pm-x_"  # a name may end in _ (project_slug keeps it): no other name comes of it
+        self.assertTrue(pm.retire_name("w2:p4", "pm-x_"))
+        self.assertEqual(self.running["w2:p4"], "ex-pm-x_")
+
+    def test_a_rotate_whose_new_pm_cannot_start_changes_nothing(self):
+        repo = self.register()
+        name = pm.pm_name(repo)
+        self.running = {"w1:p0": name}
+        inner = pm.herdr
+        pm.herdr = lambda *args: ({"pane": {"workspace_id": "w1"}} if args[:2] == ("pane", "get") else inner(*args))
+        self.refuse.add(("pane", "run"))
+        out = self.run_cmd(pm.cmd_rotate, argparse.Namespace(repo=repo, notes="what is in flight", model=None,
+                                                             transcript="/nonexistent/t.jsonl"))
+        self.assertIn("exit:", out)
+        self.assertIn("stays the PM", out)
+        self.assertEqual(self.running, {"w1:p0": name})  # its name back; the new tab closed
+        rec = pm.pm_record(repo)
+        self.assertEqual(rec["pane"], "w1:p0")
+        self.assertNotIn("rotations", rec)
+        self.assertIn("what is in flight", (pm.project_dir(repo) / "handover.md").read_text())
+
+    def hook(self, fn, cwd, stdin=""):
+        """Run a hook as Claude Code does: in the session's folder, with the event on stdin."""
+        here = os.getcwd()
+        os.chdir(cwd)
+        try:
+            with mock.patch.object(pm.sys, "stdin", io.StringIO(stdin)), mock.patch.dict(os.environ, {"HERDR_ENV": "1"}):
+                return self.run_cmd(fn, argparse.Namespace())
+        finally:
+            os.chdir(here)
+
+    def test_hooks_ignore_a_registration_whose_pane_now_holds_another_project(self):
+        repo = self.register(pane="w1:p0")
+        name = pm.pm_name(repo)
+        elsewhere = pm.project_root(tempfile.mkdtemp())
+        started = []
+        pm.name_later = lambda pane, name: started.append((pane, name))
+        self.running = {"w1:p0": ""}  # a session of another project, in a pane id the server gave out again
+        turn = lambda prompt, cwd: json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": prompt, "cwd": cwd})
+        self.assertEqual(self.hook(pm.cmd_hook_session_start, elsewhere), "")
+        self.hook(pm.cmd_hook_turn, elsewhere, turn("你好", elsewhere))
+        self.assertEqual(pm.conversation(repo), [])
+        self.assertEqual(self.running, {"w1:p0": ""})
+        self.assertEqual(started, [])
+        # In its own project the same session is the PM: it is told so, and named once herdr sees it.
+        self.refuse.add(("agent", "rename"))  # too early: herdr does not see the agent yet
+        out = self.hook(pm.cmd_hook_session_start, repo)
+        self.assertIn(f"You are {name}", out)
+        self.assertEqual(started, [("w1:p0", name)])
+        self.hook(pm.cmd_hook_turn, repo, turn("你好", repo))
+        self.assertEqual([(e["type"], e["text"]) for e in pm.conversation(repo)], [("user", "你好")])
+        # A PM claimed with --repo from a folder above the project (pm-issues: ~ for ~/Desktop/…/issues): its log
+        # goes on, and when it restarts it is told it is the PM and gets its name back.
+        above = str(Path(repo).parent)
+        self.hook(pm.cmd_hook_turn, above, turn("上面", above))
+        self.assertEqual(pm.conversation(repo)[-1]["text"], "上面")
+        self.refuse.clear()
+        out = self.hook(pm.cmd_hook_session_start, above)
+        self.assertIn(f"You are {name}", out)
+        self.assertEqual(self.running, {"w1:p0": name})
+
+    def test_hooks_skip_quietly_without_a_folder_or_a_repo(self):
+        repo = self.register(pane="w1:p0")
+        self.running = {"w1:p0": ""}
+        gone = str(Path(tempfile.mkdtemp()) / "removed")  # the session's folder no longer exists
+        event = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "你好", "cwd": gone})
+        self.assertEqual(self.hook(pm.cmd_hook_turn, repo, event), "")
+        path = pm.PMS / f"{pm.project_slug(repo)}.json"
+        rec = json.loads(path.read_text())
+        rec.pop("repo")  # a registration without its repo
+        path.write_text(json.dumps(rec))
+        event = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "你好", "cwd": repo})
+        self.assertEqual(self.hook(pm.cmd_hook_turn, repo, event), "")
+        self.assertEqual(self.hook(pm.cmd_hook_session_start, repo), "")
+        self.assertEqual(pm.conversation(repo), [])
+        self.assertEqual(self.running, {"w1:p0": ""})
+
+    def test_a_reviewer_pane_that_holds_another_agent_now_is_not_closed(self):
+        review = {"id": "t-review", "pane": "w2:p3", "worker_pane": "w2:p3", "agent": "w-review"}
+        for now in ({"w2:p3": "someone-else"}, {}):  # another agent came in; the reviewer exited, a shell is left
+            self.running = {"w1:p0": "pm-x", **now}
+            self.assertEqual(pm.end_worker(review), "")
+            self.assertNotIn(("pane", "close", "w2:p3"), self.herdr_calls)
+        self.running["w2:p3"] = "w-review"
+        self.assertEqual(pm.end_worker(review), "pane w2:p3")
+
+
+class DevMachine(unittest.TestCase):
+    """guard, watch, launch and codex-cmd, merged from an earlier pm.py: there several herdr TUI sessions run
+    at once (default, ci) and repeat pane ids, PMs keep `pm.py watch` running on their inbox, and the PMs' prompts
+    call these commands as they did before the merge."""
+
+    # What earlier PMs, briefs and hub ran with the old pm.py: every line must still parse.
+    OLD_COMMAND_LINES = [
+        "guard --action read", "guard --action coordinate", "guard --action implement",
+        "guard --action read --repo /p", "watch", "watch --pm pm-x --timeout 5 --interval 1 --workspace w1",
+        "launch --resume abc", "launch --repo /p",
+        "codex-cmd --project demo-app --model gpt-6.1-sol --effort high", "codex-cmd --repo /p",
+        "notify --repo /p text", "claim --repo /p --pane w1:p1 --discord-channel 1 --discord-users 2,3",
+        "board", "board --post", "board --channel 1", "status", "status --all", "find --repo /p",
+        "dispatch t --repo /p --branch dev/x --label l --path /w --brief b --name n --base main --prep true "
+        "--kind codex --model m --effort high",
+        "new t --repo /p --status proposed --owner o --workspace w --pane p --agent a --branch b --worktree w "
+        "--base m --brief b --slug s --note n",
+        "update i --title t --status review --owner o --workspace w --pane p --agent a --branch b --worktree w "
+        "--base m --brief b --commit c --release r --note n",
+        "log i text", "show i", "retire i --force", "hook-session-start", "hook-mirror",
+    ]
+
+    def setUp(self):
+        self.saved = (pm.herdr, pm.hc, pm.PANE, pm.WORKSPACE, pm.HERDR_PANE, pm.HC_TERMINAL, pm.subprocess.run,
+                      pm.time.sleep, pm._IDENTITY, pm._SESSION)
+        self.repo = self.folder("proj")  # a plain folder: its own project
+        self.sessions = {"default": "/s/default.sock", "ci": "/s/ci.sock"}
+        # session -> pane -> (workspace, agent name, status); w1:p1 exists in both sessions
+        self.panes = {"default": {"w1:p1": ("w1", "pm-proj", "idle"), "w2:p1": ("w2", "w-a", "working")},
+                      "ci": {"w1:p1": ("w1", "someone", "idle")}}
+        self.socket = "/s/default.sock"  # the session this process inherited
+        self.prompts, self.calls = [], []
+
+        def fake_herdr(*args, session=None):
+            session = session or "default"
+            self.calls.append((session, *args))
+            rows = self.panes.get(session, {})
+            if args[:2] == ("agent", "list"):
+                return {"agents": [{"pane_id": p, "workspace_id": w, "name": n, "agent_status": s}
+                                   for p, (w, n, s) in rows.items() if n]}
+            if args[:2] == ("pane", "list"):
+                return {"panes": [{"pane_id": p, "workspace_id": w, "agent": "claude" if n else None,
+                                   "agent_status": s} for p, (w, n, s) in rows.items()]}
+            if args[:2] == ("workspace", "list"):
+                return {"workspaces": [{"workspace_id": "w1", "label": "proj"}, {"workspace_id": "w2", "label": "x"}]}
+            if args[:2] == ("agent", "prompt"):
+                self.prompts.append((session, args[2], args[3]))
+            return {"ok": True}
+
+        real_run = pm.subprocess.run
+
+        def fake_run(argv, **kw):
+            done = lambda out: subprocess.CompletedProcess(argv, 0, out, "")
+            if argv[:4] == ["herdr", "session", "list", "--json"]:
+                return done(json.dumps({"sessions": [{"name": n, "socket_path": s, "running": True}
+                                                     for n, s in self.sessions.items()]}))
+            if argv[:3] == ["herdr", "status", "server"]:
+                return done(f"status: running\nsocket: {self.socket}\n")
+            if argv[0] == "herdr" and "read" in argv:
+                return done("")
+            if argv[0] in ("herdr", "hc", "herdr-app"):
+                raise AssertionError(f"unexpected command {argv}")
+            return real_run(argv, **kw)  # git
+
+        pm.herdr, pm.subprocess.run = fake_herdr, fake_run
+        pm.hc = lambda *a, **kw: None
+        pm.time.sleep = lambda _: None
+        pm.PANE = pm.HERDR_PANE = "w1:p1"
+        pm.WORKSPACE, pm.HC_TERMINAL, pm._IDENTITY = "w1", "", None
+        env = mock.patch.dict(os.environ, {"HERDR_ENV": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(self.restore)
+        self.register("proj", pane="w1:p1", workspace="w1", session="default")
+
+    def restore(self):
+        (pm.herdr, pm.hc, pm.PANE, pm.WORKSPACE, pm.HERDR_PANE, pm.HC_TERMINAL, pm.subprocess.run, pm.time.sleep,
+         pm._IDENTITY, pm._SESSION) = self.saved
+        for path in list(pm.PMS.glob("*.json")) + list(pm.TASKS.glob("*.json")):
+            path.unlink()
+        for path in pm.INBOX.glob("*") if pm.INBOX.exists() else []:
+            path.unlink()
+        (Path(HOME) / "config.json").unlink(missing_ok=True)
+
+    @staticmethod
+    def folder(name):
+        path = Path(tempfile.mkdtemp()).resolve() / name
+        path.mkdir()
+        return str(path)
+
+    def register(self, slug, repo=None, **fields):
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        rec = {"project": slug, "repo": repo or self.repo, "name": f"pm-{slug}", **fields}
+        (pm.PMS / f"{slug}.json").write_text(json.dumps(rec))  # the folder is named as the project
+        pm._IDENTITY = None
+        return rec
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["pm.py", *argv]), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            try:
+                pm.main()
+                code = 0
+            except SystemExit as stop:
+                code = stop.code
+        pm._IDENTITY = None
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_old_command_lines_still_parse(self):
+        parser = pm.build_parser()
+        for line in self.OLD_COMMAND_LINES:
+            with self.subTest(line=line):
+                parser.parse_args(shlex.split(line))
+
+    def test_guard_names_the_pm_and_refuses_what_its_role_may_not_do(self):
+        code, out, _ = self.run_main("guard", "--action", "coordinate", "--repo", self.repo)
+        self.assertEqual(code, 0)
+        role = json.loads(out)
+        self.assertEqual((role["role"], role["caller"]), ("pm", {"session": "default", "workspace": "w1",
+                                                                 "pane": "w1:p1"}))
+        self.assertEqual(set(role["pm"]), {"name", "repo", "session", "workspace", "pane", "registered", "verified",
+                                           "uncertain"})
+        code, out, err = self.run_main("guard", "--action", "implement", "--repo", self.repo)
+        self.assertEqual((code, out), (2, ""))
+        self.assertTrue(err.startswith("PM identity check failed: PM cannot implement"))
+
+    def test_the_same_pane_id_in_another_session_is_a_worker(self):
+        self.socket = "/s/ci.sock"
+        code, out, _ = self.run_main("guard", "--action", "implement", "--repo", self.repo)
+        role = json.loads(out)
+        self.assertEqual((code, role["role"], role["pm"]["name"], role["pm"]["session"]), (0, "worker", "pm-proj",
+                                                                                         "default"))
+        code, _, err = self.run_main("guard", "--action", "coordinate", "--repo", self.repo)
+        self.assertEqual(code, 2)
+        self.assertIn("only the registered PM may coordinate", err)
+
+    def test_outside_herdr_guard_only_reads(self):
+        pm.PANE = pm.HERDR_PANE = pm.WORKSPACE = ""
+        with mock.patch.dict(os.environ, {"HERDR_ENV": ""}):
+            code, out, _ = self.run_main("guard", "--repo", self.repo)
+            self.assertEqual((code, json.loads(out)["role"]), (0, "observer"))
+            self.assertEqual(self.run_main("guard", "--action", "coordinate")[0], 2)
+
+    def test_a_registration_of_a_session_that_is_gone_is_uncertain(self):
+        self.register("proj", pane="w1:p1", workspace="w1", session="gone")
+        self.panes["default"]["w1:p1"] = ("w1", "", "idle")  # a pm-proj agent here would be a second PM: refused
+        code, out, _ = self.run_main("guard", "--repo", self.repo)
+        self.assertEqual((code, json.loads(out)["role"]), (0, "uncertain"))
+        self.assertEqual(self.run_main("guard", "--action", "implement", "--repo", self.repo)[0], 2)
+
+    def test_desktop_app_and_archived_registrations_do_not_stop_a_tui_guard(self):
+        # Neither carries a herdr workspace; the earlier inventory refused any registration without one.
+        self.register("app", repo=self.folder("app"), pane="hc:t1", workspace="", runtime="hc", terminal="t1")
+        self.register("old", repo=self.folder("old"), pane="w9:p1", archived="2026-11-15")
+        code, out, _ = self.run_main("guard", "--action", "coordinate", "--repo", self.repo)
+        self.assertEqual((code, json.loads(out)["role"]), (0, "pm"))
+
+    def test_guard_in_the_desktop_app_asks_herdr_core(self):
+        repo = self.repo
+        self.register("proj", pane="hc:t1", workspace="", runtime="hc", terminal="t1")
+        pm.hc = lambda *a, **kw: {"state": "live", "labels": {"pm": Path(repo).name}} if a == ("get", "t1") else None
+        pm.HERDR_PANE, pm.WORKSPACE, pm.HC_TERMINAL = "", "", "t1"
+        with mock.patch.dict(os.environ, {"HERDR_ENV": ""}):
+            for pane, role in (("hc:t1", "pm"), ("hc:t2", "worker")):
+                pm.PANE = pane
+                code, out, _ = self.run_main("guard", "--repo", repo)
+                self.assertEqual((code, json.loads(out)["role"], json.loads(out)["pm"]["pane"]), (0, role, "hc:t1"))
+        self.assertFalse([c for c in self.calls if c[1:3] == ("session", "list")])  # no herdr TUI needed
+
+    def test_notify_writes_the_inbox_and_types_only_without_a_watcher(self):
+        pm.PANE = pm.HERDR_PANE = "w2:p1"
+        pm.WORKSPACE = "w2"
+        lock = pm.watch_lock("pm-proj")
+        try:
+            code, out, _ = self.run_main("notify", "--repo", self.repo, "done: dev/x")
+        finally:
+            lock.close()
+        self.assertEqual(code, 0)
+        self.assertIn("pm-proj has a watcher; not typing into its pane", out)
+        self.assertEqual(self.prompts, [])
+        line = pm.inbox_path("pm-proj").read_text()
+        self.assertRegex(line, r"^\[from default/w2:p1 \d\d:\d\d\] done: dev/x\n$")
+        self.run_main("notify", "--repo", self.repo, "again")
+        self.assertEqual(self.prompts, [("default", "w1:p1", "[from default/w2:p1] again")])
+
+    def test_notify_reaches_a_pm_in_another_session(self):
+        self.socket = "/s/ci.sock"
+        self.panes["ci"] = {"w3:p1": ("w3", "w-b", "working")}
+        pm.PANE = pm.HERDR_PANE = "w3:p1"
+        pm.WORKSPACE = "w3"
+        with mock.patch.object(pm, "agents", lambda: []):  # this session has no pm-proj agent
+            self.run_main("notify", "--repo", self.repo, "ready")
+        self.assertEqual(self.prompts, [("default", "w1:p1", "[from ci/w3:p1] ready")])
+
+    def test_notify_from_another_folder_in_the_pms_workspace_reaches_that_pm(self):
+        # A worker in the PM's workspace whose folder is another repository (no PM registered for it).
+        self.panes["default"]["w1:p3"] = ("w1", "w-gukvm", "working")
+        pm.PANE = pm.HERDR_PANE = "w1:p3"
+        code, out, _ = self.run_main("notify", "--repo", self.folder("gukvm"), "merged")
+        self.assertEqual(code, 0)
+        self.assertIn(f"appended to {pm.inbox_path('pm-proj')}", out)
+        self.assertEqual(self.prompts, [("default", "w1:p1", "[from default/w1:p3] merged")])
+        self.prompts.clear()
+        self.socket = "/s/ci.sock"  # the same workspace id in another session is not that PM's
+        self.panes["ci"]["w1:p3"] = ("w1", "w-c", "working")
+        self.assertIn("no PM in herdr", self.run_main("notify", "--repo", self.folder("other"), "x")[1])
+        self.assertEqual(self.prompts, [])
+
+    def watch(self, **kw):
+        a = argparse.Namespace(**{"pm": None, "repo": self.repo, "workspace": None, "timeout": 30, "interval": 0,
+                                  **kw})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                pm.cmd_watch(a)
+            except SystemExit as stop:
+                out.write(f"exit: {stop.code}")
+            finally:
+                pm._IDENTITY = None
+        return out.getvalue()
+
+    def test_watch_wakes_on_an_inbox_line_and_keeps_its_offset(self):
+        pm.append_inbox("pm-proj", "w-old", "before the first watch")
+        offset_file = pm.INBOX / "pm-proj.offset"
+        offset_file.write_text(str(pm.inbox_path("pm-proj").stat().st_size))
+        pm.append_inbox("pm-proj", "w-a", "finished")
+        out = self.watch()
+        self.assertRegex(out, r"^INBOX:\n\[from w-a \d\d:\d\d\] finished\n$")
+        self.assertEqual(offset_file.read_text(), str(pm.inbox_path("pm-proj").stat().st_size))
+        self.assertEqual(self.watch(timeout=0), "watch timeout\n")
+
+    def test_watch_sees_a_worker_this_dispatch_started_finish(self):
+        # This version's dispatch labels the worker's workspace without the pm-<project> prefix: the task names it.
+        pm.save({"id": "proj-x", "title": "x", "project": "proj", "repo": self.repo, "status": "in_progress",
+                 "base": "main", "workspace": "w2", "pane": "w2:p1", "dispatched": True})
+        states = iter(["working", "working", "done"])
+        herdr = pm.herdr
+        pm.identity_inventory()  # read before the worker's state starts to change
+
+        def changing(*args, session=None):
+            if args[:2] == ("pane", "list"):
+                self.panes["default"]["w2:p1"] = ("w2", "w-a", next(states, "done"))
+            return herdr(*args, session=session)
+        pm.herdr = changing
+        self.assertEqual(self.watch(), "w2:p1 working->done\n")
+
+    def test_a_second_watcher_is_refused(self):
+        lock = pm.watch_lock("pm-proj")
+        try:
+            self.assertIn("a watcher for pm-proj is already running", self.watch())
+        finally:
+            lock.close()
+
+    def test_watch_needs_the_pm(self):
+        pm.PANE = pm.HERDR_PANE = "w2:p1"
+        pm.WORKSPACE = "w2"
+        with self.assertRaises(pm.IdentityError):
+            self.watch()
+
+    def test_codex_cmd_prints_what_the_old_one_did(self):
+        self.register("demo-app", repo=self.folder("demo-app"), pane="w5:p1", workspace="w5", session="ci",
+                      codex={"args": ["--no-daemon", "-c", 'model_provider="demo-app"'], "model_prefix": "codex/"})
+        code, out, _ = self.run_main("codex-cmd", "--project", "demo-app", "--model", "gpt-6.1-sol", "--effort", "high")
+        self.assertEqual((code, out), (0, "codex --no-daemon -c 'model_provider=\"demo-app\"' -m codex/gpt-6.1-sol "
+                                          "-c 'model_reasoning_effort=\"high\"'\n"))
+        (Path(HOME) / "config.json").write_text(json.dumps({"codex": {"args": ["-c", 'service_tier="priority"']}}))
+        code, out, _ = self.run_main("codex-cmd", "--project", "proj")  # no codex block of its own
+        self.assertEqual(out, "codex -c 'service_tier=\"priority\"' -m gpt-6-astra -c 'model_reasoning_effort=\"high\"'\n")
+
+    def test_codex_workers_get_the_pms_provider_settings(self):
+        self.register("proj", pane="w1:p1", workspace="w1", session="default",
+                      codex={"args": ["--no-daemon", "-c", 'model_provider="demo-app"'], "model_prefix": "codex/"})
+        a = argparse.Namespace(kind="codex", model="gpt-6.1-sol", effort="high", advisor="", fallback="")
+        argv = pm.worker_argv(a, repo=self.repo)
+        self.assertEqual(argv[:4], ["codex", "--no-daemon", "-c", 'model_provider="demo-app"'])
+        self.assertIn("codex/gpt-6.1-sol", argv)
+        self.assertNotIn("--no-daemon", pm.worker_argv(argparse.Namespace(**{**vars(a), "kind": "claude"}),
+                                                      repo=self.repo))
+
+    def test_launch_is_plain_until_discord_is_switched_on(self):
+        mcp = pm.mcp_config_path(self.repo)
+        mcp.parent.mkdir(parents=True, exist_ok=True)
+        mcp.write_text("{}")  # left by an earlier install
+        try:
+            self.assertEqual(self.run_main("launch", "--repo", self.repo, "--resume", "s1")[1],
+                             "claude --resume s1 <your usual flags>\n")
+            (Path(HOME) / "config.json").write_text(json.dumps({"discord": True}))
+            self.assertEqual(self.run_main("launch", "--repo", self.repo)[1],
+                             f"claude --mcp-config {mcp} --dangerously-load-development-channels server:discord-pm "
+                             "<your usual flags>\n")
+        finally:
+            mcp.unlink()
+
+    def test_without_the_switch_nothing_reaches_discord(self):
+        # Configured by an earlier install, as by an earlier install: a board channel, a bound PM and a token.
+        pm.DISCORD_CFG.write_text(json.dumps({"board_channel": "1"}))
+        self.register("proj", pane="w1:p1", workspace="w1", session="default", discord={"channel_id": "2"})
+        self.addCleanup(pm.DISCORD_CFG.unlink)
+        with mock.patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "x"}), \
+                mock.patch("urllib.request.urlopen", side_effect=AssertionError("network")) as net:
+            pm.save({"id": "proj-y", "title": "y", "project": "proj", "repo": self.repo, "status": "proposed",
+                     "base": "main"})
+            with mock.patch.object(pm, "herdr_session", lambda: "default"), mock.patch.object(pm, "in_tui", lambda: False):
+                for event in ({"hook_event_name": "UserPromptSubmit", "prompt": "你好", "cwd": self.repo},
+                              {"hook_event_name": "Stop", "last_assistant_message": "好的", "cwd": self.repo}):
+                    with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        pm.cmd_hook_turn(None)
+            self.assertEqual(self.run_main("board", "--post")[0], 'Discord is off: set "discord": true in '
+                                                                    'config.json in the ledger home to use it')
+            net.assert_not_called()
+        self.assertEqual([e["type"] for e in pm.conversation(self.repo)][-2:], ["user", "pm"])  # the log still works
+
+    def test_a_registration_from_another_session_is_not_this_sessions_in_hooks(self):
+        with mock.patch.object(pm, "herdr_session", lambda: "ci"):
+            self.assertIsNone(pm.own_pm_record(self.repo))
+        with mock.patch.object(pm, "herdr_session", lambda: "default"):
+            self.assertEqual(pm.own_pm_record(self.repo)["name"], "pm-proj")
+        with mock.patch.object(pm, "herdr_session", lambda: ""):  # unknown: as before
+            self.assertEqual(pm.own_pm_record(self.repo)["name"], "pm-proj")
+
+
+# A stand-in for Windows' msvcrt: byte-range locks that fail at once when another process holds them, as
+# msvcrt.locking(fd, LK_NBLCK, n) does from the file's position. Built on fcntl, which the scripts never see.
+FAKE_MSVCRT = """
+import fcntl as _fcntl, os as _os
+LK_UNLCK, LK_NBLCK = 0, 2
+def locking(fd, mode, n):
+    where = _os.lseek(fd, 0, _os.SEEK_CUR)
+    # Windows locks a read-only handle too; POSIX takes a read lock on one.
+    kind = _fcntl.LOCK_SH if _fcntl.fcntl(fd, _fcntl.F_GETFL) & _os.O_ACCMODE == _os.O_RDONLY else _fcntl.LOCK_EX
+    _fcntl.lockf(fd, _fcntl.LOCK_UN if mode == LK_UNLCK else kind | _fcntl.LOCK_NB, n, where)
+"""
+
+
+class WithoutFcntl(unittest.TestCase):
+    """pm.py where `import fcntl` fails, as on Windows (os.name stays posix: no UTF-8 re-run, POSIX paths)."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        (self.root / "fake").mkdir()
+        (self.root / "fake/msvcrt.py").write_text(FAKE_MSVCRT)
+        self.env = dict(os.environ, PM_HOME=str(self.root / "ledger"), HOME=str(self.root))
+        for key in ("HERDR_PANE_ID", "HC_TERMINAL_ID"):
+            self.env.pop(key, None)
+        # subprocess takes msvcrt's presence for Windows: it is imported, the real way, before the stand-in.
+        self.prelude = (f"import sys, subprocess; sys.path[:0] = [{str(self.root / 'fake')!r}, {str(Path(__file__).parent)!r}]; "
+                        "import msvcrt; sys.modules['fcntl'] = None; ")
+
+    def python(self, code, **kw):
+        return subprocess.Popen([sys.executable, "-c", self.prelude + code], env=self.env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+
+    def test_state_runs(self):
+        script = Path(__file__).parent / "pm.py"
+        proc = self.python(f"import runpy; sys.argv = ['pm.py', 'state']; runpy.run_path({str(script)!r}, run_name='__main__')")
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, err)
+        state = json.loads(out)
+        self.assertEqual((state["pms"], state["tasks"]), ([], []))
+
+    def test_watcher_lock_through_msvcrt(self):
+        holder = self.python("import pm; assert pm.fcntl is None; f = pm.watch_lock('demo'); print('held' if f else 'none', "
+                             "flush=True); sys.stdin.read()", stdin=subprocess.PIPE)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        ask = "import pm; print(pm.watcher_pid('demo')); print('again' if pm.watch_lock('demo') is None else 'took')"
+        out, err = self.python(ask).communicate(timeout=60)
+        self.assertEqual(out.split(), [str(holder.pid), "again"], err)
+        holder.communicate("", timeout=60)
+        out, err = self.python(ask).communicate(timeout=60)
+        self.assertEqual(out.split(), ["None", "took"], err)
+
+
+SPACED = "/Users/Jo Doe/.claude/skills/pm/scripts/pm.py"  # a user name with a space, as on many Windows machines
+
+
+@contextlib.contextmanager
+def as_windows(script=SPACED, py=True, exe=r"C:\Program Files\Python312\python.exe"):
+    """pm.py as it behaves on Windows: WINDOWS, the py launcher (or none, and Python at exe), the script at script."""
+    which = pm.shutil.which
+    with mock.patch.object(pm, "WINDOWS", True), mock.patch.object(pm, "__file__", script), \
+            mock.patch.object(pm.sys, "executable", exe), \
+            mock.patch.object(pm.shutil, "which", lambda name, *a, **kw: (r"C:\Windows\py.exe" if py else None)
+                              if name == "py" else which(name, *a, **kw)):
+        yield
+
+
+class WindowsCommandLines(unittest.TestCase):
+    """The command lines pm.py writes for people and agents, and the processes it starts and stops, on Windows (by
+    WINDOWS) and on macOS and Linux, where they stay exactly as they were."""
+
+    def test_windows_quotes_like_list2cmdline_and_never_with_single_quotes(self):
+        with as_windows():
+            self.assertEqual(pm.shell_quote(pm.PureWindowsPath(r"C:\Users\Jo Doe\.dudu\sent\x.md")),
+                             '"C:/Users/Jo Doe/.dudu/sent/x.md"')            # forward slashes, as setup.py writes
+            self.assertEqual(pm.shell_quote(pm.PureWindowsPath(r"C:\tools\pm.py")), "C:/tools/pm.py")
+            for arg in ("plain", "a b", 'say "hi" now', "C:\\dir with space\\", 'a\\"b c', ""):
+                self.assertEqual(pm.shell_quote(arg), subprocess.list2cmdline([arg]))
+            self.assertEqual(pm.shell_quote("R&D"), '"R&D"')                  # cmd's metacharacters too
+            line = pm.shell_join(["hc", "send", "t5", "[from hc:t7] 看一下 C:/Users/Jo Doe"])
+            self.assertEqual(line, 'hc send t5 "[from hc:t7] 看一下 C:/Users/Jo Doe"')
+            self.assertNotIn("'", line)
+
+    def test_powershell_lines_escape_with_backticks_and_call_a_quoted_program_with_ampersand(self):
+        with as_windows():
+            self.assertEqual(pm.shell_join(["C:/Program Files/codex/codex.exe", "-c", 'model_provider="x"', "-m", "gpt"],
+                                           powershell=True),
+                             '& "C:/Program Files/codex/codex.exe" -c "model_provider=`"x`"" -m gpt')
+            self.assertEqual(pm.shell_join(["codex", "-c", "a=$b"], powershell=True), 'codex -c "a=`$b"')
+
+    def test_pm_command_and_handover_line_on_windows(self):
+        with as_windows(), mock.patch.object(pm, "STATE", Path("/Users/Jo Doe/ledger")):
+            with mock.patch.dict(os.environ, {"PM_HOME": "/Users/Jo Doe/ledger"}):
+                cmd = pm.pm_command()
+            self.assertEqual(cmd, f'py -3 "{SPACED}" --home "/Users/Jo Doe/ledger"')
+            with mock.patch.dict(os.environ):
+                os.environ.pop("PM_HOME")
+                self.assertEqual(pm.pm_command(), f'py -3 "{SPACED}"')
+            self.assertNotIn("'", cmd)
+            self.assertNotIn("PM_HOME=", cmd)                                 # cmd and PowerShell cannot read it
+            self.assertEqual(pm.file_text(pm.PureWindowsPath(r"C:\Users\Jo Doe\.dudu\sent\t.md")),
+                             '"$(cat "C:/Users/Jo Doe/.dudu/sent/t.md")"')
+        with as_windows(py=False):                                            # no py launcher: the interpreter
+            self.assertEqual(pm.pm_script(), f'"C:/Program Files/Python312/python.exe" "{SPACED}"')
+
+    def test_home_option_sets_the_ledger_home(self):
+        home = Path(tempfile.mkdtemp()) / "a ledger"
+        env = {k: v for k, v in os.environ.items() if k not in ("PM_HOME", "HERDR_PANE_ID", "HC_TERMINAL_ID")}
+        env["HOME"] = tempfile.mkdtemp()
+        out = subprocess.run([sys.executable, str(Path(pm.__file__)), "--home", str(home), "new", "home option",
+                              "--repo", tempfile.mkdtemp(), "--slug", "x"], env=env, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(list((home / "tasks").glob("*.json"))), 1)
+
+    def test_posix_lines_are_unchanged(self):
+        script = str(Path(pm.__file__).resolve())
+        self.assertFalse(pm.WINDOWS)
+        self.assertEqual(pm.pm_command(), f"PM_HOME={shlex.quote(str(pm.STATE))} python3 {shlex.quote(script)}")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PM_HOME")
+            self.assertEqual(pm.pm_command(), f"python3 {shlex.quote(script)}")
+        self.assertEqual(pm.pm_script() + " handover", f"python3 {script} handover")
+        sent = Path("/tmp/ledger/sent/x.md")
+        self.assertEqual(pm.file_text(sent), '"$(cat /tmp/ledger/sent/x.md)"')
+        for args in (["claude", "--", "[from pm.py start] 你是 PM"], ["codex", "-c", 'model_provider="x"']):
+            self.assertEqual(pm.shell_join(args), shlex.join(args))
+            self.assertEqual(pm.shell_join(args, powershell=True), shlex.join(args))
+        self.assertEqual(pm.shell_quote("a b"), "'a b'")
+        self.assertEqual(pm.own_group(), {"start_new_session": True})
+        self.assertEqual(pm.own_group(background=True), {"start_new_session": True})
+
+    def test_windows_stops_a_check_with_taskkill_not_killpg(self):
+        class Proc:
+            pid, waited, killed, alive = 4242, False, False, True
+            def poll(self): return None if self.alive else 0
+            def wait(self): self.waited = True
+            def kill(self): self.killed = True
+        proc, ran = Proc(), []
+        def run(argv, **kw):
+            ran.append(argv)
+            proc.alive = False
+        with as_windows(), mock.patch.object(pm.subprocess, "run", run), \
+                mock.patch.object(pm.os, "killpg", side_effect=AssertionError("killpg on Windows"), create=True):
+            pm.stop_group(proc)
+        self.assertEqual(ran, [["taskkill", "/T", "/F", "/PID", "4242"]])
+        self.assertEqual((proc.killed, proc.waited), (False, True))
+        proc, ran = Proc(), []                                     # taskkill missing: the shell itself is killed
+        def missing(argv, **kw):
+            raise FileNotFoundError(argv[0])
+        with as_windows(), mock.patch.object(pm.subprocess, "run", missing):
+            pm.stop_group(proc)
+        self.assertEqual((proc.killed, proc.waited), (True, True))
+
+    def test_windows_starts_checks_and_background_work_in_new_process_groups(self):
+        class Proc:
+            pid, returncode = 7, 0
+            def communicate(self, timeout=None): return "ok", None
+        with as_windows(), mock.patch.object(pm.subprocess, "Popen", return_value=Proc()) as popen:
+            self.assertIsNone(pm.run_checks(tempfile.mkdtemp(), ["true"], 60, []))
+            check = popen.call_args[1]
+            pm.name_later("hc:t7", "pm-x")
+            named = popen.call_args[1]
+            pm.end_retired_later("t7", "t50", False, "claude", True)
+            ended = popen.call_args[1]
+        self.assertNotIn("start_new_session", {**check, **named, **ended})
+        self.assertEqual(check["creationflags"], 0x200)                         # CREATE_NEW_PROCESS_GROUP
+        self.assertEqual(named["creationflags"], 0x200 | 0x08000000)            # and CREATE_NO_WINDOW
+        self.assertEqual(ended["creationflags"], 0x200 | 0x08000000)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, panes, shared, setShared, openOverlay } from 'herdr';
 import { foldReviews, pmRows, splitArchived, archivedDay, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH, focusPlan, opensProject, projectShared } from './model.js';
+import { execPython } from './python.js';
 
 // Like pm-nav, the list reads the ledger through the original pm-dash bundle.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
@@ -77,7 +78,7 @@ export default class PmList extends View {
     this.loading = true;
     cx.spawn(async cx => {
       try {
-        const r = await exec('python3', [appHome() + PM_SCRIPT, 'state']);
+        const r = await execPython(exec, [appHome() + PM_SCRIPT, 'state']);
         if (r.code !== 0) throw new Error(r.stderr || `pm.py: ${r.code}`);
         const state = JSON.parse(r.stdout);
         if (!Array.isArray(state.pms)) throw new Error('state is missing the pms array');

@@ -1325,6 +1325,41 @@ test('hovering the engine label gives the profile, the dispatch reason, escalati
   assert.equal(wasEscalated({}), false);
 });
 
+test('a thread list row carries the label without its advisor, the model alone when narrow, and the same tip', () => {
+  const { engineChip, engineTip } = model;
+  // As `pm.py state` lists them: the worker under `engine`, its escalations and rounds beside it.
+  const hard = { engine: { profile: 'hard', kind: 'claude', model: 'opus', effort: 'xhigh', advisor: 'fable' }, rounds: 1,
+    escalations: [{ from: 'standard', to: 'hard', why: '两轮没过' }], log: [{ text: 'hard：跨文件状态机' }] };
+  assert.deepEqual(engineChip('zh', hard), { label: 'Opus·xhigh', name: 'Opus', advisor: 'Fable', up: true,
+    tip: engineTip('zh', hard) });
+  assert.deepEqual(engineChip('en', { engine: { profile: 'light', kind: 'claude', model: 'sonnet', effort: 'medium', advisor: '' } }),
+    { label: 'Sonnet·medium', name: 'Sonnet', advisor: '', up: false, tip: 'Profile: light' });
+  // No effort given: the default is said, still the model alone when narrow. A review thread's worker is its reviewer.
+  const standard = { engine: { profile: 'standard', kind: 'claude', model: 'opus', effort: '', advisor: '' } };
+  assert.deepEqual([engineChip('zh', standard).label, engineChip('zh', standard).name], ['Opus·默认', 'Opus']);
+  assert.equal(engineChip('en', { engine: { profile: '', kind: 'claude', model: 'fable', effort: '', advisor: '' } }).label, 'Fable·default');
+  assert.equal(engineChip('en', { engine: { kind: 'codex', model: 'gpt-5', effort: 'high', advisor: 'claude-fable-5-2' } }).advisor, 'Fable');
+  // Entered by hand, or from before profiles: nothing.
+  assert.equal(engineChip('zh', { engine: {}, worker: 'working' }), null);
+  assert.equal(engineChip('zh', { id: 'x' }), null);
+});
+
+test('an ended thread off the board is labeled from the state\'s ended_engines', () => {
+  const { engineChip, endedEngine } = model;
+  // As `pm.py state` keeps them for retired tasks (dudu-pm-light-review was escalated once).
+  const marks = { 'dudu-pm-light-review': { profile: 'hard', kind: 'claude', model: 'opus', effort: 'xhigh', advisor: 'fable', escalated: 1 },
+    'dudu-ops-basics': { profile: 'standard', kind: 'claude', model: 'opus' } };
+  assert.deepEqual(engineChip('zh', endedEngine(marks, 'dudu-pm-light-review')),
+    { label: 'Opus·xhigh', name: 'Opus', advisor: 'Fable', up: true, tip: '档位：hard\n升级过 1 次' });
+  assert.equal(engineChip('en', endedEngine(marks, 'dudu-pm-light-review')).tip, 'Profile: hard\nEscalated 1 time');
+  assert.deepEqual(engineChip('zh', endedEngine(marks, 'dudu-ops-basics')),
+    { label: 'Opus·默认', name: 'Opus', advisor: '', up: false, tip: '档位：standard' });
+  // Not kept (an older thread, or a state from before): no label.
+  assert.equal(endedEngine(marks, 'dudu-old'), null);
+  assert.equal(endedEngine(undefined, 'dudu-ops-basics'), null);
+  assert.equal(endedEngine({ toString: 'x' }, 'toString'), null);
+});
+
 test('past six sub-threads the rest fold behind how many more there are', () => {
   const { foldParts, PARTS_LIMIT, word } = model;
   const rows = n => Array.from({ length: n }, (_x, i) => ({ task: `p${i}` }));
@@ -1554,12 +1589,26 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
     .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmProject extends View', 'return class');
   const calls = [];
+  let drafts = null, failSend = false;
   const blank = new Proxy(function () {}, { get: (_, key) => (key === Symbol.toPrimitive ? () => 0 : blank), apply: () => blank });
   const stubs = { View: class {}, projectRef: model.projectRef, machineView: model.machineView, onMachine: model.onMachine,
     remotePmArgv: model.remotePmArgv, sendArgv: model.sendArgv, pmRow: model.pmRow, terminalFor: model.terminalFor,
+    pasteDir: model.pasteDir, uploadSteps: model.uploadSteps, landedPath: model.landedPath, sentFiles: model.sentFiles,
+    heldFiles: model.heldFiles, sentLeftovers: model.sentLeftovers, staleArgv: model.staleArgv, staleFiles: model.staleFiles,
+    localStorage: { getItem: () => drafts }, readDrafts: model.readDrafts,
+    messageText: model.messageText, word: model.word, fileName: model.fileName,
     terminals: () => [{ address: 't73', state: 'live', labels: { pm: 'dudu' } }, { address: 'box/t73', state: 'live', labels: { pm: 'dudu' } }],
     agents: () => [], panes: () => [],
-    exec: async (command, args, options) => { calls.push([command, args, options]); return { code: 0, stdout: '', stderr: '' }; },
+    exec: async (command, args, options) => {
+      calls.push([command, args, options]);
+      const put = args?.indexOf('put') ?? -1;
+      if (failSend && args?.includes('send')) return { code: 1, stdout: '', stderr: 'no terminal' };
+      if (command === 'find') return { code: 0, stdout: '/here/attachments/box/pm-dudu/paste-20261101-101500.png\n/here/attachments/box/pm-dudu/paste-20261116-101500.png\n', stderr: '' };
+      if (put < 0) return { code: 0, stdout: '', stderr: '' };
+      const name = model.fileName(args[args.length - 1]);
+      if (name.startsWith('huge')) return { code: 2, stdout: '{"error":{"message":"too big to send to box (16 MB at most)"}}', stderr: '' };
+      return { code: 0, stdout: `{"bytes":1,"path":"/home/x/.local/state/herdr-core/default/files/t73/${name}"}`, stderr: '' };
+    },
     readTextFile: async (path, options) => { calls.push(['read', path, options]); return null; } };
   const scope = new Proxy(stubs, {
     has: (target, name) => name in target || !(name in globalThis),
@@ -1576,9 +1625,181 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   view.readLog(cx); view.readThread(cx);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.deepEqual(calls[0], ['env', ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 'box/t73', 'hi'], { timeout: 20000 }]);
-  // The log's tail and the thread's file come from that machine (exec / readTextFile `on`).
-  assert.deepEqual(calls.slice(1).map(c => [c[0], c[2]?.on]).sort(), [['read', 'box'], ['sh', 'box']]);
+  // The log's tail and the thread's file come from that machine (exec / readTextFile `on`); the
+  // screenshots pasted for it are kept here, in this computer's ledger home.
+  assert.deepEqual(calls.slice(1).map(c => [c[0], c[2]?.on]).sort(), [['read', 'box'], ['sh', undefined], ['sh', 'box']]);
+  assert.equal(calls.find(c => c[0] === 'sh' && !c[2]?.on)[1].at(-1), '/here/attachments/box/pm-dudu');
   assert.equal(calls.find(c => c[0] === 'read')[1], '/Users/x/.claude/pm/tasks/dudu-a.json');
+  // Files go to that machine first, beside the PM's terminal there, and the message names where they landed.
+  calls.length = 0;
+  const shot = '/here/attachments/box/pm-dudu/paste-20261116-101500.png', doc = '/Users/me/Desktop/a b.txt';
+  const went = await view.deliver('t73', '看图', [shot, doc]);
+  const there = name => `/home/x/.local/state/herdr-core/default/files/t73/${name}`;
+  assert.deepEqual(calls.map(c => c[1]), [model.putArgv('box/t73', shot), model.putArgv('box/t73', doc),
+    model.sendArgv('box/t73', `看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`)]);
+  assert.equal(went, `看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`);
+  // A file that does not go stops the send: nothing reaches the terminal, and the error names the file and machine.
+  calls.length = 0;
+  await assert.rejects(view.deliver('t73', 'x', [shot, '/Users/me/huge.png']),
+    e => e.upload === true && /huge\.png was not copied to box: too big to send to box/.test(e.message));
+  assert.ok(!calls.some(c => c[1].includes('send')));
+  // A name hc put would garble goes as a renamed copy, made in a folder of this send's own that is removed after.
+  calls.length = 0;
+  const zh = '/Users/me/Desktop/设计稿 v2.png';
+  const sentZh = await view.deliver('t73', '', [zh]);
+  const copy = calls.find(c => c[0] === 'sh');
+  assert.match(copy[1][3], /^\/here\/attachments\/box\/pm-dudu\/sending-\d+-\d+$/);
+  assert.equal(copy[1][4], zh);
+  assert.match(model.fileName(copy[1][5]), /^image-\d{8}-\d{6}-1-v2\.png$/);
+  const putZh = calls.find(c => c[1].includes('put'));
+  assert.equal(putZh[1].at(-1), copy[1][5]);
+  assert.ok(calls.some(c => c[0] === 'rm' && c[1].join(' ') === `-rf -- ${copy[1][3]}`), 'the folder of copies is removed');
+  assert.ok(calls.some(c => c[0] === 'find'), 'putting a copy there tidies what is a week old');
+  // The message names the copy where it landed: an ASCII name, no "_" for the characters hc would have dropped.
+  assert.equal(sentZh.split('\n').at(-1), there(model.fileName(copy[1][5])));
+  assert.ok(!sentZh.includes('_'), sentZh);
+  // A send whose second file failed, sent again: the first is not copied again, its landed path is named.
+  calls.length = 0;
+  // (the shot went with the failed send above, so this one, failing the same way, copies only huge.png)
+  await assert.rejects(view.deliver('t73', 'x', [shot, '/Users/me/huge.png']), e => e.upload === true);
+  assert.deepEqual(calls.filter(c => c[1].includes('put')).map(c => c[1].at(-1)), ['/Users/me/huge.png']);
+  calls.length = 0;
+  const retried = await view.deliver('t73', 'x', [shot, '/Users/me/ok.png']);
+  assert.deepEqual(calls.map(c => c[1]), [model.putArgv('box/t73', '/Users/me/ok.png'),
+    model.sendArgv('box/t73', `x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`)]);
+  assert.equal(retried, `x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`);
+  // The same when the files all went and the message itself did not: sent again, only the message goes.
+  failSend = true;
+  await assert.rejects(view.deliver('t73', 'y', [shot]));
+  failSend = false;
+  calls.length = 0;
+  await view.deliver('t73', 'y', [shot]);
+  assert.deepEqual(calls.map(c => c[1]), [model.sendArgv('box/t73', `y\n\n${there('paste-20261116-101500.png')}`)]);
+  // Once it went, the next send of that file copies it again (nothing is remembered past a send).
+  calls.length = 0;
+  await view.deliver('t73', 'y', [shot]);
+  assert.equal(calls.filter(c => c[1].includes('put')).length, 1);
+  // After a send went, its pasted screenshots are removed here; the person's own files and held ones are not.
+  calls.length = 0;
+  const shot2 = '/here/attachments/box/pm-dudu/paste-20261116-101600.png';
+  drafts = JSON.stringify({ 'thread:box/dudu-a': { text: '', at: Date.now(), files: [shot2] } });
+  view.pending = [{ id: 7, files: [shot] }];
+  view.cleanSent([shot, doc, shot2], 7);
+  assert.deepEqual(calls.map(c => c[1]), [['-f', '--', shot]]);
+  // The week-old ones go when a screenshot is pasted, except what a box still holds.
+  calls.length = 0;
+  drafts = JSON.stringify({ 'pm:box/pm-dudu': { text: '', at: Date.now(), files: ['/here/attachments/box/pm-dudu/paste-20261116-101500.png'] } });
+  view.prune();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(calls.map(c => [c[0], c[1]]), [['find', ['/here/attachments', '-mindepth', '3', '-mmin', '+10080']],
+    ['rm', ['-rf', '--', '/here/attachments/box/pm-dudu/paste-20261101-101500.png']]]);
+  view.pending = [];
+  drafts = null;
+  // A local project's files go as they are: no copy, the message names them here.
+  calls.length = 0;
+  await Object.assign(Object.create(Mod.prototype), { machine: '' }).deliver('t73', '看图', [shot]);
+  assert.deepEqual(calls.map(c => c[1]), [model.sendArgv('t73', `看图\n\n${shot}`)]);
   // Before that machine's ledger is read, the view has no project from another one's state.
   assert.equal(Object.assign(view, { stateFor: '' }).pm(), null);
+});
+
+test('a message to a project on another machine first copies each file beside its terminal there, then names where it landed', () => {
+  const { uploadSteps, putArgv, landedPath, sentFiles, messageText, splitMessage, sameMessage, pasteDir } = model;
+  const shot = '/Users/me/.claude/pm/attachments/dev/dudu/paste-20261116-101500.png', doc = '/Users/me/Desktop/my notes.txt';
+  // One `hc put` per file, each once, to the terminal as "<machine>/<address>", never through the shell.
+  const steps = uploadSteps([shot, doc, shot], 't7p', 'dev');
+  assert.deepEqual(steps, [
+    { path: shot, key: `dev/t7p\n${shot}`, argv: ['-u', 'HC_TERMINAL_ID', 'hc', 'put', '--json', '--', 'dev/t7p', shot] },
+    { path: doc, key: `dev/t7p\n${doc}`, argv: ['-u', 'HC_TERMINAL_ID', 'hc', 'put', '--json', '--', 'dev/t7p', doc] },
+  ]);
+  assert.deepEqual(putArgv('dev/t1', '-x.png').slice(-3), ['--', 'dev/t1', '-x.png']);
+  // A project here sends its files as they are: nothing to copy.
+  assert.deepEqual(uploadSteps([shot], 't7p', ''), []);
+  assert.deepEqual(uploadSteps([], 't7p', 'dev'), []);
+  // What hc put printed is where the file is on that machine (hc's real output, from a run against a second core).
+  const there = '/home/me/.local/state/herdr-core/default/files/t7p/paste-20261116-101500.png';
+  const there2 = '/home/me/.local/state/herdr-core/default/files/t7p/my_notes.txt';
+  assert.equal(landedPath({ code: 0, stdout: `{"bytes":12,"path":"${there}"}\n`, stderr: '' }), there);
+  // A failure throws hc's own words, so the bubble can say why.
+  assert.throws(() => landedPath({ code: 2, stdout: '{"error":{"hint":"see `hc schema`","kind":"invalid_params","message":"too big to send to dev (16 MB at most)"}}', stderr: '' }),
+    /too big to send to dev \(16 MB at most\)/);
+  assert.throws(() => landedPath({ code: 3, stdout: '', stderr: '{"error":{"kind":"not_found","message":"no terminal \\"t9\\""}}' }), /no terminal "t9"/);
+  assert.throws(() => landedPath({ code: 255, stdout: '', stderr: 'ssh: connect to host dev: Connection refused' }), /Connection refused/);
+  assert.throws(() => landedPath({ code: 0, stdout: 'ok', stderr: '' }), /ok/);
+  assert.throws(() => landedPath({ code: 0, stdout: '{"path":"relative.png"}', stderr: '' }));
+  // The message names the remote paths, in the order the files were attached; the bubble (local paths) settles on its log line.
+  const landed = new Map([[shot, there], [doc, there2]]);
+  assert.deepEqual(sentFiles([shot, doc], landed), [there, there2]);
+  assert.deepEqual(sentFiles([shot, doc], new Map([[shot, there]])), [there, doc]);
+  const sent = messageText('看这张', sentFiles([shot, doc], landed));
+  assert.equal(sent, `看这张\n\n${there}\n${there2}`);
+  assert.deepEqual(splitMessage(sent), { text: '看这张', files: [there, there2] });
+  assert.ok(sameMessage(sent, messageText('看这张', [shot, doc])));
+  assert.deepEqual(settlePending([{ id: 1, text: messageText('看这张', [shot, doc]), sentAt: model.eventTime('2026-11-16 10:15:00') }],
+    [{ at: '2026-11-16 10:15:02', type: 'user', text: sent }]), []);
+  assert.equal(messageText('', sentFiles([shot], landed), '附件：'), `附件：\n${there}`);
+  // A pasted screenshot of a remote project waits in this computer's ledger home; a local one beside its log.
+  assert.equal(pasteDir(null, { machine: 'dev', name: 'dudu', home: '/Users/me/.claude/pm' }), '/Users/me/.claude/pm/attachments/dev/dudu');
+  assert.equal(pasteDir(null, { machine: 'dev', name: 'dudu', home: '' }), '');
+  assert.equal(pasteDir({ conversation: '/Users/me/.claude/pm/projects/dudu/conversation.jsonl' }, { home: '/x' }), '/Users/me/.claude/pm/projects/dudu/attachments');
+  // A send whose file did not go is a failed bubble that says so in words (upload), unlike any other failure.
+  const items = timeline([], [], { pending: [{ id: 2, text: messageText('看', [shot]), sentAt: 0, failed: 'paste.png 没传到 dev：x', upload: true },
+    { id: 3, text: 'hi', sentAt: 0, failed: 'hc send: 1' }, { id: 4, text: 'yo', sentAt: 0, upload: true }] });
+  const users = items.filter(i => i.kind === 'user');
+  assert.deepEqual(users.map(u => Boolean(u.upload)), [true, false, false]);
+  assert.equal(model.word('zh', 'uploadFailed', 'a.png', 'dev', 'too big'), 'a.png 没传到 dev：too big');
+  assert.match(model.word('zh', 'remoteAttach', 'dev'), /传到 dev/);
+});
+
+test("a file whose name hc put would garble goes to another machine as a renamed copy, named so in the message", () => {
+  const { uploadName, uploadSteps, putArgv, uploadKey } = model;
+  const at = new Date(2026, 10, 16, 22, 15, 14);
+  // hc put makes each non-ASCII character "_": 设计稿 v2.png landed as ____v2.png. A readable ASCII name instead.
+  assert.equal(uploadName('设计稿 v2.png', at), 'image-20261116-221514-1-v2.png');
+  assert.equal(uploadName('截图.PNG', at, 3), 'image-20261116-221514-3.PNG');
+  assert.equal(uploadName('会议纪要.pdf', at, 2), 'file-20261116-221514-2.pdf');
+  assert.equal(uploadName('说明', at), 'file-20261116-221514-1');
+  assert.equal(uploadName('报告.文档', at), 'file-20261116-221514-1');
+  assert.equal(uploadName('Café menu 2.jpg', at), 'image-20261116-221514-1-Caf-menu-2.jpg');
+  // An ASCII name goes as it is (hc's own "_" for a space is still readable).
+  assert.equal(uploadName('my notes.txt', at), '');
+  assert.equal(uploadName('paste-20261116-221514.png', at), '');
+  const stage = '/here/attachments/dev/dudu/sending-1-1';
+  const zh = '/Users/me/Desktop/设计稿 v2.png', zh2 = '/Users/me/Desktop/图.jpg', plain = '/Users/me/Desktop/a b.txt';
+  const steps = uploadSteps([zh, plain, zh2], 't7p', 'dev', { stage, at });
+  assert.deepEqual(steps.map(s => [s.path, s.copy || '', s.argv.at(-1)]), [
+    [zh, `${stage}/image-20261116-221514-1-v2.png`, `${stage}/image-20261116-221514-1-v2.png`],
+    [plain, '', plain],
+    [zh2, `${stage}/image-20261116-221514-2.jpg`, `${stage}/image-20261116-221514-2.jpg`],
+  ]);
+  assert.deepEqual(steps[0].argv, putArgv('dev/t7p', `${stage}/image-20261116-221514-1-v2.png`));
+  // Without a folder to copy into, the file goes as it is (its name garbled, but it goes).
+  assert.equal(uploadSteps([zh], 't7p', 'dev', { at }).at(0).argv.at(-1), zh);
+  // A file already copied there by an earlier try of the same send is not copied again: its landed path is used.
+  const there = '/home/me/.local/state/herdr-core/default/files/t7p/image-20261116-221514-1-v2.png';
+  const uploaded = new Map([[uploadKey('t7p', 'dev', zh), there]]);
+  const again = uploadSteps([zh, zh2], 't7p', 'dev', { stage, at, uploaded });
+  assert.deepEqual(again[0], { path: zh, key: uploadKey('t7p', 'dev', zh), landed: there });
+  assert.equal(again[1].copy, `${stage}/image-20261116-221514-1.jpg`);
+  // Keyed by the terminal there: another terminal, or the same address on another machine, gets its own copy.
+  assert.ok(uploadSteps([zh], 't9', 'dev', { stage, at, uploaded })[0].argv);
+  assert.ok(uploadSteps([zh], 't7p', 'box', { stage, at, uploaded })[0].argv);
+});
+
+test("what waits here for another machine goes once sent, or after a week, unless a box or a bubble still holds it", () => {
+  const { heldFiles, sentLeftovers, staleArgv, staleFiles, STALE_MINUTES } = model;
+  const dir = '/here/attachments/dev/dudu', shot = `${dir}/paste-20261116-101500.png`, shot2 = `${dir}/paste-20261116-101600.png`;
+  const mine = '/Users/me/Desktop/a.png';
+  const drafts = { 'pm:dev/pm-dudu': { text: '', at: 1, files: [shot2] }, 'thread:x': { text: 'hi', at: 2 } };
+  const held = heldFiles(drafts, [{ id: 1, files: [mine] }, { id: 2 }]);
+  assert.deepEqual([...held].sort(), [mine, shot2].sort());
+  // Sent: the pasted screenshots in the paste folder go; the person's own files never; nor what is still held.
+  assert.deepEqual(sentLeftovers([shot, mine, shot2], dir, held), [shot]);
+  assert.deepEqual(sentLeftovers([shot], '', held), []);
+  assert.deepEqual(sentLeftovers([`${dir}x/paste.png`], dir), []);
+  // A week: what find lists under <home>/attachments, past the machine and project folders.
+  assert.equal(STALE_MINUTES, 10080);
+  assert.deepEqual(staleArgv('/here'), ['find', '/here/attachments', '-mindepth', '3', '-mmin', '+10080']);
+  assert.deepEqual(staleFiles(`${shot}\n${shot2}\n${dir}/sending-1-1\n\nfind: x: No such file\n`, held), [shot, `${dir}/sending-1-1`]);
+  assert.deepEqual(staleFiles(''), []);
 });

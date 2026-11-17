@@ -34,7 +34,11 @@ test('setup is ready when one agent is complete and no installed copy is outdate
 });
 
 // Exercise async setup/IO decisions without starting Herdr or executing Python.
+// python.js stands in as the Python found being python3 (its own tests are below).
+const PYTHON3 = { execPython: (run, args, options) => run('python3', args, options), NO_PYTHON: 'no-python',
+  appWindow: () => ({ platform: 'macos' }) };
 function modWithIO(file, bindings) {
+  bindings = { ...PYTHON3, ...bindings };
   const source = readFileSync(new URL(file, import.meta.url), 'utf8')
     .replace(/^import .*;$/gm, '').replace('export default class ', 'return class ');
   const Mod = new Function('View', ...Object.keys(bindings), source)(class {}, ...Object.values(bindings));
@@ -1221,4 +1225,126 @@ test('an opened ended list groups by day: today, yesterday, then each date, the 
   const rows = layout(input, 980, 640, 1, false, { open: ['pm-a'], today: '2026-11-15' }).rows;
   assert.deepEqual(rows.filter(r => r.type === 'day' || r.entry).map(r => r.entry ? `${r.task} ${r.time}` : r.title),
     ['今天', 'a 00:54', 'b 00:10', '昨天 · 11-14', 'c 22:29', '11-13', 'd 09:46', '10-31', 'e 23:44', '更早', 'f ']);
+});
+
+// ---- Finding Python (python.js) ----------------------------------------------
+import * as py from './python.js';
+
+// A machine as exec sees it: programs[name](args) gives a result; a missing name rejects as exec does.
+const fakeMachine = programs => {
+  const calls = [];
+  const run = async (command, args, options) => {
+    calls.push([command, ...args]);
+    if (!programs[command]) throw new Error(`${command}: not found`);
+    return programs[command](args, options);
+  };
+  return { run, calls };
+};
+const realPython = (major, minor, executable) => args =>
+  args.includes(py.PYTHON_PROBE) ? { code: 0, stdout: `pm-python ${major} ${minor} ${executable}\n`, stderr: '' }
+    : { code: 0, stdout: `ran ${args.join(' ')}`, stderr: '' };
+// Windows' python/python3 app execution aliases when no Python is installed.
+const storeStub = () => ({ code: 9009, stdout: '',
+  stderr: 'Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Apps > Advanced app settings > App execution aliases.\r\n' });
+
+test('findPython skips the Microsoft Store stubs and finds nothing on a machine with only them', async () => {
+  const m = fakeMachine({ python3: storeStub, python: storeStub });
+  assert.equal(await py.findPython(m.run), null);
+  assert.deepEqual(m.calls.map(c => c[0]), ['python3', 'py', 'python']); // py absent: asked, rejected, skipped
+});
+
+test('findPython takes py -3 when the launcher is the only Python', async () => {
+  const m = fakeMachine({ python3: storeStub, python: storeStub, py: realPython(3, 12, 'C:\\Python312\\python.exe') });
+  assert.deepEqual(await py.findPython(m.run),
+    { command: 'py', args: ['-3'], version: [3, 12], executable: 'C:\\Python312\\python.exe' });
+  assert.deepEqual(m.calls[1], ['py', '-3', '-c', py.PYTHON_PROBE]);
+});
+
+test('findPython takes python3 first, as macOS and Linux always did', async () => {
+  const m = fakeMachine({ python3: realPython(3, 9, '/usr/bin/python3'), py: realPython(3, 12, 'x'), python: realPython(3, 12, 'y') });
+  assert.equal((await py.findPython(m.run)).command, 'python3');
+  assert.equal(m.calls.length, 1);
+});
+
+test('findPython finds nothing when no candidate exists, and passes over a Python older than 3.8', async () => {
+  assert.equal(await py.findPython(fakeMachine({}).run), null);
+  const old = fakeMachine({ python3: realPython(3, 6, '/usr/bin/python3'), python: realPython(3, 11, 'C:/P/python.exe') });
+  assert.equal((await py.findPython(old.run)).command, 'python');
+  assert.ok(py.recentEnough([3, 8]) && py.recentEnough([4, 0]) && !py.recentEnough([3, 7]) && !py.recentEnough([2, 7]));
+  // A program that prints something else, or a stub that exits 0, is not taken for Python.
+  assert.equal(py.probeAnswer({ code: 0, stdout: 'Python was not found', stderr: '' }), null);
+});
+
+test('execPython runs the script with the Python found, and says no-python when there is none', async () => {
+  py.forgetPython();
+  const none = fakeMachine({ python3: storeStub });
+  await assert.rejects(py.execPython(none.run, ['pm.py', 'state']), { message: py.NO_PYTHON });
+  // A miss is not remembered: Python installed (and Herdr restarted) is found on the next call.
+  const later = fakeMachine({ py: realPython(3, 13, 'C:/py.exe') });
+  assert.equal((await py.execPython(later.run, ['pm.py', 'state'])).stdout, 'ran -3 pm.py state');
+  assert.deepEqual(later.calls.at(-1), ['py', '-3', 'pm.py', 'state']);
+  // A hit is: no second probe.
+  const asked = later.calls.length;
+  await py.execPython(later.run, ['pm.py', 'state']);
+  assert.deepEqual(later.calls.slice(asked), [['py', '-3', 'pm.py', 'state']]);
+  py.forgetPython();
+});
+
+test("findPython finds this machine's python3 through a real exec", async () => {
+  const run = async (command, args) => {
+    try { return { code: 0, stdout: execFileSync(command, args, { encoding: 'utf8' }), stderr: '' }; }
+    catch (e) { if (e.code === 'ENOENT') throw e; return { code: e.status ?? 1, stdout: String(e.stdout || ''), stderr: String(e.stderr || '') }; }
+  };
+  const found = await py.findPython(run);
+  assert.equal(found.command, 'python3');
+  assert.ok(py.recentEnough(found.version) && found.executable);
+});
+
+test('every mod that runs pm.py carries the same python.js, and the card explains a missing Python', () => {
+  const here = dirname(new URL(import.meta.url).pathname);
+  const source = readFileSync(join(here, 'python.js'), 'utf8');
+  for (const mod of ['pm-nav', 'pm-list', 'pm-project']) assert.equal(readFileSync(join(here, '..', mod, 'python.js'), 'utf8'), source, mod);
+  // No mod runs python3 by name on this machine any more (another machine's shell lines still may).
+  for (const mod of ['pm-dash', 'pm-nav', 'pm-list', 'pm-project']) {
+    for (const file of readdirSync(join(here, '..', mod)).filter(f => f.endsWith('.js'))) {
+      assert.doesNotMatch(readFileSync(join(here, '..', mod, file), 'utf8'), /exec\(\s*['"]python/, `${mod}/${file}`);
+    }
+  }
+  for (const lang of ['en', 'zh']) {
+    for (const key of ['noPython', 'noPythonWindows']) {
+      assert.match(word(lang, key), /Python 3/);
+      assert.doesNotMatch(word(lang, key), /Microsoft Store|ms-windows-store/);
+    }
+    assert.match(word(lang, 'noPythonWindows'), /winget install Python\.Python\.3\.12/);
+    assert.match(word(lang, 'noPythonWindows'), /python\.org/);
+    assert.match(word(lang, 'noPythonWindows'), new RegExp(word(lang, 'setup')));
+  }
+});
+
+test('without Python the setup card asks for one instead of showing the Store message, and Set up asks again', async () => {
+  let found = false;
+  const calls = [];
+  const board = modWithIO('./main.js', {
+    appHome: () => '/app home', home: () => '/test home', setupState, word, run: () => {}, exec: null,
+    execPython: async (_run, args) => {
+      calls.push(args);
+      if (!found) throw new Error('no-python');
+      return { code: 0, stdout: JSON.stringify(setupSummary(['claude'], ['claude'])) };
+    },
+  });
+  board.state = { lang: 'zh' };
+  board.refresh = () => {};
+  await board.checkSetup();
+  assert.equal(board.setupStatus, 'missing');
+  assert.equal(board.noPython, true);
+  assert.equal(board.setupError, '');
+  const { cx, drain } = asyncContext();
+  board.setUp(cx); await drain();
+  assert.equal(board.noPython, true);
+  assert.equal(board.setupError, '');
+  found = true; // installed, Herdr restarted: the next Set up finds it
+  board.setUp(cx); await drain();
+  assert.equal(board.noPython, false);
+  assert.equal(board.setupStatus, 'ready');
+  assert.equal(board.setupDone, true);
 });

@@ -1,4 +1,7 @@
+import argparse
+import contextlib
 import copy
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -6,7 +9,9 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import sys
 import unittest
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -617,6 +622,79 @@ class InstallTest(unittest.TestCase):
         self.assertNotIn("hook-turn", self.settings.read_text())
         result = self.run_setup("--agents", "claude,gemini", success=False)
         self.assertIn("choose from claude, codex, pi", result.stderr)
+
+
+def load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class WindowsHookTest(unittest.TestCase):
+    """setup.py as it runs on Windows (WINDOWS forced on; the paths are this machine's). Not run on Windows."""
+    PYTHON = r"C:\Users\Ann Lee\AppData\Local\Programs\Python\Python312\python.exe"
+
+    def setUp(self):
+        self.setup = load_module("pm_setup_under_test", BUNDLE / "setup.py")
+        self.pm = load_module("pm_under_test", BUNDLE / "skill/scripts/pm.py")
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.claude = Path(temp.name) / "claude home"
+        self.claude.mkdir()
+
+    def windows(self, py):
+        """Patch both scripts as on Windows: py is the launcher's path, or None when it is not installed."""
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(self.setup, "WINDOWS", True))
+        stack.enter_context(mock.patch.object(self.pm, "WINDOWS", True))
+        stack.enter_context(mock.patch.object(shutil, "which", lambda name: py if name == "py" else None))
+        stack.enter_context(mock.patch.object(sys, "executable", self.PYTHON))
+        self.addCleanup(stack.close)
+
+    def install(self):
+        args = argparse.Namespace(dry_run=False, uninstall=False, agents=["claude"], claude_home=str(self.claude),
+                                  codex_home=None, pi_home=None)
+        setup = self.setup.Setup(args)
+        setup.prepare()
+        setup.save_settings()
+        return [hook["command"] for entries in json.loads((self.claude / "settings.json").read_text())["hooks"].values()
+                for entry in entries for hook in entry["hooks"]]
+
+    def test_python_command(self):
+        self.assertEqual(self.setup.python_command(), "python3")  # macOS and Linux: as before
+        self.windows(r"C:\Windows\py.exe")
+        self.assertEqual(self.setup.python_command(), "py -3")
+        self.assertEqual(self.pm.python_command(), "py -3")
+
+    def test_python_command_without_launcher_is_the_quoted_interpreter(self):
+        self.windows(None)
+        quoted = '"C:/Users/Ann Lee/AppData/Local/Programs/Python/Python312/python.exe"'
+        self.assertEqual(self.setup.python_command(), quoted)
+        self.assertEqual(self.pm.python_command(), quoted)
+        with mock.patch.object(sys, "executable", r"C:\Python312\python.exe"):
+            self.assertEqual(self.setup.python_command(), "C:/Python312/python.exe")
+
+    def test_hooks_name_the_launcher_and_an_absolute_script(self):
+        self.windows(r"C:\Windows\py.exe")
+        script = self.setup.PureWindowsPath(self.claude / "skills/pm/scripts/pm.py").as_posix()
+        self.assertEqual(sorted(self.install()), sorted(f'py -3 "{script}" {action}'
+                                                        for _, action, _ in self.setup.HOOKS))
+        self.assertEqual(self.setup.Agent("claude", r"C:\Users\Ann\.claude").script_command.count("\\"), 0)
+
+    def test_hooks_without_launcher_and_a_later_launcher_replaces_them(self):
+        self.windows(None)
+        first = self.install()
+        self.assertTrue(all(c.startswith('"C:/Users/Ann Lee/') for c in first), first)
+        self.assertEqual(len(first), 3)
+        self.windows(r"C:\Windows\py.exe")
+        second = self.install()
+        self.assertEqual(len(second), 3, second)  # replaced, not added next to the old ones
+        self.assertTrue(all(c.startswith("py -3 ") for c in second), second)
+
+    def test_windows_path_forms(self):
+        self.assertEqual(self.setup.PureWindowsPath(r"C:\Users\Ann\.claude\skills\pm\scripts\pm.py").as_posix(),
+                         "C:/Users/Ann/.claude/skills/pm/scripts/pm.py")
 
 
 if __name__ == "__main__":

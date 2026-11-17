@@ -5,7 +5,7 @@ import copy
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shlex
 import shutil
 import sys
@@ -22,6 +22,18 @@ AGENTS = {
 # hand-over reminder; what UserPromptSubmit prints is added to the session's context, so it stays synchronous.
 HOOKS = [("SessionStart", "hook-session-start", 10), ("UserPromptSubmit", "hook-turn", 15), ("Stop", "hook-turn", 15)]
 SCRIPT = "skills/pm/scripts/pm.py"
+WINDOWS = os.name == "nt"
+
+
+def python_command():
+    """How a command line names a Python 3 that runs pm.py (a copy of pm.py's): python3 on macOS and Linux; on
+    Windows the py launcher, else the Python running this setup (python3 there may be the Microsoft Store stub)."""
+    if not WINDOWS:
+        return "python3"
+    if shutil.which("py"):
+        return "py -3"
+    exe = PureWindowsPath(sys.executable).as_posix()
+    return f'"{exe}"' if " " in exe else exe
 
 
 def write_json(path, value):
@@ -98,8 +110,13 @@ class Agent:
         self.hooks_path = self.home / hooks_file if hooks_file else None
         script = self.skill / "scripts/pm.py"
         # Hook commands run through a shell; the default home is written as ~/... like the docs show it.
-        self.script_command = (f"~/{script.relative_to(Path.home())}" if self.home == default
-                               else shlex.quote(str(script)))
+        # Windows: the shell may be cmd, PowerShell or Git Bash, and only an absolute path in double quotes
+        # reads the same in all three; forward slashes, so Git Bash keeps them.
+        if WINDOWS:
+            self.script_command = f'"{PureWindowsPath(script).as_posix()}"'
+        else:
+            self.script_command = (f"~/{script.relative_to(Path.home())}" if self.home == default
+                                   else shlex.quote(str(script)))
         self.hooks = self.original = None
 
     @property
@@ -107,7 +124,7 @@ class Agent:
         return self.home.is_dir()
 
     def command(self, action):
-        return f"python3 {self.script_command} {action}"
+        return f"{python_command()} {self.script_command} {action}"
 
     def read_hooks(self):
         path = self.hooks_path
@@ -139,6 +156,11 @@ class Agent:
         else:
             # `hook-mirror` was the turn hook's earlier name; `hook-turn` replaces it.
             strip_hooks(value, lambda command: SCRIPT in command and command.split()[-1:] == ["hook-mirror"])
+            if WINDOWS:
+                # The Python found may differ from the last setup's (py installed since): replace, not add.
+                current = {self.command(action): action for _, action, _ in HOOKS}
+                strip_hooks(value, lambda command: SCRIPT in command and command not in current
+                            and command.split()[-1:] in ([action] for action in current.values()))
             hooks = value.setdefault("hooks", {})
             for event, action, timeout in HOOKS:
                 entries = hooks.setdefault(event, [])
@@ -240,7 +262,7 @@ class Setup:
         names = ", ".join(agent.label for agent in self.agents)
         first = self.agents[0]
         print(f'Next, start {names} in your project inside Herdr and say "act as PM for this project",')
-        print(f"or start a PM from a terminal: python3 {first.script_command} start --repo <project> --kind {first.name}")
+        print(f"or start a PM from a terminal: {python_command()} {first.script_command} start --repo <project> --kind {first.name}")
         if any(agent.name == "codex" for agent in self.agents):
             print("Codex runs these hooks once you trust them (it asks at its next start) and while `hooks` is on "
                   "under [features] in ~/.codex/config.toml (the default; check with `codex features list`).")

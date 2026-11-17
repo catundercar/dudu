@@ -1,10 +1,11 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
-import { theme, home, appHome, exec, readTextFile, watchFolder, terminals, agents, panes, run, props, closeOverlay, openOverlay, layout as desktopLayout } from 'herdr';
+import { theme, home, appHome, exec, readTextFile, window as appWindow, watchFolder, terminals, agents, panes, run, props, closeOverlay, openOverlay, layout as desktopLayout } from 'herdr';
 import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime } from './model.js';
 import { page, pageView, pageHeader, projectHeader, keepPress, dialogView, initDialog, restoreProject, readLines, archivePopup, NEW_DIALOG, openProject, showPage } from './projects.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
+import { execPython, NO_PYTHON } from './python.js';
 
 // Keep the full mods/<name>/ prefix: Herdr rewrites it when cloning this mod.
 const MOD_FOLDER = 'mods/pm-dash/';
@@ -31,7 +32,7 @@ export default class PmDash extends View {
     this.endedOpen = new Set(); this.showDropped = new Set(); this.hoverEnded = null;
     // The page's keyboard, for Esc: taken each time the stage turns to this page, and on a click in it.
     this.keys = cx.focus_handle(); this.onStage = false;
-    this.setupStatus = null; this.setupError = ''; this.setupBusy = false; this.setupDone = false;
+    this.setupStatus = null; this.setupError = ''; this.setupBusy = false; this.setupDone = false; this.noPython = false;
     this.localState = this.state; this.remoteStates = {};
     this.primed = false; this.size = { width: 980, height: 640 };
     this.queue = []; this.recent = []; this.replayIndex = 0; this.auto = false;
@@ -104,24 +105,32 @@ export default class PmDash extends View {
   }
   async checkSetup() {
     try {
-      const result = await exec('python3', [appHome() + '/' + MOD_FOLDER + 'setup.py', '--status', '--claude-home', home() + '/.claude']);
+      const result = await execPython(exec, [appHome() + '/' + MOD_FOLDER + 'setup.py', '--status', '--claude-home', home() + '/.claude']);
+      this.noPython = false;
       if (result.code !== 0) throw new Error(result.stderr || result.stdout || `setup.py: ${result.code}`);
       const status = JSON.parse(result.stdout);
       this.setupStatus = setupState(status); this.setupError = status.error || '';
-    } catch (error) { this.setupStatus = 'missing'; this.setupError = String(error); }
+    } catch (error) {
+      this.setupStatus = 'missing';
+      // No Python to run setup.py: the card says how to get one instead of an error.
+      this.noPython = error?.message === NO_PYTHON; this.setupError = this.noPython ? '' : String(error);
+    }
   }
   setUp(cx) {
     if (this.setupBusy) return;
     this.setupBusy = true; this.setupError = ''; this.setupDone = false; cx.notify();
     cx.spawn(async cx => {
       try {
-        const result = await exec('python3', [appHome() + '/' + MOD_FOLDER + 'setup.py', '--claude-home', home() + '/.claude']);
+        const result = await execPython(exec, [appHome() + '/' + MOD_FOLDER + 'setup.py', '--claude-home', home() + '/.claude']);
+        this.noPython = false;
         if (result.code !== 0) throw new Error(result.stderr || result.stdout || `setup.py: ${result.code}`);
         await this.checkSetup();
         this.setupDone = this.setupStatus === 'ready';
-        if (!this.setupDone && !this.setupError) this.setupError = this.text('setupIncomplete');
+        if (!this.setupDone && !this.setupError && !this.noPython) this.setupError = this.text('setupIncomplete');
         if (this.setupDone) this.refresh(cx);
-      } catch (error) { this.setupError = String(error); }
+      } catch (error) {
+        this.noPython = error?.message === NO_PYTHON; this.setupError = this.noPython ? '' : String(error);
+      }
       finally { this.setupBusy = false; run('pm-nav.setup-changed'); cx.notify(); }
     });
   }
@@ -138,7 +147,8 @@ export default class PmDash extends View {
       .child(div().text_size(22).font_semibold().child(this.text('setupTitle')));
     if (this.setupStatus === null) block.child(div().text_color(t.muted).child(this.text('checkingSetup')));
     else {
-      block.child(div().w_full().whitespace_normal().line_height('20px').text_color(t.muted).child(this.text('setupDescription')));
+      block.child(div().w_full().whitespace_normal().line_height('20px').text_color(this.noPython ? t.foreground : t.muted)
+        .child(this.noPython ? this.text(appWindow()?.platform === 'windows' ? 'noPythonWindows' : 'noPython') : this.text('setupDescription')));
       if (this.setupError) block.child(div().w_full().whitespace_normal().text_color(t.blocked).child(this.setupError));
       block.child(this.setupButton(t, 'setup'));
     }
@@ -162,7 +172,7 @@ export default class PmDash extends View {
     this.loading = true;
     cx.spawn(async cx => {
       try {
-        const result = await exec('python3', [appHome() + '/' + MOD_FOLDER + 'skill/scripts/pm.py', 'state']);
+        const result = await execPython(exec, [appHome() + '/' + MOD_FOLDER + 'skill/scripts/pm.py', 'state']);
         if (result.code !== 0) throw new Error(result.stderr || `pm.py: ${result.code}`);
         const next = JSON.parse(result.stdout);
         if (!['pms', 'tasks', 'events'].every(k => Array.isArray(next[k]))) throw new Error('state is missing pms/tasks/events arrays');

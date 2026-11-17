@@ -7,6 +7,7 @@ import {
   word, withAlpha, solidText, countChips, projectCards, pageTotals, archiveThreads, archivedDay, age, folderName,
   ledgerOpen, startArgv, projectName, agentName, KINDS, lastPmLine,
 } from './model.js';
+import { execPython } from './python.js';
 
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
 const STAGE = 'pm-stage', BOARD = 'pm-board', PROJECT = 'pm-project';
@@ -230,7 +231,7 @@ export function initDialog(v, cx) {
   }
   cx.spawn(async cx => {
     try {
-      const r = await exec('python3', [script(), 'state']);
+      const r = await execPython(exec, [script(), 'state']);
       if (r.code === 0) v.local = JSON.parse(r.stdout);
     } catch (_) { /* The dialog still works; it shows no ledger hints. */ }
     v.loaded = true; cx.notify();
@@ -258,10 +259,10 @@ function submitNew(v, cx) {
   v.busy = true; v.failure = ''; cx.notify();
   cx.spawn(async cx => {
     try {
-      const r = await exec('python3', startArgv(script(), v.form), { timeout: 120000 });
+      const r = await execPython(exec, startArgv(script(), v.form), { timeout: 120000 });
       if (r.code !== 0) throw new Error(failure(r));
       // The new PM's name, as the ledger now has it: its project view opens.
-      const s = await exec('python3', [script(), 'state']);
+      const s = await execPython(exec, [script(), 'state']);
       const pms = s.code === 0 ? JSON.parse(s.stdout).pms || [] : [];
       const repo = v.form.repo.replace(/\/+$/, ''), name = v.form.name.trim() || folderName(repo);
       const pm = pms.find(p => String(p.repo || '').replace(/\/+$/, '') === repo) || pms.find(p => p.project === name);
@@ -278,7 +279,7 @@ function confirmArchive(v, cx) {
   cx.spawn(async cx => {
     try {
       // By folder: two projects may share a name.
-      const r = await exec('python3', [script(), 'archive', pm.repo || projectName(pm)], { timeout: 60000 });
+      const r = await execPython(exec, [script(), 'archive', pm.repo || projectName(pm)], { timeout: 60000 });
       if (r.code !== 0) throw new Error(failure(r));
       // A view of this project has nothing to show now: back to the Projects list.
       const stage = find(layout(), STAGE);
@@ -294,7 +295,7 @@ export function restoreProject(v, c, cx) {
   v.restoring = c.key; cx.notify();
   cx.spawn(async cx => {
     try {
-      const r = await exec('python3', [script(), 'restore', c.repo || c.name], { timeout: 60000 });
+      const r = await execPython(exec, [script(), 'restore', c.repo || c.name], { timeout: 60000 });
       if (r.code !== 0) throw new Error(failure(r));
     } catch (e) {
       notify({ title: word(v.state.lang, 'restore'), body: word(v.state.lang, 'failedAction', String(e?.message || e)), level: 'error' });

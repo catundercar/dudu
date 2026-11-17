@@ -16,13 +16,116 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import tempfile
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 
+try:
+    import fcntl
+except ImportError:  # Windows: watcher locks go through msvcrt (lock_file below)
+    fcntl = None
+    import msvcrt
+
+# Windows: files, pipes and child output are read and written in the locale's code page unless Python runs in
+# UTF-8 mode, and the ledger and `state` hold Chinese text. Run again in UTF-8 mode (the child inherits stdin,
+# stdout and stderr, so hooks and the desktop app see one process).
+WINDOWS = os.name == "nt"
+if __name__ == "__main__" and WINDOWS and not sys.flags.utf8_mode:
+    sys.exit(subprocess.run([sys.executable, "-X", "utf8", *sys.argv]).returncode)
+# `pm.py --home <dir> <command>`: the ledger home as an option. pm_command writes it so on Windows, where cmd,
+# PowerShell and Git Bash each set an environment variable their own way; it applies to the processes this one starts.
+if __name__ == "__main__" and sys.argv[1:2] == ["--home"] and len(sys.argv) > 2:
+    os.environ["PM_HOME"] = sys.argv[2]
+    del sys.argv[1:3]
+
+
+def python_command():
+    """How a command line names a Python 3 that runs this script: python3 on macOS and Linux; on Windows the
+    py launcher, else this interpreter's path (python3 there may be the Microsoft Store stub). setup.py has a copy."""
+    if not WINDOWS:
+        return "python3"
+    if shutil.which("py"):
+        return "py -3"
+    exe = PureWindowsPath(sys.executable).as_posix()
+    return f'"{exe}"' if " " in exe else exe
+
+
+def shell_quote(arg, powershell=False):
+    """One argument of a command line that a person or an agent runs on this machine. macOS and Linux: shlex. Windows
+    has no quoting that cmd, PowerShell and Git Bash all read the same; double quotes as subprocess.list2cmdline
+    writes them come closest, and a path is written with forward slashes (as setup.py writes the hooks), so it
+    reads the same in all three. powershell: a line for PowerShell, whose double quotes take ` escapes."""
+    if isinstance(arg, PurePath):
+        arg = PureWindowsPath(arg).as_posix() if WINDOWS else str(arg)
+    if not WINDOWS:
+        return shlex.quote(arg)
+    if powershell:
+        if arg and not re.search(r"[\s\"'`$&|;,<>(){}@#]", arg):
+            return arg
+        return '"' + re.sub(r'([`"$])', r"`\1", arg) + '"'
+    if arg and not re.search(r'[\s"&|<>^()]', arg):
+        return arg
+    # list2cmdline's rules, with cmd's metacharacters quoted too: backslashes before a quote and at the end double.
+    arg = re.sub(r'(\\*)"', lambda m: m.group(1) * 2 + '\\"', arg)
+    return '"' + re.sub(r"(\\+)$", r"\1\1", arg) + '"'
+
+
+def shell_join(args, powershell=False):
+    """A whole command line from its arguments, quoted by shell_quote. PowerShell runs a program whose name is in
+    quotes only after `&`."""
+    line = " ".join(shell_quote(arg, powershell) for arg in args)
+    return f"& {line}" if WINDOWS and powershell and line.startswith('"') else line
+
+
+def file_text(path):
+    """A file's text as one argument, in a "send it by hand" line. It reads the same in Git Bash and PowerShell
+    (PowerShell joins the lines with spaces); cmd has no way to say it."""
+    return f'"$(cat {shell_quote(path)})"'
+
+
+def pm_script():
+    """How a command line runs this script: the Python that runs it and its path."""
+    return f"{python_command()} {shell_quote(Path(__file__).resolve())}"
+
+
+def own_group(background=False):
+    """Popen arguments that start a child in a process group of its own, so stop_group ends it with what it started
+    and it outlives the session that started it. POSIX: a session of its own. Windows has no setsid: a new process
+    group, and for a background child also a console of its own without a window, so closing the starting
+    console does not end it."""
+    if not WINDOWS:
+        return {"start_new_session": True}
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+    if background:
+        flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return {"creationflags": flags}
+
+
+def lock_file(f, shared=False):
+    """Take a non-blocking lock on the open file f for the life of the handle; OSError when another process holds
+    one. Windows has no shared locks and locks bytes, so one byte far past the pid the file holds is locked."""
+    if fcntl is not None:
+        fcntl.flock(f, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+        return
+    where = f.tell()
+    f.seek(1 << 20)
+    try:
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    finally:
+        f.seek(where)
+
+
+def unlock_file(f):
+    """Give back lock_file's lock before closing f (Windows frees it at close only eventually)."""
+    if fcntl is not None:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return
+    f.seek(1 << 20)
+    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def default_home():
@@ -35,6 +138,8 @@ STATE = default_home()
 TASKS = STATE / "tasks"
 PMS = STATE / "pms"
 BOARD = STATE / "BOARD.md"
+# inbox/<pm name>.log: one line per report from an agent, `[from <sender> HH:MM] <text>`; `pm.py watch` wakes the PM.
+INBOX = STATE / "inbox"
 ACTIVE = ["proposed", "in_progress", "review", "blocked", "paused"]
 CLOSED = ["merged", "released", "done", "abandoned"]
 # A session is identified by its herdr pane, or in the herdr desktop app by its herdr-core terminal ("hc:t7").
@@ -50,10 +155,14 @@ def now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-def herdr(*args):
-    """Return the `result` object of a herdr CLI call, or None outside herdr."""
+def herdr(*args, session=None):
+    """Return the `result` object of a herdr CLI call, or None outside herdr or when the call fails.
+    session: the herdr session to talk to (`herdr --session <name>`), default the one this process runs in."""
     try:
-        out = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=60)
+        out = subprocess.run(["herdr", *(["--session", session] if session else []), *args],
+                             capture_output=True, text=True, timeout=60)
+        if out.returncode == 0 and not out.stdout.strip():
+            return {"ok": True}  # a command that prints nothing when it succeeds, such as `pane run`
         return json.loads(out.stdout)["result"]
     except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
         return None
@@ -147,6 +256,242 @@ def pm_record(repo):
     return json.loads(path.read_text()) if path and path.exists() else None
 
 
+# ---- identity across herdr sessions (`guard`) ----------------------------------------------------------------------
+# Several herdr TUI sessions can run on one machine (`herdr session list`: default, ci, …) and pane ids repeat
+# between them, so a registration may name its session. `guard` reconciles every running session with the
+# registrations, read-only, and says which role the caller has. A desktop-app session is checked through herdr-core
+# instead (hc_role). Only `guard` and `watch` enforce it; the other commands do not ask.
+
+class IdentityError(Exception):
+    """An uncertain PM identity must never authorize a mutation."""
+
+
+_IDENTITY = None
+_SESSION = None
+HERDR_PANE = os.environ.get("HERDR_PANE_ID", "")
+
+
+def strict_herdr(*args, session=None):
+    result = herdr(*args, session=session)
+    if not isinstance(result, dict):
+        raise IdentityError(f"cannot verify herdr {session or 'current'} {' '.join(args)}")
+    return result
+
+
+def herdr_sessions():
+    """The local herdr sessions ({name, socket_path, running}), checked; IdentityError when they cannot be read."""
+    try:
+        out = subprocess.run(["herdr", "session", "list", "--json"], capture_output=True, text=True, timeout=30)
+        sessions = json.loads(out.stdout)["sessions"]
+        if out.returncode or not isinstance(sessions, list):
+            raise ValueError("invalid session list")
+        if any(not isinstance(s, dict) or not s.get("name") or not s.get("socket_path")
+               or not isinstance(s.get("running"), bool) for s in sessions):
+            raise ValueError("incomplete session identity")
+        if len({s["name"] for s in sessions}) != len(sessions):
+            raise ValueError("duplicate session names")
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as e:
+        raise IdentityError(f"cannot enumerate herdr sessions: {e}") from e
+    return sessions
+
+
+def socket_session(sessions):
+    """The running session whose socket this process inherited (`herdr status server`)."""
+    try:
+        out = subprocess.run(["herdr", "status", "server"], capture_output=True, text=True, timeout=30)
+        socket = re.search(r"^socket:\s*(.+)$", out.stdout, re.M)
+        matches = [s for s in sessions if socket and s["running"]
+                   and Path(s["socket_path"]).resolve() == Path(socket.group(1)).resolve()]
+        if out.returncode or len(matches) != 1:
+            raise ValueError("inherited socket is not one known running session")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        raise IdentityError(f"cannot verify caller session: {e}") from e
+    return matches[0]["name"]
+
+
+def herdr_session():
+    """Name of the herdr session this pane runs in, or "" when it cannot be told (best effort, never raises)."""
+    if not HERDR_PANE:
+        return ""
+    try:
+        return socket_session(herdr_sessions())
+    except IdentityError:
+        return ""
+
+
+def tui_registration(rec):
+    """A registration of a herdr TUI PM: not archived (no PM then) and not the desktop app's (hc_role checks those)."""
+    return not rec.get("archived") and rec.get("runtime") != "hc" and not str(rec.get("pane") or "").startswith("hc:")
+
+
+def identity_inventory():
+    """Read every running local session and reconcile registrations without changing them."""
+    global _IDENTITY
+    if _IDENTITY is not None:
+        return _IDENTITY
+    sessions = herdr_sessions()
+    live, panes = [], []
+    for s in sessions:
+        if not s["running"]:
+            continue
+        for command, field, dest in [("agent", "agents", live), ("pane", "panes", panes)]:
+            rows = strict_herdr(command, "list", session=s["name"]).get(field)
+            if not isinstance(rows, list) or any(not isinstance(x, dict) or not x.get("pane_id")
+                                                 or not x.get("workspace_id") for x in rows):
+                raise IdentityError(f"incomplete {command} list in herdr session {s['name']}")
+            dest.extend({**x, "session": s["name"]} for x in rows)
+    records = []
+    for path in sorted(PMS.glob("*.json")) if PMS.exists() else []:
+        try:
+            rec = json.loads(path.read_text())
+            if not isinstance(rec, dict):
+                raise ValueError("not an object")
+            if not tui_registration(rec):
+                continue
+            if not all(rec.get(k) for k in ("repo", "name", "pane", "workspace")):
+                raise ValueError("missing repo/name/pane/workspace")
+            rec = {**rec, "repo": str(Path(rec["repo"]).resolve())}
+        except (OSError, ValueError, TypeError) as e:
+            raise IdentityError(f"invalid PM registration {path}: {e}") from e
+        if not rec.get("session"):
+            named = [p for p in live if p.get("name") == rec["name"] and p["pane_id"] == rec["pane"]
+                     and p["workspace_id"] == rec["workspace"]]
+            rec["session"] = named[0]["session"] if len(named) == 1 else None
+        rec["uncertain"] = rec["session"] not in {s["name"] for s in sessions}
+        rec.update(pane_id=rec["pane"], workspace_id=rec["workspace"], registered=True)
+        actual = [p for p in live if (p["session"], p["pane_id"]) == (rec["session"], rec["pane"])]
+        rec["verified"] = bool(actual and actual[0].get("name") == rec["name"]
+                               and actual[0]["workspace_id"] == rec["workspace"])
+        records.append(rec)
+    pms = list(records)
+    for p in live:
+        if str(p.get("name") or "").startswith("pm-") and not any(
+                (r["session"], r["pane"]) == (p["session"], p["pane_id"]) for r in records):
+            pms.append({**p, "pane": p["pane_id"], "workspace": p["workspace_id"], "registered": False})
+    workspaces, projects, names = {}, {}, {}
+    for pm in pms:
+        for seen, key, label in [(workspaces, (pm["session"], pm["workspace"]), "workspace"),
+                                 (projects, pm.get("repo"), "project"), (names, pm["name"], "PM name")]:
+            if key is None:
+                continue
+            if key in seen:
+                raise IdentityError(f"multiple PMs reserve {label} {key}: {seen[key]['name']} and {pm['name']}")
+            seen[key] = pm
+    _IDENTITY = {"sessions": sessions, "agents": live, "panes": panes, "pms": pms, "records": records}
+    return _IDENTITY
+
+
+def caller_identity(inventory):
+    """The inherited socket, pane and workspace must identify the same running pane."""
+    global _SESSION
+    if not HERDR_PANE and not WORKSPACE and os.environ.get("HERDR_ENV") != "1":
+        return None
+    if not HERDR_PANE or not WORKSPACE or os.environ.get("HERDR_ENV") != "1":
+        raise IdentityError("incomplete herdr identity; require HERDR_ENV=1, HERDR_PANE_ID and HERDR_WORKSPACE_ID")
+    session = socket_session(inventory["sessions"])
+    if not any((p["session"], p["workspace_id"], p["pane_id"]) == (session, WORKSPACE, HERDR_PANE)
+               for p in inventory["panes"]):
+        raise IdentityError(f"caller pane {session}/{WORKSPACE}/{HERDR_PANE} does not exist")
+    _SESSION = session
+    return {"session": session, "workspace": WORKSPACE, "pane": HERDR_PANE}
+
+
+def inventory_pm(repo=None, inventory=None):
+    """The registered project PM across sessions, or the caller workspace's PM."""
+    inventory = inventory or identity_inventory()
+    root = project_root(repo or ".")
+    pms = [p for p in inventory["pms"] if p.get("repo") == root or p.get("name") == pm_name(root)] if root else []
+    if not pms and HERDR_PANE and WORKSPACE:
+        caller = caller_identity(inventory)
+        pms = [p for p in inventory["pms"] if (p["session"], p["workspace"]) ==
+               (caller["session"], caller["workspace"])]
+    if len(pms) > 1:
+        raise IdentityError("multiple project PM matches; reconcile registrations")
+    return pms[0] if pms else None
+
+
+def app_caller():
+    """A session of the desktop app (a herdr-core terminal), not of the herdr terminal UI."""
+    return bool(HC_TERMINAL) and os.environ.get("HERDR_ENV") != "1"
+
+
+def authorize(role, action):
+    if action != "read" and role == "uncertain":
+        raise IdentityError("PM reservation has an uncertain session or different live identity; "
+                            "reconcile explicitly, do not rename")
+    if action == "coordinate" and role != "pm":
+        raise IdentityError("only the registered PM may coordinate; hand the task to the existing PM")
+    if action == "implement" and role == "pm":
+        raise IdentityError("PM cannot implement code, documents or deliverables; dispatch to a worker")
+
+
+def hc_registration(pane):
+    for path in sorted(PMS.glob("*.json")) if PMS.exists() else []:
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("pane") == pane and not rec.get("archived"):
+            return rec
+    return None
+
+
+def hc_role(action="read", repo="."):
+    """check_role in the desktop app: the PM is the terminal its registration names while herdr-core shows it live
+    and labelled pm=<project>. A registration naming this terminal that herdr-core does not confirm is uncertain."""
+    caller = {"session": "hc", "workspace": "", "pane": PANE}
+    own = hc_registration(PANE)
+    live = hc_pm(own["repo"]) if own and own.get("repo") else None
+    verified = bool(live and live["pane_id"] == PANE)
+    root = project_root(repo or ".")
+    found = live if verified else (hc_pm(root) if root else None)
+    rec = own if verified else (pm_record(root) if found else None)
+    pm = None
+    if found:
+        pm = {"name": found["name"], "repo": (rec or {}).get("repo") or root, "session": "hc", "workspace": "",
+              "pane": found["pane_id"], "pane_id": found["pane_id"], "registered": True, "verified": True,
+              "uncertain": False}
+    elif own:
+        pm = {"name": own.get("name"), "repo": own.get("repo"), "session": "hc", "workspace": "", "pane": PANE,
+              "pane_id": PANE, "registered": True, "verified": False, "uncertain": True}
+    role = "pm" if verified else ("uncertain" if own else "worker")
+    authorize(role, action)
+    return {"role": role, "caller": caller, "pm": pm, "unresolved_registrations": []}
+
+
+def check_role(action="read", repo="."):
+    """The caller's role: pm, worker, observer (outside herdr: read only) or uncertain (read only).
+    IdentityError when the action is not allowed or the identity cannot be verified."""
+    if app_caller():
+        return hc_role(action, repo)
+    inventory = identity_inventory()
+    caller = caller_identity(inventory)
+    if caller is None:
+        if action != "read":
+            raise IdentityError("observer outside herdr is read-only; cannot claim, coordinate or implement")
+        return {"role": "observer", "caller": None, "pm": inventory_pm(repo=repo, inventory=inventory)}
+    own = [p for p in inventory["pms"] if (p["session"], p["pane"]) == (caller["session"], caller["pane"])]
+    workspace_pm = [p for p in inventory["pms"] if (p["session"], p["workspace"]) ==
+                    (caller["session"], caller["workspace"])]
+    pm = own[0] if own else (workspace_pm[0] if workspace_pm else inventory_pm(repo=repo, inventory=inventory))
+    role = "pm" if own and own[0]["registered"] else "worker"
+    uncertain = [p for p in inventory["pms"] if p.get("uncertain") and
+                 (p["workspace"] == caller["workspace"] or p.get("repo") == project_root(repo))]
+    if uncertain or (own and not own[0].get("verified")):
+        role = "uncertain"
+    authorize(role, action)
+    return {"role": role, "caller": caller, "pm": pm,
+            "unresolved_registrations": [p["name"] for p in inventory["records"] if p.get("uncertain")]}
+
+
+def cmd_guard(a):
+    role = check_role(a.action, a.repo)
+    if role["pm"]:
+        role["pm"] = {k: role["pm"].get(k) for k in
+                      ("name", "repo", "session", "workspace", "pane", "registered", "verified", "uncertain")}
+    print(json.dumps(role, ensure_ascii=False, indent=2))
+
+
 def git(path, *args):
     try:
         r = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=30)
@@ -213,6 +558,7 @@ def save(task):
     tmp.write_text(json.dumps(task, ensure_ascii=False, indent=2) + "\n")
     tmp.replace(TASKS / f"{task['id']}.json")
     write_board()
+    post_board()
 
 
 def all_tasks():
@@ -308,6 +654,260 @@ def turn_log(text):
             f.write(f"{now()} [{PANE or '-'}] {text}\n")
     except OSError:
         pass
+
+
+# ---- Discord (optional) ---------------------------------------------------------------------------------------------
+# A PM can be bound to a Discord channel (`claim --discord-channel`), and the board mirrored into one
+# (`board --channel`). All of it is off unless config.json says {"discord": true}: then no call is made, nothing is
+# printed and nothing fails, whatever discord.json, the registrations or the token file hold from earlier installs.
+
+DISCORD_CFG = STATE / "discord.json"
+DISCORD_HOME = Path(os.environ.get("DISCORD_HOME", Path.home() / ".claude" / "channels" / "discord"))
+DISCORD_TOKEN_FILE = DISCORD_HOME / "pm-token.env"
+DISCORD_PLUGIN_ROOT = Path.home() / ".claude" / "plugins" / "cache" / "claude-plugins-official" / "discord"
+MCP_DIR = STATE / "mcp"
+MCP_SERVER = "discord-pm"
+DISCORD_API = "https://discord.com/api/v10"
+
+
+def discord_on():
+    return config().get("discord") is True
+
+
+def discord_needed():
+    if not discord_on():
+        sys.exit('Discord is off: set "discord": true in config.json in the ledger home to use it')
+
+
+def discord_token():
+    token = os.environ.get("DISCORD_BOT_TOKEN")
+    try:
+        if not token and DISCORD_TOKEN_FILE.exists():
+            m = re.search(r"^DISCORD_BOT_TOKEN=(.+)$", DISCORD_TOKEN_FILE.read_text(), re.M)
+            token = m.group(1).strip() if m else None
+    except OSError:
+        return None
+    return token
+
+
+def discord_log(text):
+    """Append one line to discord.log in the ledger home; the mirror must never fail a command or a hook."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with open(STATE / "discord.log", "a") as f:
+            f.write(f"{now()} [{PANE or '-'}] {text}\n")
+    except OSError:
+        pass
+
+
+def discord_api(method, path, body=None):
+    """One Discord REST call with the bot token; returns the parsed JSON, or None (no token: no call)."""
+    import urllib.error
+    import urllib.request
+    token = discord_token()
+    if not token:
+        return None
+    req = urllib.request.Request(f"{DISCORD_API}{path}", method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bot {token}", "Content-Type": "application/json",
+                                          "User-Agent": "pm.py (herdr PM skill)"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        discord_log(f"discord {method} {path}: HTTP {e.code} {e.read()[:200]!r}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        discord_log(f"discord {method} {path}: {e!r}")
+    return None
+
+
+def discord_cfg():
+    try:
+        cfg = json.loads(DISCORD_CFG.read_text()) if DISCORD_CFG.exists() else {}
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def pm_record_for_project(project):
+    for p in PMS.glob("*.json") if PMS.exists() else []:
+        try:
+            rec = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if rec.get("project") == project:
+            return rec
+    return None
+
+
+def board_text():
+    """BOARD.md condensed for a single Discord message (limit 2000 chars)."""
+    tasks = all_tasks()
+    lines = [f"**PM Board** · {now()}"]
+    for project in sorted({t["project"] for t in tasks}):
+        pm = pm_record_for_project(project)
+        where = f" · PM {pm['pane']}" if pm and pm.get("pane") else ""
+        lines.append(f"\n__{project}__{where}")
+        for t in [t for t in tasks if t["project"] == project and t["status"] in ACTIVE]:
+            latest = (t.get("log") or [{}])[-1].get("text", "").replace("\n", " ")[:60]
+            who = " ".join(x for x in (t.get("pane"), t.get("agent")) if x) or t.get("owner", "")
+            lines.append(f"• `{t['status']}` {t['title']} — {who} · {latest}")
+        if not any(t["project"] == project and t["status"] in ACTIVE for t in tasks):
+            lines.append("• (no active tasks)")
+    text = "\n".join(lines)
+    return text if len(text) <= 1900 else text[:1880] + "\n…(truncated)"
+
+
+def post_board(force=False):
+    """Mirror the board into the configured Discord channel by editing one message in place.
+
+    Best effort: never fails the ledger write. Returns True when the message was updated.
+    """
+    if not discord_on():
+        return False
+    cfg = discord_cfg()
+    channel = cfg.get("board_channel")
+    if not channel or (os.environ.get("PM_NO_DISCORD") and not force):
+        return False
+    body = {"content": board_text()}
+    if cfg.get("message_id"):
+        if discord_api("PATCH", f"/channels/{channel}/messages/{cfg['message_id']}", body):
+            return True
+        cfg.pop("message_id", None)  # deleted by hand; post a fresh one
+    created = discord_api("POST", f"/channels/{channel}/messages", body)
+    if not created or "id" not in created:
+        return False
+    cfg["message_id"] = created["id"]
+    try:
+        DISCORD_CFG.write_text(json.dumps(cfg, indent=2) + "\n")
+    except OSError:
+        pass
+    return True
+
+
+def discord_state_dir(repo):
+    return DISCORD_HOME / pm_name(repo)
+
+
+def write_discord_state(repo, channel_id, user_ids):
+    """Per-PM plugin state: own .env (token) and an access.json that admits only this PM's channel."""
+    sdir = discord_state_dir(repo)
+    sdir.mkdir(parents=True, exist_ok=True)
+    token = discord_token()
+    if not token:
+        sys.exit(f"no bot token: put DISCORD_BOT_TOKEN=... in {DISCORD_TOKEN_FILE}")
+    env = sdir / ".env"
+    env.write_text(f"DISCORD_BOT_TOKEN={token}\n")
+    env.chmod(0o600)
+    access_file = sdir / "access.json"
+    access = json.loads(access_file.read_text()) if access_file.exists() else {}
+    # "disabled" would drop guild messages too; allowlist with nobody drops DMs silently and keeps the channel.
+    access.update({"dmPolicy": "allowlist", "allowFrom": [], "pending": {}})
+    access.setdefault("groups", {})[str(channel_id)] = {"requireMention": False, "allowFrom": list(user_ids)}
+    access_file.write_text(json.dumps(access, indent=2) + "\n")
+    access_file.chmod(0o600)
+    write_mcp_config(repo)
+    return sdir
+
+
+def plugin_root():
+    """Newest installed version of the official discord plugin."""
+    versions = sorted(DISCORD_PLUGIN_ROOT.glob("*/server.ts"), key=lambda p: p.parent.name)
+    if not versions:
+        sys.exit(f"discord plugin not installed under {DISCORD_PLUGIN_ROOT}")
+    return versions[-1].parent
+
+
+def mcp_config_path(repo):
+    return MCP_DIR / f"{pm_name(repo)}.json"
+
+
+def write_mcp_config(repo):
+    """A session-only MCP config that runs the plugin's server with this PM's state dir.
+
+    Claude Code does not pass the parent environment to plugin MCP servers, so the
+    state dir has to be set through a server config's env block.
+    """
+    MCP_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = {"mcpServers": {MCP_SERVER: {
+        "command": "bun",
+        "args": ["run", "--cwd", str(plugin_root()), "--shell=bun", "--silent", "start"],
+        "env": {"DISCORD_STATE_DIR": str(discord_state_dir(repo))}}}}
+    mcp_config_path(repo).write_text(json.dumps(cfg, indent=2) + "\n")
+    return mcp_config_path(repo)
+
+
+def launch_command(repo, resume=None):
+    """The command that starts this project's PM in Claude Code: with its Discord channel when `claim
+    --discord-channel` wrote its MCP config, else a plain one."""
+    # A manually configured server only counts as a channel through the development-channels flag.
+    # Do not also pass --channels for it: the first matching entry wins and that one is not marked dev.
+    discord = (f"--mcp-config {mcp_config_path(repo)} --dangerously-load-development-channels server:{MCP_SERVER} "
+               if discord_on() and mcp_config_path(repo).exists() else "")
+    return f"claude {discord}" + (f"--resume {resume} " if resume else "") + "<your usual flags>"
+
+
+def default_discord_users():
+    """Users already paired with the bot in the shared access.json (the user's own account)."""
+    try:
+        return list(json.loads((DISCORD_HOME / "access.json").read_text()).get("allowFrom", []))
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def chunks(text, size=1900, limit=3):
+    parts = []
+    while text and len(parts) < limit:
+        cut = text.rfind("\n", 0, size) if len(text) > size else len(text)
+        cut = cut if cut > size // 2 else size
+        parts.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    if text:
+        parts[-1] = parts[-1][:size - 30] + "\n…(已截断，完整内容见终端)"
+    return parts
+
+
+def replied_on_discord(transcript):
+    """The last turn of a Claude Code transcript answered through the Discord plugin's reply tool."""
+    try:
+        lines = Path(transcript).read_text().splitlines()[::-1] if transcript else []
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        content = (row.get("message") or {}).get("content")
+        if row.get("isSidechain"):
+            continue
+        if row.get("type") == "user":
+            blocks = content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
+            if any(isinstance(b, dict) and b.get("type") == "text" for b in blocks):
+                return False  # the prompt that started this turn
+        elif row.get("type") == "assistant" and isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_use" and "discord" in str(b.get("name", ""))
+                   and str(b.get("name", "")).endswith("__reply") for b in content):
+                return True
+    return False
+
+
+def discord_mirror(rec, text):
+    """Post a PM's chat turn into its Discord channel, when its registration has one."""
+    channel = ((rec or {}).get("discord") or {}).get("channel_id")
+    if not channel or not text or os.environ.get("PM_NO_DISCORD") or not discord_on():
+        return
+    for part in chunks(text):
+        if not discord_api("POST", f"/channels/{channel}/messages", {"content": part, "flags": 4}):  # 4: no embeds
+            discord_log(f"mirror: post failed ({len(part)} chars)")
+            return
+
+
+def cmd_launch(a):
+    repo = project_root(a.repo)
+    if not repo:
+        sys.exit(f"{a.repo} is not a directory")
+    print(launch_command(repo, resume=a.resume))
 
 
 # ---- commands ---------------------------------------------------------------
@@ -475,6 +1075,16 @@ def cmd_show(a):
 
 def cmd_board(a):
     write_board()
+    if getattr(a, "post", False) or getattr(a, "channel", None):
+        discord_needed()
+        cfg = discord_cfg()
+        if a.channel:
+            cfg = {"board_channel": str(a.channel)}  # new channel: start a fresh message
+            DISCORD_CFG.write_text(json.dumps(cfg, indent=2) + "\n")
+        if not cfg.get("board_channel"):
+            sys.exit("no board channel configured; pass --channel <id> once")
+        print("board posted to Discord" if post_board(force=True) else "posting to Discord failed")
+        return
     print(BOARD.read_text())
 
 
@@ -702,6 +1312,11 @@ def cmd_claim(a):
         sys.exit(f"PM for {Path(repo).name} already exists at {pm['pane_id']}; ask the user before replacing it")
     name = pm_name(repo)
     kind = getattr(a, "kind", None) or ""
+    channel = getattr(a, "discord_channel", None)
+    if channel:
+        discord_needed()
+    if channel and not discord_token():
+        sys.exit(f"no bot token: put DISCORD_BOT_TOKEN=... in {DISCORD_TOKEN_FILE}")
     if pane.startswith("hc:"):
         workspace = ""
         if hc("label", pane[3:], f"pm={Path(repo).name}") is None:
@@ -722,7 +1337,17 @@ def cmd_claim(a):
     rec = json.loads(rec_path.read_text()) if rec_path.exists() else {}
     rec.update({"project": Path(repo).name, "repo": repo, "name": name, "pane": pane, "workspace": workspace,
                 "claimed": now()})
-    rec.pop("discord", None)  # written by earlier versions
+    # Which herdr session the pane is in: pane ids repeat between sessions (see identity_inventory).
+    session = herdr_session() if not pane.startswith("hc:") else ""
+    if session:
+        rec["session"] = session
+    else:
+        rec.pop("session", None)
+    sdir = None
+    if channel:
+        users = a.discord_users.split(",") if a.discord_users else default_discord_users()
+        sdir = write_discord_state(repo, channel, users)
+        rec["discord"] = {"channel_id": str(channel), "state_dir": str(sdir), "users": users}
     if kind:
         rec["agent"] = kind  # which program this PM is: its successor is started the same way
     for key in ("runtime", "terminal"):
@@ -731,24 +1356,277 @@ def cmd_claim(a):
         rec.update({"runtime": "hc", "terminal": pane[3:]})
     print(f"{pane} is now {name} (PM for {Path(repo).name})")
     rec_path.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n")
+    if sdir and pane == PANE and os.environ.get("DISCORD_STATE_DIR") != str(sdir):
+        print("restart to connect Discord:\n  " + launch_command(repo, resume="<session id>"))
     if pane != PANE and not pane.startswith("hc:"):
-        print(f"start it: herdr agent start {name} --kind {kind or 'claude'} --pane {pane} -- <your usual flags>")
+        flags = launch_command(repo)[len("claude "):] if channel else "<your usual flags>"
+        print(f"start it: herdr agent start {name} --kind {kind or 'claude'} --pane {pane} -- {flags}")
 
 
 def cmd_notify(a):
+    """Append the line to the PM's inbox, then type it into the PM's input only when no `pm.py watch` runs for it:
+    a watcher wakes the PM without typing where the user may be writing."""
     pm = find_pm(repo=a.repo)
-    if not pm:
+    rec = pm_record(a.repo) or {}
+    rec = {} if rec.get("archived") else rec
+    if not pm and not rec.get("name"):
+        # Working in a folder no PM is registered for, inside a PM's workspace: that PM is the one to tell.
+        rec = workspace_registration() or {}
+        pm = next((x for x in agents() if rec.get("name") and x.get("name") == rec["name"]
+                   and x.get("pane_id") == rec.get("pane")), None)
+    name = (pm or {}).get("name") or rec.get("name")
+    if not name:
         print("no PM in herdr; the ledger entry is enough")
         return
-    if pm["pane_id"] == PANE:
+    if pm and pm["pane_id"] == PANE:
         print("this session is the PM")
         return
-    text = f"[from {PANE or 'a session'}] {a.text}"
-    if pm["pane_id"].startswith("hc:"):
-        result = hc("send", pm["pane_id"][3:], text)
+    session = herdr_session() if in_tui() else ""
+    me = f"{session}/{PANE}" if session else (PANE or "a session")
+    append_inbox(name, me, a.text)
+    print(f"appended to {inbox_path(name)}")
+    if watcher_pid(name):
+        print(f"{name} has a watcher; not typing into its pane")
+        return
+    text = f"[from {me}] {a.text}"
+    if pm:
+        target = pm["pane_id"]
+        result = hc("send", target[3:], text) if target.startswith("hc:") else herdr("agent", "prompt", target, text)
+    elif rec.get("session") and rec.get("pane") and tui_registration(rec):
+        # The PM runs in another herdr session than this one: its registration says which.
+        target = f"{rec['session']}/{rec['pane']}"
+        result = herdr("agent", "prompt", rec["pane"], text, session=rec["session"])
     else:
-        result = herdr("agent", "prompt", pm["pane_id"], text)
-    print(f"notified PM at {pm['pane_id']}" if result else "notify failed; the ledger entry still records it")
+        print(f"{name} is not running here; the inbox line still records it")
+        return
+    print(f"notified PM at {target}" if result else "notify failed; the inbox line still records it")
+
+
+def workspace_registration():
+    """In the herdr TUI: the registration of the PM whose workspace this pane is in (in this herdr session, where
+    the registration names one), or None. Never raises: notify must not stop on an identity it cannot check."""
+    if not in_tui() or not WORKSPACE or not PMS.exists():
+        return None
+    session = None
+    for path in sorted(PMS.glob("*.json")):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or not tui_registration(rec) or rec.get("workspace") != WORKSPACE:
+            continue
+        if rec.get("session"):
+            session = herdr_session() if session is None else session
+            if session and rec["session"] != session:
+                continue
+        return rec
+    return None
+
+
+# ---- inbox and `watch` ----------------------------------------------------------------------------------------------
+# Agents report into inbox/<pm name>.log, one line each (`pm.py notify` writes the same line). `pm.py watch`, kept
+# running in the background by a herdr TUI PM, exits on the first new line or agent state change, so the PM wakes
+# up without anything typed into its pane. The file names, the lock and the offset file are shared with earlier
+# installs' watchers: keep them as they are.
+
+def inbox_path(name):
+    return INBOX / f"{name}.log"
+
+
+def append_inbox(name, sender, text):
+    INBOX.mkdir(parents=True, exist_ok=True)
+    fd = os.open(inbox_path(name), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a") as f:
+        f.write(f"[from {sender} {datetime.datetime.now():%H:%M}] {text}\n")
+
+
+def watch_lock(name):
+    """Hold the watcher lock of PM name for the life of this process, or return None when another watcher holds it."""
+    INBOX.mkdir(parents=True, exist_ok=True)
+    f = open(INBOX / f"{name}.watch.lock", "a+")
+    try:
+        lock_file(f)
+    except OSError:
+        f.close()
+        return None
+    f.truncate(0)
+    f.write(str(os.getpid()))
+    f.flush()
+    return f
+
+
+def watcher_pid(name):
+    """PID of the running watcher of PM name, or None."""
+    path = INBOX / f"{name}.watch.lock"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        try:
+            lock_file(f, shared=True)
+        except OSError:
+            return f.read().strip() or "?"
+        unlock_file(f)
+    return None
+
+
+def read_inbox(path, offset):
+    """(new offset, complete new lines) of the inbox file since offset."""
+    size = path.stat().st_size if path.exists() else 0
+    if size < offset:  # truncated or replaced: read it again from the start
+        offset = 0
+    if size == offset:
+        return offset, ""
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read(size - offset)
+    end = data.rfind(b"\n") + 1  # a half-written last line waits for the next round
+    return offset + end, data[:end].decode(errors="replace")
+
+
+# herdr reports a claude session in a long thinking or shell step as done/idle; its screen still shows these.
+BUSY = re.compile(r"…\s*\(\d+[hms]|esc to interrupt|Waiting for API response|Running \d+ shell|shells? still running")
+
+
+def pane_busy(pane, session=None):
+    try:
+        out = subprocess.run(["herdr", *(["--session", session] if session else []),
+                              "pane", "read", pane, "--lines", "12"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(BUSY.search(out))
+
+
+def watched_workspaces(rec, workspaces):
+    """The PM's workspace, the workspaces labelled `pm-<project>…` (where earlier installs' dispatch put workers),
+    and those of the project's open tasks that `dispatch` started (this version's labels carry no prefix)."""
+    ids = [rec.get("workspace")] + [w.get("workspace_id") for w in workspaces
+                                    if str(w.get("label", "")).startswith(rec["name"])]
+    ids += [t.get("workspace") for t in all_tasks() if t.get("dispatched") and t.get("repo") == rec.get("repo")
+            and t.get("status") in ACTIVE and not str(t.get("pane") or "").startswith("hc:")]
+    return set(filter(None, ids))
+
+
+def watched_agents(rec):
+    """pane -> agent status in the watched workspaces (watched_workspaces), the PM excluded.
+
+    None when herdr did not answer, so a failed call is not mistaken for agents appearing or vanishing.
+    """
+    session = rec.get("session")
+    listed = herdr("workspace", "list", session=session)
+    panes = herdr("pane", "list", session=session) if listed is not None else None
+    if listed is None or panes is None:
+        return None
+    ids = watched_workspaces(rec, listed.get("workspaces", []))
+    states = {}
+    for p in panes.get("panes", []):
+        if p.get("workspace_id") not in ids or p["pane_id"] == rec.get("pane") or not p.get("agent"):
+            continue
+        status = p.get("agent_status")
+        if status in ("done", "idle") and pane_busy(p["pane_id"], session=session):
+            status = "working"
+        states[p["pane_id"]] = status
+    return states
+
+
+def state_changes(prev, cur):
+    finished = [f"{p} {prev[p]}->{s}" for p, s in cur.items()
+                if prev.get(p) == "working" and s not in ("working", "blocked")]
+    blocked = [f"{p} ->blocked" for p, s in cur.items() if p in prev and prev[p] != "blocked" and s == "blocked"]
+    new = [f"{p} new:{s}" for p, s in cur.items() if p not in prev and s in ("blocked", "done")]
+    return finished + blocked + new
+
+
+def own_registration():
+    """The registration of the PM this session is: in the herdr TUI one whose session and pane are the caller's and
+    that the live agent confirms; in the desktop app the one naming this terminal."""
+    if app_caller():
+        return hc_registration(PANE)
+    inventory = identity_inventory()
+    caller = caller_identity(inventory)
+    if not caller:
+        return None
+    for rec in inventory["records"]:
+        if (rec["session"], rec["pane"]) == (caller["session"], caller["pane"]) and rec.get("verified"):
+            return rec
+    return None
+
+
+def current_pm_record(project=None, repo="."):
+    """Registration of the PM named by project (slug, project or PM name), else of this session, else of repo."""
+    if project:
+        if app_caller():
+            recs = [json.loads(p.read_text()) for p in sorted(PMS.glob("*.json"))] if PMS.exists() else []
+        else:
+            recs = identity_inventory()["records"]
+        for rec in recs:
+            if project in (project_slug(rec.get("repo") or "."), rec.get("project"), rec.get("name")):
+                return rec
+        return None
+    return (own_registration() if PANE else None) or pm_record(repo)
+
+
+def cmd_watch(a):
+    check_role("coordinate", a.repo)
+    rec = current_pm_record(a.pm, a.repo)
+    if not rec:
+        sys.exit("no PM registration found; pass --pm <name> or run it from the PM pane")
+    rec = {**rec, "workspace": a.workspace or rec.get("workspace")}
+    name = rec["name"]
+    lock = watch_lock(name)
+    if not lock:
+        sys.exit(f"a watcher for {name} is already running (pid {watcher_pid(name)})")
+    inbox, offset_file = inbox_path(name), INBOX / f"{name}.offset"
+    try:
+        offset = int(offset_file.read_text())
+    except (OSError, ValueError):
+        # First run: start at the end, and persist it so lines written before the next run are not skipped.
+        offset = inbox.stat().st_size if inbox.exists() else 0
+        offset_file.write_text(str(offset))
+    deadline, prev, tick = time.time() + a.timeout, None, 0
+    while time.time() < deadline:
+        new_offset, text = read_inbox(inbox, offset)
+        if text:
+            print("INBOX:\n" + text, end="", flush=True)
+            offset_file.write_text(str(new_offset))
+            return
+        if new_offset != offset:
+            offset = new_offset
+            offset_file.write_text(str(offset))
+        if tick % 2 == 0 and tui_registration(rec):  # a desktop-app PM's watch reads its inbox only
+            cur = watched_agents(rec)
+            if cur is not None:
+                changes = state_changes(prev, cur) if prev is not None else []
+                if changes:
+                    print("\n".join(changes), flush=True)
+                    return
+                prev = cur
+        tick += 1
+        time.sleep(a.interval)
+    print("watch timeout")
+
+
+# ---- codex provider settings (`codex-cmd`) -------------------------------------------------------------------------
+# A PM's registration (pms/<project>.json) may carry {"codex": {"args": ["-c", "model_provider=\"<name>\"", ...],
+# "model_prefix": "<prefix>/"}}; config.json's "codex" block is the default for PMs without one. `dispatch`, `review`
+# and `escalate` start codex workers with them too.
+
+def codex_settings(rec=None):
+    cfg = (rec or {}).get("codex") or config().get("codex") or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def codex_args(model, effort, rec=None):
+    """codex CLI arguments: the provider settings of PM rec (else config.json), then model and effort."""
+    cfg = codex_settings(rec)
+    prefix = cfg.get("model_prefix", "")
+    if prefix and not model.startswith(prefix):
+        model = prefix + model
+    return [*cfg.get("args", []), "-m", model, "-c", f'model_reasoning_effort="{effort}"']
+
+
+def cmd_codex_cmd(a):
+    print(shell_join(["codex", *codex_args(a.model, a.effort, current_pm_record(a.project, a.repo))], powershell=True))
 
 
 def cmd_dispatch(a):
@@ -769,7 +1647,8 @@ def cmd_dispatch(a):
         workspace, pane, path = place.get("workspace") or "", place["pane"], held["worktree"]
     else:
         created = herdr("worktree", "create", "--cwd", repo, "--branch", a.branch, "--base",
-                        a.base or base_branch(repo), "--label", a.label, "--no-focus")
+                        a.base or base_branch(repo), "--label", a.label, "--no-focus",
+                        *(["--path", a.path] if getattr(a, "path", None) else []))
         if not created:
             sys.exit("herdr worktree create failed")
         flat = json.dumps(created)
@@ -780,7 +1659,7 @@ def cmd_dispatch(a):
         if a.prep:
             subprocess.run(["zsh", "-c", a.prep], cwd=path, check=True, env={**os.environ, "MAIN": repo})
     args = ["agent", "start", a.name, "--kind", a.kind, "--pane", pane]
-    argv = worker_argv(a, outside_reads(repo, a.brief))
+    argv = worker_argv(a, outside_reads(repo, a.brief), repo)
     if len(argv) > 1:
         args += ["--", *argv[1:]]
     if not herdr(*args):
@@ -795,7 +1674,7 @@ def cmd_dispatch(a):
             hold_exited(task_id, a, tr("(no agent in the pane)", "（窗格里已经没有 agent）"),
                         {"workspace": workspace, "pane": pane})
         sys.exit(f"prompt failed; the agent is running. Send the brief by hand: "
-                 f"herdr agent prompt {a.name} \"$(cat {shlex.quote(str(sent))})\"")
+                 f"herdr agent prompt {a.name} {file_text(sent)}")
     # A startup screen (for example codex's hook trust review) can swallow the brief.
     if not herdr("agent", "wait", a.name, "--until", "working", "--timeout", "20000"):
         if gone():
@@ -804,6 +1683,11 @@ def cmd_dispatch(a):
         print(f"warning: {a.name} did not start working; read its screen and resend the brief from {sent}",
               file=sys.stderr)
     print(f"workspace={workspace} pane={pane} worktree={path}")
+
+
+def in_tui():
+    """This session runs in a pane of the herdr terminal UI ($HERDR_PANE_ID), not in the desktop app's herdr-core."""
+    return bool(PANE) and not PANE.startswith("hc:")
 
 
 def tui_agent_gone(pane):
@@ -881,6 +1765,7 @@ def register_worker(a, repo, held, **where):
                                                parent=getattr(a, "parent", None), **where)))
     task["worker"] = worker_record(a)
     task["worker_pane"] = where.get("pane") or ""  # the pane pm.py started the worker in (see own_worker)
+    task["dispatched"] = True  # `update --status merged` (and so `land`) retires only what `dispatch` created
     task.setdefault("escalations", [])
     task.setdefault("rounds", 0)
     save(task)
@@ -958,9 +1843,13 @@ def docs_line():
 
 
 def pm_command():
-    """How a worker runs this script: the installed copy, with the ledger home when it is not the default."""
-    home = f"PM_HOME={shlex.quote(str(STATE))} " if os.environ.get("PM_HOME") else ""
-    return f"{home}python3 {shlex.quote(str(Path(__file__).resolve()))}"
+    """How a worker runs this script: the installed copy, with the ledger home when it is not the default (on
+    Windows as `--home`, which every shell there reads the same)."""
+    if not os.environ.get("PM_HOME"):
+        return pm_script()
+    if WINDOWS:
+        return f"{pm_script()} --home {shell_quote(STATE)}"
+    return f"PM_HOME={shell_quote(str(STATE))} {pm_script()}"
 
 
 def report_section(task_id):
@@ -1211,9 +2100,15 @@ def screen_line(term, width=160):
     return clip(" / ".join(lines[:3]), width) or "(empty screen)"
 
 
-def worker_argv(a, reads=()):
-    """reads: paths outside the worktree the worker is let read (outside_reads)."""
-    argv = agent_argv(a.kind, a.model, a.effort, advisor=getattr(a, "advisor", ""), fallback=getattr(a, "fallback", ""))
+def worker_argv(a, reads=(), repo=None):
+    """reads: paths outside the worktree the worker is let read (outside_reads). repo: the project, whose PM's codex
+    provider settings a codex worker is started with (codex_settings)."""
+    model = a.model
+    cfg = codex_settings(pm_record(repo) if repo else None) if a.kind == "codex" else {}
+    if model and cfg.get("model_prefix") and not model.startswith(cfg["model_prefix"]):
+        model = cfg["model_prefix"] + model
+    argv = agent_argv(a.kind, model, a.effort, advisor=getattr(a, "advisor", ""), fallback=getattr(a, "fallback", ""))
+    argv[1:1] = [str(x) for x in cfg.get("args") or []]
     return argv + read_settings(a.kind, list(reads))
 
 
@@ -1279,7 +2174,8 @@ def dispatch_hc(a, repo, brief, held=None):
     """Dispatch from a PM in the herdr desktop app: a git worktree and a herdr-core terminal for the worker.
     held: a task dispatch registered without a worker (see held_task); its worktree, if it has one, is used again."""
     base = a.base or base_branch(repo)
-    path = worktree_home(repo) / a.branch.replace("/", "-")
+    path = Path(a.path).expanduser().resolve() if getattr(a, "path", None) else \
+        worktree_home(repo) / a.branch.replace("/", "-")
     if not (held and held.get("worktree") == str(path) and path.is_dir()):
         if path.exists():
             sys.exit(f"{path} already exists")
@@ -1289,14 +2185,12 @@ def dispatch_hc(a, repo, brief, held=None):
         if a.prep:
             subprocess.run(["zsh", "-c", a.prep], cwd=str(path), check=True, env={**os.environ, "MAIN": repo})
     made = (hc("run", "--bg", *worker_placement(), "--name", a.name, "--cwd", str(path),
-               "--", *worker_argv(a, outside_reads(repo, a.brief))) or {}).get("address")
+               "--", *worker_argv(a, outside_reads(repo, a.brief), repo)) or {}).get("address")
     if not made:
         sys.exit(f"hc run failed; the worktree {path} is ready, start the worker by hand")
     task = register_worker(a, repo, held, workspace="", pane=f"hc:{made}", worktree=str(path))
     task_id = task["id"]
     hc("label", made, f"task={task_id}")
-    task["dispatched"] = True  # `update --status merged` retires only what `dispatch` created
-    save(task)
     sent = keep_sent(task_id, brief)
     # About a minute for the worker to come up; claude and codex report a status once their input is ready.
     # With an advisor, a worker that exits at once is not waited for: see advisor_refused.
@@ -1311,7 +2205,7 @@ def dispatch_hc(a, repo, brief, held=None):
         save(task)
         sys.exit(f"the brief was not sent: the worker in hc:{made} is not ready. Its screen: {seen}\n"
                  f"Read it (hc read {made}); once it is ready, send the brief by hand: "
-                 f"hc send {made} \"$(cat {shlex.quote(str(sent))})\"")
+                 f"hc send {made} {file_text(sent)}")
     print(f"pane=hc:{made} worktree={path}")
 
 
@@ -1383,7 +2277,7 @@ def wait_for_report(a):
                             "--status review|blocked --note \"...\"`")
                 print(tr(f"{a.id}: the worker stopped ({state}) without reporting. Remind it:",
                          f"{a.id}：worker 停了（{state}）但没有汇报。提醒它："))
-                print(f"hc send {term} {shlex.quote(remind)}")
+                print(f"hc send {term} {shell_quote(remind)}")
             sys.exit(3)
         if time.time() >= deadline:
             print(tr(f"{a.id}: no new report after {a.timeout} s; wait again.",
@@ -1412,11 +2306,26 @@ def end_terminal(term):
     return True
 
 
+def end_worker(task):
+    """End the terminal, or in the herdr TUI the pane, that pm.py started this task's worker or reviewer in: an hc
+    terminal as end_terminal does; a TUI pane only when it is the one recorded as `worker_pane` and the task's agent
+    still runs in it (as own_worker checks), and never a PM's or this session's. What was ended ("terminal hc:t4",
+    "pane w2:p3"), or ""."""
+    pane = task.get("pane") or ""
+    if pane.startswith("hc:"):
+        return f"terminal {pane}" if end_terminal(pane[3:]) else ""
+    if not pane or pane == PANE or pane != task.get("worker_pane") or pm_record_for_pane(pane):
+        return ""
+    if not any(x.get("pane_id") == pane and x.get("name") == task.get("agent") for x in agents()):
+        return ""  # another agent came into the pane since, or none runs there: left as it is
+    return f"pane {pane}" if herdr("pane", "close", pane) is not None else ""
+
+
 def close_review(review, text):
-    """Retire a review thread (`pm.py review`) and end its reviewer's terminal. It has no worktree or branch of its
-    own: it read the task's. Returns what was removed."""
-    term = hc_terminal_of(review)
-    done = [f"terminal hc:{term}"] if end_terminal(term) else []
+    """Retire a review thread (`pm.py review`) and end its reviewer's terminal or pane. It has no worktree or branch
+    of its own: it read the task's. Returns what was removed."""
+    ended = end_worker(review)
+    done = [ended] if ended else []
     review["retired"] = now()
     if review["status"] in ACTIVE:
         review["status"] = "done"
@@ -1547,12 +2456,21 @@ def refuse(text):
 
 
 def stop_group(proc):
-    """Kill a check and everything it started (it runs in a process group of its own)."""
+    """Kill a check and everything it started (it runs in a process group of its own, see own_group)."""
     if proc and proc.poll() is None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        if WINDOWS:  # no killpg or SIGKILL there: taskkill ends the shell's whole process tree
+            try:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         proc.wait()
 
 
@@ -1585,7 +2503,7 @@ def run_checks(repo, checks, timeout, running):
     deadline = time.time() + timeout
     for check in checks:
         proc = subprocess.Popen(check, shell=True, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, env={**os.environ, "MAIN": repo}, start_new_session=True)
+                                text=True, env={**os.environ, "MAIN": repo}, **own_group())
         running[:] = [proc]
         try:
             out, _ = proc.communicate(timeout=max(0.1, deadline - time.time()))
@@ -1637,7 +2555,7 @@ def cmd_land(a):
     # From here on the main checkout is mid-merge: whatever happens, it is committed or undone.
     def stopped(signum, frame):
         raise LandStopped(signum)
-    signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    signals = tuple(getattr(signal, s) for s in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, s))  # no SIGHUP on Windows
     before = {s: signal.signal(s, stopped) for s in signals}
     running, failed, landed, why_commit, signum = [], None, False, "", 0
     try:
@@ -1754,18 +2672,34 @@ def cmd_review(a):
     old = json.loads(path.read_text()) if path.exists() else {}
     if old and old.get("review_of") != task["id"]:
         sys.exit(f"task {rid} exists and is not a review of {task['id']}")
-    end_terminal(hc_terminal_of(old))  # a review that is run again starts from a fresh reviewer
+    end_worker(old)  # a review that is run again starts from a fresh reviewer
     sent = STATE / "sent" / f"{rid}.md"
     sent.parent.mkdir(parents=True, exist_ok=True)
     sent.write_text(review_brief(task, rid, worktree))
-    name = a.name or f"{task.get('agent') or slugify(task['id'])}-review"
+    worker = task.get("agent") or slugify(task["id"])
+    workspace, tui = "", in_tui()
+    # A herdr TUI agent name has at most 32 characters.
+    name = a.name or f"{worker[:25].rstrip('-') if tui else worker}-review"
     # A Claude Code reviewer is given no tool that writes files: it reads, runs the checks and reports.
-    argv = (worker_argv(a, outside_reads(task["repo"], task.get("brief") or ""))
+    argv = (worker_argv(a, outside_reads(task["repo"], task.get("brief") or ""), task["repo"])
             + (["--disallowedTools", "Edit,Write,NotebookEdit"] if a.kind == "claude" else []))
-    made = (hc("run", "--bg", *worker_placement(), "--name", name, "--cwd", worktree, "--", *argv) or {}).get("address")
-    if not made:
-        sys.exit("hc run failed; no reviewer was started")
-    hc("label", made, f"task={rid}")
+    if tui:
+        # In the herdr TUI: a tab beside the task's worker, as escalate makes one. Never herdr-core, even where
+        # `hc` is installed: the desktop app would run it where this PM cannot see it.
+        workspace = task_workspace(task)
+        pane, failed = tui_tab_agent(workspace, worktree, name, a.kind, argv)
+        if failed:
+            sys.exit(tr(f"no reviewer was started: no tab could be made in workspace {workspace or '(none)'}"
+                        if failed == "no tab" else f"no reviewer was started: agent start failed in {pane}",
+                        f"没有起审查 worker：没能在工作区 {workspace or '（无）'} 开出标签页" if failed == "no tab"
+                        else f"没有起审查 worker：在 {pane} 启动 agent 失败"))
+    else:
+        made = (hc("run", "--bg", *worker_placement(), "--name", name, "--cwd", worktree, "--", *argv)
+                or {}).get("address")
+        if not made:
+            sys.exit("hc run failed; no reviewer was started")
+        hc("label", made, f"task={rid}")
+        pane = f"hc:{made}"
     # A review run again after the one before reported blockers: that round of work did not pass. Not after a pass
     # (a report that starts as the brief says, "no blockers"), after a review that never reported, or once the review
     # thread is closed (an escalation closes it, so the new worker's rounds start from nothing).
@@ -1775,9 +2709,9 @@ def cmd_review(a):
         fresh["rounds"] = (fresh.get("rounds") or 0) + 1
         save(fresh)
     review = {**old, "id": rid, "title": tr("Review: ", "审查：") + task["title"], "project": task["project"],
-              "repo": task["repo"], "status": "in_progress", "base": task["base"], "owner": "pm", "workspace": "",
-              "pane": f"hc:{made}", "agent": name, "brief": str(sent), "review_of": task["id"],
-              "worker": worker_record(a), "created": old.get("created") or now()}
+              "repo": task["repo"], "status": "in_progress", "base": task["base"], "owner": "pm",
+              "workspace": workspace, "pane": pane, "worker_pane": pane, "agent": name, "brief": str(sent),
+              "review_of": task["id"], "worker": worker_record(a), "created": old.get("created") or now()}
     for f in ("retired", "commit", *QUESTION_FIELDS):
         review.pop(f, None)
     said = " ".join(x for x in (a.kind, a.model, a.effort) if x)
@@ -1785,15 +2719,26 @@ def cmd_review(a):
     note(review, tr(f"review started ({said}" + (f", the review model for {of})" if of else ")"),
                     f"开始审查（{said}" + (f"，{of} 档的评审模型）" if of else "）")) + fallback_said(a))
     save(review)
-    if not send_when_ready(made, sent.read_text(), tries=30, pause=2, strict=a.kind in ("claude", "codex"),
-                           trust=worktree):
-        seen = screen_line(made)
+    if tui:
+        got = tui_prompt(name, pane, sent.read_text())
+        if got in ("refused", "gone"):
+            seen = tr("(no agent in the pane)", "（窗格里已经没有 agent）") if got == "gone" else \
+                tr("(the prompt was refused)", "（提示没送进去）")
+            note(review, tr(f"brief not sent: {seen}", f"任务书没送达：{seen}"))
+            save(review)
+            sys.exit(f"the review brief was not sent to {pane}: {seen}\nOnce it is ready, send it by hand: "
+                     f"herdr agent prompt {name} {file_text(sent)}")
+        if got == "idle":
+            print(f"warning: {name} did not start working; read its screen", file=sys.stderr)
+    elif not send_when_ready(pane[3:], sent.read_text(), tries=30, pause=2, strict=a.kind in ("claude", "codex"),
+                             trust=worktree):
+        seen = screen_line(pane[3:])
         note(review, tr(f"brief not sent; the reviewer's screen: {seen}", f"任务书没送达；审查 worker 屏幕上是：{seen}"))
         save(review)
-        sys.exit(f"the review brief was not sent to hc:{made}. Its screen: {seen}\nOnce it is ready, send it by hand: "
-                 f"hc send {made} \"$(cat {shlex.quote(str(sent))})\"")
-    print(tr(f"{rid}: reviewer in hc:{made}. Get its findings with `pm.py wait {rid}`.",
-             f"{rid}：审查 worker 在 hc:{made}。用 `pm.py wait {rid}` 拿结论。"))
+        sys.exit(f"the review brief was not sent to {pane}. Its screen: {seen}\nOnce it is ready, send it by hand: "
+                 f"hc send {pane[3:]} {file_text(sent)}")
+    print(tr(f"{rid}: reviewer in {pane}. Get its findings with `pm.py wait {rid}`.",
+             f"{rid}：审查 worker 在 {pane}。用 `pm.py wait {rid}` 拿结论。"))
 
 
 # ---- escalate: the same task again, on a stronger profile ---------------------------
@@ -1939,7 +2884,7 @@ def start_escalated(task, b, name, worktree, text, why):
     screen when the text was not delivered, else ""). Exits, with nothing changed, when no worker could be started."""
     if PANE.startswith("hc:"):
         made = (hc("run", "--bg", *worker_placement(), "--name", name, "--cwd", str(worktree), "--",
-                   *worker_argv(b, outside_reads(task["repo"], task.get("brief") or ""))) or {}).get("address")
+                   *worker_argv(b, outside_reads(task["repo"], task.get("brief") or ""), task["repo"])) or {}).get("address")
         if not made:
             sys.exit(tr(f"hc run failed; nothing changed for {task['id']}", f"hc run 失败；{task['id']} 什么都没改"))
         hc("label", made, f"task={task['id']}")
@@ -1951,28 +2896,57 @@ def start_escalated(task, b, name, worktree, text, why):
             end_terminal(made)
             escalation_failed(task["id"], b, why, seen)
         return f"hc:{made}", "", seen or "(empty screen)"
-    old = task.get("pane") or ""
-    workspace = task.get("workspace") or (((herdr("pane", "get", old) or {}).get("pane") or {}).get("workspace_id")
-                                          if old else "") or ""
-    made = re.search(r'"pane_id": "([^"]+)"', json.dumps(
-        herdr("tab", "create", "--workspace", workspace, "--cwd", str(worktree), "--label", name, "--no-focus")
-        or {})) if workspace else None
-    if not made:
+    workspace = task_workspace(task, fallback="")
+    pane, failed = tui_tab_agent(workspace, worktree, name, b.kind,
+                                 worker_argv(b, outside_reads(task["repo"], task.get("brief") or ""), task["repo"]))
+    if failed == "no tab":
         sys.exit(tr(f"no tab could be made in {task['id']}'s workspace; nothing changed",
                     f"没能在 {task['id']} 的工作区开出标签页；什么都没改"))
-    pane = made.group(1)
-    argv = worker_argv(b, outside_reads(task["repo"], task.get("brief") or ""))
-    if not herdr("agent", "start", name, "--kind", b.kind, "--pane", pane, *(["--", *argv[1:]] if argv[1:] else [])):
-        herdr("pane", "close", pane)
+    if failed:
         sys.exit(tr(f"agent start failed in {pane}; nothing changed", f"在 {pane} 启动 agent 失败；什么都没改"))
-    prompted = herdr("agent", "prompt", name, text)
-    working = prompted and herdr("agent", "wait", name, "--until", "working", "--timeout", "20000")
-    if not working and tui_agent_gone(pane):
-        herdr("pane", "close", pane)
+    said = tui_prompt(name, pane, text)
+    if said == "gone":
         escalation_failed(task["id"], b, why, tr("(no agent in the pane)", "（窗格里已经没有 agent）"))
-    if prompted and not working:
+    if said == "idle":
         print(f"warning: {name} did not start working; read its screen", file=sys.stderr)
-    return pane, workspace, "" if prompted else tr("(the prompt was refused)", "（提示没送进去）")
+    return pane, workspace, tr("(the prompt was refused)", "（提示没送进去）") if said == "refused" else ""
+
+
+def task_workspace(task, fallback=None):
+    """The herdr TUI workspace a task's worker runs in: the one recorded, else its pane's; else fallback (default:
+    this session's)."""
+    old = task.get("pane") or ""
+    found = task.get("workspace") or (((herdr("pane", "get", old) or {}).get("pane") or {}).get("workspace_id")
+                                      if old and not old.startswith("hc:") else "")
+    return found or (WORKSPACE if fallback is None else fallback)
+
+
+def tui_tab_agent(workspace, cwd, name, kind, argv):
+    """In the herdr terminal UI: a new tab of workspace at cwd, and the agent `name` of this kind started in it (herdr
+    runs the kind's own program: argv[0] is left out). Returns (pane, failed): failed is "" once the agent runs, "no
+    tab" when no tab could be made (pane None), "no agent" when the agent did not start (its tab is closed again)."""
+    made = re.search(r'"pane_id": "([^"]+)"', json.dumps(
+        herdr("tab", "create", "--workspace", workspace, "--cwd", str(cwd), "--label", name, "--no-focus")
+        or {})) if workspace else None
+    if not made:
+        return None, "no tab"
+    pane = made.group(1)
+    if not herdr("agent", "start", name, "--kind", kind, "--pane", pane, *(["--", *argv[1:]] if argv[1:] else [])):
+        herdr("pane", "close", pane)
+        return pane, "no agent"
+    return pane, ""
+
+
+def tui_prompt(name, pane, text):
+    """Give a herdr TUI agent its first text. "" once it works on it; "idle" when it took the text but has not started
+    working; "refused" when it did not take it; "gone" when the agent has left its pane (its tab is closed)."""
+    prompted = herdr("agent", "prompt", name, text)
+    if prompted and herdr("agent", "wait", name, "--until", "working", "--timeout", "20000"):
+        return ""
+    if tui_agent_gone(pane):
+        herdr("pane", "close", pane)
+        return "gone"
+    return "idle" if prompted else "refused"
 
 
 def own_worker(task, pane):
@@ -2121,8 +3095,8 @@ def cmd_escalate(a):
     if unsent:
         note(task, tr(f"brief not sent; the worker's screen: {unsent}", f"任务书没送达；worker 屏幕上是：{unsent}"))
         save(task)
-        resend = (f"hc send {pane[3:]} \"$(cat {shlex.quote(str(sent))})\"" if pane.startswith("hc:")
-                  else f"herdr agent prompt {name} \"$(cat {shlex.quote(str(sent))})\"")
+        resend = (f"hc send {pane[3:]} {file_text(sent)}" if pane.startswith("hc:")
+                  else f"herdr agent prompt {name} {file_text(sent)}")
         sys.exit(tr(f"the brief was not sent to {pane}. Its screen: {unsent}\nOnce it is ready, send it by hand: {resend}",
                     f"任务书没送到 {pane}。屏幕上是：{unsent}\n等它就绪后手动发送：{resend}"))
 
@@ -2134,8 +3108,11 @@ def cmd_hook_session_start(a):
     pm = find_pm()
     if not pm:
         # A restarted PM loses its herdr name; restore it from the registration for this pane.
-        rec = pm_record_for_pane(PANE)
+        rec = own_pm_record()
         if rec and not rec.get("archived") and herdr("agent", "rename", PANE, rec["name"]):
+            pm = {"pane_id": PANE, "name": rec["name"]}
+        elif rec and not rec.get("archived") and in_tui():
+            name_later(PANE, rec["name"])  # too early: herdr does not see this agent in its pane yet
             pm = {"pane_id": PANE, "name": rec["name"]}
         else:
             return
@@ -2156,6 +3133,26 @@ def pm_record_for_pane(pane):
     return None
 
 
+def own_pm_record(cwd=None):
+    """The registration of the PM this session is, for its hooks: the one naming its pane. herdr TUI pane ids come
+    again once its server restarts, so there a registration counts only when this session's folder (cwd, default the
+    current one) is the project's, or one of the two holds the other: a PM claimed with --repo from its home folder,
+    as pm-issues is. None when either folder is unknown (gone, or a registration without its repo)."""
+    rec = pm_record_for_pane(PANE) if PANE else None
+    if rec and in_tui():
+        try:
+            here = project_root(cwd or os.getcwd())
+        except OSError:  # the session's folder was removed
+            here = None
+        repo = rec.get("repo")
+        if not here or not repo or not (in_scope(here, repo) or in_scope(repo, here)):
+            return None
+        # The same pane id in another herdr session (see identity_inventory): not this session's registration.
+        if rec.get("session") and rec["session"] != (herdr_session() or rec["session"]):
+            return None
+    return rec
+
+
 SLASH_COMMAND = re.compile(r"/[\w:.-]+(\s|$)")  # "/compact", not a path such as "/Users/me/shot.png"
 HC_SENT = re.compile(r'<hc from="([^"]+)">(.*)</hc>$', re.S)
 
@@ -2168,7 +3165,7 @@ def cmd_hook_turn(a):
     except ValueError:
         return
     event = data.get("hook_event_name", "")
-    rec = pm_record_for_pane(PANE) if PANE else None
+    rec = own_pm_record(data.get("cwd"))
     if event not in ("UserPromptSubmit", "Stop") or not rec:
         return
     repo = rec.get("repo") or ""
@@ -2194,11 +3191,13 @@ def cmd_hook_turn(a):
         if sender:
             if repo and prompt:
                 record(repo, "agent", by=sender, text=prompt)
+                discord_mirror(rec, f"**{sender}**\n{prompt}")
             return
         if not said:
             return  # task notifications, slash commands
         if repo:
             record(repo, "user", text=prompt)
+        discord_mirror(rec, f"**你**\n{prompt}")
     else:
         # The agent's Stop hook carries the final message of the turn (Claude Code and Codex name it so).
         reply = (data.get("last_assistant_message") or "").strip()
@@ -2207,6 +3206,9 @@ def cmd_hook_turn(a):
         if repo and reply and not quiet:
             # `by`: which session spoke, so the project view can tell this PM's ledger entries from a worker's.
             record(repo, "pm", text=reply, **({"by": PANE} if PANE else {}))
+        if reply and not quiet and rec.get("discord") and discord_on() \
+                and not replied_on_discord(data.get("transcript_path")):
+            discord_mirror(rec, f"**{rec['name']}**\n{reply}")
     turn_log(f"{event}: turn")
 
 
@@ -2849,18 +3851,73 @@ def rotate_herdr(a, repo, rec, previous, prompt, is_self):
     args = next((p["argv"][1:] for p in info.get("foreground_processes", [])
                  if p.get("argv") and Path(p["argv"][0]).name == program), [])
     argv = pm_argv(kind, successor_argv(kind, args, pm_model(kind, a.model), prompt))
-    # The name must be free: the new session's SessionStart hook takes it from the registration of its pane.
-    herdr("agent", "rename", old, f"ex-{name}")
+    # The name must be free for the new session, and the registration names its pane before it starts.
+    holder = next((x.get("pane_id") for x in agents() if x.get("name") == name), None)
+    kept = dict(rec, previous=previous)
+    if holder and not retire_name(holder, name):
+        herdr("pane", "close", new)
+        path.write_text(json.dumps(kept, ensure_ascii=False, indent=2) + "\n")
+        sys.exit(f"handover notes saved, but {holder} keeps the name {name} (no free ex-{name} name for it), so no new "
+                 f"PM was started. Rename or close {holder}, then rotate again.")
     rec.update({"pane": new, "workspace": workspace, "claimed": now(), "previous": previous,
                 "rotations": rec.get("rotations", 0) + 1})
     path.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n")
-    herdr("pane", "run", new, shlex.join(argv))
-    seen = herdr("agent", "wait", new, "--until", "working", "--until", "idle", "--until", "blocked",
-                 "--timeout", "30000")
+    if herdr("pane", "run", new, shell_join(argv, powershell=True)) is None:
+        # Nothing started: the old session stays the PM, under its name.
+        herdr("pane", "close", new)
+        if holder:
+            herdr("agent", "rename", holder, name)
+        path.write_text(json.dumps(kept, ensure_ascii=False, indent=2) + "\n")
+        sys.exit(f"handover notes saved, but the new PM could not be started in {new}; {old} stays the PM. Start a "
+                 f"fresh session by hand (SKILL.md, \"Restart a PM\", without --resume) with this prompt:\n{prompt}")
+    # Its own SessionStart hook runs before herdr sees the agent in the pane, too early to give it the name.
+    named = name_agent(new, name)
+    seen = named and herdr("agent", "wait", name, "--until", "working", "--until", "idle", "--until", "done",
+                           "--until", "blocked", "--timeout", "30000")
     print(f"new PM session started in {new}; {old} is retired"
           + (": stop acting as PM in this session and tell the user to continue there." if is_self else "."))
     if not seen:
-        print(f"check {new}: it may be waiting at a startup dialog (folder trust) that the user has to confirm.")
+        print(f"check {new}: it may be waiting at a startup dialog (folder trust) that the user has to confirm"
+              + ("." if named else f"; once it runs, name it: herdr agent rename {new} {name}"))
+
+
+def retire_name(pane, name):
+    """Rename the agent in pane, a PM that is handing over, so its name is free: ex-<name>, else ex2-<name> and so on
+    while earlier retired sessions still hold those (herdr names are unique among live agents, at most 32
+    characters). True once renamed."""
+    for n in range(1, 10):
+        if herdr("agent", "rename", pane, (("ex-" if n == 1 else f"ex{n}-") + name)[:32]):
+            return True
+    return False
+
+
+NAME_WAIT = 30  # seconds to wait for herdr to see a new agent in its pane before it can be named
+
+
+def name_agent(pane, name, wait=NAME_WAIT):
+    """Give the agent that is starting in this herdr TUI pane its name, once herdr sees it there (an agent's name is
+    cleared when it exits, and a session's SessionStart hook runs before herdr sees it). True when named."""
+    deadline = time.time() + wait
+    while True:
+        if any(x.get("pane_id") == pane for x in agents()) and herdr("agent", "rename", pane, name):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(1)
+
+
+def name_later(pane, name):
+    """name_agent from a process of its own (`pm.py name-agent`), so the session-start hook does not wait for it."""
+    try:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "name-agent", pane, name],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         **own_group(background=True))
+    except OSError:
+        pass
+
+
+def cmd_name_agent(a):
+    name_agent(a.pane, a.name, a.wait)
 
 
 def app_spaces():
@@ -2930,7 +3987,7 @@ def cmd_start(a, prompt=None):
     cfg = config().get("pm") or {}
     kind = a.kind or cfg.get("kind") or "claude"
     skill = Path(__file__).resolve().parent.parent
-    handover = f"python3 {Path(__file__).resolve()} handover"
+    handover = f"{pm_script()} handover"
     prompt = prompt or "[from pm.py start] " + tr(
         f"You are the PM (project manager) of the {Path(repo).name} project. Read {skill}/SKILL.md and "
         f"{skill}/references/pm-playbook.md, then run `{handover}` and work from what it prints. Then tell the "
@@ -3080,7 +4137,7 @@ def cmd_restore(a):
             task["status"] = task.pop("paused_from")
             note(task, tr("project restored", "项目恢复"))
             save(task)
-    handover = f"python3 {Path(__file__).resolve()} handover"
+    handover = f"{pm_script()} handover"
     prompt = "[from pm.py restore] " + tr(
         f"You are the PM of the {name} project (pm skill); the project was archived and has just been restored. "
         f"First run `{handover}` and take over from what it prints, nothing else. Then tell the user in three or "
@@ -3118,7 +4175,7 @@ def cmd_rotate(a):
     (d / "handover.md").write_text(notes)
     previous = {"pane": rec.get("pane"), "transcript": transcript, "at": now(),
                 "tokens": context_tokens(transcript) if transcript else 0}
-    name, handover = Path(repo).name, f"python3 {Path(__file__).resolve()} handover"
+    name, handover = Path(repo).name, f"{pm_script()} handover"
     if rec.get("runtime") != "hc":
         # The herdr TUI: the new PM opens in a tab of its own, so it says what it took over, as before.
         prompt = "[from pm.py rotate] " + tr(
@@ -3312,7 +4369,7 @@ def end_retired_later(term, successor="", place=False, kind="", started=False):
     argv += ["--started"] if started else []
     try:
         subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+                         **own_group(background=True))
     except OSError:
         print(tr(f"hc:{term} could not be ended for you; end it once it is idle: hc kill {term}",
                  f"没能自动结束 hc:{term}；等它空闲后手动结束：hc kill {term}"))
@@ -3694,8 +4751,8 @@ def start_beside_pm(task, plan, name):
             or {})) if workspace else None
         if not made:
             return "", ""  # not a bare terminal elsewhere: the PM's workspace or nothing
-        herdr("pane", "run", made.group(1), shlex.join(
-            plan["argv"] + ([plan["prompt"]] if takes_prompt(plan["kind"]) else [])))
+        herdr("pane", "run", made.group(1), shell_join(
+            plan["argv"] + ([plan["prompt"]] if takes_prompt(plan["kind"]) else []), powershell=True))
         return made.group(1), workspace
     placement = ["--parent", pane[3:], "--outlive-parent", "--no-notify"] if pane.startswith("hc:") else ["--no-parent"]
     made = (hc("run", "--bg", *placement, "--name", name, "--cwd", plan["cwd"], "--", *plan["argv"]) or {}).get("address")
@@ -3713,6 +4770,8 @@ def stale_lock(lock):
         return True
     if not text or not text[0].isdigit():
         return age > 5
+    if WINDOWS:  # signal 0 there is CTRL_C_EVENT, sent to a process group: only the age tells
+        return False
     try:
         os.kill(int(text[0]), 0)
     except ProcessLookupError:
@@ -3792,6 +4851,21 @@ DASH_HTML = Path(__file__).resolve().parent.parent / "assets" / "dash.html"
 TURN_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d) \[([^\]]+)\] (UserPromptSubmit|Stop): turn")
 
 
+# How many ended threads off the board per PM get their worker's label in the state: a few more than the project
+# view lists (pm-project's FINISHED_LIMIT), as it orders them by the conversation log, not by the ledger.
+ENDED_ENGINES = 10
+
+
+def engine_mark(task):
+    """What a task's worker ran as, as the thread list labels it: the worker record's set fields
+    ({profile, kind, model, effort, advisor}) and how many times it was escalated (`escalated`, left out at 0);
+    {} when the ledger does not say."""
+    worker = task.get("worker") if isinstance(task.get("worker"), dict) else {}
+    mark = {k: worker[k] for k in ("profile", "kind", "model", "effort", "advisor") if worker.get(k)}
+    ups = len(task["escalations"]) if isinstance(task.get("escalations"), list) else 0
+    return mark | ({"escalated": ups} if mark and ups else {})
+
+
 def dash_state():
     """Everything the dashboard draws: PMs, tasks, live agents and recent events."""
     listing = agents()
@@ -3856,6 +4930,9 @@ def dash_state():
                      | ({"asked_at": asked[t["id"]]} if asked.get(t["id"]) else {})
                      # a review thread (`pm.py review`): the task it reviews; the views fold it into that task
                      | ({"review_of": t["review_of"]} if t.get("review_of") else {})
+                     # how its worker got there and how many reviews it has been through: the thread list's tip
+                     | ({"escalations": t["escalations"]} if isinstance(t.get("escalations"), list) and t["escalations"] else {})
+                     | ({"rounds": t["rounds"]} if isinstance(t.get("rounds"), int) else {})
                      | {"pm": pm, "latest": (log[-1].get("text", "") if log else ""), "cleanup": needs_cleanup(t),
                         "offline": task_offline(t, hc_live, tui_panes),
                         # what the worker was dispatched with ({profile, kind, model, effort, advisor}; {}: unknown)
@@ -3874,6 +4951,17 @@ def dash_state():
     shown = {t["id"] for t in tasks}
     parts = [{k: t.get(k) or "" for k in ("id", "title", "project", "status", "parent", "updated")}
              | {"pm": owner_pm(t), "retired": bool(t.get("retired"))} for t in left if t.get("parent") in shown]
+    # What the workers of the threads that ended last and are off the board ran as: the project view's ended rows
+    # label them as they do a task on the board (its `engine`). Only the newest ENDED_ENGINES of each PM, and only
+    # the label's fields: the state is read every few seconds.
+    ended = {}
+    for t in sorted(left, key=lambda t: t.get("updated") or "", reverse=True):
+        if t["status"] not in CLOSED or t["status"] == "abandoned" or t.get("review_of"):
+            continue
+        mark = engine_mark(t)
+        pm = owner_pm(t)
+        if mark and pm and len(ended.setdefault(pm, {})) < ENDED_ENGINES:
+            ended[pm][t["id"]] = mark
     # Chat turns with a PM, as recorded by the turn hook.
     if TURN_LOG.exists():
         pane_pm = {p["pane"]: p["name"] for p in pms}
@@ -3914,7 +5002,8 @@ def dash_state():
             counts[key] += 1
     events = sorted(events, key=lambda e: e["at"])[-120:]
     return {"now": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "pms": pms, "tasks": tasks,
-            "agents": agent_map, "events": events, "lang": tr("en", "zh"), "home": str(STATE), "retired_parts": parts}
+            "agents": agent_map, "events": events, "lang": tr("en", "zh"), "home": str(STATE), "retired_parts": parts,
+            "ended_engines": {k: v for of_pm in ended.values() for k, v in of_pm.items()}}
 
 
 def cmd_state(a):
@@ -3982,7 +5071,7 @@ def cmd_dash(a):
         pass
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(prog="pm.py")
     sub = p.add_subparsers(dest="cmd", required=True)
     n = sub.add_parser("new")
@@ -4014,7 +5103,9 @@ def main():
     sh = sub.add_parser("show", help="a task's status, branch and latest ledger entries")
     sh.add_argument("id")
     sh.add_argument("--json", action="store_true", help="print the whole record as JSON (the old output)")
-    sub.add_parser("board")
+    b = sub.add_parser("board")
+    b.add_argument("--post", action="store_true", help="mirror the board to the configured Discord channel")
+    b.add_argument("--channel", help="set (or change) the Discord board channel, then post")
     so = sub.add_parser("status", help="PMs, this project's open tasks and unregistered work")
     so.add_argument("--all", action="store_true", help="every project, not only this one")
     so.add_argument("--closed", action="store_true", help="closed tasks too (done, merged, released, …)")
@@ -4026,6 +5117,15 @@ def main():
     c.add_argument("--repo", default=".")
     c.add_argument("--pane", help="register the PM for this pane instead of the current one")
     c.add_argument("--kind", help="which agent this PM is (default: read from its terminal)")
+    c.add_argument("--discord-channel", help="optional: guild channel ID this PM listens to (needs the bot token)")
+    c.add_argument("--discord-users", help="comma-separated user IDs allowed to talk there (default: paired users)")
+    g = sub.add_parser("guard", help="verify session/workspace identity and authorize a role action (exit 2: refused)")
+    g.add_argument("--repo", default=".")
+    g.add_argument("--action", choices=["read", "coordinate", "implement"], default="read")
+    la = sub.add_parser("launch", help="print the command that starts this project's PM in Claude Code "
+                                       "(with its Discord channel when one is bound)")
+    la.add_argument("--repo", default=".")
+    la.add_argument("--resume")
     st = sub.add_parser("start", help="start a PM session for a project, with any coding agent")
     st.add_argument("--repo", default=".")
     st.add_argument("--kind", help="agent program (default: config.json pm.kind, else claude)")
@@ -4042,14 +5142,27 @@ def main():
             ar.add_argument("--kind", help="agent program (default: the one the PM was)")
             ar.add_argument("--model", help="default: config.json pm.model, else opus for Claude Code, else the "
                                             "program's own")
-    nt = sub.add_parser("notify")
+    nt = sub.add_parser("notify", help="append a line to the PM's inbox; type it into the PM pane only without a watcher")
     nt.add_argument("text")
     nt.add_argument("--repo", default=".")
+    wa = sub.add_parser("watch", help="wait for a new inbox line or an agent state change, print it and exit")
+    wa.add_argument("--pm", help="PM or project name (default: the PM registered for this pane, else for --repo)")
+    wa.add_argument("--repo", default=".")
+    wa.add_argument("--workspace", help="the PM's main workspace (default: from its registration)")
+    wa.add_argument("--timeout", type=int, default=4 * 3600, help="seconds before printing 'watch timeout'")
+    wa.add_argument("--interval", type=int, default=10,
+                    help="seconds between inbox checks; agent states every second check")
+    cc = sub.add_parser("codex-cmd", help="print the codex launch command from the PM's codex settings, else config.json")
+    cc.add_argument("--project", help="PM whose settings to use (default: this pane's PM, else the one for --repo)")
+    cc.add_argument("--repo", default=".")
+    cc.add_argument("--model", default="gpt-6-astra")
+    cc.add_argument("--effort", default="high")
     d = sub.add_parser("dispatch")
     d.add_argument("title")
     d.add_argument("--repo", default=".")
     d.add_argument("--branch", required=True)
     d.add_argument("--label", required=True)
+    d.add_argument("--path", help="worktree path (default: herdr's choice; in the desktop app ~/.herdr/worktrees/…)")
     d.add_argument("--brief", required=True)
     d.add_argument("--name", required=True)
     d.add_argument("--base")
@@ -4136,11 +5249,23 @@ def main():
     er.add_argument("--place", action="store_true", help="give the new pane the old one's place in the tab")
     er.add_argument("--started", action="store_true", help="rotate saw the new PM start work: do not wait for it")
     er.add_argument("--timeout", type=int, default=RETIRE_WAIT)
+    na = sub.add_parser("name-agent", help="(run by the session-start hook) name a PM in a herdr TUI pane once it shows")
+    na.add_argument("pane")
+    na.add_argument("name")
+    na.add_argument("--wait", type=int, default=60)
     sub.add_parser("hook-session-start")
     sub.add_parser("hook-turn")
     sub.add_parser("hook-mirror")  # earlier installs
+    return p
+
+
+def main():
+    p = build_parser()
     a = p.parse_args()
-    globals()["cmd_" + a.cmd.replace("-", "_")](a)
+    try:
+        globals()["cmd_" + a.cmd.replace("-", "_")](a)
+    except IdentityError as e:
+        p.exit(2, f"PM identity check failed: {e}\n")
 
 
 if __name__ == "__main__":

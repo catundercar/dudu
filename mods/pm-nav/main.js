@@ -2,6 +2,7 @@ import { View, div, svg } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, watchFolder, nextCommand, layout, focused, run, shared, setShared, openOverlay } from 'herdr';
 import { summary, navText, estimateTextWidth, focusKey, shouldReturnToWork, pageBefore, pageBack, projectKeys, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand } from './model.js';
+import { execPython } from './python.js';
 
 // The sidebar deliberately depends on the original pm-dash bundle.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
@@ -113,7 +114,7 @@ export default class PmNav extends View {
     this.checkingSetup = true;
     cx.spawn(async cx => {
       try {
-        const result = await exec('python3', [appHome() + SETUP_SCRIPT, '--status', '--claude-home', home() + '/.claude']);
+        const result = await execPython(exec, [appHome() + SETUP_SCRIPT, '--status', '--claude-home', home() + '/.claude']);
         if (result.code !== 0) throw new Error(result.stderr || `setup.py: ${result.code}`);
         const status = JSON.parse(result.stdout);
         // Any agent with the skill counts; the board itself offers Set up or Update.
@@ -130,7 +131,7 @@ export default class PmNav extends View {
     this.loading = true;
     cx.spawn(async cx => {
       try {
-        const r = await exec('python3', [appHome() + PM_SCRIPT, 'state']);
+        const r = await execPython(exec, [appHome() + PM_SCRIPT, 'state']);
         if (r.code !== 0) throw new Error(r.stderr || `pm.py: ${r.code}`);
         const state = JSON.parse(r.stdout);
         if (!Array.isArray(state.pms) || !Array.isArray(state.tasks)) throw new Error('state is missing pms/tasks arrays');
@@ -170,7 +171,7 @@ export default class PmNav extends View {
         this.publish(cx);
         try {
           if (this.setupAvailable && this.ledgerHome) {
-            await exec('python3', ['-c', WRITE_REMOTE_CACHE, this.ledgerHome + '/cache/remote-states.json',
+            await execPython(exec, ['-c', WRITE_REMOTE_CACHE, this.ledgerHome + '/cache/remote-states.json',
               JSON.stringify(this.remoteStates), String(Date.now())], { timeout: 4000 });
           }
         } catch (_) { /* Cache writes are best effort; the sidebar is already updated. */ }

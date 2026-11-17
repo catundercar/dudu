@@ -4,14 +4,16 @@ import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, ter
 import {
   word, timeline, parseConversation, settlePending, answeredTasks, markAnswered, bellStops, bellNext, bellCount, bellThread, detailQuestion, askKey, timelineRows, rowOf, riseAfterWheel, riseAfterJump, answerText, clock, dayLabel, shortPath,
   diffArgv, sendArgv, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
-  disconnected, terminalAction, reattachArgv, engineLabel, engineTip, wasEscalated, escapeStep,
+  disconnected, terminalAction, reattachArgv, engineLabel, engineTip, engineChip, wasEscalated, endedEngine, escapeStep,
   subThreads, parentThread, foldParts, PARTS_LIMIT, foldReviews, reviewRow, threadFor,
   age, eventTime, workingTasks, threadLink, logText, draftKey, draftText, readDrafts, keepDraft,
-  draftFiles, withFiles, withoutFile, notFiles, pickedPaths, addFiles, messageText, afterSend, fileName, isImage, pasteName, attachmentsDir, pastesIn,
+  draftFiles, withFiles, withoutFile, notFiles, pickedPaths, addFiles, messageText, afterSend, fileName, isImage, pasteName, pasteDir, pastesIn, uploadSteps, landedPath, sentFiles,
+  heldFiles, sentLeftovers, staleArgv, staleFiles,
   CHOOSE_FILES, SAVE_CLIPBOARD_IMAGE, PANEL_WIDTH, panelWidth, draggedWidth, readPanelWidth, keepPressHandler,
   withAlpha, solidText, isDarkTheme, viewMarkdown, LEDGER_HOME_SH, EVENT_LIMIT,
   projectRef, machineView, onMachine, remotePmArgv,
 } from './model.js';
+import { execPython } from './python.js';
 
 // The project view reads the ledger through the original pm-dash bundle, like pm-list.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
@@ -178,7 +180,7 @@ export default class PmProject extends View {
         // A project on another machine is read there, through herdr-core (its folders cannot be watched
         // from here: the 10-second read keeps it current).
         const r = machine ? await exec(...remotePmArgv(['state']), { on: machine, timeout: 15000 })
-          : await exec('python3', [appHome() + PM_SCRIPT, 'state']);
+          : await execPython(exec, [appHome() + PM_SCRIPT, 'state']);
         if (r.code !== 0) throw new Error(r.stderr || `pm.py: ${r.code}`);
         const state = JSON.parse(r.stdout);
         if (!Array.isArray(state.pms) || !Array.isArray(state.tasks)) throw new Error('state is missing pms/tasks arrays');
@@ -214,8 +216,8 @@ export default class PmProject extends View {
           this.events = parseConversation(r.stdout);
           this.pending = settlePending(this.pending, this.events);
           // The screenshots pasted into this project, for the messages the log has with image marks
-          // (one on another machine has none here to show).
-          const dir = on.on ? '' : attachmentsDir(pm);
+          // (kept here for a project on another machine too, see pasteFolder).
+          const dir = this.pasteFolder(pm);
           try {
             const ls = dir ? await exec('sh', ['-c', 'cd "$1" 2>/dev/null && ls -1 || true', 'sh', dir]) : null;
             if (path === this.logPath && ls?.code === 0) this.pastes = pastesIn(dir, ls.stdout);
@@ -386,8 +388,8 @@ export default class PmProject extends View {
   // on its way still has that send as its draft), and into its box when it shows. What is not a
   // file is named by the red mark.
   attach(key, paths, cx) {
-    // A file here means nothing to a PM on another machine.
-    if (!key || this.machine) return;
+    // On another machine's project the files stay paths here until a send copies them there (deliver).
+    if (!key) return;
     const rejected = notFiles(paths);
     if (rejected.length) this.attachError = { key, text: word(this.lang, 'notAFile', rejected.map(p => fileName(String(p))).join(', ')) };
     else if (this.attachError?.key === key) this.attachError = null;
@@ -412,9 +414,9 @@ export default class PmProject extends View {
   // The clipboard's image saved in the project's attachments folder; a clipboard without one leaves
   // the box as it was (the paste had no text either).
   pasteImage(which, cx) {
-    if (this.machine) return;
-    const key = this.keyOf(which), dir = attachmentsDir(this.pm());
+    const key = this.keyOf(which), dir = this.pasteFolder(this.pm());
     if (!dir) { this.failedAttach(key, word(this.lang, 'noPasteFolder'), cx); return; }
+    if (this.machine) this.prune();
     const now = new Date(), stamp = pasteName(now);
     this.pasted = { stamp, n: this.pasted.stamp === stamp ? this.pasted.n + 1 : 1 };
     const path = `${dir}/${pasteName(now, this.pasted.n)}`;
@@ -426,9 +428,32 @@ export default class PmProject extends View {
       } catch (e) { this.failedAttach(key, e, cx); }
     });
   }
+  // Where a screenshot pasted into this project is saved here (pasteDir): beside its log, or for a
+  // project on another machine in this computer's ledger home until a send copies it there.
+  pasteFolder(pm) {
+    const name = projectRef({ pm: this.pmName, machine: this.machine }).name;
+    return pasteDir(pm, { machine: this.machine, name, home: this.ledgerHome });
+  }
+  // What waits here for another machine and is a week old goes when something new is put there
+  // (staleArgv); what a box or a bubble still holds stays. Nothing to report: it is tidying.
+  prune() {
+    const home = this.ledgerHome;
+    if (!home) return;
+    exec(staleArgv(home)[0], staleArgv(home).slice(1), { timeout: 20000 }).then(r => {
+      const stale = staleFiles(r.stdout, heldFiles(this.drafts(), this.pending));
+      if (stale.length) return exec('rm', ['-rf', '--', ...stale], { timeout: 20000 });
+    }).catch(() => {});
+  }
+  // After a send to another machine went: its pasted screenshots there are no longer kept here,
+  // unless a box or another bubble (not `except`, the one that went) still holds them.
+  cleanSent(files, except) {
+    if (!this.machine) return;
+    const held = heldFiles(this.drafts(), (this.pending || []).filter(p => p.id !== except));
+    const gone = sentLeftovers(files, this.pasteFolder(this.pm()), held);
+    if (gone.length) exec('rm', ['-f', '--', ...gone], { timeout: 20000 }).catch(() => {});
+  }
   // The paperclip: the system's file picker, several files at once. Cancelling it is no error.
   pickFiles(which, cx) {
-    if (this.machine) return;
     const key = this.keyOf(which);
     cx.spawn(async cx => {
       try {
@@ -449,6 +474,44 @@ export default class PmProject extends View {
     return exec('env', sendArgv(onMachine(address, this.machine), text), { timeout: 20000 }).then(r => {
       if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc send: ${r.code}`);
     });
+  }
+  // `words` and `files` to the terminal `address` (as the project's machine sees it). On another
+  // machine each file is first copied beside that terminal (uploadSteps) and the message names where
+  // it landed there; a file that did not go stops the send with an error that names it (`upload` set).
+  // Resolves with the message that went.
+  // A file whose name hc put would garble goes as a renamed copy (uploadName), made in a folder of
+  // this send's own beside the pasted screenshots and removed once the copies went or failed. A file
+  // already copied there by an earlier try of the same send (this.uploaded) is not copied again.
+  async deliver(address, words, files) {
+    const landed = new Map(), uploaded = this.uploaded ||= new Map();
+    const folder = this.machine ? this.pasteFolder(this.pm()) : '';
+    const stage = folder ? `${folder}/sending-${Date.now()}-${this.sending = (this.sending || 0) + 1}` : '';
+    const steps = uploadSteps(files, address, this.machine, { uploaded, stage });
+    if (steps.some(step => step.copy)) this.prune();
+    try {
+      for (const step of steps) {
+        if (step.landed) { landed.set(step.path, step.landed); continue; }
+        try {
+          if (step.copy) {
+            const r = await exec('sh', ['-c', 'mkdir -p "$1" && cp -- "$2" "$3"', 'sh', stage, step.path, step.copy], { timeout: 60000 });
+            if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `cp: ${r.code}`);
+          }
+          const where = landedPath(await exec('env', step.argv, { timeout: 120000 }));
+          uploaded.set(step.key, where);
+          landed.set(step.path, where);
+        } catch (e) {
+          const error = new Error(word(this.lang, 'uploadFailed', fileName(step.path), this.machine, String(e.message || e).trim()));
+          error.upload = true;
+          throw error;
+        }
+      }
+    } finally {
+      if (steps.some(step => step.copy)) await exec('rm', ['-rf', '--', stage], { timeout: 20000 }).catch(() => {});
+    }
+    const message = messageText(words, sentFiles(files, landed), word(this.lang, 'attachments'));
+    await this.send(address, message);
+    for (const step of steps) uploaded.delete(step.key);
+    return message;
   }
   // The bubble shows at once; the same line in the log replaces it.
   // `question` tags a quick answer so its options stay disabled while it is in flight.
@@ -472,9 +535,9 @@ export default class PmProject extends View {
     this.follow();
     cx.notify();
     cx.spawn(async cx => {
-      try { await this.send(terminal.address, message); this.landed(key, { text, files }, true); }
+      try { await this.deliver(terminal.address, said, files); this.landed(key, { text, files }, true); this.cleanSent(files, bubble.id); }
       catch (e) {
-        this.pending = this.pending.map(p => p.id === bubble.id ? { ...p, failed: String(e.message || e) } : p);
+        this.pending = this.pending.map(p => p.id === bubble.id ? { ...p, failed: String(e.message || e), ...(e.upload ? { upload: true } : {}) } : p);
         this.landed(key, { text, files }, false);
       }
       cx.notify();
@@ -507,7 +570,7 @@ export default class PmProject extends View {
     this.leaving(key);
     this.threadInput.set_value(''); this.threadDraft = ''; this.threadFiles = []; this.threadError = '';
     cx.spawn(async cx => {
-      try { await this.send(terminal.address, message); this.landed(key, { text, files }, true); }
+      try { await this.deliver(terminal.address, text, files); this.landed(key, { text, files }, true); this.cleanSent(files); }
       catch (e) {
         this.landed(key, { text, files }, false);
         // Back into the box when it still is that thread's and nothing was typed there since; files
@@ -691,11 +754,11 @@ export default class PmProject extends View {
         .bg(withAlpha(t.blocked, .14)).text_color(t.blocked).text_size(12.5).font_semibold()
         .tooltip(word(this.lang, 'attachFailed', failed)).accessibility_label(word(this.lang, 'attachFailed', failed))
         .child('!'))) : null;
-    // A project on another machine takes no files from here: the clip shows why, dimmed.
-    const local = !this.machine, clipTip = word(this.lang, local ? 'attach' : 'remoteAttach');
+    // A project on another machine takes files too: its tooltip says they are copied there on sending.
+    const clipTip = this.machine ? word(this.lang, 'remoteAttach', this.machine) : word(this.lang, 'attach');
     const clip = h_flex().id(`${id}-attach`).size(32).mb(6).flex_none().rounded(9).items_center().justify_center()
-      .text_color(t.muted).tooltip(clipTip).accessibility_label(clipTip).when(!local, el => el.opacity(.45))
-      .when(enabled && local, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+      .text_color(t.muted).tooltip(clipTip).accessibility_label(clipTip)
+      .when(enabled, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => this.pickFiles(which, cx)))
       .child(this.icon('clip', 16));
     // The box keeps its presses without the page's keyboard: its textarea takes the keyboard itself.
@@ -706,7 +769,7 @@ export default class PmProject extends View {
         if (enabled && e.keystroke === 'enter') { cx.stop_propagation(); onSend(cx); }
       })
       // Files dragged from Finder (or anywhere) onto the box.
-      .when(enabled && local, el => el.on_drop((e, cx) => this.attach(this.keyOf(which), e?.paths || [], cx)))
+      .when(enabled, el => el.on_drop((e, cx) => this.attach(this.keyOf(which), e?.paths || [], cx)))
       .when(Boolean(mark), el => el.child(mark))
       .when(Boolean(cards), el => el.child(cards))
       .child(h_flex().w_full().items_end().gap(2)
@@ -886,7 +949,7 @@ export default class PmProject extends View {
         .when(Boolean(b.text), el => el.child(div().whitespace_normal().child(b.text)))
         .when(files.length > 0, el => el.child(h_flex().flex_wrap().gap(6)
           .children(files.map((path, i) => this.fileCard(`sent-${b.key}-${i}`, path, t).bg(t.surface)))));
-      return h_flex().w_full().justify_end().gap(6).items_center()
+      const row = h_flex().w_full().justify_end().gap(6).items_center()
         .when(Boolean(b.failed), row => row.child(h_flex().id(`retry-${b.key}`).size(22).rounded(11).items_center()
           .justify_center().text_color(t.blocked).cursor_pointer().hover(s => s.bg(t.hover))
           .tooltip(word(this.lang, 'failed', b.failed)).on_click((_e, cx) => this.retry(Number(b.key.split(':')[1]), cx))
@@ -894,6 +957,12 @@ export default class PmProject extends View {
         .child(el.id(`bubble-${b.key}`).when(b.pending, el => el.opacity(.65).tooltip(word(this.lang, 'sending')))
           .when(!isDarkTheme(t) && !b.failed, el => el.border_1().border_color(t.border))
           .when(Boolean(b.failed), el => el.border_1().border_color(withAlpha(t.blocked, .6))));
+      // A file that was not copied to the project's machine is said in words under the bubble, not
+      // only in the retry mark's tooltip: the message did not go at all.
+      if (!(b.failed && b.upload)) return row;
+      return v_flex().w_full().items_end().gap(4).child(row)
+        .child(div().id(`upload-error-${b.key}`).max_w('72%').text_size(12).text_color(t.blocked).whitespace_normal()
+          .child(word(this.lang, 'failed', b.failed)));
     }
     // One row of a coordinator turn (see timelineRows). The names of the threads a reply is about sit
     // close above it; the turn's other parts follow on rows of their own, under the avatar's column.
@@ -1041,10 +1110,33 @@ export default class PmProject extends View {
     const onTitle = el => h_flex().h(19).flex_none().items_center().child(el);
     const stateMark = row => this.threadMark(row, t);
     const now = Date.now();
+    // What each thread's worker runs as, quietly after its title (the detail's label, see engineChip). The tip
+    // reads the dispatch reason from the ledger log as the state lists it. At the narrowest panel the title
+    // keeps room and the label says only the model. A thread off the board (retired) has its worker's mark in
+    // the state's ended_engines instead.
+    const byId = new Map((this.tasks || this.state.tasks).map(x => [x.id, x]));
+    const logs = new Map();
+    for (const e of Array.isArray(this.state.events) ? this.state.events : []) {
+      if (e?.task) { if (!logs.has(e.task)) logs.set(e.task, []); logs.get(e.task).push(e); }
+    }
+    const narrow = width < 300;
+    const engineMark = id => {
+      const task = byId.get(id) || endedEngine(this.state.ended_engines, id);
+      const chip = task ? engineChip(lang, { ...task, log: logs.get(id) || [] }) : null;
+      if (!chip) return null;
+      return h_flex().id(`engine-${id}`).flex_none().gap(3).items_center().text_size(11).text_color(t.dim).opacity(.85)
+        .tooltip(chip.tip).accessibility_label(chip.tip)
+        .child(div().whitespace_nowrap().child(narrow ? chip.name : chip.label))
+        .when(chip.up, el => el.child(this.icon('up', 10)))
+        .when(Boolean(chip.advisor), el => el.child(h_flex().id(`advisor-${id}`).items_center()
+          .tooltip(word(lang, 'engineAdvisor', chip.advisor)).accessibility_label(word(lang, 'engineAdvisor', chip.advisor))
+          .child(this.icon('advisor', 10))));
+    };
     const openRow = row => {
       // One that waits or is in review keeps its group; that its terminal is gone shows under the pointer.
       const gone = row.offline && row.group !== 'offline' ? word(lang, 'disconnected') : '';
       const at = eventTime(row.updated), tip = [statusLabel(lang, row.status, false, row.offline, row.answered), gone, row.title].filter(Boolean).join(' · ');
+      const engine = engineMark(row.task);
       return h_flex().id(`list-${row.task}`).px(8).py(7).gap(9).rounded(8).items_start().cursor_pointer()
         .hover(s => s.bg(t.hover)).tooltip(tip).accessibility_label(tip)
         .on_click((_e, cx) => this.openThread(row.task, cx))
@@ -1053,6 +1145,7 @@ export default class PmProject extends View {
           .child(h_flex().gap(8).items_baseline()
             .child(div().flex_1().min_w(0).truncate().text_size(13.5).font_medium()
               .text_color(['parked', 'paused', 'offline'].includes(row.group) ? t.muted : t.foreground).child(row.title))
+            .when(Boolean(engine), el => el.child(engine))
             .when(at > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(age(Math.max(0, now - at), lang)))))
           // What it waits for is read whole; a step of work is one line.
           .when(Boolean(row.latest), el => el.child(row.waiting
@@ -1081,13 +1174,14 @@ export default class PmProject extends View {
     });
     // What ended: the conversation's quiet line (a ring and the title), in this list's columns.
     const finished = list.finished.map(row => {
-      const tip = [statusLabel(lang, row.status, row.cleanup), row.title].join(' · ');
+      const tip = [statusLabel(lang, row.status, row.cleanup), row.title].join(' · '), engine = engineMark(row.task);
       return h_flex().id(`list-${row.task}`).h(28).px(8).gap(9).rounded(8).items_center().cursor_pointer().text_size(12.5)
         .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .tooltip(tip).accessibility_label(tip)
         .on_click((_e, cx) => this.openThread(row.task, cx))
         .child(lead(div().size(9).rounded_full().border(1.5).border_color(t.dim)))
-        .child(div().flex_1().min_w(0).truncate().child(row.title));
+        .child(div().flex_1().min_w(0).truncate().child(row.title))
+        .when(Boolean(engine), el => el.child(engine));
     });
     const groups = [...byGroup, ['groupSessions', sessions], ['groupFinished', finished]]
       .filter(([, rows]) => rows.length).map(([key, rows]) => group(key, rows));

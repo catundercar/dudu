@@ -24,6 +24,9 @@ const STRINGS = {
     setupDone: 'Done. Restart your coding agent sessions, then say "act as PM for this project".',
     setupOutdated: 'A PM skill update is available.', update: 'Update',
     setupIncomplete: 'Setup did not finish. Try again.',
+    // No Python 3.8+ to run the PM scripts (Windows: the Microsoft Store stub does not count).
+    noPython: 'PM needs Python 3 first. Install Python 3.8 or newer from python.org, restart Herdr, then click Set up.',
+    noPythonWindows: 'PM needs Python 3 first. Install it from python.org, or run winget install Python.Python.3.12 in a terminal. Then restart Herdr and click Set up.',
     line: (name, text) => `${name}: ${text}`,
     summaryLead: (p, r) => `${p} ${p === 1 ? 'project' : 'projects'} · ${r} ${r === 1 ? 'task' : 'tasks'} running ·`,
     summaryWaiting: w => `${w} ${w === 1 ? 'item' : 'items'} waiting`,
@@ -79,6 +82,8 @@ const STRINGS = {
     setupDone: '设置完成。重启编程 agent 的会话，然后说“作为本项目的 PM”。',
     setupOutdated: 'PM 技能有可用更新。', update: '更新',
     setupIncomplete: '设置尚未完成，请重试。',
+    noPython: 'PM 需要先装 Python 3：从 python.org 安装 3.8 或更新的版本，装好后重开 Herdr，再点「设置」。',
+    noPythonWindows: 'PM 需要先装 Python 3：从 python.org 下载安装，或在终端运行 winget install Python.Python.3.12。装好后重开 Herdr，再点「设置」。',
     line: (name, text) => `${name}：${text}`,
     summaryLead: (p, r) => `${p} 个项目 · ${r} 个任务在跑 ·`,
     summaryWaiting: w => `${w} 件事等你`,

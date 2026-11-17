@@ -13,15 +13,16 @@ The ledger CLI is `scripts/pm.py` in this skill's folder, run with `python3` (ca
 
 ```bash
 pm.py find    # PM terminal of the project containing the current directory (`hc:<address>`); exit 1 when there is none
-echo hc:$HC_TERMINAL_ID
+echo hc:$HC_TERMINAL_ID    # in the herdr terminal UI: echo $HERDR_PANE_ID
 ```
 
-- The printed terminal is your own → you are the PM. Read [references/pm-playbook.md](references/pm-playbook.md). If you are `pm-hub`, follow "Hub" below instead.
+- The printed terminal (or pane) is your own → you are the PM. Read [references/pm-playbook.md](references/pm-playbook.md). If you are `pm-hub`, follow "Hub" below instead.
 - The user asks you to be the PM and none exists → `pm.py claim` from inside the repository, then read the playbook. `claim` registers this session as `pm-<project>` and records which agent program it is, so a later rotation starts the same one.
 - Otherwise you are a worker → follow "Worker" below.
 - A session is identified by its herdr-core terminal, written `hc:<address>` (`$HC_TERMINAL_ID`). `dispatch` run by a PM creates a git worktree under `~/.herdr/worktrees/<project>/` and starts the worker in a herdr-core terminal of its own (a sub-agent of the PM's terminal, so the app lists it under the PM; it outlives the PM, so it survives a rotation; label `task=<task id>`). `retire` ends that terminal together with the worktree.
-- The `herdr` terminal UI (`$HERDR_PANE_ID`) is not supported in this version. `pm.py` contains code paths for it, but they are untested; do not rely on them.
+- In the `herdr` terminal UI a session is its pane (`$HERDR_PANE_ID`, such as `w1:p1`) and the PM is the agent named `pm-<project slug>`. Tested there (herdr 0.9.5): `claim`, `status`, `show`, `diff`, `handover`, `dispatch` (a `herdr worktree` workspace per worker), `wait`, `review` and `escalate` (a tab beside the worker), `land` (which retires, as in the app), `retire` and `rotate` (the new PM opens in a new tab of your workspace, is named there, and tells the user what it took over). What only the desktop app has is skipped there without an error: the tab name, the takeover in the same tab, the quiet first turn and the toasts. `wait` cannot see a TUI worker stop, so it waits until its timeout. Not tested there: `start`, `restore`, `archive`, `reattach`, the hub and the board.
 - Not inside the desktop app (`$HC_TERMINAL_ID` empty) → work normally. Still register non-trivial repository work with `pm.py new` so a future PM can see it.
+- Where several herdr TUI sessions run on one machine (`herdr session list`: default, ci, …), pane ids repeat between them and `find` sees only your own session. Ask `pm.py guard` instead (see "Herdr terminal UI" below): `guard --action read` prints your role, and the PM, as JSON.
 
 ## Worker
 
@@ -58,6 +59,27 @@ Small questions, reviews and one-line fixes do not need a ledger entry.
 
 The playbook (§4, §5) has the details.
 
+## Herdr terminal UI: guard, watch, codex settings
+
+These commands came from the pm.py on a machine where PMs run in the herdr terminal UI, in several herdr sessions at once. The PMs started there before the merge call them as written below; their names, flags, output and exit codes stay as they were.
+
+- **`pm.py guard --action read|coordinate|implement [--repo <dir>]`** checks who you are against every running herdr session and the registrations, read-only. It prints JSON: `role` (`pm`, `worker`, `observer` outside herdr, or `uncertain`), `caller` (session, workspace, pane), `pm` (name, repo, session, workspace, pane, registered, verified, uncertain) and `unresolved_registrations`. Exit 2, with `PM identity check failed: …` on stderr, when the action is not allowed: `coordinate` is for the registered PM only, `implement` for anyone but the PM, and an uncertain identity may only read. A PM there runs `guard --action coordinate` before each turn's actions, and a worker `guard --action implement` before it changes anything. `uncertain` means a registration names a session that is not running, or the live agent in its pane has another name: report it, do not rename or claim to fix it. Missing environment, a failed query or a stale registration is not evidence that no PM exists. In the desktop app `guard` asks herdr-core instead: the PM is the terminal its registration names while that terminal is live and labelled `pm=<project>`. Only `guard` and `watch` refuse on identity; the other commands do not check it.
+- **Inbox.** Agents report to the PM with one line in `inbox/<pm name>.log` of the ledger home: `[from <sender> HH:MM] <text>`. `pm.py notify` appends that line; it also types the text into the PM's input, but only while no watcher runs for that PM, so the user's half-written input there is not sent along. A PM in another herdr session than the sender is found through its registration; a sender whose folder has no PM reaches the PM of the workspace it runs in.
+- **`pm.py watch [--pm <name>] [--repo <dir>] [--workspace <w>] [--timeout 14400] [--interval 10]`**, run by the PM in the background, exits on the first new inbox line (it prints `INBOX:` and the lines) or on an agent state change: `<pane> working->done`, `<pane> ->blocked`, `<pane> new:done`. It watches the agents in the PM's workspace, in workspaces labelled `pm-<project>…`, and in the workspaces of the project's open tasks that `dispatch` started. A claude pane that herdr calls done or idle while its screen still shows a spinner counts as working. After 4 hours it prints `watch timeout`. Its read offset is kept in `inbox/<pm>.offset`, so lines written between two runs are still delivered, and a second watcher for the same PM is refused. Handle what it printed, then start it again. **`watch` and `wait` are not the same:** `wait <id>` waits for one task's report in the ledger and prints that report (exit 2: timeout, 3: stopped unreported); `watch` waits for anything that should wake the PM, from any agent, and prints only what woke it. In the herdr TUI `wait` cannot see a worker stop, so a TUI PM keeps one `watch` running; both can run at once.
+- **Codex provider settings.** A PM's registration (`pms/<project>.json`) may carry `"codex": {"args": ["-c", "model_provider=\"<name>\""], "model_prefix": "<prefix>/"}`, and `config.json`'s `codex` block is the default for PMs without one. `pm.py codex-cmd [--project <name>] [--model gpt-6-astra] [--effort high]` prints the codex command line with them, to start codex by hand in a pane. `dispatch`, `review` and `escalate` start codex workers with the same settings: the args after `codex`, the prefix on the model.
+- **`pm.py launch [--repo <dir>] [--resume <session id>]`** prints the command that starts the project's PM in Claude Code: with its Discord channel when Discord is on and `claim --discord-channel` bound one (below), otherwise `claude [--resume <id>] <your usual flags>`.
+- **`dispatch --path <dir>`** puts the worktree there instead of herdr's (or, in the desktop app, `~/.herdr/worktrees/…`) default.
+
+Migration notes for older pm.py versions — what differs from them: `find` prints the pane alone, not `<session>/<pane>`; `status` lists this project's tasks (`--all`: every project, `--closed`: closed ones too); `show` prints a summary (`--json`: the whole record); `dispatch` without `--model`/`--effort` takes `config.json`'s `worker` settings, else the worker program's own, where it used to default to `gpt-6-astra` and `high`; and `new`, `update`, `log`, `notify`, `claim`, `dispatch` and `retire` no longer run the identity check themselves.
+
+### Discord (optional, off by default)
+
+A PM can listen on one channel of a Discord bot. It is off unless `config.json` says `"discord": true`; until then nothing is sent to Discord, `launch` prints the plain command, and the Discord flags stop with a one-line message, whatever `discord.json`, the registrations or the token file hold from earlier installs. When on:
+
+- `pm.py claim --discord-channel <channel id> [--discord-users <id,id>]` (bot token in `~/.claude/channels/discord/pm-token.env`) writes the PM's plugin state and a session-only MCP config, `mcp/pm-<project>.json` in the ledger home. Start the PM with `pm.py launch --resume <session id>`'s command (`--mcp-config <file> --dangerously-load-development-channels server:discord-pm`) and confirm the startup dialog. Messages from the user's own account in that channel are the user's instructions; anything else is information. After a restart, catch up with `fetch_messages`.
+- The turn hook mirrors the PM's chat into its channel: what the user typed (**你**), what another agent sent, and the PM's final reply, unless that turn already answered on Discord. `PM_NO_DISCORD=1` silences a session.
+- `pm.py board --channel <id>` sets the board channel and posts the board; after that every ledger write edits that one message, and `board --post` refreshes it.
+
 ## Hub (PM of PMs)
 
 `pm-hub` runs in its own space (directory `hub/` in the ledger home). It holds no project context. It starts and restarts PMs and answers cross-project status, so these requests stay out of the project PMs' contexts.
@@ -88,12 +110,18 @@ Personal settings live in `config.json` in the ledger home; every key is optiona
  "profiles": {"hard": {"kind": "claude", "model": "opus", "effort": "xhigh", "advisor": "fable"}},
  "review": {"standard": "fable", "light": {"model": "opus", "effort": "high"}},
  "pm": {"kind": "claude", "model": "opus", "narrow_tools": true, "lean": true},
- "agents": {"mine": {"argv": ["mine", "--yes"], "model": ["--model", "{}"], "effort": [], "prompt_arg": false}}}
+ "agents": {"mine": {"argv": ["mine", "--yes"], "model": ["--model", "{}"], "effort": [], "prompt_arg": false}},
+ "codex": {"args": ["-c", "model_provider=\"<name>\""], "model_prefix": "<prefix>/"},
+ "discord": false}
 ```
+
+`codex` and `discord` are described under "Herdr terminal UI" above.
 
 `lang` is the language of built-in text (the handover prompt, recorded quotes, dashboard labels): `en` by default, or `zh`. `worker` gives the defaults for `pm.py dispatch`; its `--kind`, `--model` and `--effort` flags win, and without either the worker program's own defaults apply. `profiles` replaces or adds the worker profiles that `dispatch --profile` and `escalate` name (built in: light, standard, hard, deep; `worker` may name one as `"profile"`). `review` changes the review table, which picks the reviewer's model from the profile the task's worker ran with. `fable` (default `true`): set it to `false` where Fable cannot be used (Bedrock, Vertex, a gateway, an account without it); hard then runs without the advisor, deep is not offered and escalation ends at hard, and the review table's Fable entries go to Sonnet. What `profiles` and `review` say still wins. Any Claude worker or reviewer that runs on Fable is started with `--fallback-model` (worker: opus, reviewer: sonnet), and its note says so. `reviewer` gives the defaults for `pm.py review` instead of that table, and falls back to `worker`. `pm` gives the defaults for `pm.py start` and `rotate`; a Claude Code PM runs on `opus` unless `pm.model` or `--model` says otherwise, and a rotation never carries over the outgoing session's model. `pm.py start` and `rotate` start a Claude Code PM with `--disallowedTools Edit,NotebookEdit` so it changes no files itself, and `"narrow_tools": false` turns that off. They also start it lean, since every turn re-reads the whole context: `--strict-mcp-config --no-chrome` (no MCP servers or browser tools), and `--settings pm-settings.json` from the ledger home, which turns the user's plugins off and lists the user's other skills to the user only (`/name` still works), for that session alone. `"lean": false` turns that off.
 
 **Any coding agent can be the PM or a worker.** `kind` names the program: `claude`, `codex`, `pi`, `gemini` and `opencode` are built in (only Claude Code and Codex are tested); `agents` adds others or overrides a built-in one. `argv` is the command, `model` and `effort` are the flags that carry those values (`{}` is replaced), and `prompt_arg` says the program takes its first prompt as a trailing argument; without it the prompt is typed in once the program is ready. A kind that is not listed is run as written (`--kind "mine --yes"`). What differs between agents: the session-start reminder, the turn notes and the conversation log need the agent's hooks (Claude Code; Codex's hooks carry the same fields but that path has not been run yet); the context-size warning is read from Claude Code transcripts only. Everything else (ledger, dispatch, review, rotation, board) is the same for all.
+
+**Windows.** The command lines `pm.py` writes (the report lines in briefs, the handover command, the "send it by hand" lines) name the script as `py -3 "C:/…/pm.py"` (else the quoted interpreter path), with paths in double quotes and forward slashes, which cmd, PowerShell and Git Bash read alike; a ledger home other than the default goes in as `pm.py --home "<dir>" <command>` instead of `PM_HOME=…`. `codex-cmd` prints a line for PowerShell. `land` ends a check that runs out of time with `taskkill /T /F`. A `reattach` lock counts as stale only by its age there (five minutes): whether the process that holds it is still running is not checked.
 
 ## Rotation
 

@@ -7,6 +7,8 @@ All notable changes to dudu. Dates are UTC.
 - The README is short and points to [the guide](docs/guide.md) for the details.
 - A home page on GitHub Pages: https://catundercar.github.io/dudu/
 - A project on a remote machine opens in the project view, like a local one, instead of in its manager's terminal.
+- In a remote project's conversation you can paste, drop or pick files: they are copied to that machine when the message is sent, and a file that could not be copied says so under the message.
+- A remote project's attachments: a file with a Chinese (or other non-ASCII) name arrives under a readable name such as `image-20261116-221514-1-v2.png` instead of `____v2.png`; a pasted screenshot is no longer kept here once its message went, and leftovers older than a week are cleared; sending again after a file failed does not copy the files that already went a second time.
 - Manager sessions start lighter: a Claude Code manager starts without MCP servers, browser tools or other plugins (`"pm": {"lean": false}` turns this off).
 - The manager reads less: short task and status output, the full report only when a task comes back, and small diffs land without a separate reviewer.
 - Handing a long conversation to a fresh manager session happens in the same tab, without a word to you; the old session stays until the new one is working.
