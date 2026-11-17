@@ -1,9 +1,9 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex, TextView, TextareaState, Textarea, ScrollHandle } from 'gpui-base';
-import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, panes, spaces, shared, setShared } from 'herdr';
+import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, panes, spaces, shared, setShared, window as appWindow } from 'herdr';
 import {
   word, timeline, parseConversation, settlePending, answeredTasks, markAnswered, bellStops, bellNext, bellCount, bellThread, detailQuestion, askKey, timelineRows, rowOf, riseAfterWheel, riseAfterJump, answerText, clock, dayLabel, shortPath,
-  diffArgv, sendArgv, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
+  diffArgv, sendArgv, withoutTerminalEnv, SEND_ENV, REATTACH_ENV, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
   disconnected, terminalAction, reattachArgv, engineLabel, engineTip, engineChip, wasEscalated, endedEngine, escapeStep,
   subThreads, parentThread, foldParts, PARTS_LIMIT, foldReviews, reviewRow, threadFor,
   age, eventTime, workingTasks, threadLink, logText, draftKey, draftText, readDrafts, keepDraft,
@@ -264,6 +264,10 @@ export default class PmProject extends View {
     const task = this.threadTask || this.state.tasks.find(t => t.id === this.thread);
     return task ? terminalFor(taskRow(task), this.terms()) || null : null;
   }
+  // Herdr's window.platform: "windows" | "macos" | "linux". Used so send/put/reattach skip Unix `env -u`.
+  hostPlatform() {
+    try { return appWindow()?.platform || ''; } catch (_) { return ''; }
+  }
   // The reattach icon: pm.py brings the thread's agent back (its session resumed, or a new agent given
   // the thread's context) in a terminal under the PM, and the ledger then names that terminal.
   reattach(cx) {
@@ -272,8 +276,17 @@ export default class PmProject extends View {
     this.reattaching = id; this.reattachError = null;
     cx.spawn(async cx => {
       try {
-        const r = this.machine ? await exec(...remotePmArgv(['reattach', id]), { on: this.machine, timeout: 150000 })
-          : await exec('env', reattachArgv(appHome() + PM_SCRIPT, id), { timeout: 150000 });
+        let r;
+        if (this.machine) {
+          r = await exec(...remotePmArgv(['reattach', id]), { on: this.machine, timeout: 150000 });
+        } else if (this.hostPlatform() === 'windows') {
+          // No `env -u` and no guaranteed `python3` on Windows: the same finder setup uses.
+          r = await execPython(exec, [appHome() + PM_SCRIPT, 'reattach', id], { timeout: 150000 });
+        } else {
+          r = await exec(...withoutTerminalEnv(reattachArgv(appHome() + PM_SCRIPT, id), {
+            platform: this.hostPlatform(), unset: REATTACH_ENV,
+          }), { timeout: 150000 });
+        }
         if (r.code !== 0) throw new Error(String(r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop());
       } catch (e) {
         this.reattachError = { id, text: String(e.message || e) };
@@ -470,8 +483,11 @@ export default class PmProject extends View {
   }
 
   // `hc send` reaches a terminal on another machine by its "<machine>/<id>" address.
+  // Windows: bare `hc` (no Unix `env -u`); elsewhere: `env -u HC_TERMINAL_ID hc send …`.
   send(address, text) {
-    return exec('env', sendArgv(onMachine(address, this.machine), text), { timeout: 20000 }).then(r => {
+    return exec(...withoutTerminalEnv(sendArgv(onMachine(address, this.machine), text), {
+      platform: this.hostPlatform(), unset: SEND_ENV,
+    }), { timeout: 20000 }).then(r => {
       if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc send: ${r.code}`);
     });
   }
@@ -496,7 +512,9 @@ export default class PmProject extends View {
             const r = await exec('sh', ['-c', 'mkdir -p "$1" && cp -- "$2" "$3"', 'sh', stage, step.path, step.copy], { timeout: 60000 });
             if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `cp: ${r.code}`);
           }
-          const where = landedPath(await exec('env', step.argv, { timeout: 120000 }));
+          const where = landedPath(await exec(...withoutTerminalEnv(step.argv, {
+            platform: this.hostPlatform(), unset: SEND_ENV,
+          }), { timeout: 120000 }));
           uploaded.set(step.key, where);
           landed.set(step.path, where);
         } catch (e) {
