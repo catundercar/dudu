@@ -1,3 +1,11 @@
+export function numberedLabel(terminal, label) {
+  const id = terminal.address.split("/").pop();
+  const name = label || terminal.name || terminal.template || terminal.title || terminal.program?.name || "";
+  if (!name || name === terminal.address || name === id) return name || id;
+  if (name.startsWith(id) && /^[\s·:：\-—]/u.test(name.slice(id.length))) return name;
+  return `${id} · ${name}`;
+}
+
 // Extend the host list without inventing an agent status or a terminal.
 export function includePMs(list, terminals, panes, spaces) {
   const result = [...list];

@@ -1,7 +1,7 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
 import { View, div, image, svg } from "gpui-kit";
-import { includePMs } from "./model.js";
+import { includePMs, numberedLabel } from "./model.js";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
 
@@ -169,14 +169,16 @@ export default class Agents extends View {
     run("terminal.peek", { terminal: addr });
   }
 
-  // A label-only PM is an extra row, not a new parent for existing agent rows.
+  // PMs and reporting agents use the same tree; child labels retain pane identity.
   children(all, agent) {
-    return agent.pmFallback ? [] : this.tree(all, agent.address);
+    return this.tree(all, agent.address);
   }
 
   // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
   tree(all, addr, lead = []) {
-    const kids = all.filter((k) => k.parent === addr && k.state === "live");
+    // Label-only PMs get independent roots: don't also draw their subtree under
+    // the terminal that originally launched them.
+    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !this.independentPMs?.has(k.address));
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
@@ -191,6 +193,7 @@ export default class Agents extends View {
     const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
+    const name = numberedLabel(k, this.rowLabels.get(k.address));
     return h_flex()
       .id(`sub-${k.address}`)
       .pl(39)
@@ -203,12 +206,12 @@ export default class Agents extends View {
       .text_size(12.5)
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address)))
+      .on_click(() => (this.paneTerminals.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address)))
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      .child(div().flex_1().truncate().tooltip(`${k.address}: ${name}`).text_color(on ? t.foreground : t.muted).child(name))
       .child(this.status(t, { status: st }, compact));
   }
 
@@ -232,7 +235,10 @@ export default class Agents extends View {
     const all = terminals();
     const allPanes = panes();
     const allSpaces = spaces();
+    this.paneTerminals = new Set(allPanes.map(p => p.terminal).filter(Boolean));
     let list = includePMs(agents(), all, allPanes, allSpaces);
+    this.independentPMs = new Set(list.filter(a => a.pmFallback).map(a => a.address));
+    const labelCandidates = list;
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     this.migratePins(all);
     const shown = focused()?.agent;
@@ -243,7 +249,7 @@ export default class Agents extends View {
     const nested = new Set(collapsed ? [] : list.flatMap((a) => this.children(all, a).map((s) => s.t.address)));
     list = list.filter((a) => a.pmFallback || a.pinned || !nested.has(a.address));
     const tabCounts = new Map();
-    for (const a of list) {
+    for (const a of labelCandidates) {
       if (!a.pmFallback) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     }
     const byPriority = sort.id === "priority";
@@ -294,12 +300,13 @@ export default class Agents extends View {
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const leads = leadPanes(allPanes);
     const tabs = new Map(allSpaces.flatMap(s => s.tabs).map(tab => [tab.id, tab]));
-    const labels = new Map(list.map(a => {
+    const labels = new Map(labelCandidates.map(a => {
       if (a.pmFallback) return [a.address, a.title];
       const tab = tabs.get(a.tab);
       const many = tabCounts.get(a.tab) > 1;
       return [a.address, tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : (a.title || a.program?.name || "")];
     }));
+    this.rowLabels = labels;
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
     const seen = {};

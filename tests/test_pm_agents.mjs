@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 const source = readFileSync(new URL("../mods/pm-agents/model.js", import.meta.url), "utf8");
-const { includePMs } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const { includePMs, numberedLabel } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 const spaces = [{ id: "dev/s1", name: "project", tabs: [{ id: "dev/b1", index: 1, name: "PM" }] }];
 const pm = { address: "dev/t3", state: "live", labels: { pm: "project", "herdr.tab": "b1" } };
 const pane = { terminal: "dev/t3", pane: "dev/p1", tab: "dev/b1", focused: true, status: null };
@@ -45,25 +45,44 @@ test("fallback remains adjacent to its space in grouped mode", () => {
   assert.deepEqual(rows.map(a => a.address), ["dev/t3", "dev/t4", "t5"]);
   assert.equal(list.length, 2);
 });
-test("label-only PM does not swallow existing numbered agent rows into its tree", () => {
+test("label-only PM exposes workers as a tree just like a reporting PM", () => {
   const viewSource = readFileSync(new URL("../mods/pm-agents/main.js", import.meta.url), "utf8")
     .replace(/^import .*;$/gm, "").replace("export default class Agents", "class Agents");
   const Agents = new Function("View", `${viewSource}; return Agents;`)(class {});
   const view = new Agents();
   const worker = { address: "dev/t62", parent: pm.address, state: "live" };
   const fallback = { address: pm.address, pmFallback: true };
-  assert.deepEqual(view.children([worker], fallback), []);
+  assert.equal(view.children([worker], fallback)[0].t.address, worker.address);
   assert.equal(view.children([worker], { address: pm.address })[0].t.address, worker.address);
   // Every render path (hiding, ranking, drawing) must use the same safe child list.
   assert.equal((viewSource.match(/this\.children\(all, a\)/g) ?? []).length, 3);
   assert.equal(viewSource.includes("this.tree(all, a.address)"), false);
 });
+test("an independently shown PM and its descendants are not duplicated under its launcher", () => {
+  const viewSource = readFileSync(new URL("../mods/pm-agents/main.js", import.meta.url), "utf8")
+    .replace(/^import .*;$/gm, "").replace("export default class Agents", "class Agents");
+  const Agents = new Function("View", `${viewSource}; return Agents;`)(class {});
+  const view = new Agents();
+  view.independentPMs = new Set([pm.address]);
+  const all = [
+    { ...pm, parent: "dev/launcher" },
+    { address: "dev/t62", parent: pm.address, state: "live" },
+  ];
+  assert.deepEqual(view.children(all, { address: "dev/launcher" }), []);
+  assert.deepEqual(view.children(all, { address: pm.address }).map(s => s.t.address), ["dev/t62"]);
+});
 test("render preserves a named worker tab even when fallback PM shares that tab", () => {
   const viewSource = readFileSync(new URL("../mods/pm-agents/main.js", import.meta.url), "utf8")
     .replace(/^import .*;$/gm, "").replace("export default class Agents", "class Agents");
   const texts = [];
+  const ids = [];
+  const clicks = new Map();
+  const calls = [];
   const element = () => {
+    let id;
     const proxy = new Proxy({}, { get: (_, key) => (...args) => {
+      if (key === "id") { id = args[0]; ids.push(id); }
+      if (key === "on_click" && id) clicks.set(id, args[0]);
       if (key === "child" && typeof args[0] === "string") texts.push(args[0]);
       if (key === "when" && args[0]) args[1](proxy);
       return proxy;
@@ -74,7 +93,8 @@ test("render preserves a named worker tab even when fallback PM shares that tab"
   const worker = { address: "dev/t62", pane: "dev/p62", tab: "dev/b1", tab_index: 1,
     space: "dev/s1", space_name: "project", title: "Implement feature", program, status: "idle" };
   const bindings = {
-    View: class {}, includePMs, agents: () => [worker],
+    View: class {}, includePMs, numberedLabel, agents: () => [worker],
+    run: (...args) => calls.push(args),
     terminals: () => [pm, { address: worker.address, parent: pm.address, state: "live" }],
     panes: () => [{ ...worker, terminal: worker.address }, pane],
     spaces: () => [{ ...spaces[0], tabs: [{ id: "dev/b1", index: 1, name: "t62", named: true }] }],
@@ -90,4 +110,24 @@ test("render preserves a named worker tab even when fallback PM shares that tab"
   assert.ok(texts.includes("t62"));
   assert.ok(texts.includes("PM-project"));
   assert.ok(!texts.includes("Implement feature"));
+  assert.ok(ids.includes("sub-dev/t62"));
+  assert.ok(!ids.includes("ag-dev/t62"));
+  clicks.get("sub-dev/t62")();
+  assert.deepEqual(calls.pop(), ["pane.focus", { terminal: "dev/t62" }]);
+  texts.length = 0;
+  view.folded.add(pm.address);
+  view.render({});
+  assert.ok(!texts.includes("t62"));
+  view.folded.clear();
+  texts.length = 0;
+  view.render({});
+  assert.ok(texts.includes("t62"));
+});
+test("child labels preserve full numbered names, or add the exact terminal ID", () => {
+  const terminal = { address: "dev/t62", name: "ui-auto" };
+  assert.equal(numberedLabel(terminal, "t62-UI门禁-功能国际化"), "t62-UI门禁-功能国际化");
+  assert.equal(numberedLabel(terminal, "t62"), "t62");
+  assert.equal(numberedLabel(terminal, "UI门禁-功能国际化"), "t62 · UI门禁-功能国际化");
+  assert.equal(numberedLabel(terminal), "t62 · ui-auto");
+  assert.equal(numberedLabel(terminal, "t620-other"), "t62 · t620-other");
 });

@@ -14,6 +14,11 @@ On Windows and Linux, PM `watch` / `wait` use file-change notifications and
 `hc events` instead of frequent status polling. A 60-second reconciliation
 remains for missed events; see [PM notifications](docs/guide.md#pm-notifications).
 
+The PM layout includes its own `pm-agents` sidebar: PMs stay visible even without
+status reports, and collapsible worker subtrees keep their terminal IDs and tab
+names. Missing status is shown as unknown, not idle. The built-in Agents mod is
+left unchanged.
+
 This first version supports the Herdr desktop app. The `herdr` terminal UI is not supported yet.
 
 ## Requirements
