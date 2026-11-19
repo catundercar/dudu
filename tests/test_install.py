@@ -33,7 +33,7 @@ MAIN = {
 PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
 PM_BOARD = {"id": "pm-board", "type": "block", "window_drag": True, "content": {"mod": "pm-dash"}}
 PM_PROJECT = {"id": "pm-project", "type": "block", "window_drag": True, "content": {"mod": "pm-project"}}
-MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
+MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project", "pm-agents")
 
 
 class InstallTest(unittest.TestCase):
@@ -266,6 +266,7 @@ class InstallTest(unittest.TestCase):
             "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
         self.assertEqual([node["id"] for node in lists["children"]], ["pm-nav", "pm-list", "spaces", "agents"])
         self.assertEqual(lists["children"][1], PM_LIST)
+        self.assertEqual(lists["children"][-1]["content"]["mod"], "pm-agents")
         self.assertEqual(stage["id"], "pm-stage")
         self.assertEqual(stage["type"], "stack")
         self.assertEqual(stage["active"], "work")
@@ -294,6 +295,7 @@ class InstallTest(unittest.TestCase):
         expected["cloned_from"] = {"name": "main", "version": "1"}
         expected["children"][0]["children"][0]["children"][0:0] = [{
             "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}}, PM_LIST]
+        expected["children"][0]["children"][0]["children"][-1]["content"]["mod"] = "pm-agents"
         expected["children"][1] = {"id": "pm-stage", "type": "stack", "active": "work", "children": [
             copy.deepcopy(MAIN["children"][1]), PM_BOARD, PM_PROJECT]}
         self.assertEqual(actual, expected)
@@ -326,6 +328,27 @@ class InstallTest(unittest.TestCase):
         self.run_install()
         self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), previous)
         self.assertEqual(json.loads(target.read_text())["generated_by"], "dudu install.sh")
+
+    def test_existing_layout_gets_pm_agents_without_overwriting_custom_mod(self):
+        self.seed_layout()
+        target = self.desktop / "layouts/pm.json"
+        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        block = layout["children"][0]["children"][1]["children"][-1]
+        block["content"]["mod"] = "agents"
+        block["size"] = {"px": 222}
+        target.write_text(json.dumps(layout))
+        before = target.read_bytes()
+        self.run_install("--dry-run")
+        self.assertEqual(target.read_bytes(), before)
+        self.run_install()
+        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        block["content"]["mod"] = "pm-agents"
+        self.assertEqual(json.loads(target.read_text()), layout)
+        block["content"]["mod"] = "my-agents"
+        target.write_text(json.dumps(layout))
+        custom = target.read_bytes()
+        self.run_install()
+        self.assertEqual(target.read_bytes(), custom)
 
     def test_existing_layout_gets_pm_list(self):
         # A pm layout from before pm-list, unmarked and edited by the person (as Herdr rewrites it).
