@@ -4,6 +4,7 @@ All notable changes to dudu. Dates are UTC.
 
 ## Unreleased
 
+- PM `watch` / `wait` now wake on Windows/Linux file notifications and desktop `hc events`, ignoring title animations and heartbeats. Fact streams reconnect, unread inbox offsets survive restarts, and a 60-second reconciliation covers missed events. The legacy TUI retains its state-check fallback.
 - Windows Desktop: sending a reply no longer shells out through Unix `env -u`; it runs `hc send` / `hc put` directly so the message box works without a usable `env`.
 - The README is short and points to [the guide](docs/guide.md) for the details.
 - A home page on GitHub Pages: https://catundercar.github.io/dudu/

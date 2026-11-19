@@ -22,6 +22,23 @@ pm.HERDR_DOCS = Path(HOME) / "no-herdr-app"  # the tests do not see this machine
 pm.claude_dir = lambda: Path(HOME) / "claude"  # nor its Claude Code skills and plugins
 
 
+class FakeChangeWaiter:
+    """Advance a virtual clock instead of sleeping or spawning a real hc."""
+    def __init__(self, callback):
+        self.callback, self.now = callback, 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def wait(self, timeout):
+        step = min(timeout, 5)
+        self.now += step
+        self.callback(step)
+
+
 def row(kind, content, usage=None, side=False):
     message = {"content": content}
     if usage:
@@ -1195,10 +1212,11 @@ class ReportAndWait(unittest.TestCase):
                     pm.cmd_update(type("A", (), {"id": task_id, "status": "review", "commit": "abc123", "keep": False,
                                                  "note": "wrote one line; tests pass; UI not checked"}))
         pm.hc = lambda *args, **kw: next(states, None) if args[0] == "get" else None
-        pm.time.sleep = fake_sleep
+        waiter = FakeChangeWaiter(fake_sleep)
         out, code = io.StringIO(), 0
         try:
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), mock.patch.object(pm, "ChangeWaiter", return_value=waiter), \
+                    mock.patch.object(pm.time, "monotonic", lambda: waiter.now):
                 pm.cmd_wait(type("A", (), {"id": task_id, "timeout": timeout}))
         except SystemExit as stop:
             code = stop.code
@@ -1289,10 +1307,11 @@ class LightOutput(unittest.TestCase):
                     pm.cmd_update(type("A", (), {"id": "p-long", "status": "review", "commit": "abc", "keep": False,
                                                  "note": long}))
         pm.hc = lambda *args, **kw: next(states, None) if args[0] == "get" else None
-        pm.time.sleep = fake_sleep
+        waiter = FakeChangeWaiter(fake_sleep)
         out = io.StringIO()
         try:
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), mock.patch.object(pm, "ChangeWaiter", return_value=waiter), \
+                    mock.patch.object(pm.time, "monotonic", lambda: waiter.now):
                 pm.cmd_wait(type("A", (), {"id": "p-long", "timeout": 60}))
         finally:
             pm.hc, pm.time.sleep = hc, sleep
