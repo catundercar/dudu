@@ -23,6 +23,7 @@ import tempfile
 import sys
 import time
 from pathlib import Path, PurePath, PureWindowsPath
+from pm_events import ChangeWaiter, replace_task_file
 
 try:
     import fcntl
@@ -556,7 +557,7 @@ def save(task):
     task["updated"] = now()
     tmp = TASKS / f".{task['id']}.json.tmp"
     tmp.write_text(json.dumps(task, ensure_ascii=False, indent=2) + "\n")
-    tmp.replace(TASKS / f"{task['id']}.json")
+    replace_task_file(tmp, TASKS / f"{task['id']}.json")
     write_board()
     post_board()
 
@@ -1529,6 +1530,38 @@ def watched_agents(rec):
     return states
 
 
+def watched_hc_agents(rec):
+    """Desktop ledger workers of this PM, never another project's.
+
+    hc ls is a compact row (no parent/status/labels); get supplies the facts.
+    Do this only on a notification or the reconciliation deadline.
+    """
+    listed = hc("ls", "--all")
+    if listed is None:
+        return None
+    parent = rec.get("terminal") or str(rec.get("pane", ""))[3:]
+    try:
+        terms = {hc_terminal_of(t) for t in all_tasks()
+                 if t.get("repo") == rec.get("repo") and not t.get("retired")}
+    except (OSError, ValueError):
+        return None  # a partially written/replaced ledger is not terminal removal
+    states = {}
+    for term in listed.get("terminals", []):
+        address = term.get("address")
+        if address == parent or not (term.get("parent") == parent or address in terms):
+            continue
+        if "status" not in term and "argv" not in term:
+            term = hc("get", address, errors=True)
+            if term and (term.get("error") or {}).get("kind") == "not_found":
+                continue
+            if not term or term.get("error"):
+                return None
+        status = term.get("status") or {}
+        status = status.get("state", "idle") if isinstance(status, dict) else str(status)
+        states[f"hc:{address}"] = status if term.get("state") == "live" else "exited"
+    return states
+
+
 def state_changes(prev, cur):
     finished = [f"{p} {prev[p]}->{s}" for p, s in cur.items()
                 if prev.get(p) == "working" and s not in ("working", "blocked")]
@@ -1576,33 +1609,58 @@ def cmd_watch(a):
     lock = watch_lock(name)
     if not lock:
         sys.exit(f"a watcher for {name} is already running (pid {watcher_pid(name)})")
+    # Release even when called in-process, interrupted, or a read fails.
+    with contextlib.closing(lock):
+        watch_notifications(a, rec)
+
+
+def watch_notifications(a, rec):
+    name = rec["name"]
     inbox, offset_file = inbox_path(name), INBOX / f"{name}.offset"
-    try:
-        offset = int(offset_file.read_text())
-    except (OSError, ValueError):
-        # First run: start at the end, and persist it so lines written before the next run are not skipped.
-        offset = inbox.stat().st_size if inbox.exists() else 0
-        offset_file.write_text(str(offset))
-    deadline, prev, tick = time.time() + a.timeout, None, 0
-    while time.time() < deadline:
-        new_offset, text = read_inbox(inbox, offset)
-        if text:
-            print("INBOX:\n" + text, end="", flush=True)
-            offset_file.write_text(str(new_offset))
-            return
-        if new_offset != offset:
-            offset = new_offset
-            offset_file.write_text(str(offset))
-        if tick % 2 == 0 and tui_registration(rec):  # a desktop-app PM's watch reads its inbox only
-            cur = watched_agents(rec)
+    state_file = INBOX / f"{name}.watch-states.json"
+    tui = tui_registration(rec)
+    parent = rec.get("terminal") or str(rec.get("pane", ""))[3:]
+    deadline = time.monotonic() + a.timeout
+    # Subscribe before reading: a write between the read and wait stays queued.
+    with ChangeWaiter([INBOX], None if tui else ["--children-of", parent]) as changes:
+        try:
+            offset = max(0, int(offset_file.read_text()))
+        except (OSError, ValueError):
+            # Existing unread reports must not disappear on the first watcher.
+            offset = 0
+            offset_file.write_text("0")
+        try:
+            prev = json.loads(state_file.read_text())
+            if not isinstance(prev, dict):
+                prev = None
+        except (OSError, ValueError):
+            prev = None
+        while time.monotonic() < deadline:
+            new_offset, text = read_inbox(inbox, offset)
+            if text:
+                print("INBOX:\n" + text, end="", flush=True)
+                offset_file.write_text(str(new_offset))
+                return
+            if new_offset != offset:
+                offset = new_offset
+                offset_file.write_text(str(offset))
+            cur = watched_agents(rec) if tui else watched_hc_agents(rec)
             if cur is not None:
-                changes = state_changes(prev, cur) if prev is not None else []
-                if changes:
-                    print("\n".join(changes), flush=True)
-                    return
+                alerts = state_changes(prev, cur) if prev is not None else []
+                if not tui and prev is not None:
+                    alerts += [f"{p} working->removed" for p in prev
+                               if p not in cur and prev[p] == "working"]
+                    alerts += [f"{p} new:{s}" for p, s in cur.items()
+                               if p not in prev and s in ("error", "exited")]
+                if prev != cur:
+                    state_file.write_text(json.dumps(cur))
                 prev = cur
-        tick += 1
-        time.sleep(a.interval)
+                if alerts:
+                    print("\n".join(alerts), flush=True)
+                    return
+            remaining = max(0, deadline - time.monotonic())
+            # The legacy TUI has no hc fact stream: retain its explicit fallback.
+            changes.wait(min(remaining, max(0.1, a.interval)) if tui else remaining)
     print("watch timeout")
 
 
@@ -2214,7 +2272,7 @@ def hc_terminal_of(task):
     return pane[3:] if pane.startswith("hc:") else ""
 
 
-WAIT_POLL = 5  # seconds between looks at the task file
+WAIT_POLL = 5  # one-shot grace before declaring a stopped worker unreported
 
 
 def worker_state(term):
@@ -2241,16 +2299,31 @@ def cmd_wait(a):
 
 
 def wait_for_report(a):
+    task = load(a.id)
+    term = hc_terminal_of(task)
+    # A file notification also observes direct/older writers, not just cmd_update.
+    with ChangeWaiter([TASKS], ["--terminal", term] if term else None) as changes:
+        wait_for_report_events(a, changes, task)
+
+
+def wait_for_report_events(a, changes, task):
     """Wait until the worker reports in the ledger; print that report, never the worker's screen.
 
     A task already past in_progress (the PM answered a blocked worker or sent review findings) counts as
     reported only once a new log entry arrives, so an old report is not returned again."""
-    deadline, stopped, last = time.time() + a.timeout, 0, ""
-    task = load(a.id)
-    term = hc_terminal_of(task)
+    deadline, stopped_at, last = time.monotonic() + a.timeout, None, ("", "")
     seen = len(task.get("log") or []) if task["status"] != "in_progress" else None
     while True:
-        task = load(a.id)
+        try:
+            task = load(a.id)
+        except (OSError, ValueError):
+            # A Windows rename can briefly deny reads; direct/older writers may
+            # still be writing JSON when the notification arrives.
+            if time.monotonic() >= deadline:
+                print(f"{a.id}: task could not be read before the wait timeout.")
+                sys.exit(2)
+            changes.wait(min(.1, max(0, deadline - time.monotonic())))
+            continue
         if task["status"] != "in_progress" and (seen is None or len(task.get("log") or []) > seen):
             latest = (task.get("log") or [{}])[-1]
             ahead, dirty = git_state(task.get("worktree") or task["repo"], task.get("branch"), task["base"])
@@ -2258,10 +2331,16 @@ def wait_for_report(a):
             print(clip(f"{latest.get('at', '')} {latest.get('by', '')}: {latest.get('text', '')}", REPORT_WIDTH))
             print(f"ahead={ahead} dirty={dirty}")
             return
-        # Two looks in a row, so a turn that has only just started (or a report on its way) is not mistaken.
+        # A duplicate snapshot/file event is not a second observation five
+        # seconds later. Give a report on its way the full grace period.
+        term = hc_terminal_of(task)
         state = worker_state(term)
-        stopped, last = (stopped + 1 if state == last else 1, state) if state else (0, "")
-        if stopped >= 2:
+        at = time.monotonic()
+        if not state:
+            stopped_at, last = None, ("", "")
+        elif (term, state) != last:
+            stopped_at, last = at, (term, state)
+        if state and stopped_at is not None and at - stopped_at >= WAIT_POLL:
             if state in ("exited", "removed"):
                 print(tr(f"{a.id}: the worker's terminal hc:{term} has {state} without reporting.",
                          f"{a.id}：worker 的终端 hc:{term} 已{'退出' if state == 'exited' else '被移除'}，没有汇报。"))
@@ -2279,11 +2358,13 @@ def wait_for_report(a):
                          f"{a.id}：worker 停了（{state}）但没有汇报。提醒它："))
                 print(f"hc send {term} {shell_quote(remind)}")
             sys.exit(3)
-        if time.time() >= deadline:
+        if time.monotonic() >= deadline:
             print(tr(f"{a.id}: no new report after {a.timeout} s; wait again.",
                      f"{a.id}：{a.timeout} 秒后仍没有新的汇报，接着等。"))
             sys.exit(2)
-        time.sleep(WAIT_POLL)
+        remaining = max(0, deadline - time.monotonic())
+        grace = max(0, WAIT_POLL - (time.monotonic() - stopped_at)) if stopped_at is not None else remaining
+        changes.wait(min(remaining, grace))
 
 
 def checkout_of(repo, branch):
@@ -5151,7 +5232,7 @@ def build_parser():
     wa.add_argument("--workspace", help="the PM's main workspace (default: from its registration)")
     wa.add_argument("--timeout", type=int, default=4 * 3600, help="seconds before printing 'watch timeout'")
     wa.add_argument("--interval", type=int, default=10,
-                    help="seconds between inbox checks; agent states every second check")
+                    help="legacy TUI state-check fallback seconds; desktop uses file/hc events (60s reconciliation)")
     cc = sub.add_parser("codex-cmd", help="print the codex launch command from the PM's codex settings, else config.json")
     cc.add_argument("--project", help="PM whose settings to use (default: this pane's PM, else the one for --repo)")
     cc.add_argument("--repo", default=".")

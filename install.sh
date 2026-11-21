@@ -37,7 +37,7 @@ PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mo
 # window (and a double-click maximize it), as on Herdr's own bars; the mods keep every other press.
 PM_PROJECT = {"id": "pm-project", "type": "block", "window_drag": True, "content": {"mod": "pm-project"}}
 PM_BOARD = {"id": "pm-board", "type": "block", "window_drag": True, "content": {"mod": "pm-dash"}}
-MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
+MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project", "pm-agents")
 setup = installer.Setup(args, repo=repo)
 write_json, remove_path = installer.write_json, installer.remove_path
 
@@ -56,6 +56,16 @@ def nodes(tree):
 def has_mod(node, name):
     content = node.get("content")
     return node.get("id") == name or (isinstance(content, dict) and content.get("mod") == name)
+
+
+def include_pm_agents(tree):
+    changed = False
+    for node in nodes(tree):
+        content = node.get("content")
+        if isinstance(content, dict) and content.get("mod") == "agents":
+            content["mod"] = "pm-agents"
+            changed = True
+    return changed
 
 
 def is_block(node, block):
@@ -97,6 +107,10 @@ def install_layout():
             existing = json.loads(target.read_text(encoding="utf-8"))
             if any(has_mod(node, "pm-nav") for node in nodes(existing)):
                 changed, hints = False, []
+                if any(node.get("content", {}).get("mod") == "agents" for node in nodes(existing)
+                       if isinstance(node.get("content"), dict)):
+                    back_up(target)
+                    changed = include_pm_agents(existing)
                 parent = next((node for node in nodes(existing)
                                if any(isinstance(child, dict) and has_mod(child, "pm-nav")
                                       for child in node.get("children", []))), None)
@@ -174,6 +188,7 @@ def install_layout():
         manual_layout(str(error))
         return
     tree["toast"] = TOAST
+    include_pm_agents(tree)
     tree["generated_by"] = generated_by
     if "version" in tree:
         tree["cloned_from"] = {"name": "main", "version": tree["version"]}

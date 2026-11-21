@@ -148,6 +148,32 @@ In the `pm` layout (other layouts are unchanged):
 - **No task alerts.** A task moving to `review` or `blocked` posts no notification of its own; the PM's turn ends and its toast is the signal.
 - **Not solved: the worker's sound.** Herdr plays its finished/needs-you sound itself, apart from the toast mod, and only has the global `sounds.enabled` switch. A layout or mod cannot silence one terminal, so a finishing worker is still heard. dudu does not change your sound settings; see the roadmap.
 
+### PM notifications
+
+Run `pm.py wait <task> --timeout 3600` in the background for a worker's report.
+Run one `pm.py watch` in the background for the PM's inbox and worker-state
+changes. Handle its output, then start it again; do not repeatedly call `status`,
+`show`, or read terminal screens while waiting.
+
+On Windows and Linux, directory notifications observe inbox appends and task-file
+replacements. Desktop waits subscribe to `hc events`; title animations and
+heartbeats do not trigger state queries. On disconnect the subscription retries
+with bounded backoff, and a fresh snapshot reconciles state. A 60-second
+reconciliation is retained for lost events, unsupported filesystems/platforms,
+and older writers. The legacy Herdr TUI has no hc stream; `watch --interval`
+controls its state-check fallback only, not desktop polling.
+
+A worker that stops without reporting gets a five-second grace period; repeated
+events cannot shorten it. Inbox offsets and desktop worker snapshots persist
+between watcher runs. Existing inbox lines without an offset are delivered rather
+than discarded. No event injects text into a worker or executes a command from a
+notification. `notify` still avoids typing into a PM while its watcher runs.
+
+Installing updated scripts affects newly started waits/watchers. Already running
+processes keep their old code until they exit and the PM starts the next wait;
+there is no need to restart worker terminals. This changes PM coordination, not
+the desktop mods' separate remote-data refresh timers.
+
 ## Uninstall
 
 ```bash

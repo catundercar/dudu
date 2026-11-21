@@ -38,7 +38,7 @@ Classify each request:
    Start at standard unless the task is plainly light or hard; failing upward (escalate, §4) is cheaper than starting high. Right after dispatching, log the profile and one line of why: `pm.py log <id> "hard: changes how rotate hands over the terminal"`. **Deep, or any Fable worker, asks the user first:** `dispatch` then registers the task as blocked with a question card and starts nothing; once the user agrees, run the same dispatch with `--confirmed` (or with `--profile hard` if the user picks that). Hard and below are yours to pick.
 
    **Without Fable** (Bedrock, Vertex, a gateway, or an account without it), `config.json` says `"fable": false`: hard runs as Opus · xhigh without the advisor, deep is not offered, and escalation ends at hard. A Fable worker that is started anyway carries `--fallback-model opus`, which Claude switches to without a word; the dispatch note says so (`Fable 不可用时会退到 opus`).
-3. Wait in the background for the worker's report in the ledger. Never poll in the foreground:
+3. Wait in the background for the worker's report in the ledger. Never poll in the foreground. On Windows/Linux, these waits block on file notifications and desktop `hc events`; a 60-second reconciliation is only a safety net. Do not replace them with a timer that repeatedly reads `status`, `show`, or terminal screens:
    ```bash
    pm.py wait <id> --timeout 3600
    ```

@@ -14,6 +14,7 @@ herdr-app check mods/pm-toast
 herdr-app check mods/pm-project
 node --test mods/pm-dash/model.test.mjs mods/pm-list/model.test.mjs mods/pm-project/model.test.mjs
 python3 -m unittest mods/pm-dash/skill/scripts/test_pm.py tests/test_install.py
+python3 -m unittest discover -s mods/pm-dash/skill/scripts -p test_pm_events.py
 bash -n install.sh
 ```
 

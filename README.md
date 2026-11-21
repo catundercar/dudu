@@ -10,6 +10,15 @@ The recording uses invented demo data.
 
 For each project, one agent session in Herdr acts as the manager (any coding agent; Claude Code and Codex are tested): it hands tasks to coding agents in their own worktrees, checks what they bring back, and keeps a persistent task ledger, so progress survives restarts and is visible across projects and machines.
 
+On Windows and Linux, PM `watch` / `wait` use file-change notifications and
+`hc events` instead of frequent status polling. A 60-second reconciliation
+remains for missed events; see [PM notifications](docs/guide.md#pm-notifications).
+
+The PM layout includes its own `pm-agents` sidebar: PMs stay visible even without
+status reports, and collapsible worker subtrees keep their terminal IDs and tab
+names. Missing status is shown as unknown, not idle. The built-in Agents mod is
+left unchanged.
+
 This first version supports the Herdr desktop app. The `herdr` terminal UI is not supported yet.
 
 ## Requirements
