@@ -1,12 +1,21 @@
 // Pure parts of the sidebar PM list: live status, order, "3m ago" text, block height.
 
-// Most urgent first, the same order as Herdr's agents list.
-export const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+// Most urgent first, the same order as Herdr's agents list; a terminal that reports no status last.
+export const RANK = { blocked: 4, done: 3, working: 2, idle: 1, unknown: 0 };
 
-// A matched terminal reports Herdr's live status; a PM outside the desktop
-// keeps the ledger's word. Anything unknown reads as idle.
+// A live terminal's status as Herdr has it (the agents list, else the terminal's own word). A terminal
+// whose program reports none (not an agent Herdr knows, or no reports on that platform) is 'unknown':
+// nothing says it is idle.
+export function liveStatus(terminal, live) {
+  const raw = live.find(a => a.address === terminal.address)?.status || terminal.status;
+  return raw === 'error' ? 'blocked' : RANK[raw] ? raw : 'unknown';
+}
+
+// A matched terminal reports Herdr's live status (liveStatus); a PM outside the desktop
+// keeps the ledger's word, idle when it has none.
 export function pmStatus(pm, terminal, exact, live) {
-  const raw = exact && terminal ? live.find(a => a.address === terminal.address)?.status || terminal.status : pm.status;
+  if (exact && terminal) return liveStatus(terminal, live);
+  const raw = pm.status;
   return raw === 'error' ? 'blocked' : RANK[raw] ? raw : 'idle';
 }
 
@@ -32,15 +41,42 @@ export function pmRows(local, remote, terms, live) {
       terminal: terminal || null, exact, status: pmStatus(pm, terminal, exact, live),
       program: exact ? terminal.program : null, seed: lastEventAt(state.events, pm.name),
       project: pm.project || '', archived: pm.archived || null, waiting: waitingCount(pm, state.tasks) };
-  })).sort((a, b) => RANK[b.status] - RANK[a.status] || a.label.localeCompare(b.label) ||
-    a.machine.localeCompare(b.machine));
+  })).sort(byUrgency);
+}
+const byUrgency = (a, b) => RANK[b.status] - RANK[a.status] || a.label.localeCompare(b.label) ||
+  a.machine.localeCompare(b.machine);
+
+// A live terminal labelled pm=<project> (not retired) that no ledger row names, on this computer or another
+// machine: a PM this ledger has no registration for. It gets a row of its own, so no PM goes missing; the
+// row shows its terminal (there is no project here to open). rows: pmRows' rows, archived ones included.
+export function labelledPmRows(rows, terms, live) {
+  const named = new Set(rows.map(r => `${r.machine}\n${r.project || r.label}`));
+  const shown = new Set(rows.filter(r => r.exact).map(r => r.terminal.address));
+  const extra = [];
+  for (const t of terms) {
+    const project = t.labels?.pm;
+    if (t.state !== 'live' || !project || t.labels['pm.retired'] || !t.address || shown.has(t.address)) continue;
+    const slash = t.address.lastIndexOf('/'), machine = slash < 0 ? '' : t.address.slice(0, slash);
+    if (named.has(`${machine}\n${project}`)) continue;
+    named.add(`${machine}\n${project}`);
+    shown.add(t.address);
+    extra.push({ key: `terminal:${t.address}`, label: project, machine, terminal: t, exact: true, unregistered: true,
+      status: liveStatus(t, live), program: t.program || null, seed: 0, project, archived: null, waiting: 0 });
+  }
+  return extra;
+}
+
+// All rows of the list: the ledger's PMs, then PM terminals it has no registration for, most urgent first.
+export function allPmRows(local, remote, terms, live) {
+  const rows = pmRows(local, remote, terms, live);
+  return [...rows, ...labelledPmRows(rows, terms, live)].sort(byUrgency);
 }
 
 // A row opens the project view (pm-project) when the stage has one: a local PM's and a remote PM's
 // alike, since pm-project reads a remote project from its machine. Without that page (an older
 // layout) the row focuses the PM's terminal instead.
 export function opensProject(row, stage) {
-  return Boolean(row) && Boolean(stage?.children?.some(c => c.id === 'pm-project'));
+  return Boolean(row) && !row.unregistered && Boolean(stage?.children?.some(c => c.id === 'pm-project'));
 }
 // What shared('pm-project') is set to for a row: its key, and the machine of a remote PM.
 export function projectShared(row) {
@@ -107,9 +143,9 @@ export function track(changed, rows, now) {
 }
 
 export const HEADER = 30, ROW = 30, COMPACT_ROW = 28, PAD = 6, MAX_ROWS = 8;
-// The block's height in px: the header alone with no PM, at most MAX_ROWS rows
-// (the rest scroll). The rail keeps a sliver so the block still gets its width,
-// and so does a list without its header (see underNav) while it has no PM.
+// The block's height in px: the header alone with no PM, at most MAX_ROWS rows' height
+// (the rest scroll). The rail keeps a sliver so the block still gets its width, and so
+// does a list without its header (see underNav) while it has no PM.
 export function listHeight(count, compact, header = true) {
   const rows = Math.min(count, MAX_ROWS);
   if (compact) return rows * COMPACT_ROW + PAD * 2;

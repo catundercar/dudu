@@ -4,7 +4,19 @@ All notable changes to dudu. Dates are UTC.
 
 ## Unreleased
 
+- In the desktop app a worker's report, a `pm.py notify` and the new `pm.py event` reach the manager as one delivered message once it is idle, instead of a `wait` per task; a worker that stops without reporting is reminded once, then the manager is told. In the herdr terminal UI the inbox, `wait` and `watch` stay as they were. Memory in two layers, yours and the project's (`pm.py remember`, `recall`, `forget`, `adopt`, `memory`): the handover and every brief carry its index, `decide` also writes one unless `--once`, and Claude Code's own memory is pointed at it. Words that reach a manager while its turn runs are now kept in the conversation. Restart running manager sessions after installing, or they keep starting `wait` and get each report twice.
+- The PM list in the sidebar lists PMs only, no longer their workers: Herdr's Agents list already shows each worker under its PM, so they showed twice. A PM whose terminal reports no status is marked unknown (?), not idle, and a terminal labelled as a PM that this ledger does not know gets a row too.
+- PM `watch` / `wait` now wake on file notifications (macOS kqueue, Linux inotify, Windows directory notifications) and desktop `hc events`, ignoring title animations and heartbeats. Fact streams reconnect, unread inbox offsets survive restarts, and a 60-second reconciliation covers missed events. The legacy TUI retains its state-check fallback.
+- `pm.py watch` refuses to start with its output going nowhere (`&`, `nohup`, `/dev/null`), stops within 5 s once what started it is gone, without reading the inbox, and says what holds the lock when a second watcher is refused. A first watch delivers at most the newest 20 unread inbox lines. Worker states wake a watch only in the herdr terminal UI; in the desktop app it is the inbox alone, as before (`wait` sees a worker stop there).
+- `pm.py notify` from a repository nested in the project's folder reaches the PM of its task or of the nearest folder above; `--repo` names a project and never falls back to another PM; when it finds no PM it exits 1 instead of reporting success.
+- Installing over a build that had `pm-agents` points the pm layout's agents block back to Herdr's agents mod and removes `mods/pm-agents`; uninstalling does too.
 - Windows Desktop: sending a reply no longer shells out through Unix `env -u`; it runs `hc send` / `hc put` directly so the message box works without a usable `env`.
+- Workers can run on a pool of codex profiles with a limit each (`codex.profiles`); when all are full, a Claude worker starts instead and the task says why. Claude Code and Codex workers can be started through a launcher of your own (`claude.launcher`, `codex.launcher`).
+- A finished task's worker terminal can be closed with it (`workers.close_on_close`); `pm.py idle-workers` lists and closes idle ones, and `pm.py status` lists reported work whose terminal is still open. `workers.close_reported` closes a worker's terminal once it has reported and sat idle.
+- `"deep": {"confirmed": true}` in `config.json` records that you agreed to Fable workers for good, so the manager stops asking each time; off by default.
+- `dispatch --task` takes up a registered task, `--here` works without a worktree, `--dry-run` shows the plan; `tabs.new_tab` gives each worker a tab of its own, and `pm.py retab` renames it.
+- The skill's main file is less than half its size: the details moved to files the manager reads when they apply.
+- Installing over a skill copy that was edited by hand backs the edits up first and says so.
 - The README is short and points to [the guide](docs/guide.md) for the details.
 - A home page on GitHub Pages: https://catundercar.github.io/dudu/
 - A project on a remote machine opens in the project view, like a local one, instead of in its manager's terminal.

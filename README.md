@@ -10,6 +10,8 @@ The recording uses invented demo data.
 
 For each project, one agent session in Herdr acts as the manager (any coding agent; Claude Code and Codex are tested): it hands tasks to coding agents in their own worktrees, checks what they bring back, and keeps a persistent task ledger, so progress survives restarts and is visible across projects and machines.
 
+The manager waits for workers on file and terminal events rather than by polling; see [PM notifications](docs/guide.md#pm-notifications).
+
 This first version supports the Herdr desktop app. The `herdr` terminal UI is not supported yet.
 
 ## Requirements
@@ -28,6 +30,8 @@ Clone or download this repository, then run from its root:
 ```
 
 It copies the skill into each coding agent it finds (Claude Code, Codex, pi), adds their hooks, and installs the desktop mods and a `pm` layout. Restart running agent sessions afterwards. `./install.sh --dry-run` previews without writing files.
+
+The skill's source is this repository (`mods/pm-dash/skill`). To change the skill on any machine, change it here and run `./install.sh` again, or open a pull request; do not edit an installed copy such as `~/.claude/skills/pm`, which the next install replaces. When an installed copy has local edits, the installer first copies it to `install/backups/` in the ledger home (`~/.dudu`) and says so.
 
 You can also add it from herdr.dev and click **Set up** on the board. Both paths, every option and what gets written: [Install](docs/guide.md#install) and [Add it from herdr.dev](docs/guide.md#add-it-from-herdrdev).
 

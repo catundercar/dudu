@@ -2,6 +2,8 @@
 """Install the bundled PM skill and its hooks for your coding agents; --status never writes files."""
 import argparse
 import copy
+import datetime
+import fnmatch
 import hashlib
 import json
 import os
@@ -75,11 +77,24 @@ def ledger_home():
     return Path(os.environ.get("PM_HOME") or (earlier if earlier.exists() else Path.home() / ".dudu"))
 
 
-def fingerprint(path):
-    if not path.is_file():
+# What the skill install leaves out of the bundled skill/. Python writes __pycache__ into an installed copy too.
+SKILL_EXCLUDED = ("test_pm.py", "test_pm_events.py", "__pycache__", ".DS_Store")
+
+
+def fingerprint(skill):
+    """{size, sha256} of the skill folder: every file the install copies, by path and content, so a copy whose
+    pm.py and pm_events.py came from different versions is outdated. None without scripts/pm.py."""
+    if not (skill / "scripts/pm.py").is_file():
         return None
-    data = path.read_bytes()
-    return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    digest, size = hashlib.sha256(), 0
+    for path in sorted(skill.rglob("*"), key=lambda p: p.relative_to(skill).as_posix()):
+        parts = path.relative_to(skill).parts
+        if not path.is_file() or any(fnmatch.fnmatch(part, pattern) for part in parts for pattern in SKILL_EXCLUDED):
+            continue
+        data = path.read_bytes()
+        size += len(data)
+        digest.update(b"%s\0%d\0" % ("/".join(parts).encode(), len(data)) + data)
+    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def strip_hooks(value, drop):
@@ -241,16 +256,60 @@ class Setup:
             if not self.args.dry_run:
                 write_json(agent.hooks_path, agent.hooks)
 
+    # What each install copied, so the next one can tell local edits from the files it put there; kept in the
+    # ledger home, outside every skills folder (a copy in there would load as a second skill).
+    def manifest_path(self, agent):
+        return ledger_home() / "install" / f"skill-{agent.name}.json"
+
+    def keep_local_changes(self, agent):
+        """Before the installed skill is replaced or removed: when its files differ from what the last install
+        copied (or, with no record of one, from the bundle), copy the folder to the ledger home and say so. The
+        skill's source is the repository: an edit to the installed copy is lost at the next install otherwise.
+        A link (a development install, or a folder linked from elsewhere) is only unlinked: nothing is lost."""
+        target = agent.skill
+        if target.is_symlink() and target.resolve() != self.source.resolve():
+            print(f"  {target} links to {target.resolve()}: the link goes, that folder is left as it is.")
+        if not target.is_dir() or target.is_symlink() or target.resolve() == self.source.resolve():
+            return
+        try:
+            record = json.loads(self.manifest_path(agent).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = None
+        known = isinstance(record, dict) and record.get("path") == str(target) and "fingerprint" in record
+        if fingerprint(target) == (record["fingerprint"] if known else fingerprint(self.source)) \
+                or not any(path.is_file() for path in target.rglob("*")):
+            return
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = ledger_home() / "install" / "backups" / f"{agent.name}-skill-{stamp}"
+        what = "it differs from what the last install copied" if known else \
+            "it differs from the version being installed (no record of the last install, so it may hold local edits)"
+        print(f"{self.prefix}Back up local changes in {target} to {backup}: {what}")
+        print("  The skill's source is the dudu repository (mods/pm-dash/skill): change it there and install again, "
+              "or open a pull request; an edit to the installed copy is replaced by the next install.")
+        if not self.args.dry_run:
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(target, backup, ignore=shutil.ignore_patterns("__pycache__", ".DS_Store"))
+
+    def record_install(self, agent):
+        if self.args.dry_run or not agent.skill.is_dir() or agent.skill.is_symlink():
+            return
+        write_json(self.manifest_path(agent), {"path": str(agent.skill), "fingerprint": fingerprint(agent.skill)})
+
     def install_skill(self):
         for agent in self.agents:
-            self.copy_files(self.source, agent.skill, ("test_pm.py", "__pycache__", ".DS_Store"))
+            if self.source.resolve() != agent.skill.resolve():
+                self.keep_local_changes(agent)
+            self.copy_files(self.source, agent.skill, SKILL_EXCLUDED)
+            self.record_install(agent)
 
     def remove_skill(self):
         for agent in self.agents:
             if agent.skill.exists() or agent.skill.is_symlink():
+                self.keep_local_changes(agent)
                 print(f"{self.prefix}Remove {agent.skill}")
                 if not self.args.dry_run:
                     remove_path(agent.skill)
+                    self.manifest_path(agent).unlink(missing_ok=True)
             else:
                 print(f"Skip removal: {agent.skill} is absent.")
 
@@ -272,14 +331,14 @@ class Setup:
             print(f"Installation complete. Restart running sessions of {names} to load the skill and hooks.")
 
     def status(self):
-        bundled = fingerprint(self.source / "scripts/pm.py")
+        bundled = fingerprint(self.source)
         if bundled is None:
             raise ValueError("bundled skill/scripts/pm.py is missing")
         result = {"agents": {}, "bundled": bundled,
                   "summary": {"detected": [], "installed": [], "ready": [], "outdated": []}}
         errors = []
         for agent in self.all:
-            installed = fingerprint(agent.skill / "scripts/pm.py")
+            installed = fingerprint(agent.skill)
             facts = {"label": agent.label, "home": str(agent.home), "detected": agent.detected,
                      "skill_present": (agent.skill / "SKILL.md").is_file() and installed is not None,
                      "script_matches": installed == bundled, "installed": installed}

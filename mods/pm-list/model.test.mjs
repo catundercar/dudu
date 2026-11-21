@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { pmRows, pmStatus, splitArchived, archivedDay, age, lastEventAt, track, listHeight, underNav, remotePmStates, HEADER, ROW, MAX_ROWS, PAD } from './model.js';
 import * as list from './model.js';
 import * as dash from '../pm-dash/model.js';
@@ -21,7 +22,7 @@ test('rows show the project name, live status by terminal, most urgent first the
     { address: 't4', status: 'working' }];
   const rows = pmRows(state, {}, terms, live);
   assert.deepEqual(rows.map(r => [r.label, r.status]), [
-    ['alpha', 'blocked'], ['zeta', 'done'], ['beta', 'working'], ['gamma', 'working'], ['delta', 'idle']]);
+    ['alpha', 'blocked'], ['zeta', 'done'], ['beta', 'working'], ['gamma', 'working'], ['delta', 'unknown']]);
   assert.equal(rows[1].program.icon, 'icons/claude.svg');
   const beta = rows.find(r => r.key === 'pm-beta');
   assert.equal(beta.terminal, null);
@@ -170,4 +171,79 @@ test("a remote project's row opens the project view, named by its key and machin
   // A local row is named as before; an older layout without the project page still focuses the terminal.
   assert.deepEqual(list.projectShared({ key: 'pm-dudu', machine: '' }), { pm: 'pm-dudu' });
   assert.equal(list.opensProject(row, { id: 'pm-stage', children: [{ id: 'work' }] }), false);
+});
+
+// ---- PMs that report no status (workers are Herdr's Agents list's) ----
+
+test('a PM whose live terminal reports no status is unknown, never idle; one outside the desktop keeps the ledger word', () => {
+  const pms = [{ name: 'pm-a', project: 'a', pane: 'hc:t1', status: 'idle' },
+    { name: 'pm-b', project: 'b', pane: 'wX:p1', status: 'offline' }];
+  const rows = pmRows({ pms }, {}, [term('t1')], []);
+  assert.deepEqual(rows.map(r => [r.label, r.status]), [['b', 'idle'], ['a', 'unknown']]);
+  assert.equal(pmStatus(pms[0], term('t1', { status: 'working' }), true, []), 'working');
+  assert.equal(list.liveStatus(term('t1', { status: 'error' }), []), 'blocked');
+  assert.equal(list.RANK.unknown, 0);
+});
+
+test('a terminal labelled as a PM that the ledger does not name gets one row, here or on another machine', () => {
+  const pm = term('dev/t3', { labels: { pm: 'project' }, program: { icon: 'icons/claude.svg' } });
+  const rows = list.allPmRows({ pms: [] }, {}, [pm, pm], []);
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].label, rows[0].machine, rows[0].status, rows[0].unregistered, rows[0].exact],
+    ['project', 'dev', 'unknown', true, true]);
+  assert.equal(rows[0].terminal.address, 'dev/t3');
+  assert.equal(list.opensProject(rows[0], { children: [{ id: 'pm-project' }] }), false);
+  // Reporting a status, it shows that status.
+  assert.equal(list.allPmRows({}, {}, [term('t4', { labels: { pm: 'p' } })], [{ address: 't4', status: 'working' }])[0].status, 'working');
+});
+
+test('a PM the ledger names, an exited, retired or unlabelled terminal gets no extra row', () => {
+  const pms = [{ name: 'pm-project', project: 'project', pane: 'hc:t9', status: 'idle' }];
+  // The ledger's PM, matched or by name on the same machine: no second row.
+  assert.equal(list.allPmRows({ pms }, {}, [term('t3', { labels: { pm: 'project' } })], []).length, 1);
+  assert.equal(list.allPmRows({}, { dev: { pms } }, [term('dev/t3', { labels: { pm: 'project' } })], []).length, 1);
+  // The same project on another machine is another PM.
+  assert.equal(list.allPmRows({ pms }, {}, [term('dev/t3', { labels: { pm: 'project' } })], []).length, 2);
+  for (const t of [term('t5', { state: 'exited', labels: { pm: 'x' } }), term('t5', { labels: { pm: 'x', 'pm.retired': 'x' } }),
+    term('t5')]) assert.deepEqual(list.labelledPmRows([], [t], []), []);
+});
+
+test('the view lists PMs only: their workers are left to the Agents list', () => {
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import .*;$/gm, '').replace('export default class PmList', 'class PmList');
+  const texts = [], clicks = new Map(), calls = [];
+  const element = () => {
+    let id;
+    const node = new Proxy({}, { get: (_, key) => (...args) => {
+      if (key === 'id') { id = args[0]; clicks.set(id, null); }
+      if (key === 'on_click' && id) clicks.set(id, args[0]);
+      if (key === 'child' && typeof args[0] === 'string') texts.push(args[0]);
+      if (key === 'when' && args[0]) args[1](node);
+      return node;
+    } });
+    return node;
+  };
+  const terms = [term('t3', { labels: { pm: 'proj' } }), term('t62', { parent: 't3', labels: { task: 'x' }, name: 'worker' }),
+    term('t63', { parent: 't62' }), term('t70', { parent: 't3', labels: { pm: 'nested' } }), term('t71', { parent: 't70' }),
+    term('t2', { labels: { pm: 'proj', 'pm.retired': 'proj' } }), term('t64', { parent: 't2' })];
+  const bindings = {
+    ...list, View: class {}, div: element, svg: element, image: element, v_flex: element, h_flex: element,
+    theme: () => ({}), home: () => '/h', appHome: () => '/a', exec: async () => ({}), readTextFile: async () => '',
+    watchFolder: async () => {}, layout: () => null, run: (...args) => calls.push(args), terminals: () => terms,
+    agents: () => [{ address: 't62', status: 'working' }], panes: () => [{ terminal: 't62' }, { terminal: 't3' }],
+    shared: () => null, setShared: () => {}, openOverlay: () => {}, execPython: async () => ({}),
+    localStorage: { setItem() {}, getItem() { return null; } },
+  };
+  const PmList = new Function(...Object.keys(bindings), `${source}; return PmList;`)(...Object.values(bindings));
+  const view = new PmList();
+  Object.assign(view, { state: { pms: [{ name: 'pm-proj', project: 'proj', pane: 'hc:t3', status: 'idle' }], lang: 'en' },
+    remote: {}, changed: {}, folded: true, compact: false, hover: null, error: '' });
+  view.render({ notify() {}, stop_propagation() {} });
+  // The ledger's PM and the unregistered nested one, each once; no worker, no fold.
+  assert.deepEqual(texts.filter(x => ['proj', 'nested'].includes(x)).sort(), ['nested', 'proj']);
+  for (const text of ['t62', 't63', 't64', 't71', 'worker']) assert.ok(!texts.some(x => x.includes(text)), text);
+  assert.ok(![...clicks.keys()].some(id => /^pm-(worker|fold)-/.test(id)));
+  // A click on the PM row still shows its terminal (no project view in this layout).
+  clicks.get('pm-pm-proj')();
+  assert.deepEqual(calls.pop(), ['pane.focus', { terminal: 't3' }]);
 });
