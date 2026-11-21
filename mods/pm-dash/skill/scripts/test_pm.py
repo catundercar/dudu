@@ -5,21 +5,73 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
 
-HOME = tempfile.mkdtemp()
+import sys
+# pm reads its ledger home and this session's terminal when it loads. Another test file may have loaded it first,
+# with a temporary ledger of its own (test_pm_events.py does the same as here): these tests then use that one.
+REAL_PM_HOME = os.environ.get("PM_HOME", "") if "pm" not in sys.modules else os.environ.get("PM_REAL_HOME", "")
+os.environ.setdefault("PM_REAL_HOME", REAL_PM_HOME)
+HOME = str(sys.modules["pm"].STATE) if "pm" in sys.modules else tempfile.mkdtemp()
 os.environ["PM_HOME"] = HOME
 os.environ.pop("HERDR_PANE_ID", None)
 os.environ.pop("HC_TERMINAL_ID", None)
-import sys
 sys.path.insert(0, str(Path(__file__).parent))
 import pm  # noqa: E402
+
+
+def real_ledgers():
+    """The ledgers of the person running the tests: ~/.claude/pm and ~/.dudu of the account's home, not of $HOME
+    (which a run may have changed), and a PM_HOME they set before the run."""
+    try:
+        import pwd
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError, AttributeError):
+        home = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+    found = [home / ".claude" / "pm", home / ".dudu"] + ([Path(REAL_PM_HOME)] if REAL_PM_HOME else [])
+    return [p.resolve() for p in found]
+
+
+def assert_temporary_ledger():
+    """Stop before any test when pm's ledger is a real one: its tests delete every task and registration in it."""
+    state, tmp = Path(pm.STATE).resolve(), Path(tempfile.gettempdir()).resolve()
+    paths = [state] + [Path(getattr(pm, name)).resolve() for name in ("TASKS", "PMS", "INBOX", "PROJECTS")]
+    near = [r for r in real_ledgers() for p in paths if p == r or r in p.parents or p in r.parents]
+    if near or not all(p.is_relative_to(tmp) for p in paths) or pm.PANE:
+        raise RuntimeError(f"{Path(__file__).name} would run against {state} (terminal {pm.PANE or 'none'}), "
+                           "not a temporary ledger of its own; nothing was run")
+
+
+# Never against a real ledger, whatever PM_HOME says and whichever test file loaded pm first.
+assert_temporary_ledger()
+setUpModule = assert_temporary_ledger
 pm.HERDR_DOCS = Path(HOME) / "no-herdr-app"  # the tests do not see this machine's Herdr docs
 pm.claude_dir = lambda: Path(HOME) / "claude"  # nor its Claude Code skills and plugins
+DELIVER_LATER = pm.deliver_later
+pm.deliver_later = lambda repo: None  # nor start a deliverer, which would type into this machine's real terminals
+
+
+class FakeChangeWaiter:
+    """Advance a virtual clock instead of sleeping or spawning a real hc."""
+    def __init__(self, callback):
+        self.callback, self.now = callback, 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def wait(self, timeout):
+        step = min(timeout, 5)
+        self.now += step
+        self.callback(step)
 
 
 def row(kind, content, usage=None, side=False):
@@ -1195,10 +1247,11 @@ class ReportAndWait(unittest.TestCase):
                     pm.cmd_update(type("A", (), {"id": task_id, "status": "review", "commit": "abc123", "keep": False,
                                                  "note": "wrote one line; tests pass; UI not checked"}))
         pm.hc = lambda *args, **kw: next(states, None) if args[0] == "get" else None
-        pm.time.sleep = fake_sleep
+        waiter = FakeChangeWaiter(fake_sleep)
         out, code = io.StringIO(), 0
         try:
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), mock.patch.object(pm, "ChangeWaiter", return_value=waiter), \
+                    mock.patch.object(pm.time, "monotonic", lambda: waiter.now):
                 pm.cmd_wait(type("A", (), {"id": task_id, "timeout": timeout}))
         except SystemExit as stop:
             code = stop.code
@@ -1289,10 +1342,11 @@ class LightOutput(unittest.TestCase):
                     pm.cmd_update(type("A", (), {"id": "p-long", "status": "review", "commit": "abc", "keep": False,
                                                  "note": long}))
         pm.hc = lambda *args, **kw: next(states, None) if args[0] == "get" else None
-        pm.time.sleep = fake_sleep
+        waiter = FakeChangeWaiter(fake_sleep)
         out = io.StringIO()
         try:
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), mock.patch.object(pm, "ChangeWaiter", return_value=waiter), \
+                    mock.patch.object(pm.time, "monotonic", lambda: waiter.now):
                 pm.cmd_wait(type("A", (), {"id": "p-long", "timeout": 60}))
         finally:
             pm.hc, pm.time.sleep = hc, sleep
@@ -1530,7 +1584,7 @@ class ConversationLog(unittest.TestCase):
             pm.cmd_handover(type("A", (), {"repo": repo, "turns": 6}))
             pm.cmd_conversation(type("A", (), {"repo": repo, "last": 20, "type": "thread,decision", "width": 300}))
         events = pm.conversation(repo)
-        self.assertEqual([e["type"] for e in events], ["user", "pm", "agent", "pm", "pm", "thread", "decision"])
+        self.assertEqual([e["type"] for e in events], ["user", "pm", "agent", "pm", "pm", "thread", "decision", "memory"])  # a decision is remembered
         self.assertEqual((events[5]["task"], events[5]["status"], events[5]["text"]),
                          (f"{name}-wires", "in_progress", "dispatched to w1"))
         text = out.getvalue()
@@ -1547,6 +1601,499 @@ class ConversationLog(unittest.TestCase):
             pm.record(repo, kind, text=text)
         self.assertEqual(pm.log_tail(repo), [{"user": "A", "pm": "reply to A"}, {"user": "B", "pm": ""},
                                              {"user": "C", "pm": ""}])
+
+
+class TakenIn(unittest.TestCase):
+    """Words that came in while a turn worked: Claude Code takes them into the turn as queued_command rows of its
+    transcript, which no hook sees. The turn hook records them when the turn ends, before the reply, once each."""
+
+    BASE = pm.datetime.datetime.now(pm.datetime.timezone.utc).replace(microsecond=0) - pm.datetime.timedelta(hours=2)
+
+    def setUp(self):
+        self.repo = pm.project_root(tempfile.mkdtemp())
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (pm.PANE, pm.HC_TERMINAL, pm.TAKEN_IN_TAIL, pm.TAKEN_IN_MORE)
+        pm.PANE, pm.HC_TERMINAL = "hc:t7", ""
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        self.reg = pm.PMS / f"{pm.project_slug(self.repo)}.json"
+        self.reg.write_text(json.dumps({"name": pm.pm_name(self.repo), "pane": "hc:t7", "project": Path(self.repo).name,
+                                        "repo": self.repo}))
+        self.n = 0
+
+    def tearDown(self):
+        pm.PANE, pm.HC_TERMINAL, pm.TAKEN_IN_TAIL, pm.TAKEN_IN_MORE = self.saved
+        self.reg.unlink(missing_ok=True)
+
+    def at(self, minute):
+        return (self.BASE + pm.datetime.timedelta(minutes=minute)).isoformat().replace("+00:00", ".123Z")
+
+    def local(self, minute):
+        return (self.BASE + pm.datetime.timedelta(minutes=minute)).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+    def prompt(self, minute, text):
+        self.n += 1
+        return {"type": "user", "uuid": f"u{self.n}", "timestamp": self.at(minute), "isSidechain": False,
+                "message": {"role": "user", "content": text}}
+
+    def reply(self, minute, text="…"):
+        self.n += 1
+        return {"type": "assistant", "uuid": f"a{self.n}", "timestamp": self.at(minute), "isSidechain": False,
+                "message": {"content": [{"type": "text", "text": text}]}}
+
+    def queued(self, minute, prompt, uuid=None, kind="human", mode="prompt", **extra):
+        self.n += 1
+        attachment = {"type": "queued_command", "prompt": prompt, "commandMode": mode, "origin": {"kind": kind},
+                      "source_uuid": f"s{self.n}", "timestamp": self.at(minute), **extra}
+        return {"type": "attachment", "uuid": uuid or f"q{self.n}", "parentUuid": None, "timestamp": self.at(minute),
+                "sessionId": "x", "isSidechain": False, "attachment": attachment}
+
+    def write(self, rows, name="session.jsonl", append=False):
+        path = self.dir / name
+        with open(path, "a" if append else "w") as f:
+            f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+        return str(path)
+
+    def hook(self, event, **payload):
+        out, pm.sys.stdin = io.StringIO(), io.StringIO(json.dumps({"hook_event_name": event, **payload}))
+        try:
+            with contextlib.redirect_stdout(out):
+                pm.cmd_hook_turn(None)
+        finally:
+            pm.sys.stdin = sys.__stdin__
+        return out.getvalue()
+
+    def said(self):
+        return [(e["type"], e.get("text")) for e in pm.conversation(self.repo) if e.get("type") in ("user", "agent", "pm")]
+
+    def test_what_came_in_mid_turn_stands_before_the_reply_as_the_prompt_rule_says(self):
+        path = self.write([self.prompt(0, "先做看板")])
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
+        self.write([self.reply(1),
+                           self.queued(2, "先别合并"),
+                           self.queued(3, '<hc from="t9">[from hc:t9] 做完了</hc>', kind="peer", isMeta=True),
+                           self.queued(4, "[from hc:t3] task x is ready", kind="peer"),
+                           self.queued(5, "能帮我看下吗", kind="peer"),           # another agent's, naming no sender
+                           self.queued(6, "[from pm.py rotate] 接手"),
+                           self.queued(7, "<task-notification>done</task-notification>", kind="task-notification",
+                                       mode="task-notification"),
+                           self.queued(8, "/compact"),
+                           self.queued(9, "<system-reminder>x</system-reminder>"),
+                           self.queued(10, "ls", mode="bash"),
+                           self.reply(11, "好的")], append=True)
+        self.hook("Stop", last_assistant_message="好的，先不合并。", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先做看板"), ("user", "先别合并"), ("agent", "做完了"),
+                                       ("agent", "task x is ready"), ("agent", "能帮我看下吗"), ("pm", "好的，先不合并。")])
+        events = pm.conversation(self.repo)
+        self.assertEqual([e.get("by") for e in events[2:5]], ["hc:t9", "hc:t3", "peer"])
+        # When the words were said, in this machine's time as every other `at`.
+        self.assertEqual([e["at"] for e in events[1:5]], [self.local(2), self.local(3), self.local(4), self.local(5)])
+        self.assertEqual(pm.unanswered(events), [])  # the reply of the turn that took the words in answers them
+
+    def test_each_row_is_recorded_once_however_often_the_turn_ends(self):
+        path = self.write([self.prompt(0, "先做看板"), self.queued(1, "先别合并")])
+        self.hook("Stop", last_assistant_message="一", transcript_path=path)
+        self.hook("Stop", last_assistant_message="", transcript_path=path)       # a Stop hook made it go on
+        self.write([self.reply(2), self.queued(3, "还有颜色")], append=True)
+        self.hook("Stop", last_assistant_message="二", transcript_path=path)
+        self.hook("UserPromptSubmit", prompt="下一个", transcript_path=path)
+        self.hook("Stop", last_assistant_message="三", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先别合并"), ("pm", "一"), ("user", "还有颜色"), ("pm", "二"),
+                                       ("user", "下一个"), ("pm", "三")])
+
+    def test_rows_of_turns_before_this_was_installed_are_not_replayed(self):
+        old = [self.prompt(0, "旧的"), self.queued(1, "旧的插话"), self.reply(2), self.queued(3, "更旧的插话")]
+        # The first hook after the change is a prompt: it only notes where the transcript stands.
+        path = self.write(old + [self.prompt(10, "新的")])
+        self.hook("UserPromptSubmit", prompt="新的", transcript_path=path)
+        self.write([self.queued(11, "新的插话")], append=True)
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "新的"), ("user", "新的插话"), ("pm", "好")])
+
+    def test_without_a_mark_a_stop_takes_the_turn_ending_now_only(self):
+        path = self.write([self.prompt(0, "旧的"), self.queued(1, "旧的插话"), self.reply(2),
+                           self.prompt(10, "新的"), self.queued(11, "新的插话")])
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "新的插话"), ("pm", "好")])
+        # A broken mark is no mark: still not the whole transcript again.
+        mark = pm.project_dir(self.repo) / "taken-in.json"
+        for broken in ("not json", "[]", '{"at": "yesterday", "keys": 3, "offset": "x"}'):
+            mark.write_text(broken)
+            self.hook("Stop", last_assistant_message="", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "新的插话"), ("pm", "好")])
+
+    def test_a_resumed_compacted_or_rotated_session_replays_nothing(self):
+        first = [self.prompt(0, "先做看板"), self.queued(1, "先别合并")]
+        path = self.write(first)
+        self.hook("Stop", last_assistant_message="一", transcript_path=path)
+        # The same session in a file of its own (resumed, compacted): the old rows again, with their ids or new ones.
+        copied = [dict(r) for r in first] + [{**first[1], "uuid": "another-id"}]
+        later = self.write(copied + [self.prompt(5, "继续"), self.queued(6, "加个图例")], name="resumed.jsonl")
+        self.hook("Stop", last_assistant_message="二", transcript_path=later)
+        # A rotation: a new session, a new transcript; the old one is finished.
+        new = self.write([self.prompt(10, "[from pm.py rotate] 接手")], name="new.jsonl")
+        self.hook("UserPromptSubmit", prompt="[from pm.py rotate] 接手", transcript_path=new)
+        self.write([self.queued(11, "现在谁在做？")], name="new.jsonl", append=True)
+        self.hook("Stop", last_assistant_message="三", transcript_path=new)
+        self.hook("Stop", last_assistant_message="", transcript_path=path)  # the old session ends late: nothing new
+        self.assertEqual(self.said(), [("user", "先别合并"), ("pm", "一"), ("user", "加个图例"), ("pm", "二"),
+                                       ("user", "现在谁在做？"), ("pm", "三")])
+
+    def test_words_a_hook_recorded_already_are_not_recorded_again(self):
+        # Should Claude Code fire UserPromptSubmit for such words, with the row already written: the hook's own.
+        path = self.write([self.prompt(0, "先做看板")])
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
+        self.write([self.queued(self.ago(0), "先别合并")], append=True)
+        self.hook("UserPromptSubmit", prompt="先别合并", transcript_path=path)
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先做看板"), ("user", "先别合并"), ("pm", "好")])
+        # Or the row written after the hook recorded them: the line in the log is theirs.
+        self.hook("UserPromptSubmit", prompt="还有颜色", transcript_path=path)
+        self.hook("UserPromptSubmit", prompt='<hc from="t9">[from hc:t9] 做完了</hc>', transcript_path=path)
+        self.write([self.queued(self.ago(0), "还有颜色"),
+                    self.queued(self.ago(1), '<hc from="t9">[from hc:t9] 做完了</hc>', kind="peer")], append=True)
+        self.hook("Stop", last_assistant_message="好的", transcript_path=path)
+        self.assertEqual(self.said()[3:], [("user", "还有颜色"), ("agent", "做完了"), ("pm", "好的")])
+        # Another agent's words that name no sender: the hook took them for the user's; still the same words.
+        self.hook("UserPromptSubmit", prompt="能帮我看下吗", transcript_path=path)
+        self.write([self.queued(self.ago(0), "能帮我看下吗", kind="peer")], append=True)
+        self.hook("Stop", last_assistant_message="看了", transcript_path=path)
+        self.assertEqual(self.said()[6:], [("user", "能帮我看下吗"), ("pm", "看了")])
+
+    def test_a_long_turn_is_read_on_from_the_mark(self):
+        # A turn that wrote more than the tail since the mark: its early words are not lost.
+        pm.TAKEN_IN_TAIL, pm.TAKEN_IN_MORE = 2000, 1 << 20
+        path = self.write([self.prompt(0, "先做看板")])
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
+        self.write([self.queued(1, "先别合并")] + [self.reply(2, "x" * 200) for _ in range(30)], append=True)
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先做看板"), ("user", "先别合并"), ("pm", "好")])
+
+    def test_a_turn_stopped_by_the_user_is_caught_up_at_the_next_prompt(self):
+        path = self.write([self.prompt(0, "先做看板")])
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
+        self.write([self.queued(1, "先别合并"), self.prompt(2, "停一下")], append=True)  # no Stop hook: interrupted
+        self.hook("UserPromptSubmit", prompt="停一下", transcript_path=path)
+        self.hook("Stop", last_assistant_message="停了", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先做看板"), ("user", "先别合并"), ("user", "停一下"), ("pm", "停了")])
+
+    def test_a_quick_answer_mid_turn_answers_the_question(self):
+        name = Path(self.repo).name
+        task = {"id": f"{name}-db", "title": "选数据库", "project": name, "repo": self.repo, "status": "blocked",
+                "owner": "pm", "base": "main", "created": pm.now(), "log": []}
+        pm.save(task)
+        pm.record(self.repo, "thread", task=task["id"], title="选数据库", status="blocked", text="status=blocked; 用哪个？",
+                  options=["SQLite", "Postgres"])
+        path = self.write([self.prompt(0, "看下状态"), self.queued(1, "【选数据库】SQLite")])
+        self.assertEqual(pm.answered_tasks(pm.conversation(self.repo)), set())
+        # A turn a delivered batch started, which the user spoke into: its reply answers the user too.
+        (pm.project_dir(self.repo) / "turn-cause.json").write_text(json.dumps({"after": "deliver", "batch": [0, 9]}))
+        self.hook("Stop", last_assistant_message="好，用 SQLite。", transcript_path=path)
+        self.assertEqual(pm.answered_tasks(pm.conversation(self.repo)), {task["id"]})
+        self.assertEqual(pm.unanswered(pm.conversation(self.repo)), [])
+        self.assertNotIn("after", pm.conversation(self.repo)[-1])
+        self.assertEqual(pm.log_tail(self.repo)[-1], {"user": "【选数据库】SQLite", "pm": "好，用 SQLite。"})
+        (pm.TASKS / f"{task['id']}.json").unlink()
+
+    def test_words_typed_into_the_takeover_turn_are_recorded_and_answered(self):
+        calls = []
+        pm.HC_TERMINAL = "t7"
+        pm.takeover_mark(self.repo).write_text(json.dumps({"terminal": "t7", "at": pm.now()}))
+        path = self.write([self.prompt(0, "[from pm.py rotate] 接手")])
+        with mock.patch.object(pm, "hc", lambda *args, **kw: calls.append(args) or {}):
+            self.hook("UserPromptSubmit", prompt="[from pm.py rotate] 接手", transcript_path=path)
+            self.write([self.queued(1, "先别合并")], append=True)
+            self.hook("Stop", last_assistant_message="好，先不合并。", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先别合并"), ("pm", "好，先不合并。")])
+        self.assertFalse(pm.takeover_mark(self.repo).exists())
+        self.assertIn(("label", "t7", "pm.quiet="), calls)  # not the quiet turn: its notice shows
+
+    def test_words_with_pictures(self):
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+        path = self.write([self.prompt(0, "先做看板"),
+                           self.queued(1, [{"type": "text", "text": "这里不对"}, image]),
+                           self.queued(2, [{"type": "text", "text": "[Image #2] 还有这里"}, image]),
+                           self.queued(3, [image, image]),
+                           self.queued(4, [{"type": "text", "text": "  "}])])
+        self.hook("Stop", last_assistant_message="看到了", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "[Image #1] 这里不对"), ("user", "[Image #2] 还有这里"),
+                                       ("user", "[Image #1] [Image #2]"), ("pm", "看到了")])
+
+    def test_a_batch_that_came_mid_turn_moves_the_delivered_mark_only(self):
+        pm.advance_delivered(self.repo, 0)
+        path = self.write([self.prompt(0, "先做看板"),
+                           self.queued(1, '<hc from="t9">[from pm.py deliver] 1 event(s) (0-120)\n1. x</hc>', kind="peer")])
+        self.hook("Stop", last_assistant_message="收到", transcript_path=path)
+        self.assertEqual(self.said(), [("pm", "收到")])
+        self.assertEqual(pm.delivered_offset(self.repo), 120)
+        self.assertNotIn("after", pm.conversation(self.repo)[-1])  # the user's turn, not the batch's
+
+    def test_nothing_fails_and_nothing_is_read_twice(self):
+        # No transcript, an unreadable one, another agent's: the reply is recorded all the same.
+        for transcript in ("", str(self.dir / "missing.jsonl"), str(self.dir)):
+            self.hook("Stop", last_assistant_message="一", transcript_path=transcript)
+        codex = self.write([{"type": "response_item", "payload": {"type": "message", "role": "user"}}, "[]"], "c.jsonl")
+        self.hook("Stop", last_assistant_message="二", transcript_path=codex)
+        self.assertEqual(self.said(), [("pm", "一")] * 3 + [("pm", "二")])
+        # A long transcript: only its end is read, and only what came after the mark.
+        pm.TAKEN_IN_TAIL = 2000
+        rows = [self.prompt(0, "先做看板")] + [self.reply(1, "x" * 200) for _ in range(30)] + [self.queued(2, "先别合并")]
+        path = self.write(rows, "long.jsonl")
+        reads = []
+        real = open
+
+        def counting(file, mode="r", *args, **kw):
+            f = real(file, mode, *args, **kw)
+            if str(file) == path:
+                seek = f.seek
+                f.seek = lambda n, *a: reads.append(n) or seek(n, *a)
+            return f
+        with mock.patch("builtins.open", counting):
+            self.hook("Stop", last_assistant_message="三", transcript_path=path)
+            self.hook("Stop", last_assistant_message="", transcript_path=path)
+        size = Path(path).stat().st_size
+        self.assertEqual(reads, [size - 2000, size])
+        self.assertEqual(self.said()[-1:], [("pm", "三")])  # the turn's prompt is out of view: nothing is guessed
+        # The mark stays small however many rows came in.
+        path = self.write([self.prompt(0, "先做看板")] + [self.queued(3, "x") for _ in range(300)], "many.jsonl")
+        pm.TAKEN_IN_TAIL = 4 << 20
+        self.hook("Stop", last_assistant_message="", transcript_path=path)
+        mark = json.loads((pm.project_dir(self.repo) / "taken-in.json").read_text())
+        self.assertEqual(len(mark["keys"]), pm.TAKEN_IN_KEYS)
+        self.assertEqual(len([e for e in pm.conversation(self.repo) if e.get("text") == "x"]), 300)
+
+    # ---- attacks: each one a way the record could go wrong ----
+
+    def ago(self, seconds):
+        """The minute (from BASE) of `seconds` before now, in whole seconds: rows said just now."""
+        now = pm.datetime.datetime.now(pm.datetime.timezone.utc).replace(microsecond=0)
+        return (now - pm.datetime.timedelta(seconds=seconds) - self.BASE).total_seconds() / 60
+
+    def mark(self):
+        return pm.project_dir(self.repo) / "taken-in.json"
+
+    def test_a_stop_a_prompt_with_nothing_new_and_a_stop_again_add_nothing(self):
+        path = self.write([self.prompt(0, "先做看板"), self.queued(1, "先别合并")])
+        self.hook("Stop", last_assistant_message="一", transcript_path=path)
+        self.hook("UserPromptSubmit", prompt="二", transcript_path=path)
+        self.hook("Stop", last_assistant_message="", transcript_path=path)
+        self.hook("Stop", last_assistant_message="", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先别合并"), ("pm", "一"), ("user", "二")])
+
+    def test_the_same_words_said_again_are_recorded_again(self):
+        # The user really said "继续" twice while the turn worked, after saying it as the turn's prompt.
+        pm.record(self.repo, "user", at=self.local(self.ago(120)), text="继续")
+        path = self.write([self.prompt(self.ago(120), "继续"), self.queued(self.ago(60), "继续"),
+                           self.queued(self.ago(58), "继续")])
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "继续")] * 3 + [("pm", "好")])
+
+    def test_words_taken_into_a_stopped_turn_and_said_again_as_the_next_prompt(self):
+        path = self.write([self.prompt(self.ago(300), "先做看板")])
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
+        # Taken in a minute ago; the user stopped that turn (no Stop hook) and now says the same as a prompt.
+        self.write([self.queued(self.ago(60), "继续"), self.prompt(self.ago(0), "继续")], append=True)
+        self.hook("UserPromptSubmit", prompt="继续", transcript_path=path)
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先做看板"), ("user", "继续"), ("user", "继续"), ("pm", "好")])
+
+    def test_a_rotation_whose_two_sessions_end_turns_close_together(self):
+        old = self.write([self.prompt(self.ago(300), "先做看板")], name="old.jsonl")
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=old)
+        # The old session's last turn takes words in; the new session starts, takes words in and ends its turn first.
+        self.write([self.queued(self.ago(100), "旧会话收下的话")], name="old.jsonl", append=True)
+        new = self.write([self.prompt(self.ago(90), "[from pm.py rotate] 接手")], name="new.jsonl")
+        self.hook("UserPromptSubmit", prompt="[from pm.py rotate] 接手", transcript_path=new)
+        self.write([self.queued(self.ago(80), "新会话收下的话"), self.reply(self.ago(70))], name="new.jsonl", append=True)
+        self.hook("Stop", last_assistant_message="新的回复", transcript_path=new)
+        # The user says it again to the new PM: its own line, not the old session's.
+        pm.record(self.repo, "user", at=self.local(self.ago(60)), text="旧会话收下的话")
+        self.hook("Stop", last_assistant_message="旧的回复", transcript_path=old)
+        self.assertEqual(self.said(), [("user", "先做看板"), ("user", "新会话收下的话"), ("pm", "新的回复"),
+                                       ("user", "旧会话收下的话"), ("user", "旧会话收下的话"), ("pm", "旧的回复")])
+        # Each again: nothing new.
+        self.hook("Stop", last_assistant_message="", transcript_path=new)
+        self.hook("Stop", last_assistant_message="", transcript_path=old)
+        self.assertEqual(len(self.said()), 6)
+
+    def test_a_mark_or_a_row_from_the_future_does_not_silence_the_log(self):
+        future = (pm.datetime.datetime.now(pm.datetime.timezone.utc) + pm.datetime.timedelta(days=400)).isoformat()
+        path = self.write([self.prompt(0, "先做看板"), self.queued(1, "先别合并")])
+        self.mark().write_text(json.dumps({"transcript": path, "offset": 0, "at": future, "keys": ["not-there"]}))
+        self.hook("Stop", last_assistant_message="一", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先别合并"), ("pm", "一")])
+        # A row written while the clock was a year ahead: words said after it, with the clock right again, count.
+        self.write([self.prompt(2, "再看看"), self.queued(400 * 24 * 60, "钟快了"), self.queued(3, "颜色")], append=True)
+        self.hook("Stop", last_assistant_message="二", transcript_path=path)
+        self.write([self.prompt(self.ago(-2), "然后"), self.queued(self.ago(-3), "还有图例")], append=True)
+        self.hook("Stop", last_assistant_message="三", transcript_path=path)
+        self.assertEqual(self.said()[2:], [("user", "钟快了"), ("user", "颜色"), ("pm", "二"), ("user", "还有图例"),
+                                           ("pm", "三")])
+        self.assertLessEqual(pm.conversation(self.repo)[2]["at"], pm.datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    def test_a_lost_or_broken_mark_replays_nothing(self):
+        # Hundreds of rows of turns before this was installed, a turn recorded since; then the mark goes bad.
+        old = [r for i in range(300) for r in (self.prompt(0, f"旧{i}"), self.queued(0, f"旧插话{i}"))]
+        path = self.write(old)
+        self.hook("UserPromptSubmit", prompt="新的", transcript_path=path)
+        self.write([self.prompt(10, "新的"), self.queued(11, "继续"), self.queued(12, "继续")], append=True)
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "新的"), ("user", "继续"), ("user", "继续"), ("pm", "好")])
+        other = self.write([self.prompt(0, "别的会话")], name="other.jsonl")
+        for broken in (None, "", "garbage", "null", '{"keys": [1, null], "files": 7, "at": 5}',
+                       json.dumps({"transcript": other, "offset": 3, "at": self.at(0), "keys": ["x"]}),
+                       json.dumps({"transcript": path, "offset": 10 ** 12, "at": "9999-12-31T00:00:00Z"})):
+            if broken is None:
+                self.mark().unlink()
+            else:
+                self.mark().write_text(broken)
+            self.hook("Stop", last_assistant_message="", transcript_path=path)
+            self.assertEqual(len(self.said()), 4, broken)
+
+    def test_a_transcript_cut_short_rewritten_or_continued_in_another_file(self):
+        rows = [self.prompt(0, "先做看板"), self.queued(1, "先别合并"), self.reply(2)]
+        path = self.write(rows)
+        self.hook("Stop", last_assistant_message="一", transcript_path=path)
+        self.write(rows[:1], name="session.jsonl")                                 # cut short
+        self.hook("Stop", last_assistant_message="", transcript_path=path)
+        self.write(rows + [self.prompt(3, "再看"), self.queued(4, "加图例")])        # written again, longer
+        self.hook("Stop", last_assistant_message="二", transcript_path=path)
+        # Compacted or resumed into a file of its own: copies with new ids and none of their own, then new words.
+        copies = [{**r, "uuid": f"copy-{i}", "attachment": {**r["attachment"], "source_uuid": None}}
+                  if r["type"] == "attachment" else {**r, "uuid": f"copy-{i}"} for i, r in enumerate(rows)]
+        later = self.write(copies + [self.prompt(5, "继续"), self.queued(6, "换个颜色")], name="compacted.jsonl")
+        self.hook("Stop", last_assistant_message="三", transcript_path=later)
+        self.assertEqual(self.said(), [("user", "先别合并"), ("pm", "一"), ("user", "加图例"), ("pm", "二"),
+                                       ("user", "换个颜色"), ("pm", "三")])
+
+    def test_two_projects_keep_their_own_record(self):
+        repo2 = pm.project_root(tempfile.mkdtemp())
+        reg2 = pm.PMS / f"{pm.project_slug(repo2)}.json"
+        reg2.write_text(json.dumps({"name": pm.pm_name(repo2), "pane": "hc:t8", "project": Path(repo2).name,
+                                    "repo": repo2}))
+        self.addCleanup(reg2.unlink, missing_ok=True)
+        one = self.write([self.prompt(0, "一号"), self.queued(1, "给一号的话")], name="one.jsonl")
+        two = self.write([self.prompt(0, "二号"), self.queued(1, "给二号的话")], name="two.jsonl")
+        self.hook("Stop", last_assistant_message="一", transcript_path=one)
+        pm.PANE = "hc:t8"
+        self.hook("Stop", last_assistant_message="二", transcript_path=two)
+        pm.PANE = "hc:t7"
+        self.hook("Stop", last_assistant_message="", transcript_path=one)
+        self.assertEqual(self.said(), [("user", "给一号的话"), ("pm", "一")])
+        self.assertEqual([(e["type"], e["text"]) for e in pm.conversation(repo2)], [("user", "给二号的话"), ("pm", "二")])
+
+    def test_a_worker_session_records_nothing(self):
+        pm.PANE = "hc:t99"  # no PM registration names this terminal
+        path = self.write([self.prompt(0, "做任务"), self.queued(1, "先别合并")])
+        with mock.patch.object(pm, "worker_stopped", lambda data: None):
+            self.hook("UserPromptSubmit", prompt="做任务", transcript_path=path)
+            self.hook("Stop", last_assistant_message="做完了", transcript_path=path)
+        self.assertEqual(self.said(), [])
+        self.assertFalse(self.mark().exists())
+
+    def test_words_that_are_not_the_users_or_need_care(self):
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+        odd = "第一行\n第二行\t\"引号\" \\反斜杠  分隔 段 \x85 \x0c 😀 </hc> <b>"
+        long = "长" * 100000
+        side = self.queued(9, "旁支里的话")
+        side["isSidechain"] = True
+        path = self.write([self.prompt(0, "先做看板"),
+                           self.queued(1, ""), self.queued(1, "   \n "), self.queued(1, {"text": "字典"}),
+                           self.queued(1, 7), self.queued(1, None), self.queued(1, [image, "x", 3, None]),
+                           self.queued(2, "<system-reminder>x</system-reminder>", kind="peer", isMeta=True),
+                           self.queued(2, "/model opus", kind="peer"),
+                           self.queued(3, odd), self.queued(4, long), side,
+                           self.queued(5, '<hc from="t9">\n  [from hc:t9]  做完了\n</hc>', kind="peer", isMeta=True),
+                           self.queued(6, "[from hc:t3]   ")])
+        with open(path, "a") as f:  # lines that are no rows, and a last one still being written
+            f.write('not json at all\n{"type": "attachment", "attachment": [1]}\n[]\n\n\x00\xff\n'
+                    '{"type": "attachment", "uuid": "half", "attachment": {"type": "queued_command", "prompt": "半')
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "[Image #1]"), ("user", odd.strip()), ("user", long),
+                                       ("agent", "做完了"), ("pm", "好")])
+
+    def test_an_answer_taken_in_mid_turn_then_the_question_asked_again(self):
+        name = Path(self.repo).name
+        task = {"id": f"{name}-db", "title": "选数据库", "project": name, "repo": self.repo, "status": "blocked",
+                "owner": "pm", "base": "main", "created": pm.now(), "log": []}
+        pm.save(task)
+        self.addCleanup((pm.TASKS / f"{task['id']}.json").unlink, missing_ok=True)
+        ask = lambda: pm.record(self.repo, "thread", task=task["id"], title="选数据库", status="blocked",
+                                text="status=blocked; 用哪个？", options=["SQLite", "Postgres"])
+        ask()
+        path = self.write([self.prompt(self.ago(120), "看下状态")])
+        self.hook("UserPromptSubmit", prompt="看下状态", transcript_path=path)
+        self.assertEqual(pm.answered_tasks(pm.conversation(self.repo)), set())
+        self.write([self.queued(self.ago(60), "【选数据库】SQLite")], append=True)
+        self.assertEqual(pm.answered_tasks(pm.conversation(self.repo)), set())   # not before the turn ends
+        self.hook("Stop", last_assistant_message="好，用 SQLite。", transcript_path=path)
+        self.assertEqual(pm.answered_tasks(pm.conversation(self.repo)), {task["id"]})
+        self.assertEqual(pm.unanswered(pm.conversation(self.repo)), [])
+        ask()  # asked again: a new question, open until the user answers it
+        self.assertEqual(pm.answered_tasks(pm.conversation(self.repo)), set())
+        self.assertEqual(pm.unanswered(pm.conversation(self.repo)), [])
+        self.write([self.prompt(self.ago(0), "【选数据库】Postgres")], append=True)
+        self.hook("UserPromptSubmit", prompt="【选数据库】Postgres", transcript_path=path)
+        self.assertEqual(pm.answered_tasks(pm.conversation(self.repo)), {task["id"]})
+        self.assertEqual([e["text"] for e in pm.unanswered(pm.conversation(self.repo))], ["【选数据库】Postgres"])
+
+    def test_the_order_and_time_of_a_turn_that_took_words_in(self):
+        path = self.write([self.prompt(self.ago(300), "先做看板")])
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
+        pm.record(self.repo, "thread", task="t-1", title="看板", status="in_progress", text="dispatched to w1")
+        said = self.ago(30)
+        self.write([self.queued(said, "先别合并")], append=True)
+        self.hook("Stop", last_assistant_message="好，先不合并。", transcript_path=path)
+        events = pm.conversation(self.repo)
+        self.assertEqual([e["type"] for e in events], ["user", "thread", "user", "pm"])
+        self.assertEqual(events[2]["at"], self.local(said))  # when it was said: before the thread entry
+        self.assertLessEqual(events[2]["at"], events[1]["at"])
+        self.assertEqual(pm.unanswered(events), [])
+        # One reply answers both: the handover does not show the turn's prompt as unanswered.
+        self.assertEqual(pm.log_tail(self.repo), [{"user": "先做看板\n先别合并", "pm": "好，先不合并。"}])
+        handover = "\n".join(pm.handover_talk(self.repo, {}, 6, 700))
+        self.assertNotIn("(no final text)", handover)
+        self.assertNotIn("Not answered yet", handover)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pm.cmd_conversation(argparse.Namespace(repo=self.repo, last=10, type="", width=100))
+        self.assertEqual([line.split(" ", 2)[2] for line in out.getvalue().splitlines()],
+                         ["User: 先做看板", "[t-1 · in_progress] None: dispatched to w1", "User: 先别合并",
+                          "PM: 好，先不合并。"])
+        self.assertEqual(pm.turn_cause(self.repo), {})
+
+    def test_hook_input_of_any_shape_never_fails_nor_writes_elsewhere(self):
+        before = {p for p in Path(pm.STATE).rglob("*")}
+        unreadable = self.write([self.prompt(0, "x"), self.queued(1, "y")], name="locked.jsonl")
+        os.chmod(unreadable, 0)
+        self.addCleanup(os.chmod, unreadable, 0o644)
+        inputs = ["", "[]", '"Stop"', "null", "{}", '{"hook_event_name": "Stop"}',
+                  json.dumps({"hook_event_name": "Stop", "transcript_path": 5, "last_assistant_message": ["x"]}),
+                  json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": ["a", 1], "transcript_path": ["p"]}),
+                  json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": 3, "cwd": 4}),
+                  json.dumps({"hook_event_name": "Stop", "transcript_path": unreadable}),
+                  json.dumps({"hook_event_name": "Stop", "transcript_path": str(self.dir)}),
+                  json.dumps({"hook_event_name": "Stop", "transcript_path": "\x00"})]
+        for stdin in inputs:
+            pm.sys.stdin = io.StringIO(stdin)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    pm.cmd_hook_turn(None)
+            finally:
+                pm.sys.stdin = sys.__stdin__
+        written = {p for p in Path(pm.STATE).rglob("*")} - before
+        allowed = pm.project_dir(self.repo)
+        self.assertEqual({p for p in written if allowed not in p.parents and p != allowed and p != pm.TURN_LOG
+                          and p != pm.TURN_LOG.parent}, set())
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["locked.jsonl"])
+
+    def test_a_turn_that_wrote_more_than_can_be_read_on_is_read_from_its_end(self):
+        pm.TAKEN_IN_TAIL, pm.TAKEN_IN_MORE = 3000, 6000
+        path = self.write([self.prompt(0, "先做看板")])
+        self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
+        self.write([self.queued(1, "早早说的")] + [self.reply(2, "x" * 200) for _ in range(40)]
+                   + [self.queued(3, "最后说的")], append=True)
+        self.hook("Stop", last_assistant_message="好", transcript_path=path)
+        self.assertEqual(self.said(), [("user", "先做看板"), ("user", "最后说的"), ("pm", "好")])
 
 
 class ProjectView(unittest.TestCase):
@@ -3003,6 +3550,12 @@ class SeamlessRotation(unittest.TestCase):
         pm.waits_dir().mkdir(parents=True, exist_ok=True)
         for task_id in (reviewed, merged):  # left behind by waits that ended with the previous session
             (pm.waits_dir() / f"{task_id}.json").write_text(json.dumps({"task": task_id, "pid": 1}))
+        # A desktop-app PM waits on nothing: reports are delivered to whichever session is the PM.
+        self.assertNotIn("## Waits to start again", self.out(pm.cmd_handover, argparse.Namespace(
+            repo=self.repo, turns=6, full=False)))
+        path = pm.PMS / f"{pm.project_slug(self.repo)}.json"
+        path.write_text(json.dumps({k: v for k, v in json.loads(path.read_text()).items()
+                                    if k not in ("runtime", "terminal")}))  # the same PM in the herdr TUI
         text = self.out(pm.cmd_handover, argparse.Namespace(repo=self.repo, turns=6, full=False))
         waits = text.split("## Waits to start again")[1]
         self.assertIn(f"pm.py is `{pm.pm_command()}`", waits)
@@ -3862,14 +4415,29 @@ class DevMachine(unittest.TestCase):
         # A worker in the PM's workspace whose folder is another repository (no PM registered for it).
         self.panes["default"]["w1:p3"] = ("w1", "w-gukvm", "working")
         pm.PANE = pm.HERDR_PANE = "w1:p3"
-        code, out, _ = self.run_main("notify", "--repo", self.folder("gukvm"), "merged")
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        gukvm = self.folder("gukvm")
+        os.chdir(gukvm)  # run in that folder, without --repo
+        code, out, _ = self.run_main("notify", "merged")
         self.assertEqual(code, 0)
         self.assertIn(f"appended to {pm.inbox_path('pm-proj')}", out)
         self.assertEqual(self.prompts, [("default", "w1:p1", "[from default/w1:p3] merged")])
         self.prompts.clear()
+        # --repo names a project: one without a PM is an error, never the PM of the workspace the caller runs in.
+        code, _, _ = self.run_main("notify", "--repo", gukvm, "merged")
+        self.assertTrue(str(code).startswith(f"no PM for {Path(gukvm).resolve()} "), code)
+        self.assertIn("not to another PM either", code)
+        self.assertEqual(self.prompts, [])
         self.socket = "/s/ci.sock"  # the same workspace id in another session is not that PM's
         self.panes["ci"]["w1:p3"] = ("w1", "w-c", "working")
-        self.assertIn("no PM in herdr", self.run_main("notify", "--repo", self.folder("other"), "x")[1])
+        # No PM found: nothing was delivered, and notify says so (it used to exit 0, "the ledger entry is enough").
+        other = self.folder("other")
+        os.chdir(other)
+        code, _, err = self.run_main("notify", "x")
+        self.assertTrue(str(code).startswith(f"no PM found for {Path(other).resolve()} "), code)
+        self.assertIn("nothing was delivered", code)
+        self.assertIn("the ledger entry stands", code)
         self.assertEqual(self.prompts, [])
 
     def watch(self, **kw):
@@ -4154,6 +4722,1250 @@ class WindowsCommandLines(unittest.TestCase):
         self.assertEqual(check["creationflags"], 0x200)                         # CREATE_NEW_PROCESS_GROUP
         self.assertEqual(named["creationflags"], 0x200 | 0x08000000)            # and CREATE_NO_WINDOW
         self.assertEqual(ended["creationflags"], 0x200 | 0x08000000)
+
+
+
+# ---- launch policy: the codex profile pool, launchers, worker tabs, /fast, closing workers, deep pre-approval --------
+
+POLICY = {
+    "codex": {"projects": ["proj"],
+              "profiles": [{"name": "team-a", "max": 2, "fast": True}, {"name": "team-b", "max": 3, "fast": True}],
+              "allow_default": False, "model": "codex-model", "review_model": "review-model", "effort": "high",
+              "fallback": {"worker": {"kind": "claude", "model": "opus", "effort": "high"},
+                           "reviewer": {"kind": "claude", "model": "fable", "effort": "high"}}},
+    "claude": {"launcher": ["zsh", "-ic", "my-claude --yes {args}"], "effort": "high", "fable_fallback": "opus"},
+    "tabs": {"max": 20, "review": "审查", "bug_pattern": r"(?<![0-9])#?([0-9]{5})(?![0-9])"},
+}
+
+
+def ns(**kw):
+    base = dict(kind="codex", model="", effort="", advisor="", fallback="", profile="", codex_profile=None)
+    return argparse.Namespace(**{**base, **kw})
+
+
+class Policy(unittest.TestCase):
+    """config.json for one test; removed again afterwards, so no later test sees it."""
+    CONFIG = POLICY
+
+    def setUp(self):
+        self.config(self.CONFIG)
+        self.addCleanup(lambda: (Path(HOME) / "config.json").unlink(missing_ok=True))
+        pm._POOL_LOCK = None
+
+    def config(self, value):
+        (Path(HOME) / "config.json").write_text(json.dumps(value))
+
+
+class EventWaitHc(Policy):
+    CONFIG = {"hc": "/opt/tools/hc"}
+
+    def test_event_waits_run_the_configured_hc(self):
+        with mock.patch.object(pm, "ChangeWaiter") as waiter:
+            pm.change_waiter([pm.TASKS], ["--terminal", "t1"], files=[])
+        self.assertEqual(waiter.call_args.kwargs["hc"], "/opt/tools/hc")
+
+
+class LaunchArgs(Policy):
+    def test_strip_codex_args(self):
+        args = ["--no-daemon", "-c", 'model_provider="acct"', "-c", 'service_tier="priority"', "-c", "x=1"]
+        self.assertEqual(pm.strip_codex_args(args), ["--no-daemon", "-c", "x=1"])
+
+    def test_profile_of(self):
+        self.assertEqual(pm.codex_profile_of(["codex", "-p", "team-b", "-m", "x"]), "team-b")
+        self.assertEqual(pm.codex_profile_of(["codex", "--profile=team-a"]), "team-a")
+        self.assertEqual(pm.codex_profile_of(["codex", "-c", 'model_provider="team-a"']), "team-a")
+        self.assertEqual(pm.codex_profile_of(["codex", "-m", "gpt"]), "default")
+
+    def test_launch_wrap(self):
+        out = pm.launch_wrap("claude", ["claude", "--model", "opus", "--settings", "/a b/c.json"])
+        self.assertEqual(out, ["zsh", "-ic", "my-claude --yes --model opus --settings '/a b/c.json'"])
+        self.assertEqual(pm.launch_wrap("codex", ["codex", "-p", "team-b"]), ["codex", "-p", "team-b"])  # none set
+        self.config({"codex": {"launcher": ["wrap", "--"]}})
+        self.assertEqual(pm.launch_wrap("codex", ["codex", "-m", "x"]), ["wrap", "--", "-m", "x"])  # no {args}: appended
+
+    def test_no_launcher_by_default(self):
+        self.config({})
+        self.assertEqual(pm.launch_wrap("claude", ["claude", "--model", "opus"]), ["claude", "--model", "opus"])
+
+    def test_claude_effort_and_fable_fallback(self):
+        a = pm.apply_codex_pool(ns(kind="claude", model="fable"), "/w/proj")
+        self.assertEqual(a.effort, "high")  # claude.effort where nothing else named one
+        self.assertEqual((pm.fable_fallback("claude", "fable", "worker"), pm.fable_fallback("claude", "fable", "reviewer")),
+                         ("opus", "opus"))
+        self.config({})
+        self.assertEqual(pm.fable_fallback("claude", "fable", "reviewer"), "sonnet")  # built in
+
+    def test_hc_path_from_config(self):
+        self.config({"hc": "/opt/hc/bin/hc"})
+        self.assertEqual(pm.hc_bin(), "/opt/hc/bin/hc")
+        self.config({})
+        self.assertEqual(pm.hc_bin(), "hc")
+
+
+class TabText(Policy):
+    def test_tab_title(self):
+        # <terminal>-<BUG>-<short>; the BUG number is taken out of the short name and put after the address.
+        self.assertEqual(pm.tab_title("12345-登录修复", "12345", "t5g"), "t5g-12345-登录修复")
+        self.assertEqual(pm.tab_title("12345第5项状态", "12345", "t5g"), "t5g-12345-第5项状态")
+        self.assertEqual(pm.tab_title("#12345 登录修复", "12345", "t5g"), "t5g-12345-登录修复")
+        self.assertEqual(pm.tab_title("A004-循环", "", "t4r"), "t4r-A004-循环")  # no BUG number: <terminal>-<use>
+        self.assertEqual(pm.tab_title("审查-demo1", "", "t5m"), "t5m-审查-demo1")
+        # a short that starts with an address already: not doubled; the real address takes its place
+        self.assertEqual(pm.tab_title("t5g-12345-登录修复", "12345", "t5g"), "t5g-12345-登录修复")
+        self.assertEqual(pm.tab_title("t5g-12345-登录修复", "12345", "t6a"), "t6a-12345-登录修复")
+        self.assertEqual(pm.tab_title("t5g-12345-登录修复", "12345", dry=True), "t5g-12345-登录修复")
+        self.assertEqual(pm.tab_title("test-修复", "", dry=True), "t?-test-修复")  # "test-" is no address
+        self.assertEqual(pm.tab_title("方案", "", ""), "方案")  # no terminal (herdr TUI): no address
+        self.assertEqual(pm.tab_title("", "12345", "t5g"), "t5g-12345")
+        self.assertEqual(pm.tab_title("一二三四五六七八九十一二三四五六七八九十多", "", "t5g"),
+                         "t5g-一二三四五六七八九十一二三四五六七八九十")  # tabs.max: 20
+
+    def test_bug_of(self):
+        self.assertEqual(pm.bug_of("54321", "12345-登录", "#11111 x"), "54321")  # --bug first
+        self.assertEqual(pm.bug_of("", "12345-登录", "#11111 x"), "12345")  # then --tab
+        self.assertEqual(pm.bug_of("", "", "修复 #11111 登录"), "11111")  # then the title
+        self.assertEqual(pm.bug_of("", "A004-循环", "demo-1118-1239 20261119"), "")
+        self.assertEqual(pm.bug_of("#12345"), "12345")
+        self.assertEqual(pm.task_bug({"title": "审查：demo1"}), "")
+        self.assertEqual(pm.task_bug({"title": "12345 登录", "bug": "10001"}), "10001")
+
+    def test_no_bug_pattern_by_default(self):
+        self.config({})
+        self.assertEqual(pm.bug_of("", "12345-登录", "#11111 x"), "")  # only --bug says it
+        self.assertEqual(pm.bug_of("777"), "777")
+
+    def test_tab_short_and_hc_name(self):
+        self.assertEqual(pm.tab_short("t5g-12345 登录修复"), "12345登录修复")
+        self.assertEqual(pm.hc_name("t5g-12345-登录修复"), "t5g-12345")
+        self.assertEqual(pm.hc_name("登录"), "worker")
+
+    def test_fast_line(self):
+        self.assertTrue(pm.shows_fast("Model-X high fast · Context 21% used"))
+        self.assertFalse(pm.shows_fast("Model-X high ultrafast · Context 21% used"))
+        self.assertFalse(pm.shows_fast("Model-X high · Context 3% used · fast mode tips"))
+
+
+class Pool(Policy):
+    def run_pool(self, sessions, role="worker", **kw):
+        live = None if sessions is None else [{"pid": i, "profile": p, "cwd": "/x"} for i, p in enumerate(sessions)]
+        a = ns(**kw)
+        with mock.patch.object(pm, "live_codex", return_value=live), mock.patch.object(pm, "hold_pool_lock"):
+            return pm.apply_codex_pool(a, "/w/proj", role)
+
+    def test_first_free_in_order(self):
+        a = self.run_pool(["team-b"])
+        self.assertEqual((a.kind, a.provider, a.model, a.effort), ("codex", "team-a", "codex-model", "high"))
+        self.assertIn("team-a 0/2", a.pool_said)
+
+    def test_a_full_profile_goes_to_the_next(self):
+        self.assertEqual(self.run_pool(["team-a", "team-a", "team-b"]).provider, "team-b")
+
+    def test_all_full_falls_back_to_claude(self):
+        a = self.run_pool(["team-a"] * 2 + ["team-b"] * 3)
+        self.assertEqual((a.kind, a.model, a.effort, a.provider), ("claude", "opus", "high", ""))
+        self.assertIn("opus", a.pool_said)
+
+    def test_reviewer_fallback_is_fable_with_its_fallback(self):
+        a = self.run_pool(["team-a"] * 2 + ["team-b"] * 3, role="reviewer")
+        self.assertEqual((a.model, a.fallback), ("fable", "opus"))
+
+    def test_fallback_without_config_follows_the_profiles(self):
+        self.config({"codex": {"profiles": [{"name": "team-a", "max": 1}]}})
+        a = self.run_pool(["team-a"])
+        self.assertEqual((a.kind, a.model), ("claude", "opus"))  # the built-in standard profile
+        self.assertEqual(self.run_pool(["team-a"], role="reviewer").model, "fable")  # the review table's standard
+        self.config({"fable": False, "codex": {"profiles": [{"name": "team-a", "max": 1}]}})
+        self.assertEqual(self.run_pool(["team-a"], role="reviewer").model, "sonnet")  # no Fable here
+
+    def test_reviewer_model(self):
+        self.assertEqual(self.run_pool([], role="reviewer").model, "review-model")
+
+    def test_default_refused(self):
+        with self.assertRaises(SystemExit):
+            self.run_pool([], codex_profile="default")
+
+    def test_named_profile_even_when_full(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.run_pool(["team-a"] * 2, codex_profile="team-a").provider, "team-a")
+        self.assertIn("full", err.getvalue())
+
+    def test_uncounted_machine_says_so(self):
+        a = self.run_pool(None)  # no /proc: nothing is counted
+        self.assertEqual(a.provider, "team-a")
+        self.assertIn("/proc", a.pool_said)
+
+    def test_other_project_untouched(self):
+        a = ns()
+        pm.apply_codex_pool(a, "/w/other", "worker")
+        self.assertEqual((a.provider, a.model), ("", ""))
+
+    def test_argv(self):
+        a = self.run_pool([])
+        with mock.patch.object(pm, "pm_record", return_value={"codex": {"args": ["-c", 'service_tier="fast"']}}):
+            argv = pm.worker_argv(a, (), "/w/proj", wrap=True)
+        self.assertEqual(argv, ["codex", "-p", "team-a", "-c", "check_for_update_on_startup=false", "-m",
+                                "codex-model", "-c", 'model_reasoning_effort="high"'])
+
+    def test_codex_cmd_with_the_pool(self):
+        out = io.StringIO()
+        with mock.patch.object(pm, "live_codex", return_value=[]), mock.patch.object(pm, "project_root",
+                                                                                      return_value="/w/proj"), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            pm.cmd_codex_cmd(argparse.Namespace(repo="/w/proj", project=None, model=None, effort="high",
+                                                codex_profile=None))
+        self.assertTrue(out.getvalue().startswith("codex -p team-a "))
+        full = [{"pid": i, "profile": p, "cwd": "/x"} for i, p in enumerate(["team-a"] * 2 + ["team-b"] * 3)]
+        with mock.patch.object(pm, "live_codex", return_value=full), mock.patch.object(pm, "project_root",
+                                                                                        return_value="/w/proj"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as stop:
+                pm.cmd_codex_cmd(argparse.Namespace(repo="/w/proj", project=None, model=None, effort="high",
+                                                    codex_profile=None))
+        self.assertEqual(stop.exception.code, 3)  # all full: the Claude command it would start instead
+
+
+class Fast(Policy):
+    def test_sends_once_when_not_fast(self):
+        screens = iter(["› Ask Codex\n  Model-X high · Context 0% used", "  Model-X high fast · Context 0%"])
+        with mock.patch.object(pm, "screen_of", side_effect=lambda t: next(screens)), \
+                mock.patch.object(pm, "hc") as hc, mock.patch.object(pm.time, "sleep"):
+            said = pm.codex_fast("t9", ns(provider="team-b"))
+        hc.assert_called_once_with("send", "t9", "/fast")
+        self.assertIn("fast", said)
+
+    def test_already_fast_not_toggled(self):
+        with mock.patch.object(pm, "screen_of", return_value="Model-X high fast · Context 0%"), \
+                mock.patch.object(pm, "hc") as hc:
+            pm.codex_fast("t9", ns(provider="team-b"))
+        hc.assert_not_called()
+
+    def test_no_fast_for_claude_or_default(self):
+        with mock.patch.object(pm, "hc") as hc:
+            self.assertEqual(pm.codex_fast("t9", ns(kind="claude")), "")
+            self.assertEqual(pm.codex_fast("t9", ns(provider="")), "")
+        hc.assert_not_called()
+
+    def test_ready_marks_for_a_program_without_status(self):
+        # Started through a shell launcher, hc reports no status: its screen says when the input is ready.
+        sent = []
+        def fake_hc(*args, **kw):
+            if args[0] == "get":
+                return {"state": "live", "status": None}
+            if args[0] == "send":
+                sent.append(args[2])
+                return {"started": False}
+            return {}
+        with mock.patch.object(pm, "hc", side_effect=fake_hc), mock.patch.object(pm.time, "sleep"), \
+                mock.patch.object(pm, "screen_of", return_value="> \n  ⏵⏵ bypass permissions on"):
+            self.assertTrue(pm.send_when_ready("t9", "brief", tries=2, strict=True, kind="claude"))
+        self.assertEqual(sent, ["brief"])
+        with mock.patch.object(pm, "hc", side_effect=fake_hc), mock.patch.object(pm.time, "sleep"), \
+                mock.patch.object(pm, "screen_of", return_value="Do you trust the files in this folder?"):
+            self.assertFalse(pm.send_when_ready("t9", "brief", tries=2, strict=True, kind="claude"))
+
+
+class CloseWorkers(Policy):
+    CONFIG = {"workers": {"close_on_close": True}}
+
+    def task(self, **kw):
+        return {"id": "p-1", "status": "done", "pane": "hc:t9", "repo": "/w/proj", "dispatched": True, **kw}
+
+    def fake_hc(self, status="idle", labels=None):
+        info = {"state": "live", "status": {"state": status}, "labels": labels or {"task": "p-1"}}
+        return lambda *args, **kw: info if args[0] == "get" else {}
+
+    def test_idle_worker_is_ended(self):
+        with mock.patch.object(pm, "hc", side_effect=self.fake_hc()), mock.patch.object(pm, "all_tasks", return_value=[]), \
+                mock.patch.object(pm, "end_terminal", return_value=True) as end:
+            self.assertEqual(pm.close_worker(self.task()), "terminal hc:t9")
+        end.assert_called_once_with("t9")
+
+    def test_working_worker_is_kept(self):
+        with mock.patch.object(pm, "hc", side_effect=self.fake_hc("working")), \
+                mock.patch.object(pm, "all_tasks", return_value=[]), mock.patch.object(pm, "end_terminal") as end:
+            self.assertIn("kept", pm.close_worker(self.task()))
+        end.assert_not_called()
+
+    def test_unlabelled_or_pm_terminal_is_kept(self):
+        for labels in ({"task": "other"}, {"pm": "proj", "task": "p-1"}, {"where": "x"}):
+            with mock.patch.object(pm, "hc", side_effect=self.fake_hc(labels=labels)), \
+                    mock.patch.object(pm, "all_tasks", return_value=[]), mock.patch.object(pm, "end_terminal") as end:
+                self.assertEqual(pm.close_worker(self.task(worker_pane="hc:t9")), "")
+            end.assert_not_called()
+
+    def test_a_session_that_registered_its_own_work_is_kept(self):
+        # Its terminal is the user's conversation, even when something labelled it with the task (a reattach).
+        own = self.task(dispatched=False)
+        with mock.patch.object(pm, "hc", side_effect=self.fake_hc()), mock.patch.object(pm, "all_tasks", return_value=[]), \
+                mock.patch.object(pm, "end_terminal") as end, mock.patch.object(pm, "close_later") as later, \
+                mock.patch.object(pm, "PANE", "hc:t9"):
+            self.assertEqual(pm.close_worker(own), "")
+            self.assertEqual(pm.close_reported({**own, "status": "review"}), "")
+        end.assert_not_called()
+        later.assert_not_called()
+
+    def test_shared_terminal_is_kept(self):
+        other = self.task(id="p-2", status="in_progress")
+        with mock.patch.object(pm, "all_tasks", return_value=[other]), mock.patch.object(pm, "end_terminal") as end:
+            self.assertIn("kept", pm.close_worker(self.task()))
+        end.assert_not_called()
+
+    def test_off_unless_configured(self):
+        for config in ({}, {"workers": {"close_on_close": False}}):  # off by default: a reviewer stays until retire
+            self.config(config)
+            with mock.patch.object(pm, "hc", side_effect=self.fake_hc()), mock.patch.object(pm, "end_terminal") as end:
+                self.assertEqual(pm.close_worker(self.task()), "")
+            end.assert_not_called()
+
+    def test_retire_ends_a_worker_that_had_no_worktree(self):
+        self.config({})
+        repo = tempfile.mkdtemp()
+        pm.save({"id": "here-1", "project": "proj", "repo": repo, "status": "review", "owner": "pm", "base": "main",
+                 "created": pm.now(), "title": "t", "pane": "hc:t9", "dispatched": True, "in_place": repo})
+        fake = lambda *a, **kw: {"state": "live", "status": {"state": "idle"}, "labels": {"task": "here-1"}} \
+            if a[0] == "get" else {}
+        with mock.patch.object(pm, "hc", side_effect=fake), mock.patch.object(pm, "herdr", return_value=None), \
+                mock.patch.object(pm, "end_terminal", return_value=True) as end, contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_retire(argparse.Namespace(id="here-1", force=False))
+        end.assert_called_once_with("t9")
+        self.assertIn("terminal hc:t9", pm.load("here-1")["log"][-1]["text"])
+
+    def test_own_worker_ends_once_its_turn_is_over(self):
+        with mock.patch.object(pm, "hc", side_effect=self.fake_hc("working")), \
+                mock.patch.object(pm, "all_tasks", return_value=[]), mock.patch.object(pm, "PANE", "hc:t9"), \
+                mock.patch.object(pm, "close_later") as later, mock.patch.object(pm, "end_terminal") as end:
+            self.assertIn("t9", pm.close_worker(self.task()))
+        later.assert_called_once_with("t9", "p-1", 20, 7200, pm.CLOSED)
+        end.assert_not_called()
+
+    def test_close_worker_waits_for_quiet(self):
+        states = iter(["working", "idle", "idle", "idle"])
+        info = lambda: {"state": "live", "status": {"state": next(states)}, "labels": {"task": "p-1"}}
+        clock = iter(range(0, 1000, 10))
+        with mock.patch.object(pm, "hc", side_effect=lambda *args, **kw: info()), \
+                mock.patch.object(pm.time, "time", side_effect=lambda: next(clock)), \
+                mock.patch.object(pm.time, "sleep"), mock.patch.object(pm, "end_terminal") as end:
+            pm.cmd_close_worker(argparse.Namespace(terminal="t9", task="p-1", quiet=20, timeout=600))
+        end.assert_called_once_with("t9")
+        with mock.patch.object(pm, "hc", return_value={"state": "live", "labels": {"task": "another"}}), \
+                mock.patch.object(pm, "end_terminal") as end:
+            pm.cmd_close_worker(argparse.Namespace(terminal="t9", task="p-1", quiet=0, timeout=60))
+        end.assert_not_called()  # relabelled for other work: left alone
+
+    def test_close_worker_stops_once_the_task_moves_on(self):
+        # A reported worker sent back to work, or blocked on a question for the user, is not closed.
+        info = {"state": "live", "status": {"state": "idle"}, "labels": {"task": "cw-r"}}
+        for status, ended in (("in_progress", False), ("blocked", False), ("review", True)):
+            pm.save({"id": "cw-r", "project": "proj", "repo": "/w/proj", "status": status, "base": "main",
+                     "created": pm.now(), "title": "t"})
+            with mock.patch.object(pm, "hc", return_value=info), mock.patch.object(pm.time, "sleep"), \
+                    mock.patch.object(pm, "end_terminal") as end:
+                pm.cmd_close_worker(argparse.Namespace(terminal="t9", task="cw-r", quiet=0, timeout=60,
+                                                       while_="review"))
+            self.assertEqual(end.called, ended, status)
+
+    def test_reported_worker_closes_only_when_configured(self):
+        reported = self.task(status="review")
+        with mock.patch.object(pm, "hc", side_effect=self.fake_hc()), mock.patch.object(pm, "PANE", "hc:t9"), \
+                mock.patch.object(pm, "close_later") as later:
+            self.assertEqual(pm.close_reported(reported), "")  # off by default
+            self.config({"workers": {"close_reported": True, "idle_minutes": 45}})
+            self.assertIn("45", pm.close_reported(reported))
+            self.assertEqual(pm.close_reported({**reported, "pane": "hc:t8"}), "")  # only from the worker's own terminal
+        later.assert_called_once_with("t9", "p-1", 45 * 60, 45 * 60 + 4 * 3600, ["review"])
+
+    def test_update_closes_and_keep_keeps(self):
+        base = {"project": "proj", "repo": tempfile.mkdtemp(), "status": "review", "owner": "pm", "base": "main",
+                "created": pm.now(), "title": "t", "pane": "hc:t9", "dispatched": True}
+        pm.save({**base, "id": "cw-a"})
+        pm.save({**base, "id": "cw-b", "pane": "hc:t8"})
+        args = lambda i, keep=False: argparse.Namespace(id=i, status="done", note="ok", keep=keep, option=None,
+                                                         why=None, recommend=False)
+        fake = lambda *a, **kw: {"state": "live", "status": {"state": "idle"},
+                                 "labels": {"task": "cw-a" if a[1] == "t9" else "cw-b"}} if a[0] == "get" else {}
+        with mock.patch.object(pm, "hc", side_effect=fake), mock.patch.object(pm, "end_terminal", return_value=True) as end, \
+                contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_update(args("cw-a"))
+            pm.cmd_update(args("cw-b", keep=True))
+        end.assert_called_once_with("t9")
+
+    def test_idle_workers_lists_and_closes(self):
+        repo = pm.project_root(tempfile.mkdtemp())
+        base = {"project": "proj", "repo": repo, "owner": "pm", "base": "main", "created": pm.now(), "title": "t",
+                "dispatched": True}
+        pm.save({**base, "id": "iw-a", "status": "review", "pane": "hc:t1"})
+        pm.save({**base, "id": "iw-b", "status": "in_progress", "pane": "hc:t2"})
+        pm.save({**base, "id": "iw-c", "status": "review", "pane": "hc:t3"})
+        pm.save({**base, "id": "iw-d", "status": "review", "pane": "hc:t4", "dispatched": False})  # its own work
+        pm.save({**base, "id": "iw-e", "status": "blocked", "pane": "hc:t5"})
+        old = (time.time() - 3600) * 1000
+        terms = {"t1": {"state": "live", "status": {"state": "idle"}, "status_ms": old, "labels": {"task": "iw-a"}},
+                 "t2": {"state": "live", "status": {"state": "working"}, "status_ms": old, "labels": {"task": "iw-b"}},
+                 "t3": {"state": "live", "status": None, "status_ms": old, "labels": {"task": "iw-c"}},
+                 "t4": {"state": "live", "status": {"state": "idle"}, "status_ms": old, "labels": {"task": "iw-d"}},
+                 "t5": {"state": "live", "status": {"state": "idle"}, "status_ms": old, "labels": {"task": "iw-e"}}}
+        out = io.StringIO()
+        with mock.patch.object(pm, "hc", side_effect=lambda *a, **kw: terms.get(a[1]) if a[0] == "get" else {}), \
+                mock.patch.object(pm, "end_terminal", return_value=True) as end, contextlib.redirect_stdout(out):
+            pm.cmd_idle_workers(argparse.Namespace(repo=repo, minutes=None, close=[], exited=False, json=False))
+        listed = out.getvalue()
+        self.assertIn("iw-a", listed)
+        self.assertIn("no-status", listed)  # listed, but ended only when named
+        self.assertNotIn("iw-b", listed)  # at work
+        self.assertNotIn("iw-d", listed)  # a session's own work is not a worker pm.py started
+        self.assertIn("iw-e", listed)  # idle, but its task waits for the user: listed, not ended without its name
+        end.assert_called_once_with("t1")
+        with mock.patch.object(pm, "hc", side_effect=lambda *a, **kw: terms.get(a[1]) if a[0] == "get" else {}), \
+                mock.patch.object(pm, "end_terminal", return_value=True) as end, contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_idle_workers(argparse.Namespace(repo=repo, minutes=None, close=["hc:t5"], exited=False, json=False))
+        end.assert_called_once_with("t5")  # named: ended
+
+    def test_status_lists_reported_work_with_an_open_terminal(self):
+        repo = tempfile.mkdtemp()
+        base = {"project": Path(repo).name, "repo": repo, "owner": "pm", "base": "main", "created": pm.now(),
+                "title": "登录修复", "dispatched": True}
+        pm.save({**base, "id": "st-a", "status": "review", "pane": "hc:t1"})
+        pm.save({**base, "id": "st-b", "status": "review", "pane": "hc:t2"})
+        rows = {"terminals": [{"address": "t1", "state": "live", "status": "idle"},
+                              {"address": "t2", "state": "live", "status": "working"}]}
+        out = io.StringIO()
+        with mock.patch.object(pm, "hc", side_effect=lambda *a, **kw: rows if a[0] == "ls" else None), \
+                mock.patch.object(pm, "herdr", return_value=None), contextlib.redirect_stdout(out):
+            pm.cmd_status(argparse.Namespace(repo=repo, all=False, closed=False))
+        text = out.getvalue()
+        section = text[text.index("worker terminal still open"):] if "worker terminal still open" in text else ""
+        self.assertIn("st-a  hc:t1", section)
+        self.assertNotIn("st-b", section)
+
+
+class HcDispatch(Policy):
+    """dispatch from a PM in herdr-core, with hc faked: what it starts, labels and names."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = tempfile.mkdtemp(prefix="pm-repo-")
+        for cmd in (["init", "-q", "-b", "main"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                                                     "--allow-empty", "-m", "init"]):
+            subprocess.run(["git", "-C", self.repo, *cmd], check=True)
+        self.brief = Path(self.repo) / "brief.md"
+        self.brief.write_text("brief")
+        self.tabs, self.names, self.labels = [], [], []
+        patches = [mock.patch.object(pm, "PANE", "hc:t1"),
+                   mock.patch.object(pm, "hc", side_effect=self.fake_hc),
+                   mock.patch.object(pm, "name_tab", side_effect=lambda made, name, **kw: self.tabs.append((made, name))
+                                     or True),
+                   mock.patch.object(pm, "codex_fast", return_value=""),
+                   mock.patch.object(pm, "send_when_ready", return_value=True),
+                   mock.patch.object(pm, "find_pm", return_value=None),
+                   mock.patch.object(pm, "pool_started")]
+        for x in patches:
+            x.start()
+            self.addCleanup(x.stop)
+
+    def fake_hc(self, *args, **kw):
+        if args[0] == "run":
+            self.names.append(args[args.index("--name") + 1])
+            return {"address": "t5g" if len(self.names) == 1 else "t5m"}
+        if args[0] == "get" and args[1] == "t1":
+            return {"labels": {"herdr.space": "sp1", "pm": "proj"}}
+        if args[0] == "label":
+            self.labels.append(args[1:])
+        return {}
+
+    def dispatch(self, *argv):
+        a = pm.build_parser().parse_args(["dispatch", *argv, "--repo", self.repo, "--here", "--brief",
+                                          str(self.brief), "--kind", "claude", "--model", "opus"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pm.cmd_dispatch(a)
+        return out.getvalue().splitlines()[0]
+
+
+class WorkerTabs(HcDispatch):
+    """dispatch, review and reattach in herdr-core: labels always; a tab of its own only with tabs.new_tab."""
+    CONFIG = {**POLICY, "tabs": {**POLICY["tabs"], "new_tab": True}}
+
+    def test_bug_from_title(self):
+        task = pm.load(self.dispatch("修复 #12345 登录"))
+        self.assertEqual(self.tabs[-1], ("t5g", "t5g-12345-修复登录"))
+        self.assertEqual((task["agent"], task["bug"], task["tab"]), ("t5g-12345-修复登录", "12345", "修复登录"))
+        self.assertEqual(task["in_place"], str(Path(self.repo).resolve()))  # --here: no worktree of its own
+        self.assertFalse(task.get("worktree"))
+        self.assertIn("herdr.space=sp1", self.labels[-1])
+        self.assertFalse(any(x.startswith("herdr.seen") for x in self.labels[-1]))
+
+    def test_no_bug_and_a_given_address(self):
+        self.assertEqual(pm.load(self.dispatch("A004 的循环", "--tab", "A004-循环"))["agent"], "t5g-A004-循环")
+        tid = self.dispatch("登录", "--tab", "t9z-12345-登录修复")  # an address given: the real one takes its place
+        self.assertEqual(pm.load(tid)["agent"], "t5m-12345-登录修复")
+
+    def test_bug_flag_wins(self):
+        self.assertEqual(pm.load(self.dispatch("修复 #12345 登录", "--bug", "54321", "--tab", "12345-登录"))["agent"],
+                         "t5g-54321-12345-登录")
+
+    def test_review(self):
+        tid = self.dispatch("修复 #12345 登录")
+        task = pm.load(tid)
+        task.update(branch="main", worktree=self.repo, status="review")
+        pm.save(task)
+        a = pm.build_parser().parse_args(["review", tid, "--kind", "claude", "--model", "fable"])
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(pm, "end_worker"):
+            pm.cmd_review(a)
+        review = pm.load(f"{tid}-review")
+        self.assertEqual(self.names[-1], "t5g-12345-review")  # the hc name: a-z 0-9 - _ only
+        self.assertEqual((review["agent"], review["tab"], review["bug"]),
+                         ("t5m-12345-审查-修复登录", "审查-修复登录", "12345"))
+
+    def test_off_by_default_the_worker_stays_under_the_pm(self):
+        self.config(POLICY)
+        task = pm.load(self.dispatch("修复 #12345 登录", "--name", "login-fix"))
+        self.assertEqual(self.tabs, [])
+        self.assertEqual(task["agent"], "login-fix")
+        self.assertEqual(self.labels[-1], ("t5g", f"task={task['id']}"))  # no herdr.space / herdr.tab
+
+    def test_dry_run_registers_nothing(self):
+        before = {p.name for p in pm.TASKS.glob("*.json")}
+        a = pm.build_parser().parse_args(["dispatch", "看一下", "--repo", self.repo, "--branch", "dev/x", "--brief",
+                                          str(self.brief), "--profile", "deep", "--dry-run"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pm.cmd_dispatch(a)
+        plan = json.loads(out.getvalue())
+        self.assertEqual((plan["what"], plan["kind"], plan["asks_user_first"]), ("dispatch", "claude", True))
+        self.assertEqual(plan["argv"][:2], ["zsh", "-ic"])  # through claude.launcher
+        self.assertEqual({p.name for p in pm.TASKS.glob("*.json")}, before)
+        self.assertEqual(self.names, [])
+
+    def test_task_takes_up_a_registered_one(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            tid = pm.cmd_new(argparse.Namespace(repo=self.repo, title="先登记的", status="proposed", owner="pm",
+                                                base=None, workspace=None, pane=None, agent=None, branch=None,
+                                                worktree=None, brief=None, slug=None, note="handed to PM",
+                                                parent=None, kind=None))
+        a = pm.build_parser().parse_args(["dispatch", "--task", tid, "--repo", self.repo, "--here", "--brief",
+                                          str(self.brief), "--kind", "claude", "--model", "opus"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_dispatch(a)
+        task = pm.load(tid)
+        self.assertEqual((task["status"], task["title"], task["pane"]), ("in_progress", "先登记的", "hc:t5g"))
+        self.assertTrue(task["dispatched"])
+
+
+class TakeUp(HcDispatch):
+    CONFIG = POLICY
+
+    def register(self, title, **kw):
+        with contextlib.redirect_stdout(io.StringIO()):
+            tid = pm.cmd_new(argparse.Namespace(repo=self.repo, title=title, status="proposed", owner="pm", base=None,
+                                                workspace=None, pane=None, agent=None, branch=None, worktree=None,
+                                                brief=None, slug=None, note="handed to PM", parent=None, kind=None))
+        task = pm.load(tid)
+        task.update(kw)
+        pm.save(task)
+        return tid
+
+    def take_up(self, tid, repo=None):
+        a = pm.build_parser().parse_args(["dispatch", "--task", tid, "--repo", repo or self.repo, "--here",
+                                          "--brief", str(self.brief), "--kind", "claude", "--model", "opus"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_dispatch(a)
+
+    def test_a_task_with_a_live_worker_is_refused(self):
+        tid = self.register("已有人在做", status="in_progress", pane="hc:t8", dispatched=True)
+        live = lambda *a, **kw: {"state": "live"} if a[:2] == ("get", "t8") else self.fake_hc(*a, **kw)
+        with mock.patch.object(pm, "hc", side_effect=live), self.assertRaises(SystemExit) as stop:
+            self.take_up(tid)
+        self.assertIn("hc:t8", str(stop.exception))
+        self.assertEqual(self.names, [])  # no second worker
+        self.assertEqual(pm.load(tid)["status"], "in_progress")
+
+    def test_a_hand_off_from_a_live_session_is_taken_up(self):
+        tid = self.register("交给 PM 的", pane="hc:t8")  # proposed by a session that is still open
+        live = lambda *a, **kw: {"state": "live"} if a[:2] == ("get", "t8") else self.fake_hc(*a, **kw)
+        with mock.patch.object(pm, "hc", side_effect=live):
+            self.take_up(tid)
+        self.assertEqual(pm.load(tid)["pane"], "hc:t5g")
+
+    def test_another_projects_task_is_refused(self):
+        tid = self.register("别的项目的")
+        other = tempfile.mkdtemp(prefix="pm-other-")
+        subprocess.run(["git", "-C", other, "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "init"], check=True)
+        with self.assertRaises(SystemExit) as stop:
+            self.take_up(tid, repo=other)
+        self.assertIn("--repo", str(stop.exception))
+        self.assertEqual(self.names, [])
+
+    def test_here_asked_first_then_confirmed_takes_up_the_same_task(self):
+        def run(*more):
+            a = pm.build_parser().parse_args(["dispatch", "设计方案", "--repo", self.repo, "--here", "--brief",
+                                              str(self.brief), "--profile", "deep", *more])
+            with contextlib.redirect_stdout(io.StringIO()):
+                pm.cmd_dispatch(a)
+        before = {t["id"] for t in pm.all_tasks()}
+        run()
+        asked = [t for t in pm.all_tasks() if t["id"] not in before]
+        self.assertEqual([t["status"] for t in asked], ["blocked"])
+        run()  # asked again before the user answered: still the same question
+        run("--confirmed")
+        after = [t for t in pm.all_tasks() if t["id"] not in before]
+        self.assertEqual([(t["id"], t["status"]) for t in after], [(asked[0]["id"], "in_progress")])
+        self.assertFalse(pm.load(asked[0]["id"]).get("held"))
+
+
+class DeepPreapproval(Policy):
+    CONFIG = {}
+
+    def setUp(self):
+        super().setUp()
+        self.repo = tempfile.mkdtemp(prefix="pm-deep-")
+        subprocess.run(["git", "-C", self.repo, "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "init"], check=True)
+        self.brief = Path(self.repo) / "brief.md"
+        self.brief.write_text("brief")
+
+    def plan(self, *more):
+        a = pm.build_parser().parse_args(["dispatch", "设计", "--repo", self.repo, "--branch", "dev/d", "--brief",
+                                          str(self.brief), "--profile", "deep", "--dry-run", *more])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pm.cmd_dispatch(a)
+        return json.loads(out.getvalue())
+
+    def test_default_asks(self):
+        self.assertTrue(self.plan()["asks_user_first"])
+        self.assertFalse(self.plan("--confirmed")["asks_user_first"])
+
+    def test_config_preapproves(self):
+        self.config({"deep": {"confirmed": True}})
+        self.assertFalse(self.plan()["asks_user_first"])
+        self.config({"deep": {"confirmed": ["another-project"]}})
+        self.assertTrue(self.plan()["asks_user_first"])  # scoped to the projects it names
+        self.config({"deep": {"confirmed": [Path(self.repo).name]}})
+        self.assertFalse(self.plan()["asks_user_first"])
+
+    def test_a_repository_inside_a_project_folder_goes_by_that_project(self):
+        folder = Path(tempfile.mkdtemp(prefix="pm-folder-")).resolve()
+        inner = folder / "service"
+        inner.mkdir()
+        subprocess.run(["git", "-C", str(inner), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(inner), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "init"], check=True)
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        record = pm.PMS / f"{pm.project_slug(folder)}.json"
+        record.write_text(json.dumps({"name": f"pm-{folder.name}", "project": folder.name, "repo": str(folder)}))
+        self.addCleanup(record.unlink)
+        self.assertEqual(pm.project_names(str(inner)), {"service", folder.name})
+        self.config({"deep": {"confirmed": [folder.name]}, "codex": {"projects": [folder.name], "profiles": ["acct"]}})
+        self.assertTrue(pm.deep_confirmed(str(inner)))
+        self.assertEqual([p["name"] for p in pm.codex_pool(str(inner))], ["acct"])
+        self.assertIn(folder, pm.project_places(str(inner)))  # its sessions count with the project folder's
+        self.config({"deep": {"confirmed": ["elsewhere"]}})
+        self.assertFalse(pm.deep_confirmed(str(inner)))
+
+    def test_the_question_says_how_past_it(self):
+        out = io.StringIO()
+        a = pm.build_parser().parse_args(["dispatch", "设计", "--repo", self.repo, "--branch", "dev/q", "--brief",
+                                          str(self.brief), "--profile", "deep"])
+        with contextlib.redirect_stdout(out):
+            tid = pm.cmd_dispatch(a)
+        self.assertEqual(pm.load(tid)["status"], "blocked")
+        self.assertIn("--confirmed", out.getvalue())
+        self.assertIn('"deep": {"confirmed": true}', out.getvalue())
+        self.assertIn("Do not switch to another profile or model", out.getvalue())
+
+    def test_a_preapproved_dispatch_says_so(self):
+        self.config({"deep": {"confirmed": True}})
+        home = Path(tempfile.mkdtemp(prefix="pm-worktrees-"))  # never the real ~/.herdr/worktrees
+        with mock.patch.object(pm, "worktree_home", return_value=home), mock.patch.object(pm, "PANE", "hc:t1"), mock.patch.object(pm, "hc", side_effect=lambda *a, **kw:
+                                                                        {"address": "t7"} if a[0] == "run" else {}), \
+                mock.patch.object(pm, "send_when_ready", return_value=True), contextlib.redirect_stdout(io.StringIO()):
+            a = pm.build_parser().parse_args(["dispatch", "设计", "--repo", self.repo, "--branch", "dev/p", "--brief",
+                                              str(self.brief), "--profile", "deep"])
+            pm.cmd_dispatch(a)
+        task = next(t for t in pm.all_tasks() if t.get("branch") == "dev/p" and t["repo"] == pm.main_root(self.repo))
+        self.assertEqual(task["status"], "in_progress")
+        self.assertIn("deep.confirmed", task["log"][0]["text"])
+
+
+class TabWithoutApp(Policy):
+    """No herdr-app on this machine: a tab is renamed in the app's document in herdr-core only when
+    tabs.rename_via_core says so."""
+    CONFIG = {}
+
+    @staticmethod
+    def missing(argv, **kw):
+        raise FileNotFoundError(argv[0])
+
+    def test_off_by_default_nothing_is_renamed_and_the_log_says_why(self):
+        with mock.patch.object(pm.subprocess, "run", side_effect=self.missing), \
+                mock.patch.object(pm, "hc_rpc") as rpc:
+            self.assertFalse(pm.name_tab("t2", "PM-app"))
+        rpc.assert_not_called()
+        with mock.patch.object(pm.shutil, "which", return_value=None):
+            self.assertIn("tabs.rename_via_core", pm.not_renamed())
+
+    def test_switched_on_it_goes_through_herdr_core(self):
+        self.config({"tabs": {"rename_via_core": True}})
+        with mock.patch.object(pm.subprocess, "run", side_effect=self.missing), \
+                mock.patch.object(pm, "rename_tab", return_value=True) as rename:
+            self.assertTrue(pm.name_tab("t2", "PM-app"))
+            self.assertTrue(pm.name_tab("t1", "", only_if="PM-app"))
+        self.assertEqual([c[0][:2] + (c[1]["only_if"],) for c in rename.call_args_list],
+                         [("t2", "PM-app", None), ("t1", "", "PM-app")])
+        with mock.patch.object(pm.shutil, "which", return_value=None):
+            self.assertIn("no tab found", pm.not_renamed())
+
+    def test_rename_tab_writes_the_apps_document(self):
+        doc = {"spaces": [{"tabs": [{"name": "3", "root": {"children": [{"content": {"terminal": "t2"}}]}}]}]}
+        def rpc(method, params):
+            return {"result": {"value": json.loads(json.dumps(doc)), "version": 4}} if method == "doc.get" else \
+                {"result": {"version": 5}}
+        with mock.patch.object(pm, "hc_rpc", side_effect=rpc) as fake:
+            self.assertTrue(pm.rename_tab("t2", "t2-登录", wait=0))
+            self.assertFalse(pm.rename_tab("t2", "x", wait=0, only_if="PM-app"))  # a tab named otherwise: left
+            self.assertFalse(pm.rename_tab("t9", "x", wait=0))  # no tab shows it
+        written = [c for c in fake.call_args_list if c[0][0] == "doc.set"]
+        self.assertEqual(len(written), 1)
+        self.assertEqual((written[0][0][1]["version"], written[0][0][1]["value"]["spaces"][0]["tabs"][0]["name"]),
+                         (4, "t2-登录"))
+
+
+class Events(unittest.TestCase):
+    """One way into a desktop-app PM: whoever writes an event has it delivered; the PM waits on nothing."""
+
+    def setUp(self):
+        self.repo = pm.project_root(tempfile.mkdtemp())
+        self.name = Path(self.repo).name
+        self.saved = (pm.hc, pm.agents, pm.deliver_later, pm.PANE, pm.HC_TERMINAL, pm.DELIVER_GIVE_UP, pm.DELIVER_PAUSE)
+        self.started, self.calls, self.pm_states, self.sent = [], [], [], {"started": True}
+        pm.deliver_later = self.started.append
+        pm.agents = lambda: []
+        self.terms = {"t20": {"state": "live", "status": {"state": "working"}}}
+
+        def hc(*args, **kw):
+            self.calls.append(args)
+            if args[0] == "get" and args[1] == "t7":
+                state = self.pm_states.pop(0) if self.pm_states else "idle"
+                return {"state": "live", "labels": {"pm": self.name}, "status": {"state": state}}
+            if args[0] == "get":
+                return self.terms.get(args[1])
+            return self.sent if args[0] == "send" else {}
+        pm.hc = hc
+        self.register()
+        self.be("hc:t20")
+
+    def tearDown(self):
+        pm.hc, pm.agents, pm.deliver_later, pm.PANE, pm.HC_TERMINAL, pm.DELIVER_GIVE_UP, pm.DELIVER_PAUSE = self.saved
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        for path in [*pm.PMS.glob("*.json"), *pm.TASKS.glob(f"{self.name}-*.json")]:
+            path.unlink()
+
+    def register(self, **fields):
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps(
+            {"name": pm.pm_name(self.repo), "project": self.name, "repo": self.repo, "pane": "hc:t7",
+             "runtime": "hc", "terminal": "t7", "agent": "claude", **fields}))
+
+    def be(self, pane):
+        pm.PANE, pm.HC_TERMINAL = pane, pane[3:]
+
+    def task(self, slug, pane="hc:t20", status="in_progress", **fields):
+        task = {"id": f"{self.name}-{slug}", "title": slug, "project": self.name, "repo": self.repo, "status": status,
+                "owner": "pm", "base": "main", "pane": pane, "dispatched": True, "created": pm.now(), "log": [], **fields}
+        pm.save(task)
+        return task["id"]
+
+    def update(self, task_id, **fields):
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_update(argparse.Namespace(id=task_id, keep=False, **{"note": None, **fields}))
+
+    def events(self, kind=None):
+        return [e for e in pm.conversation(self.repo) if kind in (None, e.get("type"))]
+
+    def size(self):
+        return (pm.project_dir(self.repo) / "conversation.jsonl").stat().st_size
+
+    def hook(self, event, **payload):
+        out, pm.sys.stdin = io.StringIO(), io.StringIO(json.dumps({"hook_event_name": event, **payload}))
+        try:
+            with contextlib.redirect_stdout(out):
+                pm.cmd_hook_turn(None)
+        finally:
+            pm.sys.stdin = sys.__stdin__
+        return out.getvalue()
+
+    def sends(self):
+        return [c for c in self.calls if c[0] == "send"]
+
+    def test_only_a_status_someone_else_sets_wakes_the_pm(self):
+        task = self.task("a")
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_log(argparse.Namespace(id=task, text="half way"))
+        self.update(task, note="still going")
+        self.assertEqual([e.get("wake") for e in self.events("thread")], [None, None])
+        self.assertEqual(self.started, [])
+        self.update(task, status="review", commit="abc123", note="done; tests pass")
+        last = self.events("thread")[-1]
+        self.assertEqual((last["wake"], last["source"], last["by"]), (True, "worker", "hc:t20"))
+        self.assertEqual(self.started, [self.repo])
+        self.be("hc:t7")  # the PM sends it back: its own entry wakes nobody
+        self.update(task, status="in_progress", note="fix the empty page")
+        last = self.events("thread")[-1]
+        self.assertEqual((last.get("wake"), last["source"]), (None, "pm"))
+        self.assertEqual(self.started, [self.repo])
+        self.be("hc:t30")  # another session hands the PM a task
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_new(argparse.Namespace(repo=self.repo, title="new idea", status="proposed", base="main", owner=None,
+                                          workspace=None, pane=None, slug="idea", branch=None, note="handed to PM"))
+        last = self.events("thread")[-1]
+        self.assertEqual((last["wake"], last["source"]), (True, "session"))
+
+    def test_a_herdr_tui_pm_keeps_its_inbox_and_waits(self):
+        self.register(runtime="", terminal="")
+        task = self.task("a")
+        self.update(task, status="review", note="done")
+        self.assertIsNone(self.events("thread")[-1].get("wake"))
+        self.assertEqual(self.started, [])
+
+    def test_a_batch_is_the_latest_word_on_each_task_the_pm_has_not_dealt_with(self):
+        a, b, c, d = (self.task(slug, pane=f"hc:t2{n}") for n, slug in enumerate("abcd"))
+        for n, task in enumerate((a, b, c, d)):
+            self.be(f"hc:t2{n}")
+            self.update(task, status="blocked", note=f"question from {task}")
+        self.be("hc:t20")
+        self.update(a, status="review", note="answered it myself; done")
+        self.be("hc:t7")
+        self.update(b, status="in_progress", note="use the old format")       # the PM answered b
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_log(argparse.Namespace(id=c, text="standard: a small change"))  # a note of the PM's settles nothing
+        task = pm.load(d)
+        task["status"] = "abandoned"
+        pm.save(task)
+        start, end, items = pm.pending_batch(self.repo)
+        self.assertEqual((start, end), (0, self.size()))
+        self.assertEqual([(i["event"]["task"], i["event"]["status"], i["earlier"]) for i in items],
+                         [(c, "blocked", 0), (a, "review", 1)])
+        text = pm.batch_text(start, end, items)
+        self.assertTrue(text.startswith(f"[from pm.py deliver] 2 event(s) (0-{end})\n"))
+        self.assertIn(f"[worker hc:t20] {a}: review", text)
+        self.assertIn("answered it myself; done", text)
+        self.assertIn("(1 earlier entries not shown)", text)
+        self.assertNotIn("use the old format", text)
+
+    def test_deliver_waits_for_an_idle_pm_and_sends_one_batch(self):
+        task = self.task("a")
+        self.update(task, status="review", commit="abc123", note="done; tests pass")
+        self.pm_states[:] = ["working", "idle"]
+        pm.cmd_deliver(argparse.Namespace(project=self.repo, dry_run=False, since=None))
+        self.assertEqual([c[0] for c in self.calls if c[0] != "get"], ["wait", "send"])
+        (_, term, text), = self.sends()
+        self.assertEqual(term, "t7")
+        self.assertIn("(commit abc123)", text)
+        self.assertIn("done; tests pass", text)
+        self.assertEqual(pm.delivered_offset(self.repo), self.size())
+        pm.cmd_deliver(argparse.Namespace(project=self.repo, dry_run=False, since=None))
+        self.assertEqual(len(self.sends()), 1)                       # nothing new: nothing sent
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pm.cmd_deliver(argparse.Namespace(project=self.repo, dry_run=True, since=0))
+        self.assertIn("done; tests pass", out.getvalue())            # a dry run prints the batch from any byte
+        self.assertEqual(len(self.sends()), 1)
+
+    def test_a_send_that_starts_no_turn_does_not_move_the_mark(self):
+        self.update(self.task("a"), status="review", note="done")
+        self.sent, pm.DELIVER_GIVE_UP, pm.DELIVER_PAUSE = {}, 0.05, 0.01
+        pm.cmd_deliver(argparse.Namespace(project=self.repo, dry_run=False, since=None))
+        self.assertTrue(self.sends())
+        self.assertEqual(pm.delivered_offset(self.repo), 0)
+
+    def test_no_pm_running_and_a_second_deliverer_send_nothing(self):
+        self.update(self.task("a"), status="review", note="done")
+        with open(pm.project_dir(self.repo) / "deliver.lock", "a+") as held:
+            pm.lock_file(held)
+            pm.cmd_deliver(argparse.Namespace(project=self.repo, dry_run=False, since=None))
+            pm.unlock_file(held)
+        self.assertEqual(self.calls, [])
+        real, pm.hc = pm.hc, lambda *args, **kw: self.calls.append(args) or ({"state": "exited"} if args[0] == "get" else {})
+        pm.cmd_deliver(argparse.Namespace(project=self.repo, dry_run=False, since=None))
+        pm.hc = real
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(pm.delivered_offset(self.repo), 0)          # it waits in the log for the PM that starts
+
+    def test_the_pm_hook_takes_a_batch_once_and_brings_what_waits_with_the_users_words(self):
+        task = self.task("a")
+        self.update(task, status="blocked", note="which format?")
+        start, end, items = pm.pending_batch(self.repo)
+        batch = pm.batch_text(start, end, items)
+        self.be("hc:t7")
+        self.assertEqual(self.hook("UserPromptSubmit", prompt=f'<hc from="t20">{batch}</hc>'), "")
+        self.assertEqual(pm.delivered_offset(self.repo), end)
+        self.assertEqual(self.events("agent"), [])                   # the events are in the log already
+        self.hook("Stop", last_assistant_message="问了用户")
+        reply = self.events("pm")[-1]
+        self.assertEqual((reply["after"], reply["batch"]), ("deliver", [start, end]))
+        self.assertIn("repeat", self.hook("UserPromptSubmit", prompt=batch))  # the same batch again
+        self.be("hc:t20")
+        self.update(task, status="review", note="done after all")
+        self.be("hc:t7")
+        brought = self.hook("UserPromptSubmit", prompt="进展如何")
+        self.assertIn("done after all", brought)                      # it rides with the user's turn
+        self.assertEqual(pm.delivered_offset(self.repo), self.size() - len(json.dumps(self.events()[-1], ensure_ascii=False).encode()) - 1)
+        self.hook("Stop", last_assistant_message="a 做完了")
+        self.assertNotIn("after", self.events("pm")[-1])
+        self.assertEqual(pm.pending_batch(self.repo)[2], [])
+
+    def test_a_worker_that_stops_unreported_is_reminded_then_reported_as_stalled(self):
+        task = self.task("a")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
+        self.assertEqual(self.hook("Stop", background_tasks=[{"id": "b1"}]), "")   # it waits on its own work
+        said = json.loads(self.hook("Stop", stop_hook_active=False))
+        self.assertEqual(said["decision"], "block")
+        self.assertIn(f"update {task} --status review|blocked", said["reason"])
+        self.assertEqual(self.events("stall"), [])
+        self.assertEqual(self.hook("Stop", stop_hook_active=True), "")
+        stall, = self.events("stall")
+        self.assertEqual((stall["task"], stall["wake"], stall["source"], stall["by"]), (task, True, "harness", "hc:t20"))
+        self.assertEqual(self.started, [self.repo])
+        self.hook("Stop", stop_hook_active=True)
+        self.assertEqual(len(self.events("stall")), 1)                # once per stall
+        self.update(task, status="review", note="done")
+        self.assertEqual(self.hook("Stop", stop_hook_active=False), "")  # reported: nothing to say
+        os.environ.pop("CLAUDE_CODE_SESSION_ID")
+        other = self.task("b", pane="hc:t21")
+        self.be("hc:t21")
+        self.assertEqual(self.hook("Stop"), "")                       # an agent a hook cannot continue
+        self.assertEqual([e["task"] for e in self.events("stall")], [task, other])
+
+    def test_the_pm_notices_a_worker_whose_terminal_is_gone(self):
+        task = self.task("a")
+        self.terms["t20"] = {"state": "exited"}
+        self.be("hc:t7")
+        self.hook("Stop", last_assistant_message="好")
+        self.hook("Stop", last_assistant_message="好")
+        stall, = self.events("stall")
+        self.assertEqual((stall["task"], stall["wake"]), (task, True))
+
+    def test_notify_and_event_reach_an_app_pm_through_the_log(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            pm.cmd_notify(argparse.Namespace(repo=self.repo, text="提问：旧版配置要不要兼容？"))
+            for key in ("sha1:pass", "sha1:pass", "sha2:fail"):
+                pm.cmd_event(argparse.Namespace(repo=self.repo, text=f"CI {key}", source="ci", key=key))
+        said, = self.events("agent")
+        self.assertEqual((said["by"], said["wake"], said["text"]), ("hc:t20", True, "提问：旧版配置要不要兼容？"))
+        self.assertEqual([(e["key"], e["source"], e["wake"]) for e in self.events("event")],
+                         [("sha1:pass", "external:ci", True), ("sha2:fail", "external:ci", True)])
+        self.assertEqual(self.sends(), [])                            # nothing is typed by the sender itself
+        self.assertEqual(self.started, [self.repo] * 3)
+        text = pm.batch_text(*pm.pending_batch(self.repo))
+        self.assertIn("[session hc:t20] 提问：旧版配置要不要兼容？", text)
+        self.assertIn("[external:ci hc:t20] CI sha2:fail", text)
+
+    def test_a_message_not_yet_read_does_not_come_between_the_user_and_the_reply(self):
+        pm.record(self.repo, "user", text="进展如何")
+        pm.record(self.repo, "agent", by="hc:t20", text="ready", wake=True)
+        pm.record(self.repo, "pm", text="a 在跑")
+        pm.record(self.repo, "pm", text="收到 ready", after="deliver")
+        self.assertEqual(pm.log_tail(self.repo), [{"user": "进展如何", "pm": "a 在跑"}])
+
+    def test_a_deliverer_starts_only_for_an_app_pm(self):
+        real, began = pm.subprocess.Popen, []
+        with mock.patch.object(pm.subprocess, "Popen", lambda argv, **kw: began.append(argv) if "deliver" in argv
+                               else real(argv, **kw)):
+            DELIVER_LATER(self.repo)
+            self.register(archived=True)
+            DELIVER_LATER(self.repo)
+        self.assertEqual([argv[-2:] for argv in began], [["deliver", self.repo]])
+
+
+class Memory(unittest.TestCase):
+    """Two layers of memory files in the ledger home: the index goes to every session, a body is read on demand."""
+
+    def setUp(self):
+        self.repo = pm.project_root(tempfile.mkdtemp())
+        self.name = Path(self.repo).name
+        self.saved = (pm.PANE, pm.HC_TERMINAL, pm.config, pm.INDEX_LINES)
+        pm.PANE = pm.HC_TERMINAL = ""
+        shutil.rmtree(pm.STATE / "memory", ignore_errors=True)  # the personal layer: one per ledger home
+
+    def tearDown(self):
+        pm.PANE, pm.HC_TERMINAL, pm.config, pm.INDEX_LINES = self.saved
+        for path in [*pm.PMS.glob("*.json"), *pm.TASKS.glob(f"{self.name}-*.json")]:
+            path.unlink()
+        shutil.rmtree(pm.STATE / "memory", ignore_errors=True)
+
+    def be(self, pane):
+        pm.PANE, pm.HC_TERMINAL = pane, pane[3:]
+
+    def pm_is(self, pane="hc:t7"):
+        pm.PMS.mkdir(parents=True, exist_ok=True)
+        (pm.PMS / f"{pm.project_slug(self.repo)}.json").write_text(json.dumps(
+            {"name": pm.pm_name(self.repo), "project": self.name, "repo": self.repo, "pane": pane,
+             "runtime": "hc", "terminal": pane[3:], "agent": "claude"}))
+
+    def worker(self, slug, pane):
+        task = {"id": f"{self.name}-{slug}", "title": slug, "project": self.name, "repo": self.repo,
+                "status": "in_progress", "owner": "pm", "base": "main", "pane": pane, "dispatched": True,
+                "created": pm.now(), "log": []}
+        pm.save(task)
+        return task["id"]
+
+    def index(self, repo=""):
+        path = pm.memory_dir(self.repo if repo == "" else repo) / "MEMORY.md"
+        return path.read_text() if path.exists() else ""
+
+    def run_cmd(self, command, **fields):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            command(argparse.Namespace(repo=self.repo, **fields))
+        return out.getvalue()
+
+    def test_a_memory_is_one_file_in_claude_codes_format_and_the_index_lists_it(self):
+        pm.record(self.repo, "user", text="最后 我们的实现里面不要有直角线")
+        m, notes = pm.remember(self.repo, "看板连线只用直线和曲线，不要直角线", kind="feedback",
+                               name="no-right-angle-wires", quote="我们的实现里面，不要有直角线")
+        self.assertEqual(notes, [])
+        path = pm.memory_dir(self.repo) / "no-right-angle-wires.md"
+        text = path.read_text()
+        self.assertTrue(text.startswith('---\nname: no-right-angle-wires\ndescription: "看板连线只用直线和曲线，不要直角线"\n'
+                                        "metadata:\n  node_type: memory\n  type: feedback\n  modified: "), text)
+        back = pm.read_memory(path)
+        self.assertEqual((back["type"], back["by"], back["quote"], back["quote_checked"], back["body"]),
+                         ("feedback", "user", "我们的实现里面，不要有直角线", "true", "看板连线只用直线和曲线，不要直角线"))
+        self.assertEqual(self.index(), "- [no-right-angle-wires](no-right-angle-wires.md) — "
+                                       "看板连线只用直线和曲线，不要直角线 (feedback)\n")
+        event = pm.conversation(self.repo)[-1]
+        self.assertEqual((event["type"], event["layer"], event["action"], event["name"], event["by"]),
+                         ("memory", "project", "remember", "no-right-angle-wires", "user"))
+
+    def test_a_memory_brought_in_from_an_older_record_keeps_its_date_and_logs_no_event(self):
+        pm.remember(self.repo, "只有正在工作的线流动", name="only-working-wires-flow", quote="同意",
+                    by="migration", when="2026-11-10", quiet=True)
+        pm.remember(self.repo, "Esc 统一表示退一层", name="esc-goes-back", quote="按这个来", quiet=True,
+                    when="2026-11-15T03:04:05.000Z")
+        old, new = (pm.read_memory(pm.memory_dir(self.repo) / f"{n}.md") for n in ("only-working-wires-flow",
+                                                                                 "esc-goes-back"))
+        self.assertEqual((old["modified"], old["by"]), ("2026-11-10T00:00:00.000Z", "migration"))
+        self.assertEqual(new["modified"], "2026-11-15T03:04:05.000Z")
+        self.assertEqual([line.split("]")[0] for line in self.index().splitlines()],
+                         ["- [esc-goes-back", "- [only-working-wires-flow"])  # newest first, by their own dates
+        self.assertEqual(pm.conversation(self.repo), [])
+
+    def test_a_quote_the_user_never_typed_is_written_and_marked(self):
+        pm.record(self.repo, "user", text="侧栏入口叫 Projects。先出设计稿")
+        ok, _ = pm.remember(self.repo, "侧栏入口叫 Projects", kind="feedback", name="entry-is-projects",
+                            quote="侧栏入口叫Projects … 先出设计稿")  # pieces, spacing and punctuation aside
+        bad, notes = pm.remember(self.repo, "默认深色主题", kind="feedback", name="dark-by-default", quote="用深色")
+        self.assertEqual((ok["quote_checked"], bad["quote_checked"]), ("true", "false"))
+        self.assertIn("not found among the user's words", notes[0])
+        self.assertIn("(feedback; quote not found in the log)", self.index())
+        self.assertIn("(not found in the log)",
+                      pm.recall_text(pm.read_memory(pm.memory_dir(self.repo) / "dark-by-default.md"), self.repo))
+
+    def test_a_worker_writes_what_it_found_out_and_nothing_else(self):
+        self.pm_is()
+        mine, other = self.worker("a", "hc:t20"), self.worker("b", "hc:t21")
+        self.be("hc:t20")
+        for wrong in ({"kind": "feedback", "quote": "x"}, {"kind": "reference", "personal": True}, {"kind": "project"}):
+            with self.assertRaises(pm.MemoryRefused):
+                pm.remember(self.repo, "渲染检查要开着显示器", name="render-check-needs-display", **wrong)
+        m, _ = pm.remember(self.repo, "渲染检查要开着显示器，否则退出码是 2", name="render-check-needs-display",
+                           verified="跑 tests/render_check.py 两次：关屏退出 2，开屏通过")
+        self.assertEqual((m["type"], m["by"], m["task"]), ("project", f"worker:{mine}", mine))
+        self.be("hc:t21")
+        with self.assertRaises(pm.MemoryRefused):  # another worker's memory is not this one's to rewrite
+            pm.remember(self.repo, "渲染检查不用显示器", name="render-check-needs-display", verified="猜的")
+        with self.assertRaises(SystemExit):
+            self.run_cmd(pm.cmd_forget, name="render-check-needs-display", why="", personal=False)
+        self.be("hc:t7")  # the PM may
+        fixed, _ = pm.remember(self.repo, "渲染检查要开着显示器，否则退出码是 2，合并会被挡住",
+                               name="render-check-needs-display")
+        self.assertEqual((fixed["by"], fixed["verified"]), ("pm", m["verified"]))  # its evidence stays
+        self.assertEqual(other, f"{self.name}-b")
+
+    def test_the_pm_writes_a_rule_only_in_a_turn_the_user_started(self):
+        self.pm_is()
+        self.be("hc:t7")
+        pm.record(self.repo, "user", text="回复改短，一两句说结论")
+        cause = pm.project_dir(self.repo) / "turn-cause.json"
+        cause.write_text(json.dumps({"after": "deliver", "batch": [0, 10]}))
+        with self.assertRaises(pm.MemoryRefused):
+            pm.remember(self.repo, "PM 回复一两句说结论", kind="feedback", name="short-replies", quote="一两句说结论")
+        with self.assertRaises(pm.MemoryRefused):
+            pm.remember(self.repo, "文档链接", kind="reference", name="docs-link", personal=True)
+        pm.remember(self.repo, "合并前要跑渲染检查", name="render-check-before-merge", verified="verify 文件里有这一步")
+        cause.unlink()
+        with self.assertRaises(pm.MemoryRefused):  # a rule needs the user's words
+            pm.remember(self.repo, "PM 回复一两句说结论", kind="feedback", name="short-replies")
+        m, _ = pm.remember(self.repo, "PM 回复一两句说结论", kind="feedback", name="short-replies", quote="一两句说结论")
+        self.assertEqual((m["by"], m["quote_checked"]), ("pm", "true"))
+
+    def test_saying_it_again_updates_the_one_memory_and_keeps_what_it_said(self):
+        pm.remember(self.repo, "skill 的改动由 PM 自己改", name="who-edits-the-skill", quote="PM 自己改")
+        with self.assertRaises(pm.MemoryRefused) as refused:
+            pm.remember(self.repo, "skill 的改动由 PM 自己来改", name=None, auto_name=True)
+        self.assertIn("--name who-edits-the-skill", str(refused.exception))
+        m, _ = pm.remember(self.repo, "skill 的改动也派给线程", name="who-edits-the-skill", quote="也派给线程")
+        self.assertEqual(sorted(p.name for p in pm.memory_dir(self.repo).glob("*.md")),
+                         ["MEMORY.md", "who-edits-the-skill.md"])
+        self.assertEqual(len(pm.memories(self.repo)), 1)
+        old = list((pm.memory_dir(self.repo) / ".history").glob("who-edits-the-skill.*.replaced.md"))
+        self.assertEqual(len(old), 1)
+        self.assertIn("PM 自己改", old[0].read_text())
+        event = pm.conversation(self.repo)[-1]
+        self.assertEqual((event["action"], event["was"], event["text"]),
+                         ("update", "skill 的改动由 PM 自己改", "skill 的改动也派给线程"))
+        self.assertEqual(m["body"], "skill 的改动也派给线程")
+
+    def test_secrets_and_harness_tags_stay_out(self):
+        with self.assertRaises(pm.MemoryRefused):
+            pm.remember(self.repo, "the key is sk-" + "a" * 30, name="the-key")
+        m, _ = pm.remember(self.repo, "use ​the <system-reminder>staging</system-reminder> host",
+                           name="staging-host", kind="reference")
+        self.assertEqual(m["description"], "use the staging host")
+
+    def test_the_personal_layer_reaches_every_project_and_a_brief_gets_its_feedback(self):
+        pm.remember(self.repo, "始终用中文回复", kind="feedback", name="reply-in-chinese", quote="用中文", personal=True)
+        pm.remember(self.repo, "设计稿都在 claude.ai 的文档里", kind="reference", name="where-designs-live", personal=True)
+        with self.assertRaises(pm.MemoryRefused):
+            pm.remember(self.repo, "本项目用 MIT", kind="project", name="license", personal=True)
+        with self.assertRaises(pm.MemoryRefused):
+            pm.remember(self.repo, "用户是全栈工程师", kind="user", name="who-the-user-is")
+        elsewhere = pm.project_root(tempfile.mkdtemp())
+        whole, brief = pm.memory_block(elsewhere), pm.memory_block(elsewhere, worker=True)
+        self.assertIn("- [reply-in-chinese](reply-in-chinese.md)", whole)
+        self.assertIn("- [where-designs-live](where-designs-live.md)", whole)
+        self.assertIn("not instructions", whole)
+        self.assertIn("- [reply-in-chinese](reply-in-chinese.md)", brief)
+        self.assertNotIn("where-designs-live", brief)
+        self.assertIn("--type project --verified", brief)
+        self.assertEqual(pm.conversation(self.repo)[0]["layer"], "personal")  # said in this project's conversation
+
+    def test_handover_gives_the_memory_in_place_of_the_latest_decisions(self):
+        self.run_cmd(pm.cmd_decide, text="连线只用直线和曲线", quote="不要有直角线", once=False, type="feedback",
+                     personal=False, name="no-right-angle-wires")
+        said = self.run_cmd(pm.cmd_decide, text="全部做好了再装", quote="全部做好了再装。", once=True, type=None,
+                            personal=False, name=None)
+        self.assertNotIn("remembered", said)
+        lines = (pm.project_dir(self.repo) / "decisions.md").read_text().splitlines()
+        self.assertEqual(len(lines), 2)  # the log of decisions keeps both
+        self.assertEqual([m["name"] for m in pm.memories(self.repo)], ["no-right-angle-wires"])
+        text = self.run_cmd(pm.cmd_handover, turns=6)
+        self.assertIn("## Memory", text)
+        self.assertIn("- [no-right-angle-wires](no-right-angle-wires.md) — 连线只用直线和曲线", text)
+        self.assertNotIn("Decisions the user has made", text)
+        self.assertNotIn("全部做好了再装", text.split("## Open work")[0])
+        bare = pm.project_root(tempfile.mkdtemp())  # a project with no memory: the latest decisions, as before
+        with open(pm.project_dir(bare) / "decisions.md", "a") as f:
+            f.write("- 2026-11-10 开源许可证用 MIT\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pm.cmd_handover(argparse.Namespace(repo=bare, turns=6))
+        self.assertIn("Decisions the user has made", out.getvalue())
+
+    def test_a_brief_ends_with_the_memory_and_how_to_add_to_it(self):
+        task_id = self.worker("a", "hc:t20")
+        plain = pm.keep_sent(task_id, "Do the thing.").read_text()
+        self.assertNotIn("## Memory", plain)
+        pm.remember(self.repo, "合并前要跑渲染检查", name="render-check-before-merge", verified="verify 文件里有这一步")
+        text = pm.keep_sent(task_id, "Do the thing.").read_text()
+        self.assertLess(text.index("Reporting (task"), text.index("## Memory"))
+        self.assertIn("- [render-check-before-merge](render-check-before-merge.md) — 合并前要跑渲染检查 (project)", text)
+        self.assertIn("recall <name>", text)
+        self.assertIn('remember "<one sentence>" --name <short-english-slug> --type project --verified', text)
+
+    def test_recall_says_where_a_memory_comes_from_and_how_old_it_is(self):
+        pm.remember(self.repo, "dev 机先不装新 skill", name="dev-machine-waits", quote="dev 机先不装",
+                    body="dev 机先不装新 skill。\n\n**Why:** 分支上还有没并入的命令。")
+        path = pm.memory_dir(self.repo) / "dev-machine-waits.md"
+        long_ago = (pm.datetime.date.today() - pm.datetime.timedelta(days=40)).isoformat()
+        path.write_text(pm.memory_text({**pm.read_memory(path), "checked": long_ago}))
+        text = self.run_cmd(pm.cmd_recall, name="dev-machine-waits", search=None, personal=False)
+        self.assertIn("# dev-machine-waits (project, project)", text)
+        self.assertIn("This memory is 40 days old", text)
+        self.assertIn('The user\'s words: "dev 机先不装" (not found in the log)', text)
+        self.assertIn("**Why:** 分支上还有没并入的命令。", text)
+        pm.write_index(self.repo)
+        self.assertIn("not confirmed for 40 days", self.index())
+        self.assertIn("dev-machine-waits", self.run_cmd(pm.cmd_recall, name=None, search="没并入", personal=False))
+        self.run_cmd(pm.cmd_forget, name="dev-machine-waits", why="装好了", personal=False)
+        self.assertEqual((self.index(), path.exists()), ("", False))
+        self.assertEqual(len(list((pm.memory_dir(self.repo) / ".history").glob("*.forgotten.md"))), 1)
+        self.assertEqual(pm.conversation(self.repo)[-1]["why"], "装好了")
+
+    def test_the_index_keeps_to_its_cap_and_says_what_it_left_out(self):
+        pm.INDEX_LINES = 3
+        notes = []
+        for n in range(5):
+            _, notes = pm.remember(self.repo, f"fact number {n} about the build", name=f"build-fact-{n}",
+                                   kind="reference", new=True)
+        self.assertIn("2 older memories are not in it", notes[0])
+        self.assertEqual(len(self.index().splitlines()), 3)
+        self.assertIn("(2 older ones are not listed", pm.memory_block(self.repo))
+        with self.assertRaises(SystemExit) as stopped:  # the command says so with its exit code too
+            self.run_cmd(pm.cmd_remember, text="fact number 9 about the deploy", name="deploy-fact", type="reference",
+                         quote=None, verified=None, personal=False, body_file=None, expires=None, new=True)
+        self.assertEqual(stopped.exception.code, 3)
+
+    def test_an_expired_memory_leaves_the_index(self):
+        pm.remember(self.repo, "dev 机先不装新 skill", name="dev-machine-waits", kind="reference", expires="2026-01-01")
+        pm.remember(self.repo, "发版分支叫 release", name="release-branch", kind="reference", expires="2999-01-01")
+        self.assertEqual([line.split("]")[0] for line in self.index().splitlines()], ["- [release-branch"])
+
+    def test_claude_code_is_started_with_its_own_memory_pointed_at_the_project(self):
+        self.assertEqual(pm.native_memory("claude", self.repo, "pm"), {})  # a project without memory: as before
+        self.assertEqual(pm.pm_argv("claude", ["claude", "--", "p"], self.repo)[-4:-2],
+                         ["--settings", str(Path(HOME) / "pm-settings.json")])
+        pm.remember(self.repo, "发版分支叫 release", name="release-branch", kind="reference")
+        home = pm.memory_dir(self.repo)
+        self.assertEqual(pm.native_memory("claude", self.repo, "pm"),
+                         {"autoMemoryEnabled": True, "autoMemoryDirectory": str(home)})
+        self.assertEqual(pm.native_memory("claude", self.repo, "worker", "Fix Wires"),
+                         {"autoMemoryEnabled": True, "autoMemoryDirectory": str(home / "candidates" / "fix-wires")})
+        self.assertEqual(pm.native_memory("codex", self.repo, "pm"), {})  # no memory of its own to point: the brief
+        argv = pm.pm_argv("claude", ["claude", "--", "p"], self.repo)
+        own = str(pm.project_dir(self.repo) / "pm-settings.json")
+        self.assertEqual(argv[argv.index("--settings") + 1], own)
+        settings = json.loads(Path(own).read_text())
+        self.assertEqual(settings["autoMemoryDirectory"], str(home))
+        self.assertIn("enabledPlugins", settings)  # with the lean settings, in the one file Claude Code reads
+        again = pm.pm_argv("claude", argv, self.repo)  # a rotation carries the flags over: still one --settings
+        self.assertEqual(again.count("--settings"), 1)
+        a = argparse.Namespace(kind="claude", model=None, effort=None, name="fix-wires", branch="dev/fix-wires")
+        worker = pm.worker_argv(a, [], self.repo)
+        given = json.loads(Path(worker[worker.index("--settings") + 1]).read_text())
+        self.assertEqual(given, {"autoMemoryEnabled": True,
+                                 "autoMemoryDirectory": str(home / "candidates" / "fix-wires")})
+        pm.config = lambda: {"memory": {"native": False}}
+        self.assertEqual(pm.native_memory("claude", self.repo, "pm"), {})
+        self.assertNotIn("--settings", pm.worker_argv(a, [], self.repo))
+
+    def test_what_claude_code_saved_by_itself_is_marked_and_a_workers_is_a_candidate(self):
+        pm.remember(self.repo, "发版分支叫 release", name="release-branch", kind="reference")
+        native = ('---\nname: {0}\ndescription: "{1}"\nmetadata:\n  node_type: memory\n  type: {2}\n'
+                  "  originSessionId: 81db4c9d\n  modified: 2026-11-18T13:16:49.647Z\n---\n\n{1}\n")
+        home = pm.memory_dir(self.repo)
+        (home / "rounded-line-caps.md").write_text(native.format("rounded-line-caps", "图表线端用圆头", "feedback"))
+        (home / "MEMORY.md").write_text("- [Rounded](rounded-line-caps.md) — 图表线端用圆头\n")  # its own index line
+        (home / "candidates" / "fix-wires").mkdir(parents=True)
+        (home / "candidates" / "fix-wires" / "flow-cache.md").write_text(
+            native.format("flow-cache", "flow.js 的缓存要在布局变了以后清掉", "project"))
+        block = pm.memory_block(self.repo)
+        self.assertIn("- [rounded-line-caps](rounded-line-caps.md) — 图表线端用圆头 (feedback; no words of the user's)", block)
+        self.assertNotIn("flow-cache", block)
+        kept = pm.read_memory(home / "rounded-line-caps.md")
+        self.assertEqual((kept["by"], kept["extra"]["originSessionId"]), ("claude-code", "81db4c9d"))
+        self.assertIn("fix-wires/flow-cache (project)", self.run_cmd(pm.cmd_memory, candidates=True))
+        self.assertIn("1 candidate(s) saved by workers", self.run_cmd(pm.cmd_handover, turns=6))
+        self.run_cmd(pm.cmd_adopt, candidate="fix-wires/flow-cache", text=None, name=None, type=None, quote=None,
+                     verified="worker 汇报里写了复现步骤", drop=False)
+        adopted = pm.read_memory(home / "flow-cache.md")
+        self.assertEqual((adopted["by"], adopted["verified"]), ("worker:fix-wires", "worker 汇报里写了复现步骤"))
+        self.assertEqual(pm.candidates(self.repo), [])
+        self.assertIn("flow-cache", self.index())
 
 
 if __name__ == "__main__":

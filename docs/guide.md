@@ -138,6 +138,8 @@ Everything else (ledger, dispatch, review, rotation, board) is the same for all.
 
 The skill includes two task brief templates: `assets/brief-template.md` (English) and `assets/brief-template.zh.md` (Chinese), under `mods/pm-dash/skill/`. Choose kinds and models available in your environment; the values above are examples.
 
+More keys, all off or empty until you set them: a pool of codex profiles with per-profile limits, a launcher for Claude Code or Codex workers, a tab of its own for each worker, closing workers once they report, and agreeing to Fable (deep) workers once instead of per task. [references/config.md](../mods/pm-dash/skill/references/config.md) in the skill describes them with an example. `"workers": {"close_on_close": true}` ends a finished task's worker terminal with the task.
+
 The installer does not create or overwrite this configuration. The ledger home survives uninstalling.
 
 ## Alerts
@@ -147,6 +149,63 @@ In the `pm` layout (other layouts are unchanged):
 - **Only the PM's toasts.** When a PM finishes its turn or needs you, Herdr's own "… finished" / "… needs you" toast shows; clicking it focuses that PM, and leaves the board (or a project view) first if one is up. Agents the PM dispatched (a terminal with a `task` label, or whose parent terminal has a `pm` label) report to the PM instead, so both of their toasts close at once without drawing anything. This is `mods/pm-toast`, which the layout uses in place of Herdr's `toast`. Agents you started yourself and every other notification look and behave as before.
 - **No task alerts.** A task moving to `review` or `blocked` posts no notification of its own; the PM's turn ends and its toast is the signal.
 - **Not solved: the worker's sound.** Herdr plays its finished/needs-you sound itself, apart from the toast mod, and only has the global `sounds.enabled` switch. A layout or mod cannot silence one terminal, so a finishing worker is still heard. dudu does not change your sound settings; see the roadmap.
+
+### PM notifications
+
+Run `pm.py wait <task> --timeout 3600` in the background for a worker's report;
+it also notices a worker that stops without reporting. Run one `pm.py watch` in
+the background for the PM's inbox. Handle its output, then start it again; do not
+repeatedly call `status`, `show`, or read terminal screens while waiting.
+
+Worker states wake a `watch` only in the herdr terminal UI, where `wait` cannot see
+a worker stop. In the desktop app `watch` is the inbox alone: `wait` already sees
+its worker stop, and a watch woken by the same worker would wake the PM twice.
+
+Start both with the agent's own background tool, the one that reports when the
+command exits (Claude Code: `run_in_background: true`), never with `&`, `nohup`,
+`disown` or a redirect to `/dev/null`: what such a process prints reaches no one.
+`watch` refuses to start that way, and a watcher whose starter goes away stops
+within five seconds without reading the inbox, so its lines wait for the next
+watcher. A second watcher for the same PM is refused with the running one's
+command, what started it and the number of unread inbox lines.
+
+File notifications observe inbox appends and task-file replacements: kqueue on
+macOS (it watches the inbox log and the task file themselves, since a folder
+watch there does not see an append), inotify on Linux and directory
+notifications on Windows. On Windows and Linux, where those report every change
+in the folder (every PM's log and offset, every task file), a change wakes only
+when the PM's own inbox log or the waited task's file is not as it was (inode,
+size, modification time). Desktop waits subscribe to `hc events`, following the
+task's terminal when `reattach` or `escalate` replaces it; title animations and
+heartbeats do not trigger state queries. On disconnect the subscription retries
+with bounded backoff, and a fresh snapshot reconciles state. A 60-second
+reconciliation is retained for lost events, filesystems that send no
+notifications, and older writers. The legacy Herdr TUI has no hc stream;
+`watch --interval` controls its state-check fallback only, not desktop polling.
+
+A worker that stops without reporting gets a five-second grace period; repeated
+events cannot shorten it. Inbox offsets, and in the herdr TUI worker snapshots,
+persist between watcher runs. A PM's first watch delivers its unread inbox lines, at most
+the newest 20 (while no watcher ran, `notify` typed the older ones into the PM),
+and says how many it left out. No event injects text into a worker or executes a
+command from a notification. `notify` still avoids typing into a PM while its
+watcher runs.
+
+Without `--repo`, `notify` goes to the PM of the task its session works on, also
+from a repository nested in the project's folder (a folder that holds several
+repositories' worktrees) or from another project's folder. The task is known by
+the terminal's `task=<id>` label or by the Claude Code session it recorded, never
+by a pane number alone (herdr TUI sessions repeat them). Otherwise it goes to the
+PM of the current folder's project or of the nearest folder above it with one, up
+to the home folder. `--repo <folder>` names a project: its PM, or the nearest
+folder above it with one, and no other, so a project without a PM is an error
+there, not the caller's task's PM. When it finds no PM, `notify` exits 1 and says
+that nothing was delivered; a project without a PM needs no notify.
+
+Installing updated scripts affects newly started waits/watchers. Already running
+processes keep their old code until they exit and the PM starts the next wait;
+there is no need to restart worker terminals. This changes PM coordination, not
+the desktop mods' separate remote-data refresh timers.
 
 ## Uninstall
 
@@ -206,7 +265,7 @@ Use these steps when automatic layout generation is skipped. Paths below are rel
 - `install.sh` — desktop installation, preview, and uninstall; calls the shared skill installer.
 - `layouts/pm.json` — distributable PM layout.
 - `mods/pm-dash/` — desktop project/task board, including `setup.py` for per-agent skill/hooks installation and read-only status.
-- `mods/pm-dash/skill/` — the single bundled PM playbook, ledger CLI, and browser dashboard.
+- `mods/pm-dash/skill/` — the single bundled PM skill (`SKILL.md`, the playbook and reference files), ledger CLI, and browser dashboard.
 - `mods/pm-nav/` — desktop sidebar entry and summary; returns to work when you navigate away from the board.
 - `mods/pm-list/` — sidebar PM list under the PM entry: each PM's live status and age; a click opens its project view (a remote PM: focuses it).
 - `mods/pm-project/` — the project view: the project's conversation with its PM, tasks as thread lines, questions as cards, a side panel (the thread list, or one thread), and a message box that sends to the PM.

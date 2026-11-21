@@ -1,7 +1,7 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, panes, shared, setShared, openOverlay } from 'herdr';
-import { foldReviews, pmRows, splitArchived, archivedDay, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH, focusPlan, opensProject, projectShared } from './model.js';
+import { foldReviews, allPmRows, splitArchived, archivedDay, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH, focusPlan, opensProject, projectShared } from './model.js';
 import { execPython } from './python.js';
 
 // Like pm-nav, the list reads the ledger through the original pm-dash bundle.
@@ -13,12 +13,14 @@ const OPEN = ['blocked', 'in_progress', 'review', 'proposed'];
 const SPINNER = 'mods/workspace-chrome/spinner.svg', DUDU = 'mods/pm-list/dudu.svg';
 
 const STRINGS = {
-  en: { blocked: 'Needs you', working: 'Working', done: 'Done', idle: 'Idle',
+  en: { blocked: 'Needs you', working: 'Working', done: 'Done', idle: 'Idle', unknown: 'Status unknown: it reports none',
+    unregistered: 'Not in this ledger. Click shows its terminal.',
     away: 'Not in the desktop app. Start it here, then run pm.py claim.',
     project: "Not in the desktop app. Click opens the project's space.", readError: 'Could not read the ledger',
     view: "Click opens the project's conversation", notDesktop: 'Not in the desktop app',
     archive: 'Archive project', archived: n => `Archived ${n}`, archivedRow: 'Archived. Click shows the archived projects' },
-  zh: { blocked: '等你', working: '工作中', done: '已完成', idle: '空闲',
+  zh: { blocked: '等你', working: '工作中', done: '已完成', idle: '空闲', unknown: '状态未知：它不上报状态',
+    unregistered: '台账里没有它。点击打开它的终端。',
     away: '这个 PM 不在桌面里。在桌面里启动它，再运行 pm.py claim。',
     project: '这个 PM 不在桌面里。点击打开项目的 space。', readError: '台账读取失败',
     view: '点击打开这个项目的对话', notDesktop: '这个 PM 不在桌面里',
@@ -138,15 +140,17 @@ export default class PmList extends View {
     setShared('pm-dash', { view: 'archived', project: '' });
     if (find(layout(), n => n.id === STAGE)) run('layout.select', { stack: STAGE, child: BOARD });
   }
-  // A row's status as a mark before its name: spinner, dot or ring.
+  // A row's status as a mark before its name: spinner, dot or ring; a "?" when the terminal reports none.
   lead(t, status) {
     if (status === 'working') return svg(SPINNER).size(12).mx(1).flex_none().text_color(t.working).spin(900);
+    if (status === 'unknown') return div().flex_none().text_size(10.5).font_semibold().text_color(t.dim).child('?');
     const dot = div().flex_none().size(7).mx(3).rounded_full();
     return status === 'blocked' ? dot.bg(t.blocked) : status === 'done' ? dot.bg(t.done) : dot.border(1.5).border_color(t.idle ?? t.dim);
   }
   // The status is a mark, never a word, except the small "needs you" badge.
   mark(t, status, lang) {
     if (status === 'working') return svg(SPINNER).size(12).mx(1).flex_none().text_color(t.working).spin(900);
+    if (status === 'unknown') return div().flex_none().w(14).text_size(10.5).font_semibold().text_color(t.dim).child('?');
     if (status === 'blocked') {
       const badge = div().flex_none().h(16).rounded(4).flex().items_center().justify_center()
         .bg(t.blocked + '26').text_color(t.blocked).text_size(10).font_semibold();
@@ -162,8 +166,8 @@ export default class PmList extends View {
     return pic.w(16).h(16).flex_none();
   }
   render(cx) {
-    const t = theme(), lang = this.state.lang, now = Date.now(), live = agents();
-    const all = pmRows(this.state, this.remote, terminals(), live), { active: rows, archived } = splitArchived(all);
+    const t = theme(), lang = this.state.lang, now = Date.now(), live = agents(), terms = terminals();
+    const all = allPmRows(this.state, this.remote, terms, live), { active: rows, archived } = splitArchived(all);
     const changed = track(this.changed, all, now);
     if (changed !== this.changed) {
       this.changed = changed;
@@ -185,7 +189,8 @@ export default class PmList extends View {
     const stage = find(layout(), n => n.id === STAGE);
     const viewing = stage?.active === PROJECT ? shared(PROJECT)?.pm : stage?.active === BOARD ? shared('pm-dash')?.project || null : null;
     const tip = row => [row.machine ? `${row.label} · ${row.machine}` : row.label, word(lang, row.status),
-      this.viewable(row) ? [!row.exact && word(lang, 'notDesktop'), word(lang, 'view')].filter(Boolean).join('\n')
+      row.unregistered ? word(lang, 'unregistered')
+        : this.viewable(row) ? [!row.exact && word(lang, 'notDesktop'), word(lang, 'view')].filter(Boolean).join('\n')
         : !row.exact && word(lang, row.terminal ? 'project' : 'away')].filter(Boolean).join('\n');
     // Keys match across machines: a remote PM's is "<machine>/<name>" here, in pm-project and on the board.
     const focused = row => viewing ? row.key === viewing
@@ -211,10 +216,10 @@ export default class PmList extends View {
     };
     const list = v_flex().id('pm-list-rows').flex_1().min_h(0).px(8).pb(rows.length || extra ? 6 : 0).overflow_y_scrollbar()
       .children(rows.map(row => {
-        const at = this.changed[row.key]?.at, archivable = !row.machine && hovered(row);
+        const at = this.changed[row.key]?.at, archivable = !row.machine && !row.unregistered && hovered(row);
         return base(row, h_flex()).px(8).h(30).rounded(8).gap(9).on_hover(onHover(row))
           .child(h_flex().w(14).flex_none().justify_center().child(this.lead(t, row.status)))
-          .child(div().flex_1().min_w(0).truncate().text_color(row.status === 'idle' ? t.muted : t.foreground).child(row.label))
+          .child(div().flex_1().min_w(0).truncate().text_color(['idle', 'unknown'].includes(row.status) ? t.muted : t.foreground).child(row.label))
           .when(Boolean(row.machine), el => el.child(div().flex_none().text_size(10).text_color(t.dim).child(row.machine)))
           .when(row.waiting > 0, el => el.child(h_flex().flex_none().min_w(18).h(18).px(5).rounded(9).items_center()
             .justify_center().bg(t.blocked + '2e').text_color(t.blocked).text_size(11).font_semibold().child(String(row.waiting))))

@@ -107,6 +107,26 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
         self.assertFalse(self.desktop.exists())
 
+    def test_setup_status_covers_every_skill_file_not_only_pm_py(self):
+        bundle = self.root / "app home/mods/pm-dash"
+        shutil.copytree(BUNDLE, bundle, ignore=shutil.ignore_patterns("__pycache__"))
+        self.run_setup(bundle=bundle)
+        installed = self.claude / "skills/pm/scripts"
+        # Running pm.py writes __pycache__ beside it; a test file in the bundle is not installed: neither counts.
+        subprocess.run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import pm_events",
+                        str(installed)], check=True, env=self.env)
+        self.assertTrue(list(installed.glob("__pycache__/*")))
+        self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
+        # pm.py from one version beside pm_events.py from another: outdated.
+        events = bundle / "skill/scripts/pm_events.py"
+        events.write_text(events.read_text() + "\n# a newer pm_events.py\n")
+        status = json.loads(self.run_setup("--status", bundle=bundle).stdout)
+        self.assertFalse(status["agents"]["claude"]["script_matches"])
+        self.assertEqual(status["summary"]["outdated"], ["claude"])
+        self.run_setup(bundle=bundle)
+        self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
+        self.assertEqual((installed / "pm_events.py").read_bytes(), events.read_bytes())
+
     def test_setup_status_partial_install_invalid_settings_and_no_writes(self):
         self.run_setup()
         self.write_settings({"hooks": {"SessionStart": []}})
@@ -163,7 +183,7 @@ class InstallTest(unittest.TestCase):
     def bundle_files():
         return {str(p.relative_to(BUNDLE / "skill")): p.read_bytes()
                 for p in (BUNDLE / "skill").rglob("*") if p.is_file()
-                and p.name not in ("test_pm.py", ".DS_Store") and "__pycache__" not in p.parts}
+                and p.name not in ("test_pm.py", "test_pm_events.py", ".DS_Store") and "__pycache__" not in p.parts}
 
     @staticmethod
     def skill_files(home):
@@ -189,6 +209,8 @@ class InstallTest(unittest.TestCase):
         self.assertTrue((self.claude / "skills/pm/scripts/pm.py").is_file())
         self.assertTrue((self.claude / "skills/pm/SKILL.md").is_file())
         self.assertFalse((self.claude / "skills/pm/scripts/test_pm.py").exists())
+        self.assertFalse((self.claude / "skills/pm/scripts/test_pm_events.py").exists())
+        self.assertTrue((self.claude / "skills/pm/scripts/pm_events.py").is_file())
         self.assertFalse(list((self.claude / "skills/pm").rglob("__pycache__")))
         for name in MODS:
             mod = self.desktop / "mods" / name
@@ -266,6 +288,7 @@ class InstallTest(unittest.TestCase):
             "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
         self.assertEqual([node["id"] for node in lists["children"]], ["pm-nav", "pm-list", "spaces", "agents"])
         self.assertEqual(lists["children"][1], PM_LIST)
+        self.assertEqual(lists["children"][-1]["content"]["mod"], "agents")
         self.assertEqual(stage["id"], "pm-stage")
         self.assertEqual(stage["type"], "stack")
         self.assertEqual(stage["active"], "work")
@@ -326,6 +349,58 @@ class InstallTest(unittest.TestCase):
         self.run_install()
         self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), previous)
         self.assertEqual(json.loads(target.read_text())["generated_by"], "dudu install.sh")
+
+    def seed_pm_agents(self, own=False):
+        """What an install of pull request #2 left: mods/pm-agents (a clone of agents) and the pm layout's agents
+        block pointing at it. own: a mod of the person's that happens to have that name."""
+        mod = self.desktop / "mods/pm-agents"
+        mod.mkdir(parents=True)
+        (mod / "mod.json").write_text(json.dumps({"place": "none", "title": "Agents"} if own else
+                                                 {"place": "none", "title": "Agents",
+                                                  "cloned_from": {"name": "agents", "version": "0.1.16"}}))
+        (mod / "model.js").write_text("export function mine() {}" if own else "export function includePMs() {}")
+        (mod / "main.js").write_text("export default class Agents {}")
+        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        block = layout["children"][0]["children"][1]["children"][-1]
+        block["content"]["mod"] = "pm-agents"
+        target = self.desktop / "layouts/pm.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(layout))
+        return mod, target, layout, block
+
+    def test_an_install_over_pull_request_2_gives_the_agents_block_back_and_removes_pm_agents(self):
+        self.seed_layout()
+        mod, target, layout, block = self.seed_pm_agents()
+        before = target.read_bytes()
+        self.run_install("--dry-run")
+        self.assertEqual(target.read_bytes(), before)
+        self.assertTrue(mod.is_dir())
+        output = self.run_install()
+        self.assertIn("Show agents instead of pm-agents (retired)", output)
+        self.assertFalse(mod.exists())
+        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        block["content"]["mod"] = "agents"
+        self.assertEqual(json.loads(target.read_text()), layout)
+        self.assertIn("Skip layout", self.run_install())  # nothing left to migrate
+
+    def test_uninstall_removes_pm_agents_and_its_block(self):
+        self.seed_layout()
+        mod, target, layout, block = self.seed_pm_agents()
+        output = self.run_install("--uninstall")
+        self.assertIn("Keep layout", output)
+        self.assertFalse(mod.exists())
+        block["content"]["mod"] = "agents"
+        self.assertEqual(json.loads(target.read_text()), layout)
+
+    def test_a_pm_agents_mod_of_the_persons_own_is_kept(self):
+        self.seed_layout()
+        mod, target, layout, block = self.seed_pm_agents(own=True)
+        self.assertIn("not the pm-agents mod this installer shipped", self.run_install())
+        self.assertTrue((mod / "main.js").is_file())
+        self.assertEqual(json.loads(target.read_text()), layout)  # its block keeps pointing at it
+        self.assertIn("not the pm-agents mod this installer shipped", self.run_install("--uninstall"))
+        self.assertTrue((mod / "main.js").is_file())
+        self.assertEqual(json.loads(target.read_text()), layout)
 
     def test_existing_layout_gets_pm_list(self):
         # A pm layout from before pm-list, unmarked and edited by the person (as Herdr rewrites it).
@@ -486,6 +561,8 @@ class InstallTest(unittest.TestCase):
                 (installed / "old.txt").write_text("old")
                 self.assertIn("Warning: skip hook cleanup", self.run_install("--uninstall"))
                 self.assertFalse(installed.exists())
+                self.assertTrue(self.backups())  # a folder that is not what an install copied is kept aside first
+                shutil.rmtree(self.root / ".dudu")
                 self.assertEqual(self.settings.read_text(), invalid)
                 installed.parent.rmdir()
 
@@ -531,6 +608,59 @@ class InstallTest(unittest.TestCase):
         before = snapshot()
         self.run_install("--uninstall", "--dry-run")
         self.assertEqual(snapshot(), before)
+
+    def backups(self):
+        folder = self.root / ".dudu/install/backups"
+        return sorted(folder.iterdir()) if folder.is_dir() else []
+
+    def test_local_changes_are_backed_up_before_an_install_replaces_them(self):
+        skill = self.claude / "skills/pm"
+        self.run_install()
+        self.assertEqual(self.backups(), [])
+        self.assertNotIn("Back up local changes", self.run_install())  # nothing changed since: no backup
+        (skill / "SKILL.md").write_text("edited here")
+        (skill / "scripts/mine.py").write_text("print(1)")
+        (skill / "scripts/__pycache__").mkdir()
+        (skill / "scripts/__pycache__/pm.cpython-39.pyc").write_bytes(b"cache")  # Python's cache is no change
+        output = self.run_setup("--dry-run").stdout
+        self.assertIn("Would Back up local changes", output)
+        self.assertEqual(self.backups(), [])  # a dry run writes nothing
+        output = self.run_install()
+        self.assertIn("it differs from what the last install copied", output)
+        self.assertIn("change it there and install again", output)
+        backup, = self.backups()
+        self.assertEqual((backup / "SKILL.md").read_text(), "edited here")
+        self.assertEqual((backup / "scripts/mine.py").read_text(), "print(1)")
+        self.assertEqual(self.skill_files(self.claude), self.bundle_files())
+        self.assertNotIn("Back up local changes", self.run_install())
+
+    def test_an_install_from_before_the_record_is_backed_up_when_it_differs(self):
+        skill = self.claude / "skills/pm"
+        shutil.copytree(BUNDLE / "skill", skill, ignore=shutil.ignore_patterns(
+            "test_pm.py", "test_pm_events.py", "__pycache__", ".DS_Store"))
+        self.assertNotIn("Back up local changes", self.run_install())  # the same files as the bundle
+        (self.root / ".dudu/install/skill-claude.json").unlink()
+        (skill / "scripts/pm.py").write_text("# an older or edited copy\n")
+        output = self.run_install()
+        self.assertIn("no record of the last install", output)
+        backup, = self.backups()
+        self.assertEqual((backup / "scripts/pm.py").read_text(), "# an older or edited copy\n")
+
+    def test_uninstall_backs_up_local_changes_and_a_linked_skill_keeps_its_folder(self):
+        skill = self.claude / "skills/pm"
+        self.run_install()
+        (skill / "SKILL.md").write_text("edited here")
+        self.assertIn("Back up local changes", self.run_install("--uninstall"))
+        self.assertFalse(skill.exists())
+        self.assertFalse((self.root / ".dudu/install/skill-claude.json").exists())
+        elsewhere = self.root / "agents/skills/pm"
+        shutil.copytree(BUNDLE / "skill", elsewhere)
+        (elsewhere / "SKILL.md").write_text("edited elsewhere")
+        skill.symlink_to(elsewhere, target_is_directory=True)
+        output = self.run_install()
+        self.assertIn("the link goes, that folder is left as it is", output)
+        self.assertFalse(skill.is_symlink())
+        self.assertEqual((elsewhere / "SKILL.md").read_text(), "edited elsewhere")
 
     def codex_hooks(self):
         return json.loads((self.codex / "hooks.json").read_text())
