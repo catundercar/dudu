@@ -204,7 +204,7 @@ class ClaudeAgent(GenericAgent):
 
     has_stop_hook: bool = True
     NARROW: tuple[str, ...] = ("--disallowedTools", "Edit,NotebookEdit")
-    REVIEWER_DISALLOWED: tuple[str, ...] = ("--disallowedTools", "Edit,Write,NotebookEdit")
+    REVIEWER_DISALLOWED: tuple[str, ...] = ()
     HELPER_READONLY_DISALLOWED: tuple[str, ...] = ("--disallowedTools", "Edit,NotebookEdit")
     LEAN: tuple[str, ...] = ("--strict-mcp-config", "--no-chrome")
     KEEP_VALUE: tuple[str, ...] = (

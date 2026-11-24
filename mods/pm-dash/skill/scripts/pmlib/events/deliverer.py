@@ -10,8 +10,9 @@ from typing import Any, Callable, Iterable
 from ..context import Context
 from ..home import project_slug
 from ..ledger.task import hc_terminal_of
-from ..procs import code_mark
+from ..procs import background_work, code_mark
 from ..project.conversation import Conversation
+from ..project.turn_state import TurnTracker
 from .deliver import Delivery
 from .policy import manager_ready_for_batch
 from .stalls import StallWatcher
@@ -231,11 +232,21 @@ class Deliverer(Delivery):
         tasks = [t.raw for t in self._ledger.project_tasks(self.repo) if self._stalls.watched_worker(t.raw)]
         # Follow the terminals before looking at them: a change between the look and the follow would wake nobody.
         changes.terminals = {term, *(hc_terminal_of(t) for t in tasks), *self.watched_terminals()}
+        extra_files = self.watched_files()
+        if extra_files and hasattr(changes, "files") and isinstance(getattr(changes, "files", None), (list, set)):
+            d = self._project_dir()
+            rec_path = self.ctx.home.registration(project_slug(self.repo))
+            base_files = [d / "conversation.jsonl", d / "pm-turn.json", rec_path, self.ctx.home.turn_log, *extra_files]
+            changes.files = list(dict.fromkeys(base_files))
         info = self.ctx.hc.get_raw(term, errors=True)
         if not info or info.get("state") != "live" or not self._projects.seat_says_alive(self.repo, rec, info):
             return None
+        tracker = TurnTracker(self.ctx, self.repo)
         due = self._stalls.watch_workers(tasks, stops, {} if bases is None else bases)
-        due = self.watchers_look(stops, bases, due)  # helpers, then dependencies (injected watchers)
+        due = self.watchers_look(stops, bases, due)  # helpers, agy transcript, then dependencies (injected watchers)
+        outbox_due = tracker.drain_outbox_and_check_stall(term, info)
+        if outbox_due is not None:
+            due = min(due, outbox_due)
         start, end, items = self.pending_batch(settle=True)
         log = self._project_dir() / "conversation.jsonl"
         if log.exists() and log.stat().st_size > end:
@@ -249,9 +260,18 @@ class Deliverer(Delivery):
         if state in ("idle", "done"):
             self._bg_sent_stop_offset = None
         stopped, stop_offset = self._last_turn_stopped(term)
+        turn_state_stopped = tracker.is_turn_stopped(term)
+        if not stopped and turn_state_stopped:
+            stopped = True
+            stop_offset = int(tracker.read().get("turn_seq") or 0)
         if self._bg_sent_stop_offset is not None and stop_offset <= self._bg_sent_stop_offset:
             stopped = False  # working-mode started:true is immediate; wait for a fresh Stop before sending again
-        ready, if_idle = manager_ready_for_batch(info, stopped)
+        has_bg_work = False
+        if state == "working" and stopped:
+            fg_pid = int((info.get("foreground") or {}).get("pid") or info.get("pid") or 0)
+            if fg_pid > 0:
+                has_bg_work = bool(background_work(fg_pid))
+        ready, if_idle = manager_ready_for_batch(info, stopped, bg_work=has_bg_work)
         held = self.is_held_back()
         if not ready or held:
             return self._note_undelivered(term, info, len(items), due, held=held)

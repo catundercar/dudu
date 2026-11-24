@@ -309,7 +309,7 @@ class DevMachine(unittest.TestCase):
         offset_file.write_text(str(self.ctx.home.inbox_log("pm-proj").stat().st_size))
         inbox.append_inbox("pm-proj", "w-a", "finished")
         out = self.watch()
-        self.assertRegex(out, r"^INBOX:\n\[from w-a \d\d:\d\d\] finished\n$")
+        self.assertRegex(out, r"^INBOX:\n\[from w-a \d\d:\d\d\] finished\r?\n$")
         self.assertEqual(offset_file.read_text(), str(self.ctx.home.inbox_log("pm-proj").stat().st_size))
         self.assertEqual(self.watch(timeout=0), "watch timeout\n")
 
@@ -343,14 +343,21 @@ class DevMachine(unittest.TestCase):
             self.watch(ctx)
 
     def test_codex_cmd_prints_what_the_old_one_did(self):
+        from pmlib import osutil
         self.register("demo-app", repo=self.folder("demo-app"), pane="w5:p1", workspace="w5", session="ci",
                       codex={"args": ["--no-daemon", "-c", 'model_provider="demo-app"'], "model_prefix": "codex/"})
         code, out, _ = self.run_main("codex-cmd", "--project", "demo-app", "--model", "gpt-6.1-sol", "--effort", "high")
-        self.assertEqual((code, out), (0, "codex --no-daemon -c 'model_provider=\"demo-app\"' -m codex/gpt-6.1-sol "
-                                          "-c 'model_reasoning_effort=\"high\"'\n"))
+        want1 = osutil.shell_join([
+            "codex", "--no-daemon", "-c", 'model_provider="demo-app"', "-m", "codex/gpt-6.1-sol",
+            "-c", 'model_reasoning_effort="high"',
+        ], powershell=True) + "\n"
+        self.assertEqual((code, out), (0, want1))
         self.ctx.home.config.write_text(json.dumps({"codex": {"args": ["-c", 'service_tier="priority"']}}))
         code, out, _ = self.run_main("codex-cmd", "--project", "proj")  # no codex block of its own
-        self.assertEqual(out, "codex -c 'service_tier=\"priority\"' -m gpt-6-astra -c 'model_reasoning_effort=\"high\"'\n")
+        want2 = osutil.shell_join([
+            "codex", "-c", 'service_tier="priority"', "-m", "gpt-6-astra", "-c", 'model_reasoning_effort="high"',
+        ], powershell=True) + "\n"
+        self.assertEqual(out, want2)
 
     def test_codex_workers_get_the_pms_provider_settings(self):
         self.register("proj", pane="w1:p1", workspace="w1", session="default",

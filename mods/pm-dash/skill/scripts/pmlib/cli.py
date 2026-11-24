@@ -18,7 +18,7 @@ from .commands import (
     workers as workers_cmd,
 )
 from .errors import IdentityError, PmError, StoreError
-from .events import deliver as events_deliver, deps_watch  # noqa: F401
+from .events import agy_watch, deliver as events_deliver, deps_watch  # noqa: F401
 from .helpers import watch as helpers_watch  # noqa: F401
 from .ledger import board as ledger_board, ledger as ledger_mod  # noqa: F401
 from .manager import seat as manager_seat  # noqa: F401

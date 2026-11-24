@@ -1466,6 +1466,26 @@ test('execPython runs the script with the Python found, and says no-python when 
   py.forgetPython();
 });
 
+test('a stranded pending findPython probe does not wedge subsequent execPython calls', async () => {
+  py.forgetPython();
+  // Simulate a layout switch / mod reload stranding the first view's exec task: its Promise never settles.
+  const strandedRun = () => new Promise(() => {});
+  const stranded = py.execPython(strandedRun, ['pm.py', 'state']);
+  let strandedSettled = false;
+  stranded.then(() => { strandedSettled = true; }, () => { strandedSettled = true; });
+
+  // A new view instance calls execPython with a healthy exec: it must probe fresh and succeed.
+  const healthy = fakeMachine({ python3: realPython(3, 12, '/usr/bin/python3') });
+  const result = await py.execPython(healthy.run, ['pm.py', 'state']);
+  assert.equal(result.stdout, 'ran pm.py state');
+  assert.equal(strandedSettled, false);
+  // Once resolved, subsequent calls reuse the cached Python without re-probing.
+  const afterProbe = healthy.calls.length;
+  await py.execPython(healthy.run, ['setup.py', '--status']);
+  assert.deepEqual(healthy.calls.slice(afterProbe), [['python3', 'setup.py', '--status']]);
+  py.forgetPython();
+});
+
 test("findPython finds this machine's python3 through a real exec", async () => {
   const run = async (command, args) => {
     try { return { code: 0, stdout: execFileSync(command, args, { encoding: 'utf8' }), stderr: '' }; }
@@ -1474,6 +1494,18 @@ test("findPython finds this machine's python3 through a real exec", async () => 
   const found = await py.findPython(run);
   assert.equal(found.command, 'python3');
   assert.ok(py.recentEnough(found.version) && found.executable);
+});
+
+test('python.js never caches an unresolved Promise across dropped view execs', async () => {
+  py.forgetPython();
+  // First caller's `run` hangs forever (simulating Herdr dropping an exec Promise on layout switch / view close).
+  const hungRun = () => new Promise(() => {});
+  void py.python(hungRun);
+  // Second caller's `run` must still resolve independently instead of deadlocking behind `hungRun`.
+  const live = fakeMachine({ python3: realPython(3, 12, '/usr/bin/python3') });
+  const out = await py.execPython(live.run, ['pm.py', 'state']);
+  assert.equal(out.stdout, 'ran pm.py state');
+  py.forgetPython();
 });
 
 test('every mod that runs pm.py carries the same python.js, and the card explains a missing Python', () => {

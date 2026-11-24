@@ -8,13 +8,18 @@ export const RANK = { blocked: 4, done: 3, working: 2, idle: 1, unknown: 0 };
 // nothing says it is idle.
 export function liveStatus(terminal, live) {
   const raw = live.find(a => a.address === terminal.address)?.status || terminal.status;
+  if (raw === 'working' && /\bshells?\s+still\s+running\b/i.test(String(terminal?.report?.msg || ''))) return 'idle';
   return raw === 'error' ? 'blocked' : RANK[raw] ? raw : 'unknown';
 }
 
 // A matched terminal reports Herdr's live status (liveStatus); a PM outside the desktop
 // keeps the ledger's word, idle when it has none.
 export function pmStatus(pm, terminal, exact, live) {
-  if (exact && terminal) return liveStatus(terminal, live);
+  if (exact && terminal) {
+    const s = liveStatus(terminal, live);
+    if (s === 'working' && pm?.turn?.phase === 'idle' && Number(pm?.turn?.bg_shells) > 0) return 'idle';
+    return s;
+  }
   const raw = pm.status;
   return raw === 'error' ? 'blocked' : RANK[raw] ? raw : 'idle';
 }
@@ -82,12 +87,23 @@ export function pmContextTip(tokens, lang = 'en', compactTokens = DEFAULT_COMPAC
 
 // local: this computer's `pm.py state`; remote: {machine: state} as pm-nav caches it.
 // A remote PM keeps its own name for terminal lookup and is keyed "<machine>/<name>".
+function stateClockOffsetMs(state) {
+  const srvMs = Number(state?.server_now_ms);
+  const nowStr = typeof state?.now === 'string' ? state.now.trim() : '';
+  if (nowStr && Number.isFinite(srvMs) && srvMs > 0) {
+    const parsed = new Date(nowStr.replace(' ', 'T')).getTime();
+    if (Number.isFinite(parsed)) return parsed - Math.floor(srvMs / 1000) * 1000;
+  }
+  return 0;
+}
+
 export function pmRows(local, remote, terms, live) {
   const sources = [['', local], ...Object.entries(remote || {}).filter(([machine]) => machine)];
   return sources.flatMap(([machine, state]) => {
     const pms = Array.isArray(state?.pms) ? state.pms : [];
     const tasks = pms.some(pm => !Number.isFinite(pm?.counts?.waiting)) ? foldReviews(state?.tasks) : [];
     const stateCompact = state?.compact_tokens ?? state?.rotate_tokens;
+    const offsetMs = stateClockOffsetMs(state);
     return pms.map(pm => {
       const row = { ...pm, type: 'pm', machine, sourceName: pm.name };
       const { terminal, exact } = terminalTargetFor(row, terms);
@@ -96,7 +112,7 @@ export function pmRows(local, remote, terms, live) {
       const hasCompact = typeof rawCompact === 'number' && Number.isFinite(rawCompact);
       return { key: machine ? `${machine}/${pm.name}` : pm.name, label: pmName(pm), machine,
         terminal: terminal || null, exact, status: pmStatus(pm, terminal, exact, live),
-        program: exact ? terminal.program : null, seed: lastEventAt(state.events, pm.name),
+        program: exact ? terminal.program : null, seed: lastEventAt(state.events, pm.name, offsetMs),
         project: pm.project || '', archived: pm.archived || null, waiting: waitingCount(pm, tasks),
         ...(ctx ? { contextTokens: ctx, ...(hasCompact ? { compactTokens: resolveCompactTokens(rawCompact) } : {}) } : {}) };
     });
@@ -176,12 +192,21 @@ export function age(ms, lang) {
 }
 
 // The ledger's newest event for a PM ("YYYY-MM-DD HH:MM", local time), in ms; 0 if none.
-export function lastEventAt(events, pm) {
+export function lastEventAt(events, pm, clockOffsetMs = 0) {
   let at = 0;
   for (const e of Array.isArray(events) ? events : []) {
-    if (e?.pm !== pm || typeof e.at !== 'string') continue;
+    if (e?.pm !== pm) continue;
+    const explicitMs = Number(e.at_ms);
+    if (Number.isFinite(explicitMs) && explicitMs > 0) {
+      if (explicitMs > at) at = explicitMs;
+      continue;
+    }
+    if (typeof e.at !== 'string') continue;
     const ms = new Date(e.at.replace(' ', 'T')).getTime();
-    if (ms > at) at = ms;
+    if (Number.isFinite(ms)) {
+      const utcMs = ms - (Number(clockOffsetMs) || 0);
+      if (utcMs > at) at = utcMs;
+    }
   }
   return at;
 }

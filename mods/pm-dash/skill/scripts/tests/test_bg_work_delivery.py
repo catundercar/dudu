@@ -69,7 +69,7 @@ class BackgroundWorkProcsTests(unittest.TestCase):
             f"  200     1 {snap}'git merge other' < /dev/null && pwd -P >| /tmp/cwd",
         ])
         fake_run = lambda argv, **kw: type("R", (), {"returncode": 0, "stdout": ps_out, "stderr": ""})()
-        with mock.patch.object(subprocess, "run", fake_run):
+        with mock.patch.object(procs_mod.osutil, "WINDOWS", False), mock.patch.object(subprocess, "run", fake_run):
             self.assertEqual(procs_mod.background_work({"pid": 100}), ["python3 tests/run_checks.py"])
             self.assertEqual(
                 procs_mod.background_work(TerminalInfo(address="t1", pid=100)),
@@ -739,6 +739,415 @@ class FinalReviewR2StallAndRaceRegressions(unittest.TestCase):
         conv.record("event", by="ci", text="batch-2", source="external:ci", wake=True)
         d.look(changes, {}, {})
         self.assertEqual(len(hc.sent), 1, "batch-2 was sent while batch-1's turn was still running!")
+
+
+class LandApproveStallAndFallbackTests(unittest.TestCase):
+    """Tests for #249: approve send failure fallback and land_approved timeout monitoring -> auto helper handoff."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo_path = Path(self.tmp.name) / "demo"
+        self.repo_path.mkdir()
+        self.repo = str(self.repo_path.resolve())
+
+    @staticmethod
+    def _approve_runs(ctx):
+        return [r for r in ctx.procs.ran if len(r["argv"]) >= 3 and r["argv"][2] == "approve"]
+
+    def test_deliver_send_started_false_on_agy_approve_falls_back_to_helper_and_wakes_pm(self):
+        from pmlib.workers.service import Workers
+
+        class _SilentNoStartHc(FakeHc):
+            def send(self, term: str, text: str, **kwargs):
+                return {"ok": True, "started": False, "status": {"state": "idle"}}
+
+        clk = FakeClock("2026-11-23 09:00:00", mono=10.0)
+        hc = _SilentNoStartHc(
+            terminals={
+                "t7": {"state": "live", "labels": {"pm": "demo"}, "status": {"state": "idle"}},
+                "t20": {"state": "live", "turn": 5, "status": {"state": "idle"}},
+            },
+            clock=clk,
+        )
+        ctx = make_ctx(
+            self.tmp.name, hc=hc, clock=clk,
+            env={"PM_HELPER_NAME": "stale-helper", "PM_HELPER_OWNER": "pm"},
+        )
+        _register_hc_pm(ctx, self.repo, "t7")
+        _write_task(ctx, {
+            "id": "demo-agy-send-fail",
+            "title": "Agy merge send fail",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "worker": {"kind": "agy"},
+            "round": {"terminal": "t20", "at": "2026-11-23 09:00", "turn": 5},
+            "land_approved": {
+                "commit": "abc1234",
+                "at": "2026-11-23 09:00:00",
+                "by": "hc:t7",
+                "executor": "worker",
+                "message": "- merge feat",
+                "keep": True,
+                "timeout": 420,
+                "note": "- deploy after merge",
+            },
+        })
+        msg_file = Path(self.tmp.name) / "approve-msg.txt"
+        msg_file.write_text("[from hc:t7] PM approved merging task demo-agy-send-fail", encoding="utf-8")
+
+        Workers(ctx).deliver_send(
+            "t20", msg_file, unlink=True, task_id="demo-agy-send-fail", repo=self.repo, pre_turn=5, timeout=30
+        )
+
+        # Must alert PM via waking stall event
+        stalls = [e for e in Conversation(ctx, self.repo).events() if e.get("type") == "stall"]
+        self.assertEqual(len(stalls), 1, stalls)
+        self.assertTrue(stalls[0].get("wake"))
+        self.assertIn("started=false", stalls[0]["text"])
+        self.assertIn("--via helper", stalls[0]["text"])
+
+        # Must synchronously run `pm.py approve <id> --via helper` with --flag=val and stripped PM_HELPER_*
+        approve_runs = self._approve_runs(ctx)
+        self.assertEqual(len(approve_runs), 1, ctx.procs.ran)
+        args = approve_runs[0]["argv"][2:]
+        self.assertEqual(args[:4], ["approve", "demo-agy-send-fail", "--via", "helper"])
+        self.assertIn("--commit=abc1234", args)
+        self.assertIn("--message=- merge feat", args)
+        self.assertIn("--keep", args)
+        self.assertIn("--timeout=420", args)
+        self.assertIn("--note=- deploy after merge", args)
+        env = approve_runs[0]["env"]
+        self.assertEqual(env.get("HC_TERMINAL_ID"), "t7")
+        self.assertFalse(any(k.startswith("PM_HELPER_") for k in env), env)
+
+        # Ledger marks fallback_at for deduplication
+        saved = ctx.store.task("demo-agy-send-fail")
+        self.assertTrue((saved.get("land_approved") or {}).get("fallback_at"))
+
+    def test_helper_handoff_failure_preserves_approval_and_reports_error_to_pm(self):
+        import subprocess
+        from fakes import FakeProcs
+
+        clk = FakeClock("2026-11-23 09:10:00", mono=10.0)
+        hc = FakeHc(
+            terminals={
+                "t7": {"state": "live", "labels": {"pm": "demo"}, "status": {"state": "idle"}},
+                "t20": {"state": "live", "turn": 5, "status": {"state": "idle"}},
+            },
+            clock=clk,
+        )
+        base_ctx = make_ctx(self.tmp.name, hc=hc, clock=clk)
+        failing_procs = FakeProcs(
+            base_ctx.home,
+            env=base_ctx.env,
+            runner=lambda entry: subprocess.CompletedProcess(
+                entry["argv"], 1, "", "refused: helpers.max (3) reached"
+            ),
+        )
+        ctx = make_ctx(self.tmp.name, hc=hc, clock=clk, procs=failing_procs)
+        _register_hc_pm(ctx, self.repo, "t7")
+        task = _write_task(ctx, {
+            "id": "demo-helper-fail",
+            "title": "Helper start refused",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "worker": {"kind": "agy"},
+            "round": {"terminal": "t20", "at": "2026-11-23 09:00", "turn": 5},
+            "land_approved": {
+                "commit": "abc1234",
+                "at": "2026-11-23 09:00:00",
+                "by": "hc:t7",
+                "executor": "worker",
+            },
+        })
+
+        sw = StallWatcher(ctx, stall_grace=0, land_approve_timeout=300)
+        sw.watch_workers([task], {}, {})
+
+        # Concrete error reported to PM (and does NOT falsely claim handed off)
+        stalls = [e for e in Conversation(ctx, self.repo).events() if e.get("type") == "stall"]
+        self.assertEqual(len(stalls), 1, stalls)
+        self.assertIn("helpers.max (3) reached", stalls[0]["text"])
+        self.assertNotIn("automatically handed off", stalls[0]["text"])
+
+        # Original land_approved is preserved, fallback_at cleared, task remains watched
+        saved = ctx.store.task("demo-helper-fail")
+        la = saved.get("land_approved") or {}
+        self.assertEqual(la.get("executor"), "worker")
+        self.assertEqual(la.get("commit"), "abc1234")
+        self.assertNotIn("fallback_at", la)
+        self.assertTrue(la.get("fallback_failed_at"))
+        self.assertIn("helpers.max (3) reached", la.get("fallback_error", ""))
+        self.assertTrue(sw.watched_worker(saved))
+
+        # Repeated watch_workers does not spam approve --via helper
+        sw.watch_workers([saved], {}, {})
+        self.assertEqual(len(self._approve_runs(ctx)), 1)
+
+    def test_landing_approve_via_helper_rollback_restores_prior_approval(self):
+        from pmlib.errors import Refused
+        from pmlib.landing import ApproveRequest, Landing
+        from pmlib.ledger.ledger import Ledger
+        from unittest import mock
+
+        clk = FakeClock("2026-11-23 09:00:00", mono=10.0)
+        hc = FakeHc(
+            terminals={
+                "t7": {"state": "live", "labels": {"pm": "demo"}, "status": {"state": "idle"}},
+                "t20": {"state": "live", "turn": 5, "status": {"state": "idle"}},
+            },
+            clock=clk,
+        )
+        ctx = make_ctx(self.tmp.name, pane="hc:t7", hc=hc, clock=clk)
+        ctx.git.branches.update({"main", "dev/feat"})
+        ctx.git.checkouts[(self.repo, "dev/feat")] = str(self.repo_path)
+        _register_hc_pm(ctx, self.repo, "t7")
+        sha = ctx.git.rev_parse(self.repo, "dev/feat", short=True)
+        prior_la = {"commit": sha, "at": "2026-11-23 08:55:00", "by": "hc:t7", "executor": "worker"}
+        Ledger(ctx).create({
+            "id": "demo-rollback",
+            "title": "Rollback test",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "branch": "dev/feat",
+            "base": "main",
+            "commit": sha,
+            "land_approved": dict(prior_la),
+        })
+
+        landing = Landing(ctx)
+        with mock.patch.object(landing, "_start", side_effect=Refused("helpers.max reached")):
+            with self.assertRaises(Refused):
+                landing.approve(ApproveRequest(id="demo-rollback", via="helper"))
+
+        saved = ctx.store.task("demo-rollback")
+        self.assertEqual(saved.get("land_approved"), prior_la)
+
+    def test_deliver_send_does_not_swallow_failure_when_fallback_returns_false(self):
+        from pmlib.store import lock_file, unlock_file
+        from pmlib.workers.service import Workers
+
+        class _SilentNoStartHc(FakeHc):
+            def send(self, term: str, text: str, **kwargs):
+                return {"ok": True, "started": False, "status": {"state": "idle"}}
+
+        clk = FakeClock("2026-11-23 09:00:00", mono=10.0)
+        hc = _SilentNoStartHc(
+            terminals={
+                "t7": {"state": "live", "labels": {"pm": "demo"}, "status": {"state": "idle"}},
+                "t20": {"state": "live", "turn": 5, "status": {"state": "idle"}},
+            },
+            clock=clk,
+        )
+        ctx = make_ctx(self.tmp.name, hc=hc, clock=clk)
+        _register_hc_pm(ctx, self.repo, "t7")
+        _write_task(ctx, {
+            "id": "demo-lock-conflict",
+            "title": "Send fail while sibling holds land lock",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "worker": {"kind": "agy"},
+            "land_approved": {
+                "commit": "abc1234",
+                "at": "2026-11-23 09:00:00",
+                "by": "hc:t7",
+                "executor": "worker",
+            },
+        })
+        msg_file = Path(self.tmp.name) / "approve-msg2.txt"
+        msg_file.write_text("[from hc:t7] PM approved merging task demo-lock-conflict", encoding="utf-8")
+
+        lock_path = ctx.home.lock(f"land-{project_slug(self.repo)}")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+", encoding="utf-8") as lock_fh:
+            lock_file(lock_fh)
+            try:
+                Workers(ctx).deliver_send(
+                    "t20", msg_file, unlink=True, task_id="demo-lock-conflict", repo=self.repo, pre_turn=5, timeout=30
+                )
+            finally:
+                unlock_file(lock_fh)
+
+        # Fallback returned False (land lock held), so deliver_send MUST record failure note & wake PM
+        self.assertEqual(self._approve_runs(ctx), [])
+        _, _, items = Delivery(ctx, self.repo, settle=0).pending_batch()
+        self.assertEqual(len(items), 1, items)
+        self.assertIn("started=false", items[0]["event"]["text"])
+
+    def test_land_approved_timeout_idle_worker_triggers_alert_and_helper_without_duplicates(self):
+        clk = FakeClock("2026-11-23 09:00:00", mono=10.0)
+        hc = FakeHc(
+            terminals={
+                "t7": {"state": "live", "labels": {"pm": "demo"}, "status": {"state": "idle"}},
+                "t20": {"state": "live", "turn": 5, "status": {"state": "idle"}},
+            },
+            clock=clk,
+        )
+        ctx = make_ctx(self.tmp.name, hc=hc, clock=clk, config={"land_approve_timeout": 300})
+        _register_hc_pm(ctx, self.repo, "t7")
+        task = _write_task(ctx, {
+            "id": "demo-timeout",
+            "title": "Timeout merge",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "worker": {"kind": "agy"},
+            "round": {"terminal": "t20", "at": "2026-11-23 09:00", "turn": 5},
+            "land_approved": {
+                "commit": "def5678",
+                "at": "2026-11-23 09:00:00",
+                "by": "hc:t7",
+                "executor": "worker",
+            },
+        })
+
+        d = Deliverer(ctx, self.repo, watchers=(), holds=(), settle=0)
+        changes = FakeChangeWaiter()
+        stops: dict = {}
+        bases: dict = {}
+
+        # Before timeout (4 minutes elapsed): no alert, no helper run, due respects remaining timeout
+        clk.advance(240.0)
+        due = d.look(changes, stops, bases)
+        self.assertIsNotNone(due)
+        self.assertLessEqual(due, 60.0)
+        self.assertEqual(self._approve_runs(ctx), [])
+        self.assertEqual([e for e in Conversation(ctx, self.repo).events() if e.get("type") == "stall"], [])
+
+        # Past timeout (5m10s elapsed): worker still idle at turn=5 -> triggers alert + helper handoff
+        clk.advance(70.0)
+        d.look(changes, stops, bases)
+        approve_runs = self._approve_runs(ctx)
+        self.assertEqual(len(approve_runs), 1, ctx.procs.ran)
+        self.assertEqual(approve_runs[0]["argv"][2:6], ["approve", "demo-timeout", "--via", "helper"])
+        stalls = [e for e in Conversation(ctx, self.repo).events() if e.get("type") == "stall"]
+        self.assertEqual(len(stalls), 1, stalls)
+        self.assertTrue(stalls[0].get("wake"))
+        # Deliverer also delivers the waking stall batch to the idle PM
+        self.assertTrue(any("demo-timeout" in text for _, text in hc.sent), hc.sent)
+
+        # Deduplication: repeated looks and direct watch_workers with stale task snapshot must NOT re-trigger
+        clk.advance(120.0)
+        d.look(changes, stops, bases)
+        StallWatcher(ctx, stall_grace=0, land_approve_timeout=300).watch_workers([task], stops, bases)
+        self.assertEqual(len(self._approve_runs(ctx)), 1)
+        self.assertEqual(len([e for e in Conversation(ctx, self.repo).events() if e.get("type") == "stall"]), 1)
+
+    def test_land_approved_timeout_does_not_trigger_when_land_lock_active(self):
+        from pmlib.store import lock_file, unlock_file
+
+        clk = FakeClock("2026-11-23 09:10:00", mono=10.0)
+        hc = FakeHc(
+            terminals={
+                "t7": {"state": "live", "labels": {"pm": "demo"}, "status": {"state": "idle"}},
+                "t20": {"state": "live", "turn": 5, "status": {"state": "idle"}},
+            },
+            clock=clk,
+        )
+        ctx = make_ctx(self.tmp.name, hc=hc, clock=clk)
+        _register_hc_pm(ctx, self.repo, "t7")
+        task = _write_task(ctx, {
+            "id": "demo-locked",
+            "title": "Active merge lock",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "worker": {"kind": "agy"},
+            "round": {"terminal": "t20", "at": "2026-11-23 09:00", "turn": 5},
+            "land_approved": {
+                "commit": "abc1234",
+                "at": "2026-11-23 09:00:00",
+                "by": "hc:t7",
+                "executor": "worker",
+            },
+        })
+        lock_path = ctx.home.lock(f"land-{project_slug(self.repo)}")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+", encoding="utf-8") as lock_fh:
+            lock_file(lock_fh)
+            try:
+                StallWatcher(ctx, stall_grace=0, land_approve_timeout=300).watch_workers([task], {}, {})
+            finally:
+                unlock_file(lock_fh)
+
+        self.assertEqual(self._approve_runs(ctx), [])
+        self.assertEqual([e for e in Conversation(ctx, self.repo).events() if e.get("type") == "stall"], [])
+        self.assertFalse((ctx.store.task("demo-locked").get("land_approved") or {}).get("fallback_at"))
+
+    def test_land_approved_timeout_exited_worker_triggers_helper_and_working_or_hc_down_does_not(self):
+        clk = FakeClock("2026-11-23 09:10:00", mono=10.0)
+        hc = FakeHc(
+            terminals={
+                "t7": {"state": "live", "labels": {"pm": "demo"}, "status": {"state": "idle"}},
+                "t20": {"state": "live", "turn": 5, "status": {"state": "working"}},
+                "t21": {"state": "exited"},
+            },
+            clock=clk,
+        )
+        ctx = make_ctx(self.tmp.name, hc=hc, clock=clk)
+        _register_hc_pm(ctx, self.repo, "t7")
+        working_task = _write_task(ctx, {
+            "id": "demo-working",
+            "title": "Still working on conflicts",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "worker": {"kind": "agy"},
+            "round": {"terminal": "t20", "at": "2026-11-23 09:00", "turn": 5},
+            "land_approved": {"commit": "aaa1111", "at": "2026-11-23 09:00:00", "by": "hc:t7", "executor": "worker"},
+        })
+        exited_task = _write_task(ctx, {
+            "id": "demo-exited",
+            "title": "Worker exited",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t21",
+            "dispatched": True,
+            "worker": {"kind": "agy"},
+            "round": {"terminal": "t21", "at": "2026-11-23 09:00", "turn": 5},
+            "land_approved": {"commit": "bbb2222", "at": "2026-11-23 09:00:00", "by": "hc:t7", "executor": "worker"},
+        })
+
+        StallWatcher(ctx, stall_grace=0, land_approve_timeout=300).watch_workers([working_task, exited_task], {}, {})
+
+        approve_runs = self._approve_runs(ctx)
+        self.assertEqual([r["argv"][3] for r in approve_runs], ["demo-exited"])
+        self.assertFalse((ctx.store.task("demo-working").get("land_approved") or {}).get("fallback_at"))
+        self.assertTrue((ctx.store.task("demo-exited").get("land_approved") or {}).get("fallback_at"))
+
+        # When hc is unreachable (get_raw returns None), treat as transient error and do NOT trigger fallback
+        hc.server_running = False
+        StallWatcher(ctx, stall_grace=0, land_approve_timeout=300).watch_workers([working_task], {}, {})
+        self.assertEqual(len(self._approve_runs(ctx)), 1)
+        self.assertFalse((ctx.store.task("demo-working").get("land_approved") or {}).get("fallback_at"))
 
 
 if __name__ == "__main__":

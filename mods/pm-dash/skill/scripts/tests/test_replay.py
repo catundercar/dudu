@@ -5,16 +5,22 @@ pid), and it would then report noise when a refactor is compared with main.
 """
 import contextlib
 import io
+import os
 from pathlib import Path
 import sys
 import unittest
 from unittest import mock
 
+WINDOWS = os.name == "nt"
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import replay  # noqa: E402
+if not WINDOWS:
+    import replay  # noqa: E402
+else:
+    replay = None
 
 
+@unittest.skipIf(WINDOWS, "replay.py is POSIX-only (uses fcntl)")
 class ReplayTest(unittest.TestCase):
     def test_same_scripts_on_both_sides_show_no_difference(self):
         out = io.StringIO()

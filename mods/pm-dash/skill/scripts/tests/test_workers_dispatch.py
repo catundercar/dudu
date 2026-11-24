@@ -415,18 +415,24 @@ class Commands(unittest.TestCase):
         self.assertIn("another task still uses it", retire("app-own"))  # the last task on the branch removes it
         self.assertTrue(tree.is_dir())
         # The session that owns the task still sits in the worktree: its directory and its terminal both stay.
-        self.assertEqual(retire("app-own-2"), f"refused: worktree {tree} is kept: hc:t7 still works in it")
+        self.assertEqual(
+            retire("app-own-2").replace("/", os.sep),
+            f"refused: worktree {tree} is kept: hc:t7 still works in it",
+        )
         self.assertTrue(tree.is_dir())
         self.assertFalse(ledger.load("app-own-2").get("retired"))
         terminal["cwd"] = str(repo)  # the session has left the worktree
         said = retire("app-own-2")
-        self.assertIn(f"removed worktree {tree}, branch dev/own", said)
+        self.assertIn(f"removed worktree {tree}, branch dev/own", said.replace(tree.as_posix(), str(tree)))
         self.assertFalse(tree.exists())
         self.assertEqual(git("branch", "--list", "dev/own"), "")
         self.assertEqual(set(calls), {"get"})  # no terminal was ended or removed
         # A branch that is checked out in the main checkout stays, and retire says where.
         git("checkout", "-q", "dev/here")
-        self.assertIn(f"removed nothing; branch dev/here is kept: checked out in {repo}", retire("app-here"))
+        self.assertIn(
+            f"removed nothing; branch dev/here is kept: checked out in {repo}",
+            retire("app-here").replace(repo.as_posix(), str(repo)),
+        )
         self.assertTrue(repo.is_dir())
         self.assertNotEqual(git("branch", "--list", "dev/here"), "")
 
@@ -609,7 +615,8 @@ class SendBrief(unittest.TestCase):
             dispatch_cmd.dispatch_hc(a, str(repo), brief.read_text(), ctx=ctx)
         task_id = out.getvalue().split()[0]
         self.assertIn("New MCP server found", str(stop.exception.code))
-        self.assertIn(f'hc send t9 "$(cat {ctx.home.root / "sent" / task_id}.md)"', str(stop.exception.code))
+        from pmlib import osutil as _osutil
+        self.assertIn(f"hc send t9 {_osutil.file_text(ctx.home.root / 'sent' / f'{task_id}.md')}", str(stop.exception.code))
         self.assertIn("New MCP server found", Ledger(ctx).load(task_id)["log"][-1]["text"])
 
 
@@ -1507,12 +1514,14 @@ class OutsideReads(unittest.TestCase):
         given = argv[argv.index("--settings") + 1]
         permissions = json.loads(Path(given).read_text())["permissions"]
         self.assertEqual(set(permissions), {"allow", "blockReadsExemptPaths"})
-        # A folder with all below it, a single file as it is; "//" starts an absolute path in a rule.
+        # A folder with all below it, a single file as it is; "//" starts an absolute path in a rule (never `\`).
         self.assertEqual(
             permissions["allow"],
-            [f"Read(/{p}/**)" if Path(p).is_dir() else f"Read(/{p})" for p in permissions["blockReadsExemptPaths"]],
+            [f"Read(//{Path(p).as_posix().lstrip('/')}/**)" if Path(p).is_dir()
+             else f"Read(//{Path(p).as_posix().lstrip('/')})"
+             for p in permissions["blockReadsExemptPaths"]],
         )
-        self.assertTrue(all(rule.startswith("Read(//") for rule in permissions["allow"]))
+        self.assertTrue(all(rule.startswith("Read(//") and "\\" not in rule for rule in permissions["allow"]))
         return permissions["blockReadsExemptPaths"]
 
     def test_dispatch_lets_a_claude_worker_read_the_brief_and_the_docs(self):
@@ -1567,7 +1576,7 @@ class OutsideReads(unittest.TestCase):
             review_cmd.cmd_review(argparse.Namespace(id="o-r", name=None, kind="claude", model="opus", effort=None), ctx=self.ctx)
         argv = self.started()
         self.assertEqual(self.exempt(argv), self.wanted)
-        self.assertEqual(argv[-2:], ["--disallowedTools", "Edit,Write,NotebookEdit"])
+        self.assertNotIn("--disallowedTools", argv)
         self.assertTrue(Path(ledger.load("o-r-review")["brief"]).read_text().endswith(self.ctx.agents.docs_line()))
 
     def test_the_terminal_ui_gets_a_settings_path_it_can_type(self):
@@ -1613,10 +1622,16 @@ class OutsideReads(unittest.TestCase):
         home = self.root / "users" / "me"
         home.mkdir(parents=True)
         with mock.patch.object(Path, "home", lambda *_: home):
-            for wide in (Path("/"), home, home.parent, Path("/tmp"), Path("/private/tmp"), Path(tempfile.gettempdir())):
+            wide_cases = [Path("/"), home, home.parent, Path("/tmp"), Path(tempfile.gettempdir())]
+            if os.name != "nt":
+                wide_cases.append(Path("/private/tmp"))
+            for wide in wide_cases:
                 self.assertTrue(reads_mod.wide_folder(wide), wide)
             self.assertFalse(reads_mod.wide_folder(self.brief.parent))
-            for folder in (home, home.parent, Path("/tmp"), Path(tempfile.gettempdir())):
+            folders = [home, home.parent, Path(tempfile.gettempdir())]
+            if Path("/tmp").is_dir():
+                folders.insert(2, Path("/tmp"))
+            for folder in folders:
                 handle, name = tempfile.mkstemp(suffix=".md", dir=folder)
                 os.close(handle)
                 self.addCleanup(os.unlink, name)
@@ -1625,7 +1640,7 @@ class OutsideReads(unittest.TestCase):
                 self.assertIn(str(brief.resolve()), reads)  # the brief itself
                 self.assertFalse({str(folder), str(folder.resolve())} & set(reads), folder)  # not all beside it
                 self.assertIn(
-                    f"Read(/{brief.resolve()})",
+                    f"Read(//{brief.resolve().as_posix().lstrip('/')})",
                     json.loads(Path(self.ctx.agents.read_settings("claude", reads)[1]).read_text())["permissions"]["allow"],
                 )
             # A brief in a folder of its own: that folder, with the screenshots beside it.

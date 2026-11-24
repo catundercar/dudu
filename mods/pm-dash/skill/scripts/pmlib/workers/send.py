@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from ..agents.base import READY_MARKS
 from ..caller import Caller
@@ -27,6 +27,35 @@ class SendBackResult:
 
     queued: bool
     message: str
+
+
+def send_succeeded(sent: Mapping[str, Any] | None, info: Mapping[str, Any] | None = None) -> bool:
+    """Whether an `hc send` reply means the target accepted the message.
+
+    A terminal that reports `status` (claude, codex, agy, ...) must report `started: True`;
+    only a terminal with no status at all accepts `started` present with `status is None` and no error.
+    """
+    if not isinstance(sent, Mapping) or sent.get("error"):
+        return False
+    if sent.get("started"):
+        return True
+    has_status = bool((info or {}).get("status"))
+    return (not has_status) and ("started" in sent) and (sent.get("status") is None)
+
+
+def send_failure_reason(sent: Mapping[str, Any] | None, info: Mapping[str, Any] | None, term: str) -> str:
+    """Human-readable reason why `hc send` to `term` did not start a turn."""
+    err = sent.get("error") if isinstance(sent, Mapping) else None
+    if isinstance(err, Mapping):
+        why = err.get("message") or err.get("kind")
+        if why:
+            return str(why)
+    state = info.get("state") if isinstance(info, Mapping) else None
+    if state != "live":
+        return f"hc:{term} is {state or 'gone'}" if term else "no herdr-core terminal of this machine"
+    if isinstance(sent, Mapping) and "started" in sent and not sent.get("started"):
+        return "turn did not start (started=false)"
+    return "hc send failed or timed out"
 
 
 def _round_handed_for(ctx: Context, task_id: str, term: str, turn: int | None = None) -> None:
@@ -253,18 +282,14 @@ def send_back_for(ctx: Context, task: Any, text: str, *, wait: bool = False) -> 
             message=ctx.config.tr(f"{raw['id']}: queued async send to hc:{term}", f"{raw['id']}：已异步发送给 hc:{term}"),
         )
     sent = (ctx.hc.send(term, message, timeout=180, errors=True) or {}) if info.get("state") == "live" else {}
-    if sent.get("started") or ("started" in sent and not sent.get("error")):
+    if send_succeeded(sent, info):
         if Ledger(ctx).load(raw["id"]).get("status") == "in_progress":
             _round_handed_for(ctx, raw["id"], term, info.get("turn") or 0)
         return SendBackResult(
             queued=False,
             message=ctx.config.tr(f"{raw['id']}: sent to hc:{term}", f"{raw['id']}：已发给 hc:{term}"),
         )
-    why = (
-        (sent.get("error") or {}).get("message")
-        or (sent.get("error") or {}).get("kind")
-        or (f"hc:{term} is {info.get('state') or 'gone'}" if term else "no herdr-core terminal of this machine")
-    )
+    why = send_failure_reason(sent, info, term)
     target = term or raw.get("pane") or "<terminal>"
     raise Refused(
         ctx.config.tr(

@@ -70,10 +70,11 @@ INSTRUCTION_RULES = (".claude", "rules")       # .claude/rules/*.md
 ADD_MAX = 20 << 20                 # 20 MiB bound on one file dropped into the Library
 RESEARCH_DEPTH = 4                 # how deep docs/research is listed
 INTERNAL_PROJECT_FILES = frozenset({
-    "conversation.jsonl", "delivered.json", "delivered.lock", "deliver.lock",
+    "conversation.jsonl", "receipts.json", "receipts.lock", "delivered.json", "delivered.lock", "deliver.lock",
     "turn-cause.json", "taken-in.json", "takeover.json", "pm-settings.json",
     "schedules.json", "dudu-attachments.json", LIBRARY_STATE_FILE, RESEARCH_SOURCES_FILE,
-    TASK_SEQ_FILE, "seat.json", "seat.lock", "next-session.json",
+    TASK_SEQ_FILE, "seat.json", "seat.lock", "next-session.json", "agy-transcript.json",
+    "pm-turn.json", "pm-turn.lock",
 })
 IMAGE_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif",
@@ -256,6 +257,37 @@ def valid_task_number(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         return None
     return value
+
+
+def local_tz_offset(dt: datetime.datetime | None = None) -> str:
+    """Format the local UTC offset of `dt` (default: local now) as `+HH:MM` or `-HH:MM`."""
+    base = dt if dt is not None else datetime.datetime.now()
+    aware = base if base.tzinfo is not None else base.astimezone()
+    off = aware.utcoffset()
+    if off is None:
+        return "+00:00"
+    total_sec = int(off.total_seconds())
+    sign = "+" if total_sec >= 0 else "-"
+    total_min = abs(total_sec) // 60
+    return f"{sign}{total_min // 60:02d}:{total_min % 60:02d}"
+
+
+def _stamp_to_ms(at: object, fallback_ms: int) -> int:
+    """Derive UTC epoch milliseconds from a naive host-local `at` stamp, preserving sub-second `fallback_ms` when close."""
+    text = str(at or "").strip()
+    if text:
+        for fmt, cut in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d %H:%M", 16)):
+            if len(text) < cut:
+                continue
+            try:
+                parsed = datetime.datetime.strptime(text[:cut], fmt)
+                ms = int(parsed.astimezone().timestamp() * 1000)
+                if abs(ms - fallback_ms) <= 2000:
+                    return fallback_ms
+                return ms
+            except (ValueError, OSError, OverflowError):
+                continue
+    return fallback_ms
 
 
 def _task_created_sort_key(task: dict, path: Path | None = None) -> str:
@@ -739,6 +771,7 @@ class Store(Protocol):
     def append_event(self, slug: str, event: dict, *, timeout: float | None = None) -> int: ...
     def events(self, slug: str, before: int | None = None, after: int | None = None, limit: int = 200) -> dict: ...
     def all_events(self, slug: str) -> list[dict]: ...
+    def receipts(self, slug: str) -> list[dict]: ...
     def documents(self, slug: str) -> list[dict]: ...
     def document(self, slug: str, root: str, path: str) -> str: ...
 
@@ -776,6 +809,14 @@ class FileStore:
 
     def _now_dt(self) -> datetime.datetime:
         return self._clock.datetime_now() if self._clock is not None else datetime.datetime.now()
+
+    def _now_ms(self) -> int:
+        if self._clock is not None:
+            try:
+                return int(self._clock.time() * 1000)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return int(time.time() * 1000)
 
     def _dirs(self) -> tuple[Path, Path, Path, Path]:
         state, pms, tasks, projects = self._paths()
@@ -899,6 +940,34 @@ class FileStore:
             write_atomic(task_path, payload, replace_fn=self._replace_fn)
             return updated
 
+    @staticmethod
+    def _next_event_seq(log_path: Path) -> int:
+        """Scan up to 64 trailing JSONL lines for the newest `seq` under the project's event lock and return `last_seq + 1`."""
+        try:
+            with open(log_path, "rb") as rf:
+                size = os.fstat(rf.fileno()).st_size
+                if size <= 0:
+                    return 1
+                end = _last_whole_end(rf, size)
+                if end <= 0:
+                    return 1
+                scanned = 0
+                for raw, _start, nxt in _each_line_back(rf, end):
+                    if raw is None:
+                        continue
+                    parsed = _parse_event_line(raw, nxt)
+                    if parsed is None:
+                        continue
+                    prev_seq = valid_task_number(parsed.get("seq"))
+                    if prev_seq is not None:
+                        return prev_seq + 1
+                    scanned += 1
+                    if scanned >= 64:
+                        break
+        except OSError:
+            return 1
+        return 1
+
     def append_event(self, slug: str, event: dict, *, timeout: float | None = None) -> int:
         """Append one event to projects/<slug>/conversation.jsonl under a per-project lock; return end byte offset."""
         if not valid_slug(slug):
@@ -910,10 +979,24 @@ class FileStore:
         folder.mkdir(parents=True, exist_ok=True)
         log_path = folder / "conversation.jsonl"
         lock_path = state_dir / "locks" / f"events-{slug}.lock"
-        payload = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
         wait = self.lock_timeout if timeout is None else timeout
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        enrich_chat = event.get("type") in ("user", "pm", "agent")
+        now_ms = self._now_ms() if enrich_chat else 0
+        tz_str = local_tz_offset(self._now_dt()) if enrich_chat else ""
         with file_lock(lock_path, wait, lock_fn=self._lock_fn, unlock_fn=self._unlock_fn):
+            if enrich_chat:
+                stored = dict(event)
+                if valid_task_number(stored.get("seq")) is None:
+                    stored["seq"] = self._next_event_seq(log_path)
+                raw_ms = stored.get("at_ms")
+                if not (isinstance(raw_ms, int) and not isinstance(raw_ms, bool) and raw_ms > 0):
+                    stored["at_ms"] = _stamp_to_ms(stored.get("at"), now_ms)
+                if not isinstance(stored.get("tz"), str) or not stored["tz"]:
+                    stored["tz"] = tz_str
+            else:
+                stored = event
+            payload = (json.dumps(stored, ensure_ascii=False) + "\n").encode("utf-8")
             fd = os.open(log_path, flags, 0o644)
             try:
                 view = memoryview(payload)
@@ -949,6 +1032,21 @@ class FileStore:
             if isinstance(event, dict):
                 events.append(event)
         return events
+
+    def receipts(self, slug: str) -> list[dict]:
+        """Recent PM user-message receipts in projects/<slug>/receipts.json, oldest first."""
+        if not valid_slug(slug):
+            return []
+        _, _, _, projects_dir = self._dirs()
+        path = projects_dir / slug / "receipts.json"
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        items = raw.get("receipts") if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            return []
+        return [r for r in items if isinstance(r, dict) and r.get("at") and (r.get("text") or r.get("digest"))]
 
     def tasks(self, slug: str | None = None) -> list[dict]:
         if slug is not None and not valid_slug(slug):

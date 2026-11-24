@@ -52,7 +52,7 @@ PRELUDE = textwrap.dedent("""
 
     ctx = Context.from_env(env={**dict(__import__("os").environ), "HC_TERMINAL_ID": "t7"})
     assert ctx.seat_alive is not None
-    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies"], ctx.deliver_watchers
+    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies", "agy-transcript"], ctx.deliver_watchers
     assert len(ctx.deliver_holds) == 1, ctx.deliver_holds
     # Work around R4-P0 (`procs.py:322` passes unexpected `ctx=ctx` to `seat.next_session_ready`; covered by
     # `@expectedFailure` in `test_final_review_r4_repros.py`) so the rest of `TWO_LOOKS` still exercises real hold logic:

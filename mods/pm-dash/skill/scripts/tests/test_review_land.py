@@ -64,6 +64,22 @@ from pmlib.workers.reattach import start_beside_pm_for  # noqa: E402
 from tests.fakes import FakeClock, FakeHc, FakeProcs, FakeTui, make_ctx  # noqa: E402
 
 PM_SCRIPT = SCRIPTS / "pm.py"
+_OK_CMD = f'"{sys.executable}" -c "pass"' if os.name == "nt" else "true"
+_FAIL_CMD = f'"{sys.executable}" -c "import sys; print(\'broken\'); sys.exit(1)"' if os.name == "nt" else "echo broken; false"
+_STUCK_CMD = (
+    f'"{sys.executable}" -c "import pathlib, sys; p=pathlib.Path(\'new.txt\'); '
+    f'p.write_text(p.read_text()+\'changed\\n\'); sys.exit(1)"'
+    if os.name == "nt" else "echo changed >> new.txt; false"
+)
+_SLOW_CMD = (
+    f'"{sys.executable}" -c "import time; print(\'started\', flush=True); time.sleep(30)"'
+    if os.name == "nt" else "echo started; sleep 30"
+)
+_SLEEP_CMD = f'"{sys.executable}" -c "import time; time.sleep(30)"' if os.name == "nt" else "sleep 30"
+_CHECK_NEW_CMD = (
+    f'"{sys.executable}" -c "import pathlib, sys; sys.exit(0 if pathlib.Path(\'new.txt\').is_file() else 1)"'
+    if os.name == "nt" else "test -f new.txt"
+)
 GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "t",
     "GIT_AUTHOR_EMAIL": "t@t",
@@ -258,7 +274,7 @@ class LandAndReview(ReviewLandCase):
         self.assertIn(str(self.ctx.home.project_for(str(repo)).verify), out)
         self.verify(repo, "# only a comment\n\n")  # counts as no checks
         self.assertEqual(self.land("l-none")[0], 2)
-        self.verify(repo, "true\n")
+        self.verify(repo, f"{_OK_CMD}\n")
         (repo / "a.txt").write_text("dirty\n")
         self.assertEqual(self.land("l-none"), (2, f"{repo} has uncommitted changes; land merges only into a clean checkout\n"))
         git("checkout", "a.txt")
@@ -275,21 +291,21 @@ class LandAndReview(ReviewLandCase):
     def test_a_failing_check_aborts_and_leaves_the_checkout_clean(self) -> None:
         repo, git = self.make_repo("r-fail")
         self.task(repo, "l-fail")
-        self.verify(repo, "# the checks\ntrue\necho broken; false\n")
+        self.verify(repo, f"# the checks\n{_OK_CMD}\n{_FAIL_CMD}\n")
         code, out = self.land("l-fail")
         self.assertEqual(code, 1)
-        self.assertIn("echo broken; false", out)
+        self.assertIn(_FAIL_CMD, out)
         self.assertIn("broken", out)
         self.assertEqual(git("status", "--porcelain"), "")
         self.assertFalse((repo / "new.txt").exists())
         self.assertEqual(self.load_raw("l-fail")["status"], "review")
-        self.assertIn("echo broken; false", self.load_raw("l-fail")["log"][-1]["text"])
+        self.assertIn(_FAIL_CMD, self.load_raw("l-fail")["log"][-1]["text"])
 
     def test_a_merge_that_cannot_be_undone_is_said_with_exit_5(self) -> None:
         # The check changes a file the merge brought in: git refuses both `merge --abort` and `reset --merge`.
         repo, git = self.make_repo("r-stuck")
         self.task(repo, "l-stuck")
-        self.verify(repo, "echo changed >> new.txt; false\n")
+        self.verify(repo, f"{_STUCK_CMD}\n")
         code, out = self.land("l-stuck")
         self.assertEqual(code, 5)
         self.assertIn("could not be undone", out)
@@ -300,7 +316,7 @@ class LandAndReview(ReviewLandCase):
     def test_checks_have_a_time_limit(self) -> None:
         repo, git = self.make_repo("r-slow")
         self.task(repo, "l-slow")
-        self.verify(repo, "echo started; sleep 30\n")
+        self.verify(repo, f"{_SLOW_CMD}\n")
         began = time.time()
         code, out = self.land("l-slow", timeout=1)
         self.assertLess(time.time() - began, 10)
@@ -309,10 +325,11 @@ class LandAndReview(ReviewLandCase):
         self.assertIn("started", out)
         self.clean(git)
 
+    @unittest.skipIf(os.name == "nt", "Windows TerminateProcess cannot be caught by Python signal handlers")
     def test_land_stopped_by_a_signal_undoes_the_merge(self) -> None:
         repo, git = self.make_repo("r-killed")
         self.task(repo, "l-killed")
-        self.verify(repo, "sleep 30\n")
+        self.verify(repo, f"{_SLEEP_CMD}\n")
         env = {k: v for k, v in os.environ.items() if not k.startswith(("HC_", "HERDR_"))}
         env["PM_HOME"] = str(self.home.root)
         proc = subprocess.Popen(
@@ -337,7 +354,7 @@ class LandAndReview(ReviewLandCase):
         git("add", "new.txt")
         git("commit", "-q", "-m", "conflicting new.txt")
         self.task(repo, "l-conflict")
-        self.verify(repo, "true\n")
+        self.verify(repo, f"{_OK_CMD}\n")
         code, out = self.land("l-conflict")
         self.assertEqual(code, 4)
         self.assertIn("  new.txt\n", out)
@@ -346,7 +363,7 @@ class LandAndReview(ReviewLandCase):
     def test_passing_checks_commit_mark_merged_and_retire(self) -> None:
         repo, git = self.make_repo("r-pass")
         self.task(repo, "l-pass")
-        self.verify(repo, "true\ntest -f new.txt\n")
+        self.verify(repo, f"{_OK_CMD}\n{_CHECK_NEW_CMD}\n")
         code, out = self.land("l-pass")
         self.assertEqual(code, 0, out)
         task = self.load_raw("l-pass")
@@ -400,12 +417,13 @@ class LandAndReview(ReviewLandCase):
         task = self.load_raw("r-a-review")
         brief = Path(task["brief"]).read_text()
         run = self.hc.run_records[0]
-        # The reviewer key wins over worker, and a Claude Code reviewer has no tool that writes files.
-        self.assertEqual(run["argv"], ["claude", "--model", "opus", "--disallowedTools", "Edit,Write,NotebookEdit"])
+        # The reviewer key wins over worker; Claude reviewers keep Edit/Write so they can fix test issues directly.
+        self.assertEqual(run["argv"], ["claude", "--model", "opus"])
         self.assertEqual(run["cwd"], str(tree))
         t1 = run["address"]
         self.assertEqual((task["title"], task["pane"], task["status"]), ("审查：加一行", f"hc:{t1}", "in_progress"))
-        for part in ("/briefs/a.md", "main...dev/x", "检查清单", "make test", "不提交",
+        for part in ("/briefs/a.md", "main...dev/x", "检查清单", "make test", "不改生产代码",
+                     "生产代码问题", "测试类问题",
                      "update r-a-review --status done --note", "无阻塞"):
             self.assertIn(part, brief)
         self.assertIn((t1, brief), self.hc.sent)
@@ -457,6 +475,210 @@ class LandAndReview(ReviewLandCase):
         with contextlib.redirect_stdout(io.StringIO()):
             workers_cmds.cmd_retire(argparse.Namespace(id="r-n-review", force=False), ctx=self.ctx)
         self.assertEqual(review(), 2)  # the thread was closed (as an escalation closes it): a fresh start
+
+    def test_review_incremental_rereview_full_flag_and_ancestor_fallback(self) -> None:
+        repo, git = self.make_repo("r-inc")
+        git("branch", "-D", "dev/x")
+        tree = self.base / "trees" / "tree-inc"
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        git("worktree", "add", "-q", str(tree), "-b", "dev/x")
+
+        def wt_git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(tree), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+        (tree / "feat.txt").write_text("v1\n")
+        wt_git("add", "feat.txt")
+        wt_git("commit", "-q", "-m", "v1")
+        c1 = wt_git("rev-parse", "HEAD")
+
+        self.task(repo, "r-inc", worktree=str(tree), brief="/briefs/inc.md", agent="w-inc", commit=c1[:7])
+        self._write_cfg({"lang": "zh", "reviewer": {"kind": "claude", "model": "opus"}})
+
+        def run_review(*, full: bool = False) -> str:
+            with contextlib.redirect_stdout(io.StringIO()):
+                review_cmds.cmd_review(
+                    argparse.Namespace(id="r-inc", name=None, kind=None, model=None, effort=None, full=full),
+                    ctx=self.ctx,
+                )
+            return Path(self.load_raw("r-inc-review")["brief"]).read_text(encoding="utf-8")
+
+        def finish_review(note: str = "1. prod issue") -> None:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ledger_cmds.cmd_update(argparse.Namespace(
+                    id="r-inc-review", status="done", keep=False, note=note,
+                    **{f: None for f in FIELDS if f != "status"},
+                ), ctx=self.ctx)
+
+        # 1. First review: full diff base...branch, does NOT write last_reviewed_commit on start; includes test-issue & no-blockers rules.
+        brief1 = run_review()
+        self.assertIn("`git diff main...dev/x`", brief1)
+        self.assertNotIn("增量复审", brief1)
+        self.assertIn("生产代码问题：只报告、不改生产代码", brief1)
+        self.assertIn("测试类问题（测试替身失真、断言变弱、隔离泄漏、漏覆盖等）：可直接在本分支修改测试代码", brief1)
+        self.assertIn("以「无阻塞」开头", brief1)
+        self.assertIsNone(self.load_raw("r-inc").get("last_reviewed_commit"))
+
+        # 2. First review interrupted (never reported done) + worker adds c2 (even if auto_reviewed_commit was set):
+        #    MUST still do full review so c1 is not skipped.
+        self.save_raw({**self.load_raw("r-inc"), "auto_reviewed_commit": c1})
+        (tree / "feat.txt").write_text("v2\n")
+        wt_git("add", "feat.txt")
+        wt_git("commit", "-q", "-m", "v2")
+        c2 = wt_git("rev-parse", "HEAD")
+        c2_short = wt_git("rev-parse", "--short", c2)
+
+        brief_after_abort = run_review()
+        self.assertNotIn("增量复审", brief_after_abort)
+        self.assertIn("`git diff main...dev/x`", brief_after_abort)
+        self.assertIsNone(self.load_raw("r-inc").get("last_reviewed_commit"))
+
+        # 3. Completing review (done) records last_reviewed_commit = c2; same-commit re-run falls back to full.
+        finish_review("1. prod bug")
+        self.assertEqual(self.load_raw("r-inc").get("last_reviewed_commit"), c2)
+        brief_same = run_review()
+        self.assertNotIn("增量复审", brief_same)
+        self.assertIn("`git diff main...dev/x`", brief_same)
+
+        # 4. Worker pushes fix c3: re-review defaults to incremental c2..HEAD; if interrupted before done,
+        #    retrying on c3 STILL stays incremental c2..HEAD (does not lose baseline or fall back to full).
+        (tree / "feat.txt").write_text("v3\n")
+        wt_git("add", "feat.txt")
+        wt_git("commit", "-q", "-m", "v3")
+        c3 = wt_git("rev-parse", "HEAD")
+        c3_short = wt_git("rev-parse", "--short", c3)
+
+        brief_inc1 = run_review()
+        self.assertIn("增量复审", brief_inc1)
+        self.assertIn(f"`git diff {c2_short}..HEAD`", brief_inc1)
+        self.assertEqual(self.load_raw("r-inc").get("last_reviewed_commit"), c2)
+
+        brief_inc_retry = run_review()
+        self.assertIn("增量复审", brief_inc_retry)
+        self.assertIn(f"`git diff {c2_short}..HEAD`", brief_inc_retry)
+
+        # 5. --full forces full diff even when last_reviewed_commit is a valid ancestor of HEAD.
+        brief_full = run_review(full=True)
+        self.assertNotIn("增量复审", brief_full)
+        self.assertNotIn(f"{c2_short}..HEAD", brief_full)
+        self.assertIn("`git diff main...dev/x`", brief_full)
+        finish_review("1. still needs test fix")
+        self.assertEqual(self.load_raw("r-inc").get("last_reviewed_commit"), c3)
+
+        # 6. Reviewer fixes a test on the branch and reports done: sync_on_done refreshes last_reviewed_commit to c_test.
+        (tree / "test_fix.txt").write_text("fix\n")
+        wt_git("add", "test_fix.txt")
+        wt_git("commit", "-q", "-m", "reviewer test fix")
+        c_test = wt_git("rev-parse", "HEAD")
+        c_test_short = wt_git("rev-parse", "--short", c_test)
+        run_review()
+        finish_review("1. prod issue; fixed test")
+        self.assertEqual(self.load_raw("r-inc").get("last_reviewed_commit"), c_test)
+
+        # 7. English incremental re-review after worker's next commit checks EN wording & test-issue/no-blockers rules.
+        self._write_cfg({"lang": "en", "reviewer": {"kind": "claude", "model": "opus"}})
+        (tree / "feat.txt").write_text("v4\n")
+        wt_git("add", "feat.txt")
+        wt_git("commit", "-q", "-m", "v4")
+        c4 = wt_git("rev-parse", "HEAD")
+        brief_en = run_review()
+        self.assertIn("incremental re-review", brief_en)
+        self.assertIn(f"`git diff {c_test_short}..HEAD`", brief_en)
+        self.assertIn("Production code issues: report only, do not edit production code", brief_en)
+        self.assertIn("Test issues (unrealistic fakes/doubles, weakened assertions, isolation leaks, missing coverage", brief_en)
+        self.assertIn("start your report with `no blockers`", brief_en)
+        finish_review("1. needs rebase")
+        self.assertEqual(self.load_raw("r-inc").get("last_reviewed_commit"), c4)
+
+        # 8. Ancestor invalidated (amend/reset): falls back to full diff base...branch.
+        (tree / "feat.txt").write_text("v4-amended\n")
+        wt_git("add", "feat.txt")
+        wt_git("commit", "-q", "--amend", "-m", "v4 amended")
+        c4_amended = wt_git("rev-parse", "HEAD")
+        self.assertNotEqual(c4_amended, c4)
+        brief_rebased = run_review()
+        self.assertNotIn("incremental re-review", brief_rebased)
+        self.assertIn("`git diff main...dev/x`", brief_rebased)
+        finish_review("无阻塞")
+        self.assertEqual(self.load_raw("r-inc").get("last_reviewed_commit"), c4_amended)
+
+        # 9. Invalid/unknown last_reviewed_commit SHA also falls back to full diff cleanly.
+        self.save_raw({**self.load_raw("r-inc"), "last_reviewed_commit": "deadbeef" * 5})
+        brief_bad_sha = run_review()
+        self.assertNotIn("incremental re-review", brief_bad_sha)
+        self.assertIn("`git diff main...dev/x`", brief_bad_sha)
+
+        # 10. CLI parser wires `--full` (default False).
+        from pmlib.cli import build_parser
+        parser = build_parser()
+        self.assertFalse(parser.parse_args(["review", "r-inc"]).full)
+        self.assertTrue(parser.parse_args(["review", "r-inc", "--full"]).full)
+
+    def test_approve_and_land_accept_reviewer_test_fix_commit_after_done(self) -> None:
+        repo, git = self.make_repo("r-revfix")
+        git("branch", "-D", "dev/x")
+        tree = self.base / "trees" / "tree-revfix"
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        git("worktree", "add", "-q", str(tree), "-b", "dev/x")
+
+        def wt_git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(tree), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+        (tree / "prod.txt").write_text("prod\n")
+        wt_git("add", "prod.txt")
+        wt_git("commit", "-q", "-m", "worker prod commit")
+        c_worker = wt_git("rev-parse", "HEAD")
+
+        slug = project_slug(str(repo))
+        self.hc.terminals["t1"] = {"state": "live", "labels": {"pm": repo.name}, "status": {"state": "idle"}}
+        self.hc.terminals["t20"] = {"state": "live", "labels": {"task": "r-revfix"}, "status": {"state": "idle"}}
+        self.ctx.store.change_registration(slug, lambda _: {
+            "name": pm_name(str(repo)), "project": repo.name, "repo": str(repo),
+            "runtime": "hc", "terminal": "t1", "pane": "hc:t1", "agent": "claude",
+        })
+        self.task(repo, "r-revfix", worktree=str(tree), pane="hc:t20", worker_pane="hc:t20",
+                  commit=c_worker[:7], auto_reviewed_commit=c_worker)
+        self.verify(repo, f"{_OK_CMD}\n")
+        self._write_cfg({"lang": "zh", "reviewer": {"kind": "claude", "model": "opus"}})
+
+        self.be("hc:t1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            review_cmds.cmd_review(argparse.Namespace(id="r-revfix", name=None, kind=None, model=None, effort=None), ctx=self.ctx)
+
+        # Reviewer fixes a test on the task branch, commits, and reports done starting with 无阻塞.
+        (tree / "test_fixed.py").write_text("# fixed test\n")
+        wt_git("add", "test_fixed.py")
+        wt_git("commit", "-q", "-m", "test: reviewer fix")
+        c_revfix = wt_git("rev-parse", "HEAD")
+        with contextlib.redirect_stdout(io.StringIO()):
+            ledger_cmds.cmd_update(argparse.Namespace(
+                id="r-revfix-review", status="done", keep=False, note="无阻塞；已修复 test_fixed.py",
+                **{f: None for f in FIELDS if f != "status"},
+            ), ctx=self.ctx)
+        self.assertEqual(self.load_raw("r-revfix").get("last_reviewed_commit"), c_revfix)
+
+        # PM approves without passing --commit: must accept c_revfix (from last_reviewed_commit), not refuse!
+        self.be("hc:t1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            review_cmds.cmd_approve(
+                argparse.Namespace(id="r-revfix", via="worker", keep=False, message=None, timeout=60, note=None),
+                ctx=self.ctx,
+            )
+        self.assertEqual(self.load_raw("r-revfix")["land_approved"]["commit"], c_revfix)
+
+        # Worker lands cleanly including the reviewer's test fix commit.
+        self.be("hc:t20")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            review_cmds.cmd_land(argparse.Namespace(id="r-revfix", keep=False, message=None, timeout=60), ctx=self.ctx)
+        self.assertIn("已合并为", out.getvalue())
+        self.assertTrue((repo / "test_fixed.py").exists())
+        self.assertEqual(self.load_raw("r-revfix")["status"], "merged")
 
     def _start_pm(self, repo: str, kind: str | None, model: str | None) -> list[str]:
         slug = project_slug(repo)
@@ -729,7 +951,7 @@ class ResearchCollectionTests(ReviewLandCase):
         tid2 = self.register_task(repo, "dev/feat-ll", wt2, title="功能 LL")
         verify = self.home.project_for(str(repo)).verify
         verify.parent.mkdir(parents=True, exist_ok=True)
-        verify.write_text("true\n", encoding="utf-8")
+        verify.write_text(f"{_OK_CMD}\n", encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
             review_cmds.cmd_land(argparse.Namespace(id=tid2, keep=False, message=None, timeout=60), ctx=self.ctx)
@@ -769,7 +991,7 @@ class ResearchCollectionTests(ReviewLandCase):
         tid = self.register_task(repo, "dev/feat-a", wt, title="功能 A")
         verify = self.home.project_for(str(repo)).verify
         verify.parent.mkdir(parents=True, exist_ok=True)
-        verify.write_text("true\n", encoding="utf-8")
+        verify.write_text(f"{_OK_CMD}\n", encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
             review_cmds.cmd_land(argparse.Namespace(id=tid, keep=False, message=None, timeout=60), ctx=self.ctx)
@@ -787,7 +1009,7 @@ class ResearchCollectionTests(ReviewLandCase):
         tid2 = self.register_task(repo2, "dev/tracked-ev", wt2, title="进仓文档")
         verify2 = self.home.project_for(str(repo2)).verify
         verify2.parent.mkdir(parents=True, exist_ok=True)
-        verify2.write_text("true\n", encoding="utf-8")
+        verify2.write_text(f"{_OK_CMD}\n", encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
             ledger_cmds.cmd_update(argparse.Namespace(id=tid2, status="review", note="ready", keep=False), ctx=self.ctx)
@@ -1041,6 +1263,63 @@ class ReviewChainAndStateHelpers(ReviewLandCase):
         self.assertEqual(pm_row["helpers"][0]["name"], "pm-scan")
         self.assertEqual(pm_row["helpers"][0]["live_state"], "working")
         self.assertFalse(pm_row["helpers"][0]["offline"])
+        self.assertNotIn("for_task", pm_row["helpers"][0])
+
+    def test_dash_state_helpers_expose_for_task_and_label_fallback(self) -> None:
+        slug, rec = self.register_hc_pm("t1")
+        rec["helpers"] = [
+            {"name": "land-rc-ft1", "terminal": "t30", "parent": "t1", "owner": rec["name"], "owner_kind": "pm",
+             "project": slug, "status": "done", "profile": "neon", "kind": "agy", "model": "gemini-4-neon",
+             "effort": "", "result": "/tmp/ft1.md", "prompt": "merge rc-ft1", "started": "2026-11-23 10:00:00",
+             "ended": "2026-11-23 10:05:00", "summary": "merged", "for_task": "rc-ft1"},
+            {"name": "land-rc-ft2", "terminal": "t31", "parent": "t1", "owner": rec["name"], "owner_kind": "pm",
+             "project": slug, "status": "running", "profile": "neon", "kind": "agy", "model": "gemini-4-neon",
+             "effort": "", "result": "/tmp/ft2.md", "prompt": "legacy live", "started": "2026-11-23 10:06:00",
+             "ended": "", "summary": ""},
+            {"name": "triage-rc-ft3", "terminal": "t32", "parent": "t1", "owner": rec["name"], "owner_kind": "pm",
+             "project": slug, "status": "done", "profile": "neon", "kind": "agy", "model": "gemini-4-neon",
+             "effort": "", "result": "/tmp/ft3.md", "prompt": "legacy ended", "started": "2026-11-23 09:00:00",
+             "ended": "2026-11-23 09:02:00", "summary": "triaged"},
+            {"name": "old-reused", "terminal": "t33", "parent": "t1", "owner": rec["name"], "owner_kind": "pm",
+             "project": slug, "status": "done", "profile": "neon", "kind": "agy", "model": "gemini-4-neon",
+             "effort": "", "result": "/tmp/ft4.md", "prompt": "old", "started": "2026-11-23 08:00:00",
+             "ended": "2026-11-23 08:02:00", "summary": "old"},
+            {"name": "pm-general", "terminal": "t34", "parent": "t1", "owner": rec["name"], "owner_kind": "pm",
+             "project": slug, "status": "running", "profile": "neon", "kind": "agy", "model": "gemini-4-neon",
+             "effort": "", "result": "/tmp/ft5.md", "prompt": "general", "started": "2026-11-23 10:07:00",
+             "ended": "", "summary": ""},
+        ]
+        self.ctx.store.change_registration(slug, lambda _: dict(rec))
+
+        self.hc.terminals["t1"] = {"state": "live", "labels": {"pm": Path(self.repo).name}, "status": {"state": "idle"}}
+        # Ledger for_task wins over a different terminal label.
+        self.hc.terminals["t30"] = {"state": "ended", "labels": {"helper": "land-rc-ft1", "helper.task": "rc-other"}}
+        # Live terminal label fallback when ledger lacks for_task.
+        self.hc.terminals["t31"] = {
+            "state": "live", "status": {"state": "working"},
+            "labels": {"helper": "land-rc-ft2", "helper.of": rec["name"], "helper.task": "rc-ft2"},
+        }
+        # Ended terminal label fallback when ledger lacks for_task.
+        self.hc.terminals["t32"] = {
+            "state": "ended",
+            "labels": {"helper": "triage-rc-ft3", "helper.of": rec["name"], "helper.task": "rc-ft3"},
+        }
+        # Reused terminal address belonging to a different helper name must not leak helper.task.
+        self.hc.terminals["t33"] = {
+            "state": "live", "status": {"state": "working"},
+            "labels": {"helper": "someone-else", "helper.task": "rc-wrong"},
+        }
+        self.hc.terminals["t34"] = {"state": "live", "status": {"state": "working"}, "labels": {"helper": "pm-general"}}
+
+        st = state_view.dash_state(ctx=self.ctx)
+        pm_row = next(p for p in st["pms"] if p["name"] == rec["name"])
+        by_name = {h["name"]: h for h in pm_row["helpers"]}
+
+        self.assertEqual(by_name["land-rc-ft1"]["for_task"], "rc-ft1")
+        self.assertEqual(by_name["land-rc-ft2"]["for_task"], "rc-ft2")
+        self.assertEqual(by_name["triage-rc-ft3"]["for_task"], "rc-ft3")
+        self.assertNotIn("for_task", by_name["old-reused"])
+        self.assertNotIn("for_task", by_name["pm-general"])
 
     def test_adopt_task_refuses_when_active_review_is_running(self) -> None:
         self.register_hc_pm("t1")
@@ -1125,7 +1404,7 @@ class DelegateBase(ReviewLandCase):
         })
         vfile = self.home.project_for(str(self.repo)).verify
         vfile.parent.mkdir(parents=True, exist_ok=True)
-        vfile.write_text("true\n")
+        vfile.write_text(f"{_OK_CMD}\n")
 
     def git_cmd(self, *args: str, cwd: Path | None = None) -> str:
         res = subprocess.run(

@@ -17,6 +17,7 @@ from ..context import Context
 from ..errors import NotFound, PmError, Refused, WaitOutcome
 from ..events.deliver import deliver_later
 from ..events.policy import wake_fields_for
+from ..events.stalls import REPORTED_STATUSES, StallWatcher
 from ..ledger.deps import evaluate_depends_on, format_dep_summary
 from ..ledger.family import parent_of
 from ..ledger.ledger import Change, Ledger
@@ -88,7 +89,9 @@ from .send import (
     SendBackResult,
     send_async_later_for,
     send_back_for,
+    send_failure_reason,
     send_ready_later_for,
+    send_succeeded,
     send_when_ready_for,
 )
 from .sessions import (
@@ -975,11 +978,26 @@ class Workers:
                 created = self.ctx.tui.worktree_create(*wt_args)
                 if not created:
                     raise Refused("herdr worktree create failed")
-                flat = json.dumps(created)
-                found = [re.search(rf'"{k}": "([^"]+)"', flat) for k in ("workspace_id", "pane_id", "path")]
+                def _find_str_field(obj: Any, target: str) -> str | None:
+                    if isinstance(obj, dict):
+                        val = obj.get(target)
+                        if isinstance(val, str) and val:
+                            return val
+                        for v in obj.values():
+                            hit = _find_str_field(v, target)
+                            if hit is not None:
+                                return hit
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            hit = _find_str_field(item, target)
+                            if hit is not None:
+                                return hit
+                    return None
+
+                found = [_find_str_field(created, k) for k in ("workspace_id", "pane_id", "path")]
                 if not all(found):
-                    raise Refused(f"unexpected worktree create result: {flat[:600]}")
-                workspace, pane, path_str = (m.group(1) for m in found if m is not None)
+                    raise Refused(f"unexpected worktree create result: {json.dumps(created)[:600]}")
+                workspace, pane, path_str = (v for v in found if v is not None)
                 if req.prep:
                     res = self.ctx.procs.run(
                         ["zsh", "-c", req.prep],
@@ -1186,12 +1204,12 @@ class Workers:
             )
             return SendResult(queued=True, terminal=term, task_id=task["id"] if task else "", message=msg)
         sent = self.ctx.hc.send(term, message, timeout=timeout, errors=True) or {}
-        if sent.get("started") or ("started" in sent and not sent.get("error")):
+        if send_succeeded(sent, info):
             if task and (self.ctx.store.task(task["id"]) or {}).get("status") == "in_progress":
                 self._round_handed(task["id"], term, info.get("turn") or 0)
             msg = self.ctx.config.tr(f"sent to hc:{term}", f"已发送到 hc:{term}")
             return SendResult(queued=False, terminal=term, task_id=task["id"] if task else "", message=msg)
-        why = (sent.get("error") or {}).get("message") or (sent.get("error") or {}).get("kind") or "send failed"
+        why = send_failure_reason(sent, info, term)
         raise Refused(self.ctx.config.tr(f"failed to send to hc:{term}: {why}", f"发送到 hc:{term} 失败：{why}"))
 
     def deliver_send(
@@ -1218,7 +1236,15 @@ class Workers:
         if info.get("state") == "live":
             turn = info.get("turn") if info.get("turn") is not None else (pre_turn or 0)
             sent = self.ctx.hc.send(term, message, timeout=timeout, errors=True) or {}
-            if sent.get("started") or ("started" in sent and not sent.get("error")):
+            ok = send_succeeded(sent, info)
+            if not ok and not sent.get("error"):
+                after = self.ctx.hc.get_raw(term, errors=True) or {}
+                if after.get("state") == "live" and (
+                    (after.get("turn") or 0) > turn
+                    or (after.get("status") or {}).get("state") == "working"
+                ):
+                    ok = True
+            if ok:
                 if task_id:
                     with contextlib.suppress(Exception, SystemExit):
                         if (self.ctx.store.task(task_id) or {}).get("status") == "in_progress":
@@ -1226,15 +1252,18 @@ class Workers:
                 return
         else:
             sent = {}
-        why = (
-            (sent.get("error") or {}).get("message")
-            or (sent.get("error") or {}).get("kind")
-            or f"hc:{term} is {info.get('state') or 'gone'}"
-        )
+        why = send_failure_reason(sent, info, term)
         resolved_repo = repo or ""
         if task_id and (self.ctx.store.task(task_id) or {}):
             t = self.ctx.store.task(task_id) or {}
             resolved_repo = resolved_repo or t.get("repo") or ""
+            la = t.get("land_approved")
+            if (isinstance(la, dict) and la.get("executor") == "worker"
+                    and not t.get("landed") and t.get("status") not in REPORTED_STATUSES):
+                if StallWatcher(self.ctx).fallback_land_to_helper(
+                    t, reason=f"approve send to hc:{term} failed ({why})", term=term,
+                ):
+                    return
             wake = bool(resolved_repo and self._projects.app_pm(resolved_repo))
             msg = self.ctx.config.tr(
                 f"async send to hc:{term} failed ({why}); check or triage with `pm.py triage {task_id}`",
@@ -1441,7 +1470,7 @@ class Workers:
             r = cur.raw
             was_blocked = r.get("status") == "blocked" and self._caller.blocked_by_worker(r)
             clear_task_session_for(self.ctx, r)
-            for f in (*QUESTION_FIELDS, "escalating", "switching", "closed", "auto_review", "auto_reviewed_commit"):
+            for f in (*QUESTION_FIELDS, "escalating", "switching", "closed", "auto_review", "auto_reviewed_commit", "last_reviewed_commit"):
                 r.pop(f, None)
             r.update(
                 status="in_progress", pane=pane, workspace=workspace, kind=spec.kind, worker=w_rec,

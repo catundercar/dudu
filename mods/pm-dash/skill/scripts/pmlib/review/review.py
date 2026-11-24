@@ -45,6 +45,7 @@ class ReviewRequest(Options):
     tab: str | None = None
     bug: str | None = None
     codex_profile: str | None = None
+    full: bool = False
     dry_run: bool = False
 
     @classmethod
@@ -58,6 +59,7 @@ class ReviewRequest(Options):
             tab=getattr(a, "tab", None),
             bug=getattr(a, "bug", None),
             codex_profile=getattr(a, "codex_profile", None),
+            full=bool(getattr(a, "full", False)),
             dry_run=bool(getattr(a, "dry_run", False)),
         )
 
@@ -158,6 +160,14 @@ class Reviews:
                        self._tr(f"review found blockers ({review_id}): {summary}",
                                 f"审查发现问题（{review_id}）：{summary}"))
                 ch.note_on(raw, msg, source="reviewer", wake=False)
+            wt = raw.get("worktree") or (
+                self.ctx.git.checkout_of(raw["repo"], raw["branch"]) if raw.get("repo") and raw.get("branch") else ""
+            )
+            if wt and Path(wt).is_dir():
+                head_sha = self.ctx.git.rev_parse(wt, "HEAD^{commit}", quiet=True)
+                if head_sha and head_sha != raw.get("last_reviewed_commit"):
+                    raw["last_reviewed_commit"] = head_sha
+                    changed = True
             return raw if changed else None
 
         with contextlib.suppress(Exception):
@@ -220,24 +230,63 @@ class Reviews:
 
     # --- the reviewer ---
 
-    def brief(self, task: dict[str, Any], rid: str, worktree: str | Path) -> str:
+    def review_scope(self, task: dict[str, Any], worktree: str | Path, *, full: bool = False) -> tuple[str | None, str | None]:
+        """Resolve `(incremental_since_sha, head_sha)` for a review of `task` in `worktree`.
+
+        Returns `(prev_sha, head_sha)` for an incremental re-review when `not full`, a completed review commit
+        (`last_reviewed_commit`) exists, differs from `HEAD`, and is still an ancestor of `HEAD`; otherwise returns
+        `(None, head_sha)` (full `base...branch` review)."""
+        head_sha = self.ctx.git.rev_parse(worktree, "HEAD^{commit}", quiet=True)
+        if full or not head_sha:
+            return None, head_sha
+        prev = task.get("last_reviewed_commit") or ""
+        if not prev:
+            return None, head_sha
+        prev_resolved = self.ctx.git.rev_parse(worktree, f"{prev}^{{commit}}", quiet=True)
+        if not prev_resolved or prev_resolved == head_sha:
+            return None, head_sha
+        if not self.ctx.git.is_ancestor(worktree, prev_resolved, head_sha):
+            return None, head_sha
+        return prev_resolved, head_sha
+
+    def brief(self, task: dict[str, Any], rid: str, worktree: str | Path, *, since: str | None = None) -> str:
         """The reviewer's brief (`sent/<id>-review.md`, before the memory block)."""
         if getattr(self.ctx, "_legacy", False) and review_brief is not _DEFAULT_REVIEW_BRIEF:
             return review_brief(task, rid, worktree)
-        return self._brief_impl(task, rid, worktree)
+        return self._brief_impl(task, rid, worktree, since=since)
 
-    def _brief_impl(self, task: dict[str, Any], rid: str, worktree: str | Path) -> str:
+    def _brief_impl(self, task: dict[str, Any], rid: str, worktree: str | Path, *, since: str | None = None) -> str:
         branch, base = task["branch"], task["base"]
         checks = verify_commands_for(self.ctx, task["repo"])
         cmd = f"{self.ctx.procs.pm_command()} update {rid} --status done --note"  # done: a review is not work waiting to be merged
         run = "\n".join(f"  - `{c}`" for c in checks or [])
         docs = self.ctx.agents.docs_line()
         ref = self._ledger.task_ref(task)
+        if since:
+            short_since = self.ctx.git.rev_parse(worktree, since, short=True) or since[:7]
+            range_en = (
+                f"- Worktree: {worktree}; incremental re-review since last reviewed commit `{short_since}`: "
+                f"focus on `git diff {short_since}..HEAD` (`--stat` first, then the new changes; "
+                f"check `git diff {base}...{branch}` only if you need broader context)\n"
+            )
+            range_zh = (
+                f"- 工作树：{worktree}；增量复审（上次审过 `{short_since}`）：以 `git diff {short_since}..HEAD` 为主"
+                f"（先 `--stat`，再读本轮新增改动；仅在需要上下文时再看 `git diff {base}...{branch}`）\n"
+            )
+        else:
+            range_en = f"- Worktree: {worktree}; range `git diff {base}...{branch}` (`--stat` first, then the source changes)\n"
+            range_zh = f"- 工作树：{worktree}；范围 `git diff {base}...{branch}`（先 `--stat`，再读源码改动）\n"
         return self._tr(
-            f"Review (read-only) of task {ref}: {task['title']}\n"
-            "Do not commit, edit files or create branches: read, run the checks, report.\n"
+            f"Review of task {ref}: {task['title']}\n"
+            "Do not create branches or edit production code: read, run the checks, report.\n"
             f"- Brief: {task.get('brief') or '(none recorded)'}\n"
-            f"- Worktree: {worktree}; range `git diff {base}...{branch}` (`--stat` first, then the source changes)\n"
+            + range_en
+            + "- Handling findings:\n"
+            "  - Production code issues: report only, do not edit production code (attach a repro unit test if helpful); "
+            "hand back to PM to decide and route to the worker.\n"
+            "  - Test issues (unrealistic fakes/doubles, weakened assertions, isolation leaks, missing coverage, etc.): "
+            "you may fix the test code directly on this branch, run the checks, commit, and list the test changes in your report "
+            "(if only tests were fixed and no production blockers remain, still start your report with `no blockers`).\n"
             "- Checklist:\n"
             "  1. The diff against the brief: flag anything outside it.\n"
             "  2. Red lines: no `git add -A` debris, no secrets, no third-party assets, nothing that touches the user's "
@@ -245,22 +294,26 @@ class Reviews:
             "  3. Correctness: edge cases the worker could not have seen (destructive file operations, compatibility "
             "with old peers, signing, OS-version behaviour). Test a claim in a scratch directory when it is cheap.\n"
             "  4. Visual or UX results: look at the evidence image.\n"
-            + (f"- The project's checks (run them in the worktree; `git status` must stay clean):\n{run}\n" if checks
+            + (f"- The project's checks (run them in the worktree; `git status` must stay clean after any test-fix commit):\n{run}\n" if checks
                else "- The project has no verify file: skip the checks.\n")
             + f"\nReport: `{cmd} \"<numbered findings, one per line; none: no blockers>\"`\n"
             "The PM reads only this report. Keep it under 600 characters, in the user's language. Then stop.\n"
             + docs,
-            f"审查（只读）任务 {ref}：{task['title']}\n"
-            "不提交、不改文件、不开新分支：只读代码、跑检查、汇报。\n"
+            f"审查任务 {ref}：{task['title']}\n"
+            "不开新分支、不改生产代码：读代码、跑检查、汇报。\n"
             f"- 任务书：{task.get('brief') or '（未登记）'}\n"
-            f"- 工作树：{worktree}；范围 `git diff {base}...{branch}`（先 `--stat`，再读源码改动）\n"
+            + range_zh
+            + "- 问题处理规则：\n"
+            "  - 生产代码问题：只报告、不改生产代码（必要时可附复现单测），交 PM 裁决后退回 worker 修。\n"
+            "  - 测试类问题（测试替身失真、断言变弱、隔离泄漏、漏覆盖等）：可直接在本分支修改测试代码、跑通检查并提交，在汇报里列明改了哪些测试"
+            "（若仅修了测试且无生产阻塞问题，汇报仍须以「无阻塞」开头）。\n"
             "- 检查清单：\n"
             "  1. 对照任务书看 diff：超出范围的都指出来。\n"
             "  2. 红线：没有 `git add -A` 带进来的杂物、密钥、第三方资源，没有碰用户正在运行的应用或系统设置。\n"
             "  3. 正确性：worker 看不到的边界情况（破坏性的文件操作、与旧版本的兼容、签名、系统版本差异）。"
             "便宜的就在临时目录里试一下。\n"
             "  4. 有界面结果的：看证据图。\n"
-            + (f"- 项目的验证命令（在工作树里跑，跑完 `git status` 仍应干净）：\n{run}\n" if checks
+            + (f"- 项目的验证命令（在工作树里跑；如有测试修复提交，跑完 `git status` 仍应干净）：\n{run}\n" if checks
                else "- 项目没有 verify 文件：跳过验证命令。\n")
             + f"\n汇报：`{cmd} \"<编号的问题清单，每条一行；没有问题就写 无阻塞>\"`\n"
             "PM 只看这条汇报。写在 600 字以内，用中文。然后停下。\n" + docs)
@@ -351,8 +404,7 @@ class Reviews:
             short = tab_short(req.tab or f"{review_word}-" + tab_short(task.get("tab") or task["title"],
                                                                        task_bug(task, cfg=cfg))[:16], bug)
             tab = tab_title(short, bug, dry=True, cfg=cfg) if new_tabs(cfg=cfg, pane=self.ctx.pane) else ""
-            # A Claude Code reviewer is given no tool that writes files: it reads, runs the checks and reports.
-            extra = ["--disallowedTools", "Edit,Write,NotebookEdit"] if spec.kind == "claude" else []
+            extra = self.ctx.agents.reviewer_extra_argv(spec.kind)
             reads = self.ctx.agents.outside_reads(task["repo"], task.get("brief") or "")
             if dry:
                 out.plan = workers.build_dry_run_plan(
@@ -363,9 +415,10 @@ class Reviews:
                 return out
             if old:
                 end_worker_for(self.ctx, old, why="review")  # a review that is run again starts from a fresh reviewer
+            since, _ = self.review_scope(task, worktree, full=req.full)
             sent = self.ctx.home.sent(rid)
             sent.parent.mkdir(parents=True, exist_ok=True)
-            sent.write_text(self.brief(task, rid, worktree) + MemoryLayer(self.ctx, task.get("repo")).memory_part(),
+            sent.write_text(self.brief(task, rid, worktree, since=since) + MemoryLayer(self.ctx, task.get("repo")).memory_part(),
                             encoding="utf-8")
             workspace, agent, fast = "", name, ""
             argv = workers.worker_argv(spec, reads, task["repo"], extra, wrap=not tui)
@@ -556,8 +609,8 @@ def should_auto_review(task: dict[str, Any], a: Any, changes: Sequence[str]) -> 
     return Reviews(Context.from_env()).should_auto_review(task, getattr(a, "commit", None), changes)
 
 
-def review_brief(task: dict[str, Any], rid: str, worktree: str | Path) -> str:
-    return Reviews(Context.from_env())._brief_impl(task, rid, worktree)
+def review_brief(task: dict[str, Any], rid: str, worktree: str | Path, *, since: str | None = None) -> str:
+    return Reviews(Context.from_env())._brief_impl(task, rid, worktree, since=since)
 
 
 _DEFAULT_REVIEW_BRIEF = review_brief

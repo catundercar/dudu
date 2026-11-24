@@ -155,7 +155,7 @@ def pid_alive(pid):
     if WINDOWS:
         try:
             out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                                 capture_output=True, text=True, timeout=10)
+                                 capture_output=True, text=True, errors="replace", timeout=10)
             return str(pid) in (out.stdout or "")
         except (OSError, subprocess.TimeoutExpired):
             return False
@@ -208,8 +208,8 @@ def stale_lock(lock):
         return True
     if not text or not text[0].isdigit():
         return age > 5
-    if WINDOWS:  # signal 0 there is CTRL_C_EVENT, sent to a process group: only the age tells
-        return False
+    if WINDOWS:  # signal 0 there is CTRL_C_EVENT, sent to a process group: use tasklist via pid_alive
+        return not pid_alive(int(text[0]))
     try:
         os.kill(int(text[0]), 0)
     except ProcessLookupError:

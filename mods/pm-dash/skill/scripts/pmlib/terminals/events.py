@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import select
+import shutil
 import subprocess
 import sys
 import threading
@@ -293,6 +294,15 @@ class DirectoryEvents:
         self.active = False
 
 
+def _exec_bin(prog):
+    """Resolve `.cmd`/`.bat` shims on Windows so `subprocess.Popen([prog, ...])` can invoke them without shell=True."""
+    if os.name == "nt" and not os.path.isabs(prog):
+        found = shutil.which(prog)
+        if found and found.lower().endswith((".cmd", ".bat")):
+            return found
+    return prog
+
+
 class ChangeWaiter:
     """Subscribe before the first read, then block; coalesce hints, not reports.
 
@@ -378,7 +388,7 @@ class ChangeWaiter:
                     if self.stop.is_set() or self.hc_args is None:
                         return
                     process = subprocess.Popen(
-                        [self.hc, "events", "--json", *self.hc_args],
+                        [_exec_bin(self.hc), "events", "--json", *self.hc_args],
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         encoding="utf-8", errors="replace",
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)

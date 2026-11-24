@@ -238,8 +238,10 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(plan["argv"][plan["argv"].index("--disallowedTools") + 1], "Edit,NotebookEdit")
         settings_path = Path(plan["argv"][plan["argv"].index("--settings") + 1])
         settings = json.loads(settings_path.read_text())
-        self.assertIn(f"Read(/{plan['result']})", settings["permissions"]["allow"])
-        self.assertIn(f"Write(/{plan['result']})", settings["permissions"]["allow"])
+        res_posix = Path(plan["result"]).as_posix().lstrip("/")
+        self.assertIn(f"Read(//{res_posix})", settings["permissions"]["allow"])
+        self.assertIn(f"Write(//{res_posix})", settings["permissions"]["allow"])
+        self.assertTrue(all("\\" not in rule for rule in settings["permissions"]["allow"]))
         self.assertNotIn("autoMemoryDirectory", settings)
 
     def test_pm_helper_start_done_and_deliver_pipeline(self) -> None:

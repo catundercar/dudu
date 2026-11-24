@@ -338,7 +338,7 @@ class ParentRollupReviewFindingsTests(unittest.TestCase):
         pm_ctx = make_ctx(self.base / "home", pane="hc:t1", hc=hc, git=git, clock=clk, env=git_env)
         _register_hc_pm(pm_ctx, self.repo, "t1")
         verify = pm_ctx.home.project_for(self.repo).ensure() / "verify"
-        verify.write_text("true\n", encoding="utf-8")
+        verify.write_text(f'"{sys.executable}" -c "pass"\n' if os.name == "nt" else "true\n", encoding="utf-8")
 
         _write_task(pm_ctx, self.repo, "demo-parent", status="in_progress")
         _write_task(

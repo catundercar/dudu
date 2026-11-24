@@ -121,9 +121,7 @@
     "--cwd",
     "<ROOT>/wt/feature",
     "--",
-    "claude",
-    "--disallowedTools",
-    "Edit,Write,NotebookEdit"
+    "claude"
    ],
    [
     "label",
@@ -137,7 +135,7 @@
    [
     "send",
     "t10",
-    "Review (read-only) of task #1 demo-rv: Work\nDo not commit, edit files or create branches: read, run the checks, report.\n- Brief: (none recorded)\n- Worktree: <ROOT>/wt/feature; range `git diff main...feature` (`--stat` first, then the source changes)\n- Checklist:\n  1. The diff against the brief: flag anything outside it.\n  2. Red lines: no `git add -A` debris, no secrets, no third-party assets, nothing that touches the user's running apps or system settings.\n  3. Correctness: edge cases the worker could not have seen (destructive file operations, compatibility with old peers, signing, OS-version behaviour). Test a claim in a scratch directory when it is cheap.\n  4. Visual or UX results: look at the evidence image.\n- The project has no verify file: skip the checks.\n\nReport: `PM_HOME=<ROOT>/ledger python3 <SCRIPTS>/pm.py update demo-rv-review --status done --note \"<numbered findings, one per line; none: no blockers>\"`\nThe PM reads only this report. Keep it under 600 characters, in the user's language. Then stop.\n"
+    "Review of task #1 demo-rv: Work\nDo not create branches or edit production code: read, run the checks, report.\n- Brief: (none recorded)\n- Worktree: <ROOT>/wt/feature; range `git diff main...feature` (`--stat` first, then the source changes)\n- Handling findings:\n  - Production code issues: report only, do not edit production code (attach a repro unit test if helpful); hand back to PM to decide and route to the worker.\n  - Test issues (unrealistic fakes/doubles, weakened assertions, isolation leaks, missing coverage, etc.): you may fix the test code directly on this branch, run the checks, commit, and list the test changes in your report (if only tests were fixed and no production blockers remain, still start your report with `no blockers`).\n- Checklist:\n  1. The diff against the brief: flag anything outside it.\n  2. Red lines: no `git add -A` debris, no secrets, no third-party assets, nothing that touches the user's running apps or system settings.\n  3. Correctness: edge cases the worker could not have seen (destructive file operations, compatibility with old peers, signing, OS-version behaviour). Test a claim in a scratch directory when it is cheap.\n  4. Visual or UX results: look at the evidence image.\n- The project has no verify file: skip the checks.\n\nReport: `PM_HOME=<ROOT>/ledger python3 <SCRIPTS>/pm.py update demo-rv-review --status done --note \"<numbered findings, one per line; none: no blockers>\"`\nThe PM reads only this report. Keep it under 600 characters, in the user's language. Then stop.\n"
    ]
   ],
   "spawns": [

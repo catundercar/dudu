@@ -93,6 +93,7 @@ export const THREAD_STRINGS = {
     detailOpenWindow: 'Toggle worker window',
     detailReviewStepTip: 'Click to toggle review window',
     agentSessionFallback: 'Session transcript unavailable; switch to live terminal.',
+    windowSizeTip: (cur, next) => `Window size: ${cur} (click for ${next})`,
   },
   zh: {
     sumWaiting: n => `${n} 等你`,
@@ -137,6 +138,7 @@ export const THREAD_STRINGS = {
     detailOpenWindow: '开关 worker 小窗',
     detailReviewStepTip: '点击开关审查小窗',
     agentSessionFallback: '暂无可解析会话，可切到原生终端查看。',
+    windowSizeTip: (cur, next) => `窗口尺寸：${cur}（点击切到 ${next}）`,
   },
 };
 
@@ -374,6 +376,14 @@ export const STRINGS = {
     checkingSent: 'Checking whether the PM already has it…',
     pmOfflineFailed: 'PM session stopped before receiving this message — click to resend',
     retrySend: 'Resend',
+    pmTurnThinking: dur => `Thinking · ${dur}`,
+    pmTurnTool: (summary, dur) => `Running ${summary} · ${dur}`,
+    pmTurnSlow: (detail, dur) => detail ? `Waiting on ${detail} · ${dur}` : `Still working · ${dur}`,
+    pmTurnStalled: (detail, dur) => detail ? `Unresponsive for ${dur} · ${detail}` : `Unresponsive for ${dur}`,
+    interruptPmTip: 'Interrupt current step (keeps PM session)',
+    interruptingPmTip: 'Interrupting…',
+    rotatePmTip: 'Start a fresh PM session from handover',
+    rotatingPmTip: 'Switching to a fresh PM session…',
     failed: error => `Not sent: ${error}`, decision: 'Decision',
     pick: 'Pick a project in the PM list to open its conversation.', noProject: 'This PM is no longer in the ledger.',
     remoteLoading: machine => `Reading the project from ${machine}…`,
@@ -618,6 +628,14 @@ export const STRINGS = {
     checkingSent: '正在核对 PM 是否已收到…',
     pmOfflineFailed: 'PM 会话已停止，未能收到此消息，点此重发',
     retrySend: '重新发送',
+    pmTurnThinking: dur => `正在思考 · ${dur}`,
+    pmTurnTool: (summary, dur) => `正在运行 ${summary} · ${dur}`,
+    pmTurnSlow: (detail, dur) => detail ? `等待返回：${detail} · ${dur}` : `仍在处理 · ${dur}`,
+    pmTurnStalled: (detail, dur) => detail ? `已连续 ${dur} 无响应 · ${detail}` : `已连续 ${dur} 无响应`,
+    interruptPmTip: '打断当前耗时操作（保留 PM 会话）',
+    interruptingPmTip: '正在打断…',
+    rotatePmTip: '换新会话从台账接手',
+    rotatingPmTip: '正在切换新会话接手…',
     failed: error => `没发出去：${error}`, decision: '决定',
     pick: '在 PM 列表里点一个项目，打开它的对话。', noProject: '台账里已经没有这个 PM。',
     remoteLoading: machine => `正在从 ${machine} 读取这个项目…`,
@@ -1021,7 +1039,7 @@ function fifoCacheGetSet(cache, key, compute, max = 512) {
 }
 
 const EVENT_TIME_CACHE = new Map();
-// "2026-11-13 09:08:12" (pm.py's local time) as ms.
+// "2026-11-13 09:08:12" (pm.py's local time) as ms in this viewer's timezone.
 export function eventTime(at) {
   const key = String(at || '');
   if (!key) return 0;
@@ -1031,26 +1049,179 @@ export function eventTime(at) {
   }, 512);
 }
 
-// Messages sent from the view show at once and give way to the same text in the
-// log. pending: [{id, text, sentAt (ms), failed?, upload? (the failure was a file not copied to another machine: shown in words)}]. A logged `user` event takes
-// the oldest pending bubble with its text, if it was written no earlier than a
-// minute before that bubble was sent (the log keeps whole seconds).
-export function settlePending(pending, events) {
-  const left = [...(pending || [])];
-  const used = new Set();
-  for (const p of pending || []) {
-    if ((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend)) continue;
-    const strictWindow = Boolean(p.timedOut || p.verifying || (p.queued && p.requeuedFromSend));
-    const minAt = strictWindow
+// Compute the timezone/clock offset (in ms) between `eventTime(server.now)` (parsed in viewer's local
+// timezone) and UTC epoch milliseconds (`server_now_ms` when present, else `clientNowMs`).
+// Example: viewer at UTC+8 reading a UTC-5 server's `now = "2026-11-23 22:30:05"` yields `-46_800_000` (-13h),
+// completely independent of network RTT when `server_now_ms` is present.
+export function computeClockOffsetMs(meta, clientNowMs = Date.now()) {
+  if (!meta || typeof meta !== 'object') return 0;
+  const serverNowMs = Number(meta.server_now_ms);
+  const nowStr = typeof meta.now === 'string' ? meta.now.trim() : '';
+  if (nowStr && Number.isFinite(serverNowMs) && serverNowMs > 0) {
+    const parsedViewer = eventTime(nowStr);
+    if (parsedViewer > 0) return parsedViewer - Math.floor(serverNowMs / 1000) * 1000;
+  }
+  const tz = typeof meta.server_tz === 'string' ? meta.server_tz.trim() : '';
+  const mTz = /^([+-])(\d\d):?(\d\d)$/.exec(tz);
+  if (mTz) {
+    const serverOffsetMin = (mTz[1] === '-' ? -1 : 1) * (Number(mTz[2]) * 60 + Number(mTz[3]));
+    const viewerOffsetMin = -new Date(clientNowMs).getTimezoneOffset();
+    return (serverOffsetMin - viewerOffsetMin) * 60_000;
+  }
+  if (nowStr && Number.isFinite(clientNowMs) && clientNowMs > 0) {
+    const parsedViewer = eventTime(nowStr);
+    if (parsedViewer > 0) {
+      const diff = parsedViewer - clientNowMs;
+      // Snap pre-upgrade remote servers (lacking server_now_ms) to 15-min timezone boundaries when >= 10m apart.
+      if (Math.abs(diff) >= 10 * 60_000) return Math.round(diff / (15 * 60_000)) * (15 * 60_000);
+    }
+  }
+  return 0;
+}
+
+// Canonical UTC epoch timestamp (ms) of a ledger event or receipt, immune to viewer/server timezone skew.
+export function eventTimeUtcMs(e, clockOffsetMs = 0) {
+  if (!e || typeof e !== 'object') return 0;
+  const explicit = Number(e.at_ms);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const rawAt = typeof e.at === 'string' ? e.at.trim() : '';
+  if (!rawAt) return 0;
+  if (typeof e.tz === 'string' && /^[+-]\d\d:?\d\d$/.test(e.tz.trim())) {
+    const isoWithTz = `${rawAt.replace(' ', 'T')}${e.tz.trim()}`;
+    const parsed = Date.parse(isoWithTz);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  const naive = eventTime(rawAt);
+  if (!(naive > 0)) return 0;
+  return naive - (Number(clockOffsetMs) || 0);
+}
+
+// Match an ordered subsequence of >= 2 eligible pending bubbles against a single coalesced text
+// (e.g. when `agy` or Claude Code merges multiple queued inputs sent during a busy PM turn with `\n`).
+export function matchCoalescedBubbles(loggedText, candidates, { truncated = false } = {}) {
+  const raw = String(loggedText ?? '');
+  if (!raw.trim() || !Array.isArray(candidates) || candidates.length < 2) return null;
+  const lines = raw.replace(/\r\n/g, '\n').split('\n');
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  const n = lines.length;
+  if (n < 2 || n > 240) return null;
+
+  const memo = new Map();
+  const solve = (lineIdx, candStart, pickedCount) => {
+    while (lineIdx < n && !lines[lineIdx].trim()) lineIdx++;
+    if (lineIdx >= n) return pickedCount >= 2 ? [] : null;
+    const stateKey = `${lineIdx}:${candStart}:${pickedCount > 0 ? 1 : 0}`;
+    if (memo.has(stateKey)) return memo.get(stateKey);
+    for (let endLine = lineIdx + 1; endLine <= n; endLine++) {
+      const seg = lines.slice(lineIdx, endLine).join('\n').trim();
+      if (!seg) continue;
+      let rem = endLine;
+      while (rem < n && !lines[rem].trim()) rem++;
+      const isLastSeg = rem >= n;
+      for (let ci = candStart; ci < candidates.length; ci++) {
+        const cand = candidates[ci];
+        const ok = isLastSeg && truncated
+          ? sameReceiptMessage({ text: seg, truncated: true }, cand.text)
+          : sameMessage(seg, cand.text);
+        if (!ok) continue;
+        const rest = solve(rem, ci + 1, pickedCount + 1);
+        if (rest !== null) {
+          const ans = [cand, ...rest];
+          memo.set(stateKey, ans);
+          return ans;
+        }
+      }
+    }
+    memo.set(stateKey, null);
+    return null;
+  };
+  return solve(0, 0, 0);
+}
+
+function pendingMinAtMs(p) {
+  const strictWindow = Boolean(p.timedOut || p.verifying || p.received || (p.queued && p.requeuedFromSend));
+  return p.received
+    ? Math.floor((Number(p.receiptAt) || Number(p.sentAt) || 0) / 1000) * 1000
+    : strictWindow
       ? Math.floor((Number(p.sentAt) || 0) / 1000) * 1000 - 2000
       : (Number(p.sentAt) || 0) - 60000;
-    const i = events.findIndex((e, n) => !used.has(n) && e.type === 'user' && sameMessage(e.text, p.text) &&
-      eventTime(e.at) >= minAt);
-    if (i < 0) continue;
-    used.add(i);
-    left.splice(left.indexOf(p), 1);
+}
+
+function bubbleMatchesCausalId(p, obj) {
+  const id = p?.msgId ? String(p.msgId) : '';
+  if (!id || !obj || typeof obj !== 'object') return false;
+  if (obj.msg_id && String(obj.msg_id) === id) return true;
+  if (Array.isArray(obj.msg_ids) && obj.msg_ids.some(x => String(x) === id)) return true;
+  return false;
+}
+
+// Messages sent from the view show at once and give way to the same message in the log:
+// 1) Causal `msg_id` / `msg_ids` match (zero clock assumptions across any timezone);
+// 2) 1-to-1 text/attachment match within UTC-calibrated window (`eventTimeUtcMs`);
+// 3) N-to-1 ordered line-partition match when an agent coalesced 2+ queued messages into one user turn.
+export function settlePending(pending, events, { clockOffsetMs = 0 } = {}) {
+  const src = Array.isArray(pending) ? pending : [];
+  const evList = Array.isArray(events) ? events : [];
+  if (!src.length || !evList.length) return pending;
+  const settledSet = new Set();
+  const usedEvents = new Set();
+
+  // Pass 1: Causal `msg_id` / `msg_ids` match (a multi-id event can settle all constituent bubbles).
+  for (let n = 0; n < evList.length; n++) {
+    const e = evList[n];
+    if (!e || e.type !== 'user') continue;
+    if (!e.msg_id && !Array.isArray(e.msg_ids)) continue;
+    let matchedAny = false;
+    for (const p of src) {
+      if (!p || settledSet.has(p)) continue;
+      if ((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend)) continue;
+      if (bubbleMatchesCausalId(p, e)) {
+        settledSet.add(p);
+        matchedAny = true;
+        if (e.msg_id && !Array.isArray(e.msg_ids)) break;
+      }
+    }
+    if (matchedAny) usedEvents.add(n);
   }
-  return left.length === (pending || []).length ? pending : left;
+
+  // Pass 2: 1-to-1 text + UTC timestamp match.
+  for (const p of src) {
+    if (!p || settledSet.has(p)) continue;
+    if ((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend)) continue;
+    const minAt = pendingMinAtMs(p);
+    const i = evList.findIndex((e, n) => !usedEvents.has(n) && e?.type === 'user' && sameMessage(e.text, p.text) &&
+      eventTimeUtcMs(e, clockOffsetMs) >= minAt);
+    if (i < 0) continue;
+    usedEvents.add(i);
+    settledSet.add(p);
+  }
+
+  // Pass 3: N-to-1 coalesced multi-message match (when PM merged 2+ queued inputs with `\n`).
+  const remainingCount = src.reduce((acc, p) => acc + (p && !settledSet.has(p) ? 1 : 0), 0);
+  if (remainingCount >= 2) {
+    for (let n = 0; n < evList.length; n++) {
+      if (usedEvents.has(n)) continue;
+      const e = evList[n];
+      if (!e || e.type !== 'user' || !String(e.text || '').includes('\n')) continue;
+      const evMs = eventTimeUtcMs(e, clockOffsetMs);
+      if (!(evMs > 0)) continue;
+      const eligible = src.filter(p =>
+        p && !settledSet.has(p) &&
+        !((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend)) &&
+        evMs >= pendingMinAtMs(p),
+      );
+      if (eligible.length < 2) continue;
+      const group = matchCoalescedBubbles(e.text, eligible);
+      if (group && group.length >= 2) {
+        usedEvents.add(n);
+        for (const hit of group) settledSet.add(hit);
+      }
+    }
+  }
+
+  if (!settledSet.size) return pending;
+  return src.filter(p => !settledSet.has(p));
 }
 
 // The opening of a PM reply as plain text: what the conversation shows while the reply is folded.
@@ -1588,7 +1759,7 @@ export const askKey = id => `${ASK}${id}`;
 // before it: a note on a question asked earlier (`pm.py log`) is no new question. pm: the project's
 // name: only its tasks count so (tasks of other projects can share a title). The same rule as pm.py's
 // answered_tasks.
-export function timeline(events, tasks = [], { pending = [], typing = false, today = '', pastes = [], pm = '', pmPane = '', taskNumbers = null } = {}) {
+export function timeline(events, tasks = [], { pending = [], typing = false, today = '', pastes = [], pm = '', pmPane = '', taskNumbers = null, clockOffsetMs = 0 } = {}) {
   const byId = new Map((tasks || []).map(t => [t.id, t]));
   const numOf = (id, ev) => taskNumber(byId.get(id)) || taskNumber(ev) || taskNumber(taskNumbers?.[id]);
   const newest = new Map();
@@ -1661,9 +1832,24 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
     keys.set(base, n + 1);
     return n ? `${base}:${n}` : base;
   };
+  const eventDay = e => {
+    const explicitMs = Number(e?.at_ms);
+    if (Number.isFinite(explicitMs) && explicitMs > 0) {
+      const ls = localStamp(explicitMs);
+      if (ls) return ls.slice(0, 10);
+    }
+    if (clockOffsetMs && e?.at) {
+      const utcMs = eventTimeUtcMs(e, clockOffsetMs);
+      if (utcMs > 0) {
+        const ls = localStamp(utcMs);
+        if (ls) return ls.slice(0, 10);
+      }
+    }
+    return String(e?.at || '').slice(0, 10);
+  };
   const push = (e, item) => {
-    ensureDay(String(e.at || '').slice(0, 10));
-    const pushed = { at: e.at || '', ...item };
+    ensureDay(eventDay(e));
+    const pushed = { at: e.at || '', ...(Number(e.at_ms) > 0 ? { at_ms: Number(e.at_ms) } : {}), ...item };
     items.push(pushed);
     return pushed;
   };
@@ -1671,15 +1857,15 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
   const placedPending = new Set();
   const pendingAnchorMs = p => {
     if (!p || p.queued) return 0;
-    const ms = Number(p.deliveredAt) || Number(p.sentAt) || 0;
+    const ms = Number(p.receiptAt) || Number(p.deliveredAt) || Number(p.sentAt) || 0;
     return Number.isFinite(ms) && ms > 0 ? ms : 0;
   };
   const pushPendingItem = p => {
     placedPending.add(p);
     const answers = p.question || addressed(squash(p.text))?.key;
     const { text, files } = splitMessage(p.text);
-    items.push({ kind: 'user', key: `pending:${p.id}`, text, pending: !p.failed && !p.queued,
-      ...(p.queued ? { queued: true } : {}), failed: p.failed || '',
+    items.push({ kind: 'user', key: `pending:${p.id}`, text, pending: !p.failed && !p.queued && !p.received,
+      ...(p.queued ? { queued: true } : {}), ...(p.received ? { received: true } : {}), failed: p.failed || '',
       // unconfirmed: it may well have arrived (see unconfirmedSend), so no "not sent" before it;
       // checking: a resend checking the log first (reconcilePendingSends).
       ...(p.failed && p.timedOut ? { unconfirmed: true } : {}), ...(p.verifying && !p.failed ? { checking: true } : {}),
@@ -1701,19 +1887,21 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
   }
   if (anchoredPending.length > 1) anchoredPending.sort((a, b) => a.cutoffMs - b.cutoffMs);
   let anchoredIdx = 0;
-  const flushPendingBefore = rawAt => {
+  const flushPendingBefore = ev => {
     if (anchoredIdx >= anchoredPending.length) return;
+    const rawAt = typeof ev === 'string' ? ev : ev?.at;
+    const hasUtc = Boolean(ev && typeof ev === 'object' && (Number(ev.at_ms) > 0 || clockOffsetMs));
     const stamp = String(rawAt || '');
-    if (!stamp) return;
-    const standard = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(stamp);
+    if (!stamp && !hasUtc) return;
+    const standard = !hasUtc && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(stamp);
     let evMs = -1;
     while (anchoredIdx < anchoredPending.length) {
       const cur = anchoredPending[anchoredIdx];
       // Sent or failed bubbles stay anchored at when they were sent instead of sliding after
-      // messages logged >5s later; a 5s window absorbs normal hook write latency on preceding sends.
+      // messages logged >5s later; UTC ms avoids 13-hour cross-timezone mis-ordering.
       const after = standard && cur.cutoffAt
         ? stamp > cur.cutoffAt
-        : ((evMs < 0 ? (evMs = eventTime(stamp)) : evMs) > cur.cutoffMs);
+        : ((evMs < 0 ? (evMs = hasUtc ? eventTimeUtcMs(ev, clockOffsetMs) : eventTime(stamp)) : evMs) > cur.cutoffMs);
       if (!after) break;
       anchoredIdx++;
       ensureDay(cur.date);
@@ -1724,7 +1912,7 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
     const e = events[eventIndex];
     if (e.type === 'user' || e.type === 'pm') {
       if (!squash(e.text)) continue;
-      if (anchoredIdx < anchoredPending.length) flushPendingBefore(e.at);
+      if (anchoredIdx < anchoredPending.length) flushPendingBefore(e);
       // A message that was only images keeps its marks when no screenshot is found for it.
       const bare = e.type === 'user' ? withoutMarks(e.text) : e.text;
       const said = pasted.has(e) || wordsOf(bare) || splitMessage(bare).files.length ? bare : e.text;
@@ -1755,11 +1943,11 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
     } else if (e.type === 'decision') {
       const decText = squash(e.text);
       if (decText) {
-        if (anchoredIdx < anchoredPending.length) flushPendingBefore(e.at);
+        if (anchoredIdx < anchoredPending.length) flushPendingBefore(e);
         push(e, { kind: 'decision', key: key(e, 'decision'), text: decText, quote: squash(e.quote) });
       }
     } else if (e.type === 'thread' && e.task) {
-      if (anchoredIdx < anchoredPending.length) flushPendingBefore(e.at);
+      if (anchoredIdx < anchoredPending.length) flushPendingBefore(e);
       const known = before.has(e.task);
       if (!known && asking(e, undefined)) asked.add(e.task);
       const was = before.get(e.task);
@@ -1773,7 +1961,7 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
         let at = items.length - 1;
         while (at >= 0 && items[at].kind === 'about') at--;
         const last = items[at];
-        if (last?.kind === 'threads' && String(e.at || '').slice(0, 10) === day) last.rows.push(row);
+        if (last?.kind === 'threads' && eventDay(e) === day) last.rows.push(row);
         else push(e, { kind: 'threads', key: key(e, 'threads'), rows: [row] });
       } else if (known && !gone) {
         const cur = now(e.task);
@@ -2068,11 +2256,24 @@ function threadSessionsAndFinished(pm, mine, openIds, events, terms = [], live =
   const roots = [trimFolder(pm?.repo), trimFolder(pm?.worktrees)].filter(Boolean);
   const within = cwd => roots.some(root => cwd === root || cwd.startsWith(root === '/' ? root : `${root}/`));
   const pmAddress = pm ? terminalFor(pmRow(pm), terms || [])?.address : '';
+  const pmHelperTasks = new Map();
+  for (const h of Array.isArray(pm?.helpers) ? pm.helpers : []) {
+    if (!h || typeof h !== 'object') continue;
+    if (h.status !== 'running' || h.offline || h.live_state === 'offline') continue;
+    const addr = String(h.terminal || h.pane || '').replace(/^hc:/, '');
+    if (!addr) continue;
+    const hName = String(h.name || '');
+    const term = local.find(x => x.address === addr);
+    if (!term || !term.labels?.helper || (hName && term.labels.helper !== hName)) continue;
+    const ft = pmHelperTask(h, terms);
+    if (ft) pmHelperTasks.set(addr, ft);
+    else pmHelperTasks.delete(addr);
+  }
   const found = (live || []).flatMap(agent => {
     const term = local.find(x => x.address === agent.address);
     if (!term || !within(trimFolder(term.cwd))) return [];
     if (term.address === pmAddress || term.labels?.pm || openIds.has(term.labels?.task) || openIds.has(term.labels?.['helper.of']) ||
-      openIds.has(term.labels?.['helper.task'])) return [];
+      openIds.has(term.labels?.['helper.task']) || openIds.has(pmHelperTasks.get(term.address))) return [];
     return [{ agent, term }];
   });
   const perTab = new Map();
@@ -2400,6 +2601,37 @@ export function sendArgv(address, text) {
   return ['hc', 'send', '--', address, text];
 }
 
+export function makeClientMsgId(now = Date.now(), seq = 1) {
+  const ts = Math.max(0, Math.floor(Number(now) || Date.now())).toString(36);
+  const s = Math.max(1, Math.floor(Number(seq) || 1)).toString(36);
+  const rand = Math.random().toString(36).slice(2, 8) || '000000';
+  return `u-${ts}-${s}-${rand}`;
+}
+
+export function projectSendArgv(slug, { msgId, target = '', text = null, fromFile = null, question = '' } = {}) {
+  const args = ['project', 'send', String(slug), '--msg-id', String(msgId)];
+  if (question) args.push('--question', String(question));
+  if (fromFile != null) {
+    args.push(`--from=${String(fromFile)}`);
+    if (target) args.push('--', String(target));
+    return args;
+  }
+  args.push('--');
+  if (target) args.push(String(target));
+  args.push(String(text ?? ''));
+  return args;
+}
+
+export function projectInterruptArgv(slug) {
+  return ['project', 'interrupt', String(slug)];
+}
+
+export function rotatePmArgs(repo, reason = '') {
+  const args = ['rotate', '--repo', String(repo || '')];
+  if (reason) args.push('--reason', String(reason));
+  return args;
+}
+
 export function readScreenArgv(address) {
   return ['hc', 'read', '--', address];
 }
@@ -2411,11 +2643,120 @@ export function pmLiveStatus(pmTerm, live = []) {
 }
 
 // True when the PM's foreground agent turn is actively running (excluding background-shell-only
-// status reports like "1 shell still running" while the REPL prompt itself is idle).
-export function pmTurnWorking(pmTerm, live = []) {
+// status reports like "1 shell still running" or `pm.turn.phase === 'idle'` with `bg_shells > 0`).
+export function pmTurnWorking(pmTerm, live = [], turn = null) {
   if (pmLiveStatus(pmTerm, live) !== 'working') return false;
   const msg = String(pmTerm?.report?.msg || '');
-  return !/\bshells?\s+still\s+running\b/i.test(msg);
+  if (/\bshells?\s+still\s+running\b/i.test(msg)) return false;
+  if (turn && typeof turn === 'object' && turn.phase === 'idle' && Number(turn.bg_shells) > 0) return false;
+  return true;
+}
+
+export const PM_SOFT_STALL_MS = 90_000;
+export const PM_HARD_STALL_MS = 300_000;
+
+export function formatTurnDuration(ms) {
+  const totalSec = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  if (totalSec < 60) return `${totalSec}s`;
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  if (mins < 60) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
+}
+
+// Pure view-model for the quiet single-line coordinator activity indicator at the bottom of the timeline.
+export function pmActivityView(lang, {
+  turn = null,
+  working = false,
+  pendingSending = false,
+  nowMs = Date.now(),
+  serverNowMs = 0,
+  receivedAtMs = 0,
+} = {}) {
+  const active = Boolean(working || pendingSending);
+  if (!active) {
+    return { active: false, mode: 'idle', label: '', slow: false, stalled: false, canInterrupt: false, canRotate: false };
+  }
+  if (!turn || typeof turn !== 'object' || turn.phase === 'idle' || turn.phase === 'offline') {
+    return { active: true, mode: 'dots', label: '', slow: false, stalled: false, canInterrupt: false, canRotate: false };
+  }
+  const refNow = Number(serverNowMs) > 0
+    ? Number(serverNowMs) + (Number(receivedAtMs) > 0 ? Math.max(0, nowMs - Number(receivedAtMs)) : 0)
+    : nowMs;
+  const startedMs = Number(turn.started_ms) || 0;
+  const lastActMs = Number(turn.last_activity_ms) || startedMs;
+  const elapsedMs = startedMs > 0 ? Math.max(Number(turn.elapsed_ms) || 0, refNow - startedMs) : (Number(turn.elapsed_ms) || 0);
+  const idleForMs = lastActMs > 0 ? Math.max(Number(turn.idle_for_ms) || 0, refNow - lastActMs) : (Number(turn.idle_for_ms) || 0);
+  const act = turn.activity && typeof turn.activity === 'object' ? turn.activity : null;
+  const rawSummary = act ? String(act.summary || act.tool || '').trim() : '';
+  const detail = rawSummary.length > 52 ? `${rawSummary.slice(0, 51)}…` : rawSummary;
+  const stalled = Boolean(turn.stalled || turn.phase === 'stalled' || idleForMs >= PM_HARD_STALL_MS);
+  const slow = !stalled && Boolean(turn.slow || idleForMs >= PM_SOFT_STALL_MS);
+  if (!stalled && !slow && elapsedMs < 3000 && !detail) {
+    return { active: true, mode: 'dots', label: '', slow: false, stalled: false, canInterrupt: false, canRotate: false };
+  }
+  const dur = formatTurnDuration(stalled || slow ? Math.max(elapsedMs, idleForMs) : elapsedMs);
+  if (stalled) {
+    return {
+      active: true,
+      mode: 'stalled',
+      label: word(lang, 'pmTurnStalled', detail, dur),
+      slow: false,
+      stalled: true,
+      canInterrupt: Boolean(working),
+      canRotate: true,
+    };
+  }
+  if (slow) {
+    return {
+      active: true,
+      mode: 'slow',
+      label: word(lang, 'pmTurnSlow', detail, dur),
+      slow: true,
+      stalled: false,
+      canInterrupt: Boolean(working),
+      canRotate: false,
+    };
+  }
+  return {
+    active: true,
+    mode: 'working',
+    label: detail ? word(lang, 'pmTurnTool', detail, dur) : word(lang, 'pmTurnThinking', dur),
+    slow: false,
+    stalled: false,
+    canInterrupt: false,
+    canRotate: false,
+  };
+}
+
+// Bounded async gate preventing hung HostModule `exec` Promises (e.g. across layout switches or dropped
+// remote sockets) from locking `refresh` / `readLog` / `flushQueue` forever.
+export function createAsyncGate() {
+  return { busy: false, seq: 0, deadlineAt: 0, again: false };
+}
+
+export function tryEnterAsyncGate(gate, nowMs, timeoutMs) {
+  const g = gate || createAsyncGate();
+  if (g.busy && nowMs < g.deadlineAt) {
+    g.again = true;
+    return 0;
+  }
+  g.busy = true;
+  g.again = false;
+  g.seq = (g.seq || 0) + 1;
+  g.deadlineAt = nowMs + Math.max(1000, Number(timeoutMs) || 15000);
+  return g.seq;
+}
+
+export function finishAsyncGate(gate, token) {
+  if (!gate || gate.seq !== token) return false;
+  gate.busy = false;
+  gate.deadlineAt = 0;
+  const rerun = Boolean(gate.again);
+  gate.again = false;
+  return rerun;
 }
 
 // Identity of the active agent session inside `pmTerm` (e.g. `fg:<pid>` for the child agent process
@@ -2495,10 +2836,185 @@ export function logKey(machine, path, slug) {
   return path && slug ? `${machine || ''}\n${path}\n${slug}` : '';
 }
 
-// Reconcile pending user bubbles against conversation events, PM session/terminal swaps, and
+// Receipt timestamp in ms: prefers `at_ms` written by the PM hook, falls back to UTC-calibrated `at`.
+export function receiptTime(r, clockOffsetMs = 0) {
+  if (!r || typeof r !== 'object') return 0;
+  const ms = Number(r.at_ms);
+  if (Number.isFinite(ms) && ms > 0) return ms;
+  return eventTimeUtcMs(r, clockOffsetMs);
+}
+
+// Unicode code-point count matching Python's `len(str)` (astral chars/emoji count as 1, not 2 UTF-16 units).
+export function codePointLength(str) {
+  let n = 0;
+  for (const _ of String(str || '')) n++;
+  return n;
+}
+
+// Whether a PM receipt (written at UserPromptSubmit before conversation.jsonl) matches a sent bubble.
+export function sameReceiptMessage(receipt, sent) {
+  if (!receipt || typeof receipt !== 'object') return false;
+  const rText = String(receipt.text ?? '');
+  if (!rText) return false;
+  if (!receipt.truncated) return sameMessage(rText, sent);
+  const normSent = squash(sent);
+  const normRec = squash(rText);
+  if (normSent.startsWith(normRec) && (!receipt.len || codePointLength(normSent) === Number(receipt.len))) return true;
+  return splitMessage(sent).files.length > 0 && wordsOf(sent).startsWith(wordsOf(rText));
+}
+
+// Merge receipts from `pm.py state` and `pm.py project events`, deduplicating identical entries.
+export function mergeReceipts(a = [], b = []) {
+  const out = [];
+  const seen = new Set();
+  for (const list of [a, b]) {
+    if (!Array.isArray(list)) continue;
+    for (const r of list) {
+      if (!r || typeof r !== 'object') continue;
+      const key = `${receiptTime(r)}\0${r.digest || r.text || ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+// Indices of receipts already accounted for by logged `user` events in `events`, so a newly sent
+// duplicate-text message cannot falsely match an earlier message's already-settled receipt.
+export function settledReceiptIndices(receipts = [], events = [], { clockOffsetMs = 0 } = {}) {
+  const used = new Set();
+  if (!Array.isArray(receipts) || !receipts.length || !Array.isArray(events) || !events.length) return used;
+  const usedEvents = new Set();
+  for (let ei = 0; ei < events.length; ei++) {
+    const e = events[ei];
+    if (!e || e.type !== 'user') continue;
+    const eMs = eventTimeUtcMs(e, clockOffsetMs);
+    for (let i = 0; i < receipts.length; i++) {
+      if (used.has(i)) continue;
+      const r = receipts[i];
+      if (!r || typeof r !== 'object') continue;
+      if (e.msg_id && (r.msg_id === e.msg_id || (Array.isArray(r.msg_ids) && r.msg_ids.includes(e.msg_id)))) {
+        used.add(i);
+        usedEvents.add(ei);
+        if (r.msg_id) break;
+        continue;
+      }
+      if (!(eMs > 0) || !sameReceiptMessage(r, e.text)) continue;
+      const rMs = receiptTime(r, clockOffsetMs);
+      if (!(rMs > 0)) continue;
+      const rSecMs = Math.floor(rMs / 1000) * 1000;
+      if (eMs >= rSecMs - 2000 && eMs <= rMs + 60_000) {
+        used.add(i);
+        usedEvents.add(ei);
+        break;
+      }
+    }
+  }
+  // Also deduct coalesced receipts accounted for by 2+ consecutive individual user events in `events`.
+  const unconsumedUserEvents = events
+    .map((e, ei) => ({ e, ei }))
+    .filter(({ e, ei }) => e?.type === 'user' && !usedEvents.has(ei))
+    .map(({ e }) => ({ text: e.text, atMs: eventTimeUtcMs(e, clockOffsetMs) }));
+  if (unconsumedUserEvents.length >= 2) {
+    for (let i = 0; i < receipts.length; i++) {
+      if (used.has(i)) continue;
+      const r = receipts[i];
+      if (!r || typeof r !== 'object' || !String(r.text || '').includes('\n')) continue;
+      const rMs = receiptTime(r, clockOffsetMs);
+      if (!(rMs > 0)) continue;
+      const rSecMs = Math.floor(rMs / 1000) * 1000;
+      const elig = unconsumedUserEvents.filter(u => u.atMs >= rSecMs - 10_000 && u.atMs <= rMs + 60_000);
+      if (elig.length >= 2 && matchCoalescedBubbles(r.text, elig, { truncated: Boolean(r.truncated) })) {
+        used.add(i);
+      }
+    }
+  }
+  return used;
+}
+
+// Find the first unused PM receipt that confirms `bubble` was received at or after `bubble.sentAt`.
+export function findReceiptMatch(bubble, receipts = [], used = null, { clockOffsetMs = 0 } = {}) {
+  if (!bubble || !Array.isArray(receipts) || !receipts.length) return null;
+  const sentAt = Number(bubble.sentAt) || 0;
+  for (let i = 0; i < receipts.length; i++) {
+    if (used?.has(i)) continue;
+    const r = receipts[i];
+    if (!r || typeof r !== 'object') continue;
+    const causalHit = bubbleMatchesCausalId(bubble, r);
+    if (!causalHit && !sameReceiptMessage(r, bubble.text)) continue;
+    const hasMs = Number.isFinite(Number(r.at_ms)) && Number(r.at_ms) > 0;
+    const rMs = hasMs ? Number(r.at_ms) : eventTimeUtcMs(r, clockOffsetMs);
+    if (!causalHit && sentAt > 0) {
+      const minAt = hasMs ? sentAt : Math.floor(sentAt / 1000) * 1000;
+      if (!(rMs >= minAt)) continue;
+    }
+    if (used && (!Array.isArray(r.msg_ids) || r.msg_ids.length <= 1)) used.add(i);
+    return { index: i, receipt: r, atMs: rMs };
+  }
+  return null;
+}
+
+// Confirm 2+ queued/delivered pending bubbles that an agent coalesced into a single `\n`-joined receipt.
+export function findCoalescedReceiptMatches(bubbles = [], receipts = [], used = null, { clockOffsetMs = 0 } = {}) {
+  const hits = new Map();
+  if (!Array.isArray(bubbles) || bubbles.length < 2 || !Array.isArray(receipts) || !receipts.length) return hits;
+  for (let i = 0; i < receipts.length; i++) {
+    if (used?.has(i)) continue;
+    const r = receipts[i];
+    if (!r || typeof r !== 'object' || !String(r.text || '').includes('\n')) continue;
+    const hasMs = Number.isFinite(Number(r.at_ms)) && Number(r.at_ms) > 0;
+    const rMs = hasMs ? Number(r.at_ms) : eventTimeUtcMs(r, clockOffsetMs);
+    const eligible = bubbles.filter(b => {
+      if (!b || hits.has(b) || b.received || b.upload || (b.failed && !b.timedOut) || (b.queued && !b.requeuedFromSend)) return false;
+      const sentAt = Number(b.sentAt) || 0;
+      if (sentAt <= 0) return true;
+      const minAt = hasMs ? sentAt : Math.floor(sentAt / 1000) * 1000;
+      return rMs >= minAt;
+    });
+    if (eligible.length < 2) continue;
+    const group = matchCoalescedBubbles(r.text, eligible, { truncated: Boolean(r.truncated) });
+    if (group && group.length >= 2) {
+      if (used) used.add(i);
+      for (const b of group) hits.set(b, { index: i, receipt: r, atMs: rMs });
+    }
+  }
+  return hits;
+}
+
+// Transition a pending/failed/verifying bubble to receipt-confirmed: stays visible until
+// conversation.jsonl catches up and settles it, but never shows "Sending…", never fails, and
+// can never be re-sent.
+export function confirmReceiptBubble(p, atMs = 0, now = Date.now()) {
+  return {
+    ...p,
+    received: true,
+    receiptAt: Number(atMs) > 0 ? Number(atMs) : (Number(p.receiptAt) || now),
+    queued: false,
+    inFlight: false,
+    inFlightAt: 0,
+    inFlightTo: '',
+    inFlightSession: '',
+    verifying: false,
+    verifySince: 0,
+    failed: '',
+    failedAt: 0,
+    timedOut: false,
+    unsure: false,
+    deliveredAt: 0,
+    idleSince: 0,
+    swapDetectedAt: 0,
+    swapWaitSince: 0,
+  };
+}
+
+// Reconcile pending user bubbles against conversation events, PM receipts, PM session/terminal swaps, and
 // delivery confirmation timeouts:
-// - Logged `user` events settle matching bubbles (including bubbles previously marked `timedOut`,
+// - Logged `user` events settle matching bubbles (including bubbles previously marked `timedOut` or `received`,
 //   so a late log write never leaves a duplicate failed bubble beside the real message).
+// - PM receipts (`receipts.json`, written at UserPromptSubmit before conversation.jsonl) immediately confirm
+//   matching bubbles (`received: true`), preventing timeout/swap requeue/manual resend duplicates even when
+//   conversation.jsonl has not flushed or refreshed yet.
 // - Unconfirmed bubbles sent to a PM terminal/session that swapped before logging re-queue for the
 //   new PM once `logReady` confirms the outgoing PM did not write them to `conversation.jsonl`.
 // - Unconfirmed bubbles wait while the PM is actively working on a foreground turn (e.g. queued in
@@ -2507,9 +3023,9 @@ export function logKey(machine, path, slug) {
 // - Bubbles queued while waiting for a vanished PM terminal fail cleanly if no replacement PM
 //   comes online within `PM_SWAP_WAIT_MS`.
 // - A timed-out bubble the user asked to resend is `verifying` first: it goes out again only once
-//   a log read that started after the click (`logFreshFrom >= verifySince`) still lacks it; when the
-//   log has it, settlePending drops it as delivered and nothing is sent twice. A log that cannot be
-//   read within RESEND_VERIFY_WAIT_MS does not hold the resend the user asked for.
+//   a log read that started after the click (`logFreshFrom >= verifySince`) still lacks both a logged
+//   event and a PM receipt; when either has it, nothing is sent twice. A log that cannot be read within
+//   RESEND_VERIFY_WAIT_MS does not hold the resend the user asked for.
 export function reconcilePendingSends(pending, events = [], {
   now = Date.now(),
   pmAddress = '',
@@ -2521,21 +3037,51 @@ export function reconcilePendingSends(pending, events = [], {
   remote = false,
   lang = 'en',
   logFreshFrom = 0,
+  receipts = [],
+  clockOffsetMs = 0,
   confirmIdleMs = remote ? SEND_CONFIRM_REMOTE_IDLE_MS : SEND_CONFIRM_IDLE_MS,
   swapWaitMs = PM_SWAP_WAIT_MS,
 } = {}) {
-  const base = settlePending(pending, events);
+  const base = settlePending(pending, events, { clockOffsetMs });
   if (!base?.length) {
-    return { pending: base, settled: (pending || []).filter(p => !base?.includes(p)), requeued: [], failed: [], needsFollowup: false };
+    return { pending: base, settled: (pending || []).filter(p => !base?.includes(p)), confirmed: [], requeued: [], failed: [], needsFollowup: false };
   }
   const settled = (pending || []).filter(p => !base.includes(p));
+  const confirmed = [];
   const requeued = [];
   const failed = [];
+  const receiptList = Array.isArray(receipts) ? receipts : [];
+  const usedReceipts = settledReceiptIndices(receiptList, events, { clockOffsetMs });
+  if (receiptList.length > 0) {
+    for (const p of base) {
+      if (p?.received) findReceiptMatch(p, receiptList, usedReceipts, { clockOffsetMs });
+    }
+  }
+  const coalescedHits = receiptList.length > 0
+    ? findCoalescedReceiptMatches(base, receiptList, usedReceipts, { clockOffsetMs })
+    : new Map();
   let changed = base !== pending;
   let needsFollowup = false;
 
   const next = base.map(p => {
-    if (!p || p.failed) return p;
+    if (!p) return p;
+    if (p.received) return p;
+
+    // Receipt confirmation: if PM already recorded receipt for this sent bubble, confirm it at once
+    // and never time out, swap-requeue, or resend (even if conversation.jsonl has not caught up yet).
+    // Never swallow unsent queued bubbles or non-timeout send failures (`hc send` exited non-zero).
+    const canConfirmByReceipt = !p.upload && !(p.failed && !p.timedOut) && (!p.queued || Boolean(p.requeuedFromSend));
+    if (canConfirmByReceipt && receiptList.length > 0) {
+      const hit = coalescedHits.get(p) || findReceiptMatch(p, receiptList, usedReceipts, { clockOffsetMs });
+      if (hit) {
+        changed = true;
+        const updated = confirmReceiptBubble(p, hit.atMs, now);
+        confirmed.push({ ...updated, wasTimedOut: Boolean(p.timedOut), wasFailed: Boolean(p.failed) });
+        return updated;
+      }
+    }
+
+    if (p.failed) return p;
 
     // 0. Resend asked for a timed-out bubble: the log was not in it (settlePending above), so send.
     if (p.verifying) {
@@ -2596,11 +3142,12 @@ export function reconcilePendingSends(pending, events = [], {
       return p;
     }
 
-    // 2. Orphaned inFlight safety net (e.g. an unexpected host throw skipped deliverBubble cleanup).
+    // 2. Orphaned inFlight safety net (e.g. an unexpected host throw or dropped Promise skipped deliverBubble cleanup).
     if (p.inFlight) {
       const started = Number(p.inFlightAt) || Number(p.sentAt) || 0;
       const limit = remote && p.files?.length ? SEND_INFLIGHT_REMOTE_UPLOAD_MS : SEND_INFLIGHT_STUCK_MS;
-      if (started > 0 && !flushingQueue && !pmWorking && now - started >= limit) {
+      const hardLimit = limit + 15_000;
+      if (started > 0 && !pmWorking && ((!flushingQueue && now - started >= limit) || now - started >= hardLimit)) {
         changed = true;
         const updated = {
           ...p,
@@ -2626,8 +3173,8 @@ export function reconcilePendingSends(pending, events = [], {
     const deliveredSecMs = Math.floor(deliveredAt / 1000) * 1000;
     const freshNotices = (events || []).filter(e =>
       e?.type === 'pm' && Boolean(e.notice) &&
-      eventTime(e.at) >= deliveredSecMs &&
-      (!p.swapHandledAt || eventTime(e.at) > p.swapHandledAt));
+      eventTimeUtcMs(e, clockOffsetMs) >= deliveredSecMs &&
+      (!p.swapHandledAt || eventTimeUtcMs(e, clockOffsetMs) > p.swapHandledAt));
     const noticeTargetSwapped = Boolean(p.sentTo) && freshNotices.some(e => {
       const byAddr = noticeTargetAddr(e.by);
       return Boolean(byAddr && byAddr !== p.sentTo);
@@ -2671,7 +3218,7 @@ export function reconcilePendingSends(pending, events = [], {
     const turnEndedAfter = (events || []).some(e =>
       e?.type === 'pm' && !e.notice &&
       (!p.sentTo || !e.by || e.by === `hc:${p.sentTo}`) &&
-      eventTime(e.at) >= deliveredAt + 3000);
+      eventTimeUtcMs(e, clockOffsetMs) >= deliveredAt + 3000);
     const busyTurn = pmWorking && !turnEndedAfter;
     const idleSince = busyTurn ? 0 : (Number(p.idleSince) > 0 ? Number(p.idleSince) : now);
     const idleExpired = !busyTurn && idleSince > 0 && now - idleSince >= confirmIdleMs;
@@ -2711,6 +3258,7 @@ export function reconcilePendingSends(pending, events = [], {
   return {
     pending: changed ? next : base,
     settled,
+    confirmed,
     requeued,
     failed,
     needsFollowup,
@@ -2777,6 +3325,7 @@ export const QUEUE_PM_LIMIT = 20;
 
 const SEND_STAGES = ['queued', 'inFlight', 'delivered', 'verifying'];
 function sendStage(p) {
+  if (p.received) return '';
   if (p.verifying) return 'verifying';
   if (p.inFlight) return 'inFlight';
   if (!p.queued && Number(p.deliveredAt) > 0) return 'delivered';
@@ -2814,6 +3363,7 @@ export function readQueuedSends(text) {
         const stage = SEND_STAGES.includes(item.stage) ? item.stage : 'queued';
         clean.push({
           id: Number.isInteger(item.id) && item.id > 0 ? item.id : clean.length + 1,
+          ...(item.msgId ? { msgId: String(item.msgId) } : {}),
           text: msg || messageText(said, files),
           said,
           words: String(item.words ?? '').trim(),
@@ -2848,6 +3398,7 @@ export function keepQueuedSends(stored, pmName, pending) {
       const stage = sendStage(p);
       return {
         id: p.id,
+        ...(p.msgId ? { msgId: String(p.msgId) } : {}),
         text: p.text,
         said: p.said ?? p.words ?? p.text,
         words: p.words ?? '',
@@ -2877,10 +3428,10 @@ export function keepQueuedSends(stored, pmName, pending) {
 // first. Sent ones wait for the log afresh (idleSince 0). A resend being checked checks again.
 export function restoreQueuedPending(saved, existing = [], now = Date.now()) {
   const cur = Array.isArray(existing) ? [...existing] : [];
-  const seen = new Set(cur.map(p => `${p.sentAt || 0}\n${p.text || ''}`));
+  const seen = new Set(cur.map(p => p.msgId ? `id:${p.msgId}` : `${p.sentAt || 0}\n${p.text || ''}`));
   let maxId = cur.reduce((m, p) => Math.max(m, Number(p?.id) || 0), 0);
   for (const item of Array.isArray(saved) ? saved : []) {
-    const sig = `${item.sentAt || 0}\n${item.text || ''}`;
+    const sig = item.msgId ? `id:${item.msgId}` : `${item.sentAt || 0}\n${item.text || ''}`;
     if (seen.has(sig)) continue;
     seen.add(sig);
     const id = Number.isInteger(item.id) && item.id > 0 && !cur.some(p => p.id === item.id) ? item.id : ++maxId;
@@ -3401,7 +3952,7 @@ export function projectSlug(pm) {
 export function isOldPmCommand(result) {
   if (!result || result.code === 0) return false;
   const text = `${result.stderr || ''}\n${result.stdout || ''}`;
-  return /invalid choice:\s*['"]?(?:project|events|log|context|library|memory|file|files|save|delete|restore|history|add|retopic|session|change)['"]?|unknown (?:project )?command|unrecognized arguments/i.test(text);
+  return /invalid choice:\s*['"]?(?:project|events|log|context|library|memory|file|files|save|delete|restore|history|add|retopic|session|change|send|interrupt)['"]?|unknown (?:project )?command|unrecognized arguments/i.test(text);
 }
 
 // A `--before` byte anchor that no longer matches the file on disk (the log was replaced or rewritten).
@@ -3660,9 +4211,10 @@ export function parseVersionConflict(result) {
 }
 
 export const INTERNAL_PROJECT_FILES = new Set([
-  'conversation.jsonl', 'delivered.json', 'delivered.lock', 'deliver.lock',
+  'conversation.jsonl', 'receipts.json', 'receipts.lock', 'delivered.json', 'delivered.lock', 'deliver.lock',
   'turn-cause.json', 'taken-in.json', 'takeover.json', 'pm-settings.json',
-  'schedules.json', 'dudu-attachments.json', 'task-seq.json',
+  'schedules.json', 'dudu-attachments.json', 'task-seq.json', 'agy-transcript.json',
+  'pm-turn.json', 'pm-turn.lock',
 ]);
 
 function splitProjectRel(raw, ledgerHome, slug) {
@@ -6846,7 +7398,7 @@ export function helperPurpose(h) {
 }
 
 // The task a PM-owned helper (`pm.helpers` in `pm.py state`) serves, or '':
-//   1. its ledger `for_task` (pm.py records it; `state` may not pass it on yet),
+//   1. its `for_task` (`pm.py state` exposes it from the ledger or `helper.task` label),
 //   2. the `helper.task` label of its terminal (live or ended),
 //   3. an ended land-/triage- helper whose terminal is gone: the task id its pm.py-written prompt names.
 export function pmHelperTask(h, terms = []) {
@@ -7283,9 +7835,48 @@ export function taskTree(pm, tasks, events = [], { terms = [], live = [], tabs =
   return { groups, flatOpen, sessions: base.sessions, finished };
 }
 
-// ---- In-Project floating agent small windows (toggle, cap 2, LRU eviction, mode switch) ---
+// ---- In-Project floating agent small windows (toggle, cap 2, LRU eviction, mode & size) ---
 
 export const AGENT_WINDOW_MAX = 2;
+export const AGENT_WINDOW_SIZE_ORDER = ['s', 'm', 'l'];
+export const AGENT_WINDOW_DEFAULT_SIZE = 'm';
+export const AGENT_WINDOW_SIZES = {
+  s: { chat: { width: 420, height: 340 }, terminal: { width: 440, height: 300 } },
+  m: { chat: { width: 520, height: 420 }, terminal: { width: 540, height: 380 } },
+  l: { chat: { width: 760, height: 580 }, terminal: { width: 800, height: 540 } },
+};
+
+export function normalizeAgentWindowSize(size) {
+  const key = String(size || '').toLowerCase();
+  return AGENT_WINDOW_SIZE_ORDER.includes(key) ? key : AGENT_WINDOW_DEFAULT_SIZE;
+}
+
+export function nextAgentWindowSize(size) {
+  const cur = normalizeAgentWindowSize(size);
+  const idx = AGENT_WINDOW_SIZE_ORDER.indexOf(cur);
+  return AGENT_WINDOW_SIZE_ORDER[(idx + 1) % AGENT_WINDOW_SIZE_ORDER.length];
+}
+
+export function agentWindowDimensions(mode, size = AGENT_WINDOW_DEFAULT_SIZE, { maxWidth = 0, maxHeight = 0 } = {}) {
+  const preset = AGENT_WINDOW_SIZES[normalizeAgentWindowSize(size)];
+  const base = mode === 'terminal' ? preset.terminal : preset.chat;
+  const width = maxWidth > 0 ? Math.min(base.width, Math.max(360, Math.floor(maxWidth))) : base.width;
+  const height = maxHeight > 0 ? Math.min(base.height, Math.max(260, Math.floor(maxHeight))) : base.height;
+  return { width, height };
+}
+
+export function agentWindowTerminalAddresses(windows, machine = '') {
+  const list = Array.isArray(windows) ? windows : [];
+  const prefix = machine ? `${machine}/` : '';
+  const seen = new Set();
+  for (const w of list) {
+    if (w?.mode !== 'terminal' || !w.address) continue;
+    const raw = String(w.address);
+    const addr = (prefix && raw.startsWith(prefix)) ? raw : onMachine(raw, machine);
+    if (addr) seen.add(addr);
+  }
+  return [...seen].sort();
+}
 
 export function agentWindowOpen(windows, key) {
   return Boolean(key) && Array.isArray(windows) && windows.some(w => w?.key === key);
@@ -7316,6 +7907,7 @@ export function toggleAgentWindow(windows, spec, { max = AGENT_WINDOW_MAX } = {}
     threadTitle: String(spec.threadTitle || ''),
     address,
     mode: spec.mode || spec.defaultMode || 'chat',
+    size: normalizeAgentWindowSize(spec.size),
     canSwitchMode: Boolean(spec.canSwitchMode ?? address),
     typing: Boolean(spec.typing),
     model: String(spec.model || ''),
@@ -7388,6 +7980,18 @@ export function toggleAgentWindowMode(windows, key, nextMode = '') {
   }
   if (cur.mode === want) return { windows: list, changed: false, window: cur };
   const updated = { ...cur, mode: want };
+  return { windows: list.map((w, i) => (i === idx ? updated : w)), changed: true, window: updated };
+}
+
+export function setAgentWindowSize(windows, key, nextSize = '') {
+  const list = Array.isArray(windows) ? windows : [];
+  const idx = list.findIndex(w => w?.key === key);
+  if (idx < 0) return { windows: list, changed: false, window: null };
+  const cur = list[idx];
+  const curSize = normalizeAgentWindowSize(cur.size);
+  const want = nextSize ? normalizeAgentWindowSize(nextSize) : nextAgentWindowSize(curSize);
+  if (curSize === want && cur.size === want) return { windows: list, changed: false, window: cur };
+  const updated = { ...cur, size: want };
   return { windows: list.map((w, i) => (i === idx ? updated : w)), changed: true, window: updated };
 }
 
@@ -7872,7 +8476,7 @@ export function pendingSignature(pending) {
   for (let i = 0; i < pending.length; i++) {
     const p = pending[i];
     if (!p) { sig += '\x1e'; continue; }
-    sig += `\x1e${p.id ?? ''}\x1f${p.failed || ''}\x1f${p.queued ? 1 : 0}${p.timedOut ? 1 : 0}${p.verifying ? 1 : 0}${p.inFlight ? 1 : 0}${p.upload ? 1 : 0}\x1f${p.deliveredAt || 0}\x1f${p.sentAt || 0}\x1f${p.question || ''}\x1f${p.text || ''}`;
+    sig += `\x1e${p.id ?? ''}\x1f${p.msgId || ''}\x1f${p.failed || ''}\x1f${p.queued ? 1 : 0}${p.timedOut ? 1 : 0}${p.verifying ? 1 : 0}${p.inFlight ? 1 : 0}${p.upload ? 1 : 0}${p.received ? 1 : 0}\x1f${p.receiptAt || 0}\x1f${p.deliveredAt || 0}\x1f${p.sentAt || 0}\x1f${p.question || ''}\x1f${p.text || ''}`;
   }
   return sig;
 }
@@ -7886,7 +8490,8 @@ export function hostLiveSignature(terms = [], live = [], tabs = []) {
       if (!x) { sig += '\x1e'; continue; }
       const lb = x.labels;
       const pr = x.program;
-      sig += `\x1e${x.address || ''}\x1f${x.state || ''}\x1f${x.status || ''}\x1f${x.cwd || ''}\x1f${contextTokens(x.context_tokens)}\x1f${pr?.key || ''}\x1f${pr?.name || ''}\x1f${pr?.icon || ''}\x1f${pr?.tint ? 1 : 0}${pr?.shell ? 1 : 0}\x1f${lb?.task || ''}\x1f${lb?.pm || ''}\x1f${lb?.['helper.of'] || ''}\x1f${lb?.helper || ''}\x1f${lb?.['helper.task'] || ''}`;
+      const rp = x.report;
+      sig += `\x1e${x.address || ''}\x1f${x.state || ''}\x1f${x.status || ''}\x1f${x.turn || 0}\x1f${rp?.state || ''}\x1f${rp?.msg || ''}\x1f${rp?.message || ''}\x1f${x.cwd || ''}\x1f${contextTokens(x.context_tokens)}\x1f${pr?.key || ''}\x1f${pr?.name || ''}\x1f${pr?.icon || ''}\x1f${pr?.tint ? 1 : 0}${pr?.shell ? 1 : 0}\x1f${lb?.task || ''}\x1f${lb?.pm || ''}\x1f${lb?.['helper.of'] || ''}\x1f${lb?.helper || ''}\x1f${lb?.['helper.task'] || ''}`;
     }
   }
   sig += '\x1dL';

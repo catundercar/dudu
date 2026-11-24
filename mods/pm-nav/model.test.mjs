@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pageBefore, pageBack, shouldReturnToWork, summary } from './model.js';
+import { pageBefore, pageBack, focusKey, isOverlayTerminalFocus, shouldReturnToWork, summary } from './model.js';
 import * as nav from './model.js';
 
 const CHILDREN = ['work', 'pm-board', 'pm-project'];
@@ -45,6 +45,38 @@ test('sidebar navigation away from the board still returns to work', () => {
   assert.equal(shouldReturnToWork(true, true, 'b', 'a'), true);
   assert.equal(shouldReturnToWork(true, true, 'a', 'a'), false);
   assert.equal(shouldReturnToWork(true, false, 'b', 'a'), false);
+});
+
+test('focusing a pm-project floating agent terminal window does not return to work, and closing it restores baseline without misfiring', () => {
+  const baseFocused = { space: 's1', tab: 'tab1', pane: 'p1', terminal: 't1', shown: null, agent: null };
+  const overlayFocused = { space: 's1', tab: 'tab1', pane: null, terminal: 't42', shown: null, agent: null };
+  const sameTerminalPane = { space: 's1', tab: 'tab42', pane: 'p42', terminal: 't42', shown: null, agent: null };
+  const otherTerminalPane = { space: 's1', tab: 'tab2', pane: 'p2', terminal: 't2', shown: null, agent: null };
+  const remoteOverlay = { space: 's1', tab: 'tab1', pane: null, terminal: 'mbp/t9', shown: null, agent: null };
+  const openOverlays = ['mbp/t9', 't42'];
+
+  // Overlay terminal focus (pane == null && terminal in openOverlays) is recognized; workspace panes are not.
+  assert.equal(isOverlayTerminalFocus(overlayFocused, openOverlays), true);
+  assert.equal(isOverlayTerminalFocus(remoteOverlay, openOverlays), true);
+  assert.equal(isOverlayTerminalFocus(sameTerminalPane, openOverlays), false);
+  assert.equal(isOverlayTerminalFocus(otherTerminalPane, openOverlays), false);
+  assert.equal(isOverlayTerminalFocus(overlayFocused, []), false);
+
+  // Simulate pm-nav's render loop: baseline -> click overlay terminal -> close overlay (restores baseline) -> click sidebar terminal.
+  let prevFocus = focusKey(baseFocused);
+  const step = (curFocused, overlays) => {
+    const focus = focusKey(curFocused);
+    const overlayFocus = isOverlayTerminalFocus(curFocused, overlays);
+    const ret = shouldReturnToWork(true, true, focus, prevFocus, { overlayFocus });
+    if (!overlayFocus) prevFocus = focus;
+    return ret;
+  };
+  assert.equal(step(overlayFocused, openOverlays), false, 'clicking floating agent terminal must not return to work');
+  assert.equal(step(remoteOverlay, openOverlays), false, 'clicking remote floating agent terminal must not return to work');
+  assert.equal(step(baseFocused, []), false, 'closing floating agent terminal and restoring previous pane must not return to work');
+  assert.equal(step(sameTerminalPane, openOverlays), true, 'clicking that terminal in sidebar (with a pane) still returns to work');
+  prevFocus = focusKey(baseFocused);
+  assert.equal(step(otherTerminalPane, openOverlays), true, 'clicking another terminal in sidebar still returns to work');
 });
 
 test('the in-progress count leaves out a task whose terminal is gone', () => {

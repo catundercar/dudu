@@ -6,6 +6,7 @@ after the mark (`pending_batch`), the one message it goes as (`batch_text`), and
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime
 import json
 import re
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any, Iterable
 from ..context import Context
 from ..home import project_slug
 from ..ledger.ledger import Ledger
-from ..ledger.task import task_number
+from ..ledger.task import pm_started, task_number
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
@@ -37,6 +38,87 @@ _PASTED_CLOSE = re.compile(r"</pasted_content(?:\s[^>]*)?>$", re.I)
 _PASTED_TAG = re.compile(r"<(/?)pasted_content(?:\s[^>]*)?>", re.I)
 _PASTED_OPEN_INNER = re.compile(r"<pasted_content(?:\s[^>]*)?>", re.I)
 _HC_WRAPPED = re.compile(r'^<hc from="[^"]+">(.*)</hc>$', re.S)
+
+SLASH_COMMAND = re.compile(r"/([\w:.-]+)(\s|$)")  # "/compact", not a path such as "/Users/me/shot.png" or "/tmp ..."
+_FS_ROOT_WORDS = frozenset({
+    "tmp", "var", "opt", "etc", "usr", "bin", "sbin", "dev", "proc", "sys",
+    "home", "users", "volumes", "private", "library", "system", "nix", "mnt", "srv", "root", "run",
+})
+_SYSTEM_XML_OPEN = re.compile(
+    r"^<(?:task-notification|system-reminder|local-command-|command-name|command-message|command-args"
+    r"|user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr|antml[:_]|ide_|context\b"
+    r"|environment_context\b|permissions\b|turn_aborted\b|EXTREMELY_IMPORTANT\b)",
+    re.I,
+)
+HC_SENT = re.compile(r'<hc from="([^"]+)">(.*)</hc>$', re.S)
+
+
+def _is_slash_command(text: str) -> bool:
+    m = SLASH_COMMAND.match(text)
+    if not m:
+        return False
+    word = m.group(1)
+    if word.lower() in _FS_ROOT_WORDS:
+        return False
+    return True
+
+
+def row_time(stamp: Any) -> datetime.datetime | None:
+    """A time in a transcript as an aware datetime, or None: ISO 8601 (UTC "…Z"; one without a
+    zone is read as UTC) or a count of ms (or s) since the epoch."""
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+        try:
+            return datetime.datetime.fromtimestamp(stamp / 1000 if stamp > 1e11 else stamp, datetime.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    m = re.fullmatch(r"(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?", str(stamp or "").strip())
+    if not m:
+        return None
+    try:
+        t = datetime.datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    zone, tz = m.group(4) or "Z", datetime.timezone.utc
+    if zone != "Z":
+        minutes = int(zone[1:3]) * 60 + int(zone[-2:])
+        tz = datetime.timezone(datetime.timedelta(minutes=-minutes if zone[0] == "-" else minutes))
+    return t.replace(microsecond=int(((m.group(3) or "") + "000000")[:6]), tzinfo=tz)
+
+
+def prompt_kind(prompt: str | None) -> tuple[str, str, str]:
+    """What words that came into a PM session are, for its conversation log: (kind, sender, text).
+    kind: "user" (the user's words: recorded as theirs), "agent" (another agent typed them in: recorded with `sender`),
+    "batch" (events `pm.py deliver` sent: already in the log, see took_delivery), "rotate" (the takeover prompt of a
+    rotation: nothing to record) or "other" (task notifications, slash commands, system text: nothing to record).
+    One rule for a prompt (the UserPromptSubmit hook), words a running turn took in (record_taken_in), and agy
+    transcript sync (AgyTranscriptWatcher)."""
+    text, sender = (prompt or "").strip(), ""
+    # Text typed in by another agent is not the user's turn: `hc send` from a terminal wraps it in
+    # <hc from="t3">…</hc>, and `pm.py notify` starts it with "[from <pane>]". Long pastes may also be wrapped in
+    # <pasted_content ...>…</pasted_content ...> by Claude Code (outside or inside <hc>).
+    while True:
+        unwrapped = unwrap_pasted(text)
+        if unwrapped != text:
+            text = unwrapped
+            continue
+        wrapped = HC_SENT.match(text)
+        if wrapped and not sender:
+            sender, text = f"hc:{wrapped.group(1)}", wrapped.group(2).strip()
+            continue
+        break
+    named = re.match(r"\[from ([^\]]+)\]\s*", text)
+    if named:
+        sender, text = sender or named.group(1), text[named.end():]
+    if sender == "pm.py rotate":
+        return "rotate", sender, text
+    # A batch of events from `pm.py deliver`; hc wraps it with the terminal of whoever wrote the last one.
+    if named and named.group(1) == DELIVER_SENDER:
+        return "batch", sender, text
+    if sender:
+        return "agent", sender, text
+    if text and not _SYSTEM_XML_OPEN.match(text) and not _is_slash_command(text):
+        return "user", "", text
+    return "other", "", text
 
 
 @dataclass(frozen=True)
@@ -272,6 +354,17 @@ class Delivery:
                 terms.update(terminals_fn(self.repo))
         return terms
 
+    def watched_files(self) -> list[Path]:
+        """Extra files (such as an active `agy` transcript) that injected watchers ask `ChangeWaiter` to watch."""
+        files: list[Path] = []
+        for watcher in self._watchers:
+            files_fn = getattr(watcher, "watched_files", None)
+            if callable(files_fn):
+                for item in files_fn(self.repo) or ():
+                    if isinstance(item, Path):
+                        files.append(item)
+        return files
+
     def watchers_look(self, stops: dict[Any, Any], bases: dict[Any, Any] | None, due: float) -> float:
         """Let each injected watcher look, in order; the soonest look any of them (or `due`) asks for."""
         bases_map = {} if bases is None else bases
@@ -320,7 +413,14 @@ class Delivery:
         )
         return start, end, items
 
-    def batch_text(self, start: int, end: int, items: list[dict[str, Any]]) -> str:
+    def batch_text(
+        self,
+        start: int,
+        end: int,
+        items: list[dict[str, Any]],
+        *,
+        include_git_state: bool = True,
+    ) -> str:
         """The one message a batch of events reaches the PM as. Its first line names the sender and the stretch of
         the log it covers, which the PM's turn hook reads (`took_delivery`)."""
         tr = self.ctx.config.tr
@@ -356,7 +456,7 @@ class Delivery:
                     head = f"{n}. {who} {rev_label} -> {parent_label}: {e.get('status')}"
                     if w_commit:
                         head += f" (commit {w_commit})"
-                    if parent.get("repo") and parent.get("base"):
+                    if include_git_state and parent.get("repo") and parent.get("base"):
                         ahead, dirty = self.ctx.git.git_state(
                             parent.get("worktree") or parent["repo"], parent.get("branch"), parent["base"]
                         )
@@ -367,6 +467,11 @@ class Delivery:
                     lines.append("   " + tr(
                         f"Worker ({w_commit or '-'}): {w_note or '(no note)'}",
                         f"Worker 汇报（{w_commit or '-'}）：{w_note or '（无说明）'}"))
+                    if parent and pm_started(parent) and not parent.get("subplan"):
+                        lines.append("   " + tr(
+                            "note: no subplan recorded",
+                            "提示：该任务未记录 subplan 子步骤",
+                        ))
                     lines.append("   " + tr(f"Review: {text}", f"审查结论：{text}"))
                     if PASSED.match(verdict_body):
                         lines.append("   " + tr(
@@ -380,7 +485,7 @@ class Delivery:
                 head = f"{n}. {who} {task_label}: {e.get('status')}"
                 if task.get("commit"):
                     head += f" (commit {task['commit']})"
-                if task.get("repo") and task.get("base"):
+                if include_git_state and task.get("repo") and task.get("base"):
                     ahead, dirty = self.ctx.git.git_state(
                         task.get("worktree") or task["repo"], task.get("branch"), task["base"]
                     )
@@ -407,10 +512,16 @@ class Delivery:
                         lines.append("   " + tr(
                             f"Hint: send findings with `pm.py update {rev_parent} --status in_progress --note \"...\" --send` (async), or `pm.py escalate {rev_parent}`.",
                             f"提示：发回修改用 `pm.py update {rev_parent} --status in_progress --note \"...\" --send`（异步），或 `pm.py escalate {rev_parent}`。"))
-                elif not rev_parent and e.get("status") == "review" and hint_id:
-                    lines.append("   " + tr(
-                        f"Hint: size with `pm.py diff {hint_id}`, then delegate merge via `pm.py approve {hint_id}` or start review via `pm.py review {hint_id}`.",
-                        f"提示：先看 `pm.py diff {hint_id}`，再决定用 `pm.py approve {hint_id}` 交执行者合或 `pm.py review {hint_id}` 开审。"))
+                elif not rev_parent and e.get("status") == "review":
+                    if task and pm_started(task) and not task.get("subplan"):
+                        lines.append("   " + tr(
+                            "note: no subplan recorded",
+                            "提示：该任务未记录 subplan 子步骤",
+                        ))
+                    if hint_id:
+                        lines.append("   " + tr(
+                            f"Hint: size with `pm.py diff {hint_id}`, then delegate merge via `pm.py approve {hint_id}` or start review via `pm.py review {hint_id}`.",
+                            f"提示：先看 `pm.py diff {hint_id}`，再决定用 `pm.py approve {hint_id}` 交执行者合或 `pm.py review {hint_id}` 开审。"))
             elif e.get("task"):
                 ev_task = self.ctx.store.task(e["task"]) if valid_task_id(e["task"]) else None
                 ev_num = valid_task_number(e.get("number"))
@@ -451,19 +562,32 @@ class Delivery:
             )
         return DeliveryReceipt(start=start, end=end, repeated=repeated, warning=warning)
 
-    def bring_pending(self) -> str | None:
-        """A PM's turn hook met another prompt (the user's, say) while events wait: claim receipt, return the
-        formatted batch text so it rides with this turn, and move the outbound cursor. Returns None when nothing
-        is news or the batch was already acknowledged (never prints directly)."""
+    def peek_pending(self, *, include_git_state: bool = False) -> tuple[int, int, str] | None:
+        """Format waiting events for a synchronous turn hook without running slow `git` subprocesses or
+        committing `ack_delivery` until the caller has flushed stdout. Returns `(start, end, text)` or `None`."""
         (self._project_dir() / "turn-cause.json").unlink(missing_ok=True)
         if not self._projects.app_pm(self.repo):
             return None
         start, end, items = self.pending_batch(settle=True)
         if items:
-            if self.ack_delivery(start, end):
-                return self.batch_text(start, end, items)
-            return None
+            _, received = self._read_delivered_state()
+            if _is_covered(received, start, end):
+                self.advance_delivered(end)
+                return None
+            return start, end, self.batch_text(start, end, items, include_git_state=include_git_state)
         self.advance_delivered(end)
+        return None
+
+    def bring_pending(self) -> str | None:
+        """A PM's turn hook met another prompt (the user's, say) while events wait: claim receipt, return the
+        formatted batch text so it rides with this turn, and move the outbound cursor. Returns None when nothing
+        is news or the batch was already acknowledged (never prints directly)."""
+        peeked = self.peek_pending(include_git_state=True)
+        if peeked is None:
+            return None
+        start, end, text_out = peeked
+        if self.ack_delivery(start, end):
+            return text_out
         return None
 
 

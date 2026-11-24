@@ -356,3 +356,85 @@ test('PM context usage formats cleanly, flags compact threshold, and omits 0 or 
   assert.equal(rendered.some(r => r.id === 'pm-context-pm-claude'), false);
   assert.equal(rendered.some(r => r.id === 'archive-pm-claude'), true);
 });
+
+test('pm-list excludes background-shell-only working status and calibrates remote cross-timezone lastEventAt', () => {
+  const bgTerm = term('t1', { status: 'working', report: { state: 'working', msg: '1 shell still running' } });
+  assert.equal(list.liveStatus(bgTerm, [{ address: 't1', status: 'working' }]), 'idle');
+
+  const unhookedBgTerm = term('t2', { status: 'working', report: { state: 'working', msg: '' } });
+  assert.equal(
+    list.pmStatus({ name: 'pm-a', status: 'working', turn: { phase: 'idle', bg_shells: 1 } }, unhookedBgTerm, true, [{ address: 't2', status: 'working' }]),
+    'idle',
+  );
+
+  // Remote state with `at_ms` or `(now, server_now_ms)` produces exact UTC seed regardless of viewer timezone.
+  const trueUtcMs = 1795491000000;
+  assert.equal(list.lastEventAt([{ pm: 'pm-a', at: '2026-11-23 10:00', at_ms: trueUtcMs }], 'pm-a'), trueUtcMs);
+  const remoteState = {
+    now: '2026-11-23 10:00:00',
+    server_now_ms: trueUtcMs,
+    pms: [{ name: 'pm-a', project: 'a', pane: 'hc:t1', status: 'idle' }],
+    tasks: [],
+    events: [{ pm: 'pm-a', at: '2026-11-23 09:55:00' }],
+  };
+  const [row] = pmRows({}, { studio: remoteState }, [term('studio/t1')], []);
+  assert.equal(row.seed, trueUtcMs - 5 * 60_000);
+});
+
+test('PmList loads remote-states.json even while local pm.py state is pending or failing', async () => {
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import .*;$/gm, '').replace('export default class PmList', 'class PmList');
+  const remoteCache = JSON.stringify({
+    at: Date.now(),
+    states: {
+      dev: { pms: [{ name: 'pm-dudu', project: 'dudu', pane: 'hc:t73', status: 'working' }], tasks: [], events: [] },
+    },
+  });
+  const stage = { id: 'pm-stage', active: 'work', children: [{ id: 'work' }, { id: 'pm-project' }] };
+  const makeHarness = (execPythonImpl) => {
+    const tasks = [];
+    let notifies = 0;
+    const cx = {
+      spawn: fn => { const p = Promise.resolve().then(() => fn(cx)); tasks.push(p); return p; },
+      timer: { every: () => ({ cancel() {} }) },
+      notify: () => { notifies++; },
+    };
+    const bindings = {
+      ...list, View: class {}, div: () => {}, svg: () => {}, image: () => {}, v_flex: () => {}, h_flex: () => {},
+      theme: () => ({}), home: () => '/h', appHome: () => '/a',
+      exec: async () => ({ code: 0, stdout: '/h/.dudu', stderr: '' }),
+      readTextFile: async path => (path === '/h/.dudu/cache/remote-states.json' ? remoteCache : ''),
+      watchFolder: () => new Promise(() => {}),
+      layout: () => ({ id: 'root', children: [stage] }), run: () => {},
+      terminals: () => [term('dev/t73', { labels: { pm: 'dudu' } })], agents: () => [], panes: () => [],
+      shared: () => null, setShared: () => {}, openOverlay: () => {},
+      execPython: execPythonImpl,
+      localStorage: { setItem() {}, getItem() { return null; } },
+    };
+    const PmList = new Function(...Object.keys(bindings), `${source}; return PmList;`)(...Object.values(bindings));
+    const view = new PmList();
+    return { view, cx, flush: async () => { for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r)); }, getNotifies: () => notifies };
+  };
+
+  // Case 1: local pm.py state has not returned yet (never settles).
+  const pending = makeHarness(() => new Promise(() => {}));
+  pending.view.init({}, pending.cx);
+  await pending.flush();
+  const pendingRows = list.allPmRows(pending.view.state, pending.view.remote, [term('dev/t73', { labels: { pm: 'dudu' } })], []);
+  assert.equal(pendingRows.length, 1);
+  assert.equal(pendingRows[0].key, 'dev/pm-dudu');
+  assert.equal(Boolean(pendingRows[0].unregistered), false);
+  assert.equal(pending.view.viewable(pendingRows[0]), true);
+
+  // Case 2: local pm.py state fails.
+  const failing = makeHarness(async () => { throw new Error('boom'); });
+  failing.view.init({}, failing.cx);
+  await failing.flush();
+  assert.match(failing.view.error, /boom/);
+  assert.equal(failing.view.loading, false);
+  const failingRows = list.allPmRows(failing.view.state, failing.view.remote, [term('dev/t73', { labels: { pm: 'dudu' } })], []);
+  assert.equal(failingRows.length, 1);
+  assert.equal(failingRows[0].key, 'dev/pm-dudu');
+  assert.equal(Boolean(failingRows[0].unregistered), false);
+  assert.equal(failing.view.viewable(failingRows[0]), true);
+});

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 from typing import Any, Callable, Iterable, Mapping
@@ -43,11 +44,20 @@ def wide_folder(place: Path | str) -> bool:
     target = Path(place)
     home = Path.home()
     wide = [Path("/"), home, *home.parents, Path("/tmp"), Path("/var/tmp"), Path(tempfile.gettempdir())]
+    if target.anchor:
+        wide.append(Path(target.anchor))
 
     def spell(p: Path) -> set[str]:
-        return {str(p.absolute()), str(p.resolve())}
+        return {os.path.normcase(str(p.absolute())), os.path.normcase(str(p.resolve()))}
 
     return bool(spell(target) & set().union(*map(spell, wide)))
+
+
+def _rule_path(path: str | Path) -> str:
+    """Normalize a path for Claude Code `Read(...)`/`Write(...)` rules: forward slashes with a leading `//` for
+    absolute filesystem paths (POSIX `/Users/...` -> `//Users/...`; Windows `C:\\Users\\...` -> `//C:/Users/...`)."""
+    posix = Path(path).as_posix()
+    return f"/{posix}" if posix.startswith("/") else f"//{posix}"
 
 
 def _outside_reads_impl(
@@ -109,10 +119,10 @@ def read_settings(
                     w_paths.append(s)
     if not (r_paths or w_paths or extra_dict) or program != "claude":
         return []
-    allow = [f"Read(/{p}/**)" if Path(p).is_dir() else f"Read(/{p})" for p in r_paths]
+    allow = [f"Read({_rule_path(p)}/**)" if Path(p).is_dir() else f"Read({_rule_path(p)})" for p in r_paths]
     for w in w_paths:
-        allow.append(f"Read(/{w})")
-        allow.append(f"Write(/{w})")
+        allow.append(f"Read({_rule_path(w)})")
+        allow.append(f"Write({_rule_path(w)})")
     allow = list(dict.fromkeys(allow))
     exempt = list(dict.fromkeys([*r_paths, *(str(Path(w).parent) for w in w_paths)]))
     perms = {"permissions": {"allow": allow, "blockReadsExemptPaths": exempt}} if (r_paths or w_paths) else {}

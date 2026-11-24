@@ -4,7 +4,17 @@ export function focusKey(focus) {
   return JSON.stringify(['space', 'tab', 'pane', 'terminal', 'shown', 'agent'].map(key => focus?.[key] ?? null));
 }
 
-export function shouldReturnToWork(shown, wasShown, focus, previousFocus) {
+// A terminal shown inside a pm-project floating window (openOverlay({ kind: 'window', layout }))
+// takes keyboard focus with `pane == null` and `terminal` set to its address. Clicking it must
+// not pull the stage back to `work`; clicking that same terminal's workspace pane sets `pane`.
+export function isOverlayTerminalFocus(focus, overlayTerminals) {
+  if (!focus || !focus.terminal || focus.pane != null) return false;
+  if (!Array.isArray(overlayTerminals) || !overlayTerminals.length) return false;
+  return overlayTerminals.includes(focus.terminal);
+}
+
+export function shouldReturnToWork(shown, wasShown, focus, previousFocus, { overlayFocus = false } = {}) {
+  if (overlayFocus) return false;
   return shown && wasShown && focus !== previousFocus;
 }
 

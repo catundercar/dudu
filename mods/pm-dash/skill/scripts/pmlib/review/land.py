@@ -45,16 +45,16 @@ def run_checks(repo: str | Path, checks: list[str], timeout: float, running: lis
     deadline = time.time() + timeout
     for check in checks:
         proc = subprocess.Popen(check, shell=True, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, env={**base_env, "MAIN": str(repo)}, **own_group())
+                                text=True, errors="replace", env={**base_env, "MAIN": str(repo)}, **own_group())
         running[:] = [proc]
         try:
             out, _ = proc.communicate(timeout=max(0.1, deadline - time.time()))
         except subprocess.TimeoutExpired:
             stop_group(proc)
             out = proc.communicate()[0]  # what it printed before it was stopped
-            return check, translate(f"timed out: the checks have {timeout} s in all", f"超时：全部检查共 {timeout} 秒"), out
+            return check, translate(f"timed out: the checks have {timeout} s in all", f"超时：全部检查共 {timeout} 秒"), out or ""
         if proc.returncode:
-            return check, translate(f"exit {proc.returncode}", f"退出码 {proc.returncode}"), out
+            return check, translate(f"exit {proc.returncode}", f"退出码 {proc.returncode}"), out or ""
     running.clear()
     return None
 

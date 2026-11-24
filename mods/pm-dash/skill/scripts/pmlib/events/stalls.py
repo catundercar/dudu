@@ -6,6 +6,8 @@ from __future__ import annotations
 import contextlib
 import datetime
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 from ..agents.base import HOOKED_KINDS, terminal_kind
@@ -13,6 +15,7 @@ from ..context import Context
 from ..home import project_slug
 from ..ledger.ledger import Ledger
 from ..ledger.task import hc_terminal_of, pm_started
+from ..osutil import clip
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
 from ..store import lock_file, unlock_file
@@ -22,7 +25,20 @@ from .deliver import Delivery, deliver_later  # noqa: F401 - kept bound for test
 
 STALL_GRACE = 5        # seconds a worker stays stopped before that counts (a report may be on its way)
 ROUND_START = 180  # seconds a worker may take to start up before it is watched though its work was never handed over
+LAND_APPROVE_TIMEOUT = 300  # seconds a worker-delegated land_approved may sit unmerged before falling back to helper
 REPORTED_STATUSES = frozenset({"review", "blocked", "done", "merged", "released", "abandoned"})
+
+
+def _seconds_since_ts(clock: Any, at: Any) -> float:
+    """Seconds since a ledger timestamp ('YYYY-MM-DD HH:MM[:SS]'); inf when unreadable."""
+    text = str(at or "").strip()
+    for fmt, n in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d %H:%M", 16)):
+        try:
+            when = datetime.datetime.strptime(text[:n], fmt)
+            return (clock.datetime_now() - when).total_seconds()
+        except ValueError:
+            continue
+    return float("inf")
 
 
 def worker_hooked(task: dict[str, Any], info: dict[str, Any] | None) -> bool:
@@ -62,11 +78,26 @@ def stop_state(
 class StallWatcher:
     """Work-round tracking and worker stall detection over an explicit `Context` (zero globals, zero prints)."""
 
-    def __init__(self, ctx: Context, *, stall_grace: float | None = None) -> None:
+    def __init__(
+        self,
+        ctx: Context,
+        *,
+        stall_grace: float | None = None,
+        land_approve_timeout: float | None = None,
+    ) -> None:
         self.ctx = ctx
         self._stall_grace = STALL_GRACE if stall_grace is None else stall_grace
+        self._land_approve_timeout_override = land_approve_timeout
         self._ledger = Ledger(ctx)
         self._projects = ProjectRegistry(ctx)
+
+    def _land_approve_timeout(self) -> float:
+        if self._land_approve_timeout_override is not None:
+            return float(self._land_approve_timeout_override)
+        raw = self.ctx.config.get("land_approve_timeout")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw >= 0:
+            return float(raw)
+        return float(LAND_APPROVE_TIMEOUT)
 
     def round_starts(self, task: dict[str, Any], term: str, handed: bool = True, turn: int | None = None) -> None:
         """A round of work begins for the task's worker in herdr-core terminal `term`."""
@@ -112,7 +143,7 @@ class StallWatcher:
 
     def _land_delegated_away(self, task: dict[str, Any] | None) -> bool:
         la = self._land_approved(task)
-        return bool(la and la.get("executor") in ("helper", "manual"))
+        return bool(la and (la.get("executor") in ("helper", "manual") or la.get("fallback_at")))
 
     def _land_lock_active(self, repo: str | Path | None) -> bool:
         if not repo:
@@ -128,13 +159,145 @@ class StallWatcher:
             return True
         return False
 
+    def fallback_land_to_helper(self, task: dict[str, Any], *, reason: str, term: str = "") -> bool:
+        """Atomically claim fallback for a stalled/failed worker-delegated `land_approved`, run
+        `pm.py approve <id> --via helper` synchronously (preserving approval options), and alert the PM.
+        On helper handoff failure, preserves the original `land_approved` (clearing `fallback_at`) and
+        reports the concrete error to the PM. Idempotent per `land_approved`."""
+        tid = task.get("id") or ""
+        if not tid:
+            return False
+        orig_la = self._land_approved(task)
+        if not orig_la or orig_la.get("executor") != "worker" or orig_la.get("fallback_at") or orig_la.get("fallback_failed_at"):
+            return False
+        expected_at = orig_la.get("at")
+        claimed = False
+        orig_snapshot: dict[str, Any] = {}
+        claimed_la: dict[str, Any] = {}
+
+        def _claim(cur: Any, _ch: Any) -> Any:
+            nonlocal claimed, orig_snapshot, claimed_la
+            claimed = False
+            raw = cur.raw
+            if raw.get("status") in REPORTED_STATUSES or raw.get("landed"):
+                return cur
+            la = self._land_approved(raw)
+            if not la or la.get("executor") != "worker" or la.get("fallback_at") or la.get("fallback_failed_at"):
+                return cur
+            if expected_at and la.get("at") != expected_at:
+                return cur
+            if self._land_lock_active(raw.get("repo")):
+                return cur
+            orig_snapshot = dict(la)
+            la["fallback_at"] = self.ctx.clock.now_sec()
+            la["fallback_reason"] = reason
+            claimed_la = dict(la)
+            claimed = True
+            return cur
+
+        try:
+            fresh_task = self._ledger.change(tid, _claim, board=False)
+        except Exception:  # noqa: BLE001
+            return False
+        if not claimed or fresh_task is None:
+            return False
+        fresh = fresh_task.raw
+        repo = fresh.get("repo") or task.get("repo") or ""
+        target_term = term or hc_terminal_of(fresh)
+        who = f"hc:{target_term}" if target_term else (fresh.get("pane") or "worker")
+        rec = self._projects.app_pm(repo) if repo else None
+        pm_term = (rec or {}).get("terminal") or ""
+        if pm_term:
+            args = ["approve", tid, "--via", "helper"]
+            if claimed_la.get("commit"):
+                args.append(f"--commit={claimed_la['commit']}")
+            if claimed_la.get("message"):
+                args.append(f"--message={claimed_la['message']}")
+            if claimed_la.get("keep"):
+                args.append("--keep")
+            if claimed_la.get("timeout"):
+                args.append(f"--timeout={int(claimed_la['timeout'])}")
+            if claimed_la.get("note"):
+                args.append(f"--note={claimed_la['note']}")
+            env = {
+                k: v for k, v in self.ctx.procs.clean_session_env().items()
+                if k not in ("HERDR_PANE_ID", "HERDR_WORKSPACE_ID") and not k.startswith("PM_HELPER_")
+            }
+            env["HC_TERMINAL_ID"] = pm_term
+            argv = [sys.executable, str(self.ctx.procs.launcher()), *args]
+            try:
+                res = self.ctx.procs.run(argv, env=env, cwd=self.ctx.home.root, timeout=60)
+                handoff_ok = getattr(res, "returncode", 1) == 0
+                raw_err = ((getattr(res, "stderr", "") or "") + "\n" + (getattr(res, "stdout", "") or "")).strip()
+                err_detail = clip(raw_err, 300) if not handoff_ok else ""
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                handoff_ok = False
+                err_detail = clip(str(exc), 300)
+            if handoff_ok:
+                msg = self.ctx.config.tr(
+                    f"merge approval for {tid} was not completed by {who} ({reason}); "
+                    f"automatically handed off to exec helper (`pm.py approve {tid} --via helper`).",
+                    f"{tid} 的合并批准未由 {who} 执行（{reason}）；"
+                    f"已自动改交执行 helper（`pm.py approve {tid} --via helper`）。",
+                )
+            else:
+                why_fail = err_detail or "approve --via helper exited non-zero"
+
+                def _restore_on_fail(cur: Any, _ch: Any) -> Any:
+                    raw = cur.raw
+                    if raw.get("status") in REPORTED_STATUSES or raw.get("landed"):
+                        return cur
+                    cur_la = self._land_approved(raw)
+                    if cur_la and cur_la.get("executor") == "helper":
+                        return cur
+                    restored = dict(orig_snapshot)
+                    restored.pop("fallback_at", None)
+                    restored.pop("fallback_reason", None)
+                    restored["fallback_failed_at"] = self.ctx.clock.now_sec()
+                    restored["fallback_error"] = why_fail
+                    raw["land_approved"] = restored
+                    return cur
+
+                with contextlib.suppress(Exception):
+                    self._ledger.change(tid, _restore_on_fail, board=False)
+                msg = self.ctx.config.tr(
+                    f"merge approval for {tid} was not completed by {who} ({reason}); "
+                    f"automatic helper handoff failed ({why_fail}) — original approval kept; "
+                    f"run `pm.py approve {tid} --via helper` or `pm.py land {tid}`.",
+                    f"{tid} 的合并批准未由 {who} 执行（{reason}）；"
+                    f"自动改交 helper 失败（{why_fail}），已保留原合并授权；"
+                    f"请处理后运行 `pm.py approve {tid} --via helper` 或 `pm.py land {tid}`。",
+                )
+        else:
+            msg = self.ctx.config.tr(
+                f"merge approval for {tid} was not completed by {who} ({reason}); "
+                f"no desktop-app PM terminal available for automatic helper handoff — run `pm.py land {tid}` "
+                f"or `pm.py approve {tid} --via helper`.",
+                f"{tid} 的合并批准未由 {who} 执行（{reason}）；"
+                f"当前没有桌面版 PM 终端可自动转交 helper，请手动运行 `pm.py land {tid}` 或 `pm.py approve {tid} --via helper`。",
+            )
+        if repo:
+            key = f"land-approve-stall:{claimed_la.get('at') or ''}"
+            conv = Conversation(self.ctx, repo)
+            last = next((e for e in reversed(conv.events()) if e.get("task") == tid and e.get("type") == "stall"), {})
+            if last.get("key") != key:
+                conv.record(
+                    "stall", task=tid, title=fresh.get("title"), status=fresh.get("status"),
+                    by=who, text=msg, source="harness", wake=True, key=key,
+                )
+            Delivery(self.ctx, repo).ensure_running()
+        return True
+
     def watched_worker(self, task: dict[str, Any]) -> bool:
         """A task whose worker the deliverer watches."""
         term = hc_terminal_of(task)
         since = (self.ctx.clock.datetime_now() - datetime.timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
         landed = task.get("landed")
         landed_done_worker = bool(landed) and not (isinstance(landed, dict) and landed.get("by_worker"))
-        return bool(term) and "/" not in term and pm_started(task) and task.get("status") == "in_progress" \
+        la = self._land_approved(task)
+        worker_land = bool(la and la.get("executor") == "worker" and not la.get("fallback_at"))
+        return bool(term) and "/" not in term and (pm_started(task) or worker_land) \
+            and task.get("status") == "in_progress" \
             and not task.get("retired") and not landed_done_worker and not self._land_delegated_away(task) \
             and not str(task.get("switching") or "") > since
 
@@ -156,7 +319,8 @@ class StallWatcher:
                 continue
             if self._land_delegated_away(task):
                 continue
-            if self._land_approved(task) and self._land_lock_active(task.get("repo")):
+            la = self._land_approved(task)
+            if la and self._land_lock_active(task.get("repo")):
                 continue
             term = hc_terminal_of(task)
             info = self.ctx.hc.get_raw(term, errors=True)
@@ -166,6 +330,35 @@ class StallWatcher:
                 if info and (info.get("status") or {}).get("state") in ("idle", "done")
                 else False
             )
+            if (la and la.get("executor") == "worker"
+                    and not la.get("fallback_at") and not la.get("fallback_failed_at")
+                    and not task.get("landed")):
+                land_timeout = self._land_approve_timeout()
+                if land_timeout > 0:
+                    elapsed = _seconds_since_ts(self.ctx.clock, la.get("at"))
+                    if elapsed < land_timeout:
+                        due = min(due, max(1.0, land_timeout - elapsed))
+                    else:
+                        transient_err = (
+                            not info
+                            or bool(info.get("error") and (info.get("error") or {}).get("kind") != "not_found")
+                        )
+                        if not transient_err:
+                            gone = (
+                                (info.get("error") or {}).get("kind") == "not_found"
+                                or info.get("state") != "live"
+                                or (info.get("reported") and not info.get("status"))
+                            )
+                            agent_state = "" if gone else str((info.get("status") or {}).get("state") or "")
+                            cur_turn = (info or {}).get("turn") or 0
+                            turn_stalled = (base is not None) and (cur_turn <= base)
+                            worker_idle = (agent_state in ("idle", "done")) and not bg
+                            if gone or worker_idle or (turn_stalled and agent_state != "working" and not bg):
+                                mins = max(1, int(elapsed // 60))
+                                why_state = "exited/gone" if gone else (agent_state or "no-turn")
+                                reason = f"timed out after {mins}m, worker {why_state} (turn={cur_turn}, base={base})"
+                                if self.fallback_land_to_helper(task, reason=reason, term=term):
+                                    continue
             state = "" if base is None else stop_state(info, worker_hooked(task, info), base, background_active=bg)
             if not state:
                 continue

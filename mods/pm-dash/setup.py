@@ -32,8 +32,8 @@ HOOKS = [
     ("Stop", "hook-turn", 15),
 ]
 PRE_TOOL_MATCHERS = {
-    "claude": "AskUserQuestion",
-    "codex": "request_user_input|ask_user|AskUserQuestion",
+    "claude": "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit",
+    "codex": "request_user_input|ask_user|AskUserQuestion|apply_patch|write_file|edit_file|Edit|Write",
 }
 SCRIPT = "skills/pm/scripts/pm.py"
 WINDOWS = os.name == "nt"
@@ -221,8 +221,18 @@ class Agent:
             hooks = value.setdefault("hooks", {})
             for event, action, timeout in HOOKS:
                 entries = hooks.setdefault(event, [])
-                if any(hook.get("command") == self.command(action) for entry in entries for hook in entry.get("hooks", [])):
-                    print(f"Skip {self.label} {event}: PM command already installed.")
+                existing = next(
+                    (entry for entry in entries
+                     if any(hook.get("command") == self.command(action) for hook in entry.get("hooks", []))),
+                    None,
+                )
+                if existing is not None:
+                    wanted_matcher = PRE_TOOL_MATCHERS.get(self.name) if event == "PreToolUse" else None
+                    if wanted_matcher and existing.get("matcher") != wanted_matcher:
+                        existing["matcher"] = wanted_matcher
+                        print(f"Update {self.label} {event} matcher.")
+                    else:
+                        print(f"Skip {self.label} {event}: PM command already installed.")
                     continue
                 hook = {"type": "command", "command": self.command(action), "timeout": timeout}
                 entry = {"hooks": [hook]}

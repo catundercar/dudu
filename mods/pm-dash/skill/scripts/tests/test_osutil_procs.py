@@ -6,6 +6,7 @@ stands in front of."""
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 from pathlib import Path, PureWindowsPath
 import shlex
@@ -79,19 +80,20 @@ class WindowsCommandLines(unittest.TestCase):
             self.assertEqual(osutil.shell_join(["codex", "-c", "a=$b"], powershell=True), 'codex -c "a=`$b"')
 
     def test_pm_command_and_handover_line_on_windows(self):
+        spaced_resolved = PureWindowsPath(Path(SPACED).resolve()).as_posix() if os.name == "nt" else SPACED
         with as_windows():
             ctx = self.ctx_with_procs(root="/Users/Jo Doe/ledger")
             cmd = ctx.procs.pm_command()
-            self.assertEqual(cmd, f'py -3 "{SPACED}" --home "/Users/Jo Doe/ledger"')
+            self.assertEqual(cmd, f'py -3 "{spaced_resolved}" --home "/Users/Jo Doe/ledger"')
             no_home = self.ctx_with_procs(root="/Users/Jo Doe/ledger", env={})   # PM_HOME not set
-            self.assertEqual(no_home.procs.pm_command(), f'py -3 "{SPACED}"')
+            self.assertEqual(no_home.procs.pm_command(), f'py -3 "{spaced_resolved}"')
             self.assertNotIn("'", cmd)
             self.assertNotIn("PM_HOME=", cmd)                                 # cmd and PowerShell cannot read it
             self.assertEqual(osutil.file_text(PureWindowsPath(r"C:\Users\Jo Doe\.dudu\sent\t.md")),
                              '"$(cat "C:/Users/Jo Doe/.dudu/sent/t.md")"')
         with as_windows(py=False):                                            # no py launcher: the interpreter
             ctx = self.ctx_with_procs()
-            self.assertEqual(ctx.procs.pm_script(), f'"C:/Program Files/Python312/python.exe" "{SPACED}"')
+            self.assertEqual(ctx.procs.pm_script(), f'"C:/Program Files/Python312/python.exe" "{spaced_resolved}"')
 
     def test_home_option_sets_the_ledger_home(self):
         home = self.tmp / "a ledger"
@@ -104,6 +106,7 @@ class WindowsCommandLines(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(len(list((home / "tasks").glob("*.json"))), 1)
 
+    @unittest.skipIf(osutil.WINDOWS, "tests native POSIX osutil.WINDOWS=False lines")
     def test_posix_lines_are_unchanged(self):
         script = str(LAUNCHER.resolve())
         self.assertFalse(osutil.WINDOWS)
@@ -160,8 +163,9 @@ class WindowsCommandLines(unittest.TestCase):
             ManagerSessions(ctx)._end_session_later("/w/proj", "t7", agent_pid=123, kill_terminal=False)
             ended = popen.call_args
         self.assertEqual(popen.call_count, 3)
-        self.assertEqual(named[0][0][1:], [SPACED, "name-agent", "hc:t7", "pm-x"])
-        self.assertEqual(ended[0][0][1:], [SPACED, "end-session", "t7", "--repo", "/w/proj", "--agent-pid", "123"])
+        spaced_resolved = str(Path(SPACED).resolve()) if os.name == "nt" else SPACED
+        self.assertEqual(named[0][0][1:], [spaced_resolved, "name-agent", "hc:t7", "pm-x"])
+        self.assertEqual(ended[0][0][1:], [spaced_resolved, "end-session", "t7", "--repo", "/w/proj", "--agent-pid", "123"])
         named, ended = named[1], ended[1]
         self.assertNotIn("start_new_session", {**check, **named, **ended})
         self.assertEqual(check["creationflags"], 0x200)                         # CREATE_NEW_PROCESS_GROUP
@@ -207,7 +211,7 @@ class WindowsCommandLines(unittest.TestCase):
         def fake_ps(argv, **kw):
             return subprocess.CompletedProcess(argv, 0, stdout=ps_table, stderr="")
 
-        with mock.patch("pmlib.procs.subprocess.run", side_effect=fake_ps):
+        with mock.patch.object(osutil, "WINDOWS", False), mock.patch("pmlib.procs.subprocess.run", side_effect=fake_ps):
             w1 = ctx.procs.background_work({
                 "pid": 90377,
                 "argv": ["agy", "--dangerously-skip-permissions"],
@@ -228,6 +232,33 @@ class WindowsCommandLines(unittest.TestCase):
         self.assertEqual(len(w2), 1, w2)
         self.assertIn("cargo test", w2[0])
         self.assertEqual(w3, [])
+
+        # Windows PowerShell CIM JSON branch (both multi-row list and single-row dict from ConvertTo-Json)
+        cim_rows = [
+            {"ProcessId": 90377, "ParentProcessId": 968, "CommandLine": "agy.exe --dangerously-skip-permissions"},
+            {"ProcessId": 14500, "ParentProcessId": 90377, "CommandLine": '"C:\\Python312\\python.exe" tests/run_checks.py'},
+            {"ProcessId": 14501, "ParentProcessId": 90377, "CommandLine": "node.exe C:\\mcp\\playwright-mcp\\cli.js"},
+            {"ProcessId": 14502, "ParentProcessId": 90377, "CommandLine": 'py -3 "C:/skills/pm/scripts/pm.py" wait demo-a'},
+            {"ProcessId": 90400, "ParentProcessId": 968, "CommandLine": "agy.exe --dangerously-skip-permissions"},
+            {"ProcessId": 14600, "ParentProcessId": 90400, "CommandLine": 'powershell.exe -Command "cargo test"'},
+        ]
+        with mock.patch.object(osutil, "WINDOWS", True), mock.patch(
+            "pmlib.procs.subprocess.run",
+            side_effect=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=json.dumps(cim_rows), stderr=""),
+        ):
+            win_w1 = ctx.procs.background_work({"pid": 90377, "status": {"app": "antigravity", "state": "done"}})
+            win_w2 = ctx.procs.background_work({"pid": 90400, "status": {"app": "antigravity", "state": "done"}})
+        self.assertEqual(len(win_w1), 1, win_w1)
+        self.assertIn("run_checks.py", win_w1[0])
+        self.assertEqual(win_w2, ["cargo test"])
+
+        # Single-process PowerShell ConvertTo-Json returns a bare JSON object `{...}`, not `[...]`
+        single_cim = {"ProcessId": 90377, "ParentProcessId": 968, "CommandLine": "agy.exe"}
+        with mock.patch.object(osutil, "WINDOWS", True), mock.patch(
+            "pmlib.procs.subprocess.run",
+            side_effect=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=json.dumps(single_cim), stderr=""),
+        ):
+            self.assertEqual(ctx.procs.background_work({"pid": 90377, "status": {"app": "antigravity"}}), [])
 
     def test_context_from_env_in_fresh_python_wires_caller_and_watchers(self):
         """Reproduction for Finding P6: `procs.build_context` relies on `sys.modules.get(...)`, so calling

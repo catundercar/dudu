@@ -18,7 +18,7 @@ from ..ledger.ledger import Change, Ledger, slugify
 from ..ledger.task import Task, hc_terminal_of
 from ..osutil import clip
 from ..project.conversation import Conversation
-from ..store import fcntl, lock_file, replace_task_file, unlock_file, write_atomic
+from ..store import lock_file, replace_task_file, unlock_file, write_atomic
 from .config import HELPER_SCREEN_LINES, HELPER_TIMEOUT, HELPER_WAIT_MAX_PRINT, _positive_int
 
 
@@ -143,17 +143,16 @@ def _helper_wait_lock_path_for(ctx: Context, owner_id: str) -> Path:
 
 @contextlib.contextmanager
 def helper_wait_guard_for(ctx: Context, owner_id: str) -> Iterator[None]:
-    """Hold a shared lock while `pm.py helper wait` blocks for this owner, so `helper done` knows not to also
+    """Hold a lock while `pm.py helper wait` blocks for this owner, so `helper done` knows not to also
     type an `hc send` notification into the waiting terminal."""
     path = _helper_wait_lock_path_for(ctx, owner_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "a+")
     locked = False
     try:
-        if fcntl is not None:
-            with contextlib.suppress(OSError):
-                lock_file(f, shared=True)
-                locked = True
+        with contextlib.suppress(OSError):
+            lock_file(f, shared=True)
+            locked = True
         yield
     finally:
         if locked:
@@ -165,8 +164,6 @@ def helper_wait_guard_for(ctx: Context, owner_id: str) -> Iterator[None]:
 
 def helper_wait_active_for(ctx: Context, owner_id: str) -> bool:
     """True when a `pm.py helper wait` process is currently waiting on this owner's helpers."""
-    if fcntl is None:
-        return False
     path = _helper_wait_lock_path_for(ctx, owner_id)
     if not path.exists():
         return False

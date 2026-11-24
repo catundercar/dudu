@@ -17,7 +17,7 @@ import urllib.parse
 
 from .context import Context
 from .discord import DiscordMirror
-from .events.deliver import DELIVER_SENDER, Delivery, unwrap_pasted
+from .events.deliver import DELIVER_SENDER, HC_SENT, SLASH_COMMAND, Delivery, prompt_kind, row_time, unwrap_pasted
 from .events.stalls import StallWatcher
 from .helpers.service import Helpers
 from .home import project_slug
@@ -31,6 +31,7 @@ from .osutil import WINDOWS, shell_quote, unfailing
 from .project.conversation import Conversation
 from .project.project import ProjectRegistry
 from .project.readmodel import IMAGE_MARK
+from .project.turn_state import TurnTracker
 from .store import DOCUMENT_ROOTS, StoreError, replace_task_file, valid_task_id, write_atomic
 from .workers.sessions import remember_pm_session_for, remember_worker_session_for
 
@@ -80,6 +81,10 @@ def read_hook_stdin():
 
 
 PM_QUESTION_TOOLS = frozenset({"AskUserQuestion", "request_user_input", "ask_user", "ask_question"})
+WORKER_SUBPLAN_TOOLS = frozenset({
+    "Edit", "Write", "MultiEdit", "NotebookEdit",
+    "apply_patch", "write_file", "edit_file",
+})
 
 
 def _extract_tool_questions(tool_input, *, tr=None):
@@ -167,29 +172,86 @@ def format_pm_question_redirect(tool_input, tool_name="AskUserQuestion", repo=""
     )
 
 
+def worker_subplan_reminder(ctx):
+    """Fallback reminder for a dispatched worker that starts editing/writing in `in_progress` without a `subplan`.
+    Returns a short reminder line at most once per task (recording `subplan_reminded`), or None."""
+    if not ctx.pane:
+        return None
+    ledger = Ledger(ctx)
+    task = next(
+        (t for t in ledger.raw_tasks()
+         if t.get("pane") == ctx.pane and t.get("dispatched") and not t.get("review_of")
+         and t.get("status") == "in_progress"),
+        None,
+    )
+    if not task or task.get("subplan") or task.get("subplan_reminded") or task.get("land_approved"):
+        return None
+    tid = task.get("id")
+    if not tid:
+        return None
+    reminded = False
+
+    def _mark(cur, _ch):
+        nonlocal reminded
+        if cur is None:
+            return None
+        raw = cur.raw
+        if raw.get("status") != "in_progress" or raw.get("subplan") or raw.get("subplan_reminded") or raw.get("land_approved"):
+            return None
+        raw["subplan_reminded"] = True
+        reminded = True
+        return raw
+
+    ledger.change(tid, _mark, board=False)
+    if not reminded:
+        return None
+    cmd = ctx.procs.pm_command()
+    return ctx.config.tr(
+        f"[pm] Reminder: record 3-8 verifiable sub-steps for {tid} with "
+        f"`{cmd} update {tid} --plan \"[>] current; [ ] next\"` (silent write; skip for trivial single-step edits).",
+        f"[pm] 提醒：请用 `{cmd} update {tid} --plan \"[>] 当前步; [ ] 下一步\"` 为任务 {tid} 写下 3~8 个可检验子步骤"
+        "（静默落盘，不唤醒 PM；随手小活可忽略）。",
+    )
+
+
 def cmd_hook_pre_tool(a, ctx=None):
     """PreToolUse hook: in a registered PM session, deny built-in interactive user-question tools
-    (`AskUserQuestion`, `request_user_input`, etc.) and redirect the PM to post a ledger question card."""
+    (`AskUserQuestion`, `request_user_input`, etc.) and redirect the PM to post a ledger question card;
+    in a dispatched worker session, emit a one-time gentle reminder on the first edit/write tool call
+    if no `subplan` has been recorded yet."""
     ctx = Context.from_env() if ctx is None else ctx
     if not in_herdr_session(ctx):
         return
     data = read_hook_stdin()
     field = lambda name: data[name] if isinstance(data.get(name), str) else ""
     tool_name = field("tool_name")
-    if tool_name not in PM_QUESTION_TOOLS:
+    if tool_name in PM_QUESTION_TOOLS:
+        rec = ctx.caller.own_pm_record(field("cwd") or None)
+        if not rec:
+            return
+        tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        reason = format_pm_question_redirect(tool_input, tool_name=tool_name, repo=rec.get("repo") or "", ctx=ctx)
+        ctx.out.line(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }, ensure_ascii=False))
         return
-    rec = ctx.caller.own_pm_record(field("cwd") or None)
-    if not rec:
-        return
-    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    reason = format_pm_question_redirect(tool_input, tool_name=tool_name, repo=rec.get("repo") or "", ctx=ctx)
-    ctx.out.line(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    }, ensure_ascii=False))
+    if tool_name in WORKER_SUBPLAN_TOOLS:
+        if ctx.caller.own_pm_record(field("cwd") or None):
+            return
+        def _subplan_remind():
+            msg = worker_subplan_reminder(ctx)
+            if msg:
+                ctx.out.line(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": msg,
+                    }
+                }, ensure_ascii=False))
+        unfailing(_subplan_remind)
 
 
 def cmd_hook_pre_compact(a, ctx=None):
@@ -372,28 +434,6 @@ def emit_mention_hints(repo, text, slug=None, *, ctx=None):
             ctx.out.line(f"- {line}")
 
 
-def row_time(stamp):
-    """A time in a transcript as an aware datetime, or None: ISO 8601 (Claude Code writes UTC, "…Z"; one without a
-    zone is read as UTC) or a count of ms (or s) since the epoch."""
-    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
-        try:
-            return datetime.datetime.fromtimestamp(stamp / 1000 if stamp > 1e11 else stamp, datetime.timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            return None
-    m = re.fullmatch(r"(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?", str(stamp or "").strip())
-    if not m:
-        return None
-    try:
-        t = datetime.datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
-    zone, tz = m.group(4) or "Z", datetime.timezone.utc
-    if zone != "Z":
-        minutes = int(zone[1:3]) * 60 + int(zone[-2:])
-        tz = datetime.timezone(datetime.timedelta(minutes=-minutes if zone[0] == "-" else minutes))
-    return t.replace(microsecond=int(((m.group(3) or "") + "000000")[:6]), tzinfo=tz)
-
-
 def taken_in(row):
     """The words in a transcript row of words a running turn took in: Claude Code writes them as an attachment of
     type queued_command, and no hook sees them. (words, prompt as written, who sent them: origin.kind) or None.
@@ -433,45 +473,6 @@ def prompt_row(row):
                for b in content or [])
 
 
-SLASH_COMMAND = re.compile(r"/[\w:.-]+(\s|$)")  # "/compact", not a path such as "/Users/me/shot.png"
-HC_SENT = re.compile(r'<hc from="([^"]+)">(.*)</hc>$', re.S)
-
-
-def prompt_kind(prompt):
-    """What words that came into a PM session are, for its conversation log: (kind, sender, text).
-    kind: "user" (the user's words: recorded as theirs), "agent" (another agent typed them in: recorded with `sender`),
-    "batch" (events `pm.py deliver` sent: already in the log, see took_delivery), "rotate" (the takeover prompt of a
-    rotation: nothing to record) or "other" (task notifications, slash commands, system text: nothing to record).
-    One rule for a prompt (the UserPromptSubmit hook) and for words a running turn took in (record_taken_in)."""
-    prompt, sender = (prompt or "").strip(), ""
-    # Text typed in by another agent is not the user's turn: `hc send` from a terminal wraps it in
-    # <hc from="t3">…</hc>, and `pm.py notify` starts it with "[from <pane>]". Long pastes may also be wrapped in
-    # <pasted_content ...>…</pasted_content ...> by Claude Code (outside or inside <hc>).
-    while True:
-        unwrapped = unwrap_pasted(prompt)
-        if unwrapped != prompt:
-            prompt = unwrapped
-            continue
-        wrapped = HC_SENT.match(prompt)
-        if wrapped and not sender:
-            sender, prompt = f"hc:{wrapped.group(1)}", wrapped.group(2).strip()
-            continue
-        break
-    named = re.match(r"\[from ([^\]]+)\]\s*", prompt)
-    if named:
-        sender, prompt = sender or named.group(1), prompt[named.end():]
-    if sender == "pm.py rotate":
-        return "rotate", sender, prompt
-    # A batch of events from `pm.py deliver`; hc wraps it with the terminal of whoever wrote the last one.
-    if named and named.group(1) == DELIVER_SENDER:
-        return "batch", sender, prompt
-    if sender:
-        return "agent", sender, prompt
-    if prompt and not prompt.startswith("<") and not SLASH_COMMAND.match(prompt):
-        return "user", "", prompt
-    return "other", "", prompt
-
-
 def cmd_hook_turn(a, ctx=None):
     """UserPromptSubmit/Stop hook of a PM session: keep the project's conversation log and note the turn for
     the board."""
@@ -501,6 +502,7 @@ def cmd_hook_turn(a, ctx=None):
     unfailing(remember_pm_session_for, ctx, rec, transcript, field("session_id"))
     delivery = Delivery(ctx, repo) if repo else None
     conv = Conversation(ctx, repo) if repo else None
+    tracker = TurnTracker(ctx, repo) if repo else None
     mirror = DiscordMirror(ctx)
     if delivery is not None:
         unfailing(delivery.ensure_running)  # a desktop-app PM's deliverer: started again if none runs
@@ -508,53 +510,107 @@ def cmd_hook_turn(a, ctx=None):
         # What a UserPromptSubmit hook prints is added to the session's context.
         raw = field("prompt").strip()
         kind, sender, prompt = prompt_kind(raw)
+        consumed_ui = False
+        matched_ids: list[str] = []
+        unlogged_prompt = prompt
+        if kind == "user" and tracker is not None and prompt:
+            consumed_ui, matched_ids, unlogged_prompt = tracker.consume_ui_prompt(prompt)
+        if kind == "user" and conv is not None and prompt:
+            # Write the receipt immediately, before slow transcript/delivery/conversation work,
+            # so pm-project knows the PM already received this message and never duplicate-sends it.
+            unfailing(
+                conv.record_receipt,
+                prompt,
+                pane=ctx.pane,
+                session=field("session_id"),
+                msg_ids=matched_ids or None,
+            )
         if repo:
             # Words a turn took in while it worked and that no Stop hook recorded (the user stopped that turn):
-            # before this prompt, where they were said. The prompt itself, if it is there too, is this hook's.
-            unfailing(record_taken_in, rec, transcript, False, raw, ctx=ctx)
+            # before this prompt, where they were said. Bounded to 512 KiB on synchronous UserPromptSubmit so a
+            # multi-MB transcript never hits the 15s hook timeout.
+            unfailing(record_taken_in, rec, transcript, False, raw, ctx=ctx, max_scan_bytes=512 << 10)
         if kind == "rotate":
             return  # the takeover prompt: nothing the user should read about
         if kind == "batch":
             if delivery is not None:
                 def _took():
                     receipt = delivery.took_delivery(prompt)
+                    if tracker is not None:
+                        tracker.begin_turn(
+                            terminal=ctx.pane,
+                            agent_kind=str(rec.get("agent") or "claude"),
+                            cause="deliver",
+                            batch=[receipt.start, receipt.end],
+                            from_hook=True,
+                        )
                     if receipt.warning:
                         ctx.out.line(receipt.warning)
                 unfailing(_took)
             return  # its events are in the log already
         if delivery is not None:
             def _bring():
-                text_out = delivery.bring_pending()
-                if text_out:
-                    ctx.out.line(text_out)
+                # Print and flush pending batch BEFORE committing ack_delivery so a hook timeout never swallows a batch.
+                peeked = delivery.peek_pending(include_git_state=False)
+                if peeked is not None:
+                    b_start, b_end, text_out = peeked
+                    if text_out:
+                        ctx.out.line(text_out)
+                        with contextlib.suppress(Exception):
+                            sys.stdout.flush()
+                    delivery.ack_delivery(b_start, b_end)
             unfailing(_bring)
         if kind == "agent":
+            if tracker is not None:
+                unfailing(
+                    lambda: tracker.begin_turn(
+                        terminal=ctx.pane, agent_kind=str(rec.get("agent") or "claude"),
+                        cause="agent", from_hook=True,
+                    )
+                )
             if conv is not None and prompt:
                 conv.record("agent", by=sender, text=prompt)
                 mirror.mirror(rec, f"**{sender}**\n{prompt}")
             return
         if kind != "user":
             return  # task notifications, slash commands
+        if tracker is not None:
+            unfailing(
+                lambda: tracker.begin_turn(
+                    terminal=ctx.pane, agent_kind=str(rec.get("agent") or "claude"),
+                    cause="user", msg_ids=matched_ids, from_hook=True,
+                )
+            )
         if conv is not None:
-            conv.record("user", text=prompt)
+            if not consumed_ui and unlogged_prompt:
+                conv.record("user", text=unlogged_prompt)
             rec_slug = rec.get("name", "")[3:] if isinstance(rec.get("name"), str) and rec["name"].startswith("pm-") and ctx.store.has_project(rec["name"][3:]) else ""
             unfailing(emit_mention_hints, repo, prompt, rec_slug or None, ctx=ctx)
-        mirror.mirror(rec, f"**你**\n{prompt}")
+        if not consumed_ui and unlogged_prompt:
+            mirror.mirror(rec, f"**你**\n{unlogged_prompt}")
     else:
         # Words that came in while the turn worked are recorded first, so they stand before the turn's reply.
         if repo:
             unfailing(record_taken_in, rec, transcript, True, ctx=ctx)
         # The agent's Stop hook carries the final message of the turn (Claude Code and Codex name it so).
         reply = field("last_assistant_message").strip()
+        cause_fields: dict[str, object] = {}
+        if tracker is not None:
+            cause_fields = tracker.end_turn()
+        if not cause_fields and conv is not None:
+            cause_fields = conv.turn_cause()
         if conv is not None and reply:
             # `by`: which session spoke, so the project view can tell this PM's ledger entries from a worker's.
             # `after`: a turn that a delivered batch started answers that batch, not the user (turn_cause).
             pane = ctx.pane
-            conv.record("pm", text=reply, **({"by": pane} if pane else {}), **conv.turn_cause())
+            conv.record("pm", text=reply, **({"by": pane} if pane else {}), **cause_fields)
+        # Write Stop to turns.log BEFORE slow subprocess sweeps / network calls so concurrent turns never see stale working state.
+        turn_log(f"{event}: turn", ctx=ctx)
         if repo:
             unfailing(lambda: ProjectRegistry(ctx).app_pm(repo) and StallWatcher(ctx).sweep_exited(repo))
         if reply and rec.get("discord") and mirror.is_on() and not mirror.replied_on_discord(transcript):
             mirror.mirror(rec, f"**{rec['name']}**\n{reply}")
+        return
     turn_log(f"{event}: turn", ctx=ctx)
 
 
@@ -567,7 +623,7 @@ TAKEN_IN_KEYS = 200      # ids of rows (two a row) the mark remembers as done
 TAKEN_IN_FILES = 8       # transcripts the mark remembers how far it has read: a rotation's old and new session, say
 
 
-def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None):
+def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None, max_scan_bytes=None):
     """Record in the conversation log the words a turn of this PM session took in while it worked (taken_in): the
     user's, another agent's, a delivered batch. No hook sees them come; the turn hook catches up with them in the
     session's transcript, at Stop (ended) before the turn's reply, and at the next UserPromptSubmit for a turn that
@@ -615,8 +671,10 @@ def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None):
     seen = files.get(key) or {}
     floor = kept(seen.get("at"))
     start = seen.get("offset") if floor else None
-    if not isinstance(start, int) or isinstance(start, bool) or not 0 <= start <= size or size - start > TAKEN_IN_MORE:
-        start, whole = max(0, size - TAKEN_IN_TAIL), False
+    more_cap = TAKEN_IN_MORE if max_scan_bytes is None else min(TAKEN_IN_MORE, int(max_scan_bytes))
+    tail_cap = TAKEN_IN_TAIL if max_scan_bytes is None else min(TAKEN_IN_TAIL, int(max_scan_bytes))
+    if not isinstance(start, int) or isinstance(start, bool) or not 0 <= start <= size or size - start > more_cap:
+        start, whole = max(0, size - tail_cap), False
     else:
         whole = True  # going on from a line's end
     try:
@@ -685,6 +743,7 @@ def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None):
         return
     conv = Conversation(ctx, repo)
     delivery = Delivery(ctx, repo)
+    tracker = TurnTracker(ctx, repo)
     mirror = DiscordMirror(ctx)
     local = lambda t: t.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     logged, used = conv.events(), set()
@@ -697,6 +756,19 @@ def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None):
             continue
         if kind not in ("user", "agent") or not text:
             continue
+        if kind == "user":
+            consumed_ui, matched_ids, remainder = tracker.consume_ui_prompt(text)
+            if consumed_ui:
+                unfailing(
+                    conv.record_receipt,
+                    text,
+                    at=local(said),
+                    at_ms=int(said.timestamp() * 1000),
+                    pane=ctx.pane,
+                    msg_ids=matched_ids or None,
+                )
+                continue
+            text = remainder or text
         # Recorded already, by a hook that saw these words come in (should Claude Code fire one for them): a line of
         # the same words from within seconds of when they were said or written. Either kind: a hook takes another
         # agent's words that name no sender (origin "peer") for the user's. Not one from long after: the user said
@@ -712,6 +784,7 @@ def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None):
             unfailing(mirror.mirror, rec, f"**{sender}**\n{text}")
         else:
             (proj_dir / "turn-cause.json").unlink(missing_ok=True)
+            unfailing(conv.record_receipt, text, at=local(said), at_ms=int(said.timestamp() * 1000), pane=ctx.pane)
             conv.record("user", at=local(said), text=text)
             unfailing(mirror.mirror, rec, f"**你**\n{text}")
 

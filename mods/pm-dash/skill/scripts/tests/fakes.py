@@ -1551,6 +1551,7 @@ def make_ctx(
     env: Mapping[str, str] | None = None,
     home_kwargs: Mapping[str, Any] | None = None,
     candidate_pruner: Any = None,
+    agy_dir: Path | str | None = None,
 ) -> Context:
     """Build a structurally isolated `Context` under `tmp_dir` with `Home` + `FileStore` + test fakes."""
     base = Path(tmp_dir)
@@ -1597,6 +1598,7 @@ def make_ctx(
         claude_dir=claude_dir,
         claude_projects=claude_dir / "projects",
         codex_sessions=base / "codex" / "sessions",
+        agy_dir=Path(agy_dir) if agy_dir is not None else base / "agy",
         herdr_docs=base / "herdr-app",
         candidate_pruner=candidate_pruner,
     )

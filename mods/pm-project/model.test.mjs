@@ -5120,11 +5120,45 @@ test('Threads 3: taskSteps merges outer plan and subplan across all 4 shapes, mu
 test('Threads 3: threadAgents, agentDefaultMode, floating small window toggle & Escape stack', () => {
   const {
     threadAgents, agentDefaultMode, AGENT_WINDOW_MAX,
+    normalizeAgentWindowSize, nextAgentWindowSize, agentWindowDimensions, agentWindowTerminalAddresses, setAgentWindowSize,
     agentWindowOpen, toggleAgentWindow, focusAgentWindow, closeAgentWindow, setAgentWindowOverlay, toggleAgentWindowMode, reconcileAgentWindows,
     escapeStep, word,
   } = model;
 
   assert.equal(AGENT_WINDOW_MAX, 2);
+  assert.equal(normalizeAgentWindowSize(''), 'm');
+  assert.equal(normalizeAgentWindowSize('L'), 'l');
+  assert.equal(normalizeAgentWindowSize('invalid'), 'm');
+  assert.equal(nextAgentWindowSize('s'), 'm');
+  assert.equal(nextAgentWindowSize('m'), 'l');
+  assert.equal(nextAgentWindowSize('l'), 's');
+  assert.deepEqual(agentWindowDimensions('chat', 's'), { width: 420, height: 340 });
+  assert.deepEqual(agentWindowDimensions('terminal', 'm'), { width: 540, height: 380 });
+  assert.deepEqual(agentWindowDimensions('terminal', 'l'), { width: 800, height: 540 });
+  assert.deepEqual(agentWindowDimensions('terminal', 'l', { maxWidth: 640, maxHeight: 400 }), { width: 640, height: 400 });
+  assert.deepEqual(agentWindowDimensions('chat', 's', { maxWidth: 200, maxHeight: 100 }), { width: 360, height: 260 });
+
+  assert.deepEqual(agentWindowTerminalAddresses([
+    { key: 'w1', mode: 'chat', address: 't1' },
+    { key: 'w2', mode: 'terminal', address: 't2' },
+    { key: 'w3', mode: 'terminal', address: 't1' },
+    { key: 'w4', mode: 'terminal', address: '' },
+  ]), ['t1', 't2']);
+  assert.deepEqual(agentWindowTerminalAddresses([
+    { key: 'w2', mode: 'terminal', address: 't2' },
+    { key: 'w3', mode: 'terminal', address: 'mbp/t2' },
+  ], 'mbp'), ['mbp/t2']);
+
+  let sizedWins = toggleAgentWindow([], { key: 'w1', mode: 'terminal', address: 't1' }).windows;
+  assert.equal(sizedWins[0].size, 'm');
+  let swSize = setAgentWindowSize(sizedWins, 'w1');
+  assert.equal(swSize.changed, true);
+  assert.equal(swSize.window.size, 'l');
+  sizedWins = swSize.windows;
+  assert.equal(setAgentWindowSize(sizedWins, 'w1', 'l').changed, false);
+  swSize = setAgentWindowSize(sizedWins, 'w1', 's');
+  assert.equal(swSize.changed, true);
+  assert.equal(swSize.window.size, 's');
   assert.equal(agentDefaultMode({ role: 'worker', kind: 'claude', address: 't1' }), 'chat');
   assert.equal(agentDefaultMode({ role: 'worker', kind: 'agy', address: 't2' }), 'terminal');
   assert.equal(agentDefaultMode({ role: 'helper', kind: 'agy', address: 't3', ended: false }), 'terminal');
@@ -6554,6 +6588,7 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
   assert.equal(overlayCalls[0].spec.props.agentWindow, 'chat');
   assert.equal(overlayCalls[1].spec.kind, 'window');
   assert.equal(overlayCalls[1].spec.layout.children[1].content.terminal, 'tr1');
+  assert.deepEqual(sharedMap['pm-project-win-terminals'], ['tr1'], 'opening a terminal-mode agent window publishes its address to shared');
   assert.equal(runCalls.some(([cmd]) => cmd === 'terminal.peek'), false, 'never jumps to Spaces via terminal.peek');
 
   // Re-click open worker closes it without killing; re-open 2 + add 3rd evicts LRU!
@@ -6660,6 +6695,36 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
     if (!last.cancelled) last.fn(cx);
   }
   assert.equal(view.agentWindows.find(w => w.key === 'worker:t_single')?.mode, 'terminal');
+  assert.deepEqual(sharedMap['pm-project-win-terminals'], ['ts1'], 'switching a window to terminal mode adds it to shared floating terminals');
+
+  // Clicking the size toggle button in the floating window titlebar cycles M -> L, remembers size in shared, and re-opens overlay with larger dimensions
+  winProps = {
+    agentWindow: 'titlebar', key: 'worker:t_single', role: 'worker', roleLabel: 'worker',
+    taskId: 't_single', targetId: 't_single', name: 't_single', threadTitle: 'Single worker thread',
+    address: 'ts1', kind: 'claude', mode: 'terminal', size: 'm', canSwitchMode: true, overlay: 'ov-4', lang: 'en', session: 'sess-1',
+  };
+  const tbWin = new Mod();
+  tbWin.init(null, cx);
+  nodes.clear();
+  tbWin.render(cx);
+  const sizeBtn = nodes.get('win-size-worker:t_single');
+  assert.ok(sizeBtn, 'floating window titlebar renders S/M/L size toggle button');
+  assert.equal(sizeBtn.allTexts().join(''), 'M');
+  const prevOverlayCount = overlayCalls.length;
+  sizeBtn.clicks({}, cx);
+  assert.equal(sharedMap['pm-project-win-event']?.kind, 'size');
+  assert.equal(sharedMap['pm-project-win-event']?.size, 'l');
+  winProps = {};
+  view.syncWinEvents(cx);
+  if (timers.length) {
+    const last = timers.pop();
+    if (!last.cancelled) last.fn(cx);
+  }
+  assert.equal(sharedMap['pm-project-agent-window-size'], 'l', 'chosen window size is persisted in shared');
+  assert.equal(overlayCalls.length, prevOverlayCount + 1);
+  assert.equal(overlayCalls[overlayCalls.length - 1].spec.width, 800);
+  assert.equal(overlayCalls[overlayCalls.length - 1].spec.height, 540);
+  assert.equal(overlayCalls[overlayCalls.length - 1].spec.key, 'pm-agent:worker:t_single');
 
   // Exited terminal-mode small window auto-closes its overlay via deferred closeOverlay (never synchronously inside render); chat-mode window stays closeable via Esc/re-click
   const exitedTermOv = view.agentWindows.find(w => w.key === 'worker:t_single')?.overlayId;
@@ -6680,11 +6745,13 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
     if (!t.cancelled) t.fn(cx);
   }
   assert.deepEqual(closedOverlays, [exitedTermOv], 'exited terminal-mode overlay must be closed via closeOverlay');
+  assert.deepEqual(sharedMap['pm-project-win-terminals'], [], 'closing exited terminal-mode overlay clears shared floating terminals');
   assert.equal(model.agentWindowOpen(view.agentWindows, 'worker:t_single'), false);
   assert.equal(model.agentWindowOpen(view.agentWindows, 'worker:t1'), true, 'chat-mode window stays open after exit and remains closeable');
   view.escape({ keystroke: 'escape' }, cx);
   assert.deepEqual(closedOverlays, [exitedTermOv, 'ov-chat-keep'], 'Esc still closes remaining chat-mode window');
   assert.equal(view.agentWindows.length, 0);
+  delete sharedMap['pm-project-agent-window-size'];
   liveTerms[0].state = 'live';
   liveTerms[2].state = 'live';
 
@@ -9598,6 +9665,8 @@ test('PmProject end-to-end: render-phase flushQueue safety, unconfirmed timeout 
   let pmTerms = [{ address: 't160', state: 'live', status: 'blocked', report: { state: 'blocked' }, labels: { pm: 'dudu' }, cwd: '/r/dudu' }];
   let logEvents = [{ at: '2026-11-22 04:19:33', type: 'pm', text: '本机的台账已经迁好了。', by: 'hc:t160', offset: 100 }];
   let logFails = false;
+  const pmReceipts = [];
+  const stateReceipts = [];
   const sentCalls = [];
   let onSendHook = null;
 
@@ -9659,7 +9728,7 @@ test('PmProject end-to-end: render-phase flushQueue safety, unconfirmed timeout 
         const after = afterIdx >= 0 ? Number(args[afterIdx + 1]) : null;
         const evs = after != null ? logEvents.filter(e => (e.offset || 0) > after) : logEvents;
         const maxOff = logEvents.reduce((m, e) => Math.max(m, e.offset || 0), 0);
-        return { code: 0, stdout: JSON.stringify({ events: evs, from: 0, offset: maxOff, earlier: false }), stderr: '' };
+        return { code: 0, stdout: JSON.stringify({ events: evs, from: 0, offset: maxOff, earlier: false, ...(pmReceipts.length ? { receipts: [...pmReceipts] } : {}) }), stderr: '' };
       }
       if (args.includes('state')) {
         return {
@@ -9667,7 +9736,7 @@ test('PmProject end-to-end: render-phase flushQueue safety, unconfirmed timeout 
           stdout: JSON.stringify({
             home: '/tmp/ledger',
             lang: 'zh',
-            pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: pmTerms[0] ? `hc:${pmTerms[0].address}` : 'hc:t160', conversation: '/tmp/ledger/projects/dudu/conversation.jsonl' }],
+            pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: pmTerms[0] ? `hc:${pmTerms[0].address}` : 'hc:t160', conversation: '/tmp/ledger/projects/dudu/conversation.jsonl', ...(stateReceipts.length ? { receipts: [...stateReceipts] } : {}) }],
             tasks: [],
           }),
           stderr: '',
@@ -9950,6 +10019,78 @@ test('PmProject end-to-end: render-phase flushQueue safety, unconfirmed timeout 
   await drain();
   assert.equal(view.pending.length, 0);
   assert.equal(sentOf('换项目再回来'), 1);
+
+  // --- Part G: PM receipt prevents duplicate resend when conversation.jsonl has not flushed yet (#234) ---
+  // (1) Message timed out while conversation.jsonl was still empty; PM wrote a receipt (exposed via
+  //     `pm.py project events`). Clicking Resend checks receipts and confirms it without sending again.
+  onSendHook = async () => ({ code: 0, stdout: '', stderr: '' });
+  const race1 = await timeOut('竞态消息一：日志未落盘但回执已写');
+  assert.equal(sentOf('竞态消息一：日志未落盘但回执已写'), 1);
+  pmReceipts.push({ at: fmtAt(fakeNow), at_ms: fakeNow, text: '竞态消息一：日志未落盘但回执已写', digest: 'd1' });
+  view.retry(race1.id, eventCx);
+  await drain();
+  await stepTime(1600);
+  assert.equal(sentOf('竞态消息一：日志未落盘但回执已写'), 1, 'receipt in project events blocks duplicate resend');
+  const confirmed1 = view.pending.find(p => p.id === race1.id);
+  assert.equal(confirmed1?.received, true, 'bubble stays visible as receipt-confirmed until log catches up');
+  assert.equal(Boolean(confirmed1?.failed), false);
+  const tl1 = model.timeline(view.events, [], { pending: view.pending }).find(i => i.key === `pending:${race1.id}`);
+  assert.equal(tl1?.pending, false, 'receipt-confirmed bubble does not show Sending…');
+  assert.equal(tl1?.received, true);
+  // Clicking retry again on a receipt-confirmed bubble is a strict no-op.
+  view.retry(race1.id, eventCx);
+  await drain();
+  assert.equal(sentOf('竞态消息一：日志未落盘但回执已写'), 1);
+  // Once conversation.jsonl finally catches up, the receipt-confirmed bubble settles cleanly.
+  logEvents.push({ at: fmtAt(fakeNow), type: 'user', text: '竞态消息一：日志未落盘但回执已写', offset: logEvents.length * 100 + 900 });
+  view.readLog(eventCx);
+  await drain();
+  assert.equal(view.pending.length, 0, 'receipt-confirmed bubble settles once conversation.jsonl arrives');
+
+  // (2) Receipt already present via `pm.py state` before clicking Resend: retry() blocks immediately without sending.
+  const race2 = await timeOut('竞态消息二：state 回执拦截重发');
+  assert.equal(sentOf('竞态消息二：state 回执拦截重发'), 1);
+  stateReceipts.push({ at: fmtAt(fakeNow), at_ms: fakeNow, text: '竞态消息二：state 回执拦截重发', digest: 'd2' });
+  // Simulate state already having the receipt on pm before retry click (e.g. from refresh or direct state).
+  view.state = {
+    ...view.state,
+    pms: view.state.pms.map(p => ({ ...p, receipts: [...stateReceipts] })),
+  };
+  view.retry(race2.id, eventCx);
+  await drain();
+  assert.equal(sentOf('竞态消息二：state 回执拦截重发'), 1, 'state receipt immediately blocks duplicate resend');
+  assert.equal(view.pending.find(p => p.id === race2.id)?.received, true);
+  logEvents.push({ at: fmtAt(fakeNow), type: 'user', text: '竞态消息二：state 回执拦截重发', offset: logEvents.length * 100 + 900 });
+  view.readLog(eventCx);
+  await drain();
+  assert.equal(view.pending.length, 0);
+
+  // (3) When `project events` omits `receipts`, stale `logReceipts` are cleared.
+  assert.ok(view.logReceipts.length > 0);
+  pmReceipts.length = 0;
+  view.readLog(eventCx);
+  await drain();
+  assert.deepEqual(view.logReceipts, [], 'logReceipts clears when project events omits receipts');
+
+  // (4) Non-timeout failed bubble (`hc send` exited non-zero) is NOT swallowed by an existing receipt on retry().
+  stateReceipts.length = 0;
+  onSendHook = async () => ({ code: 1, stdout: '', stderr: 'hc send: synthetic failure' });
+  view.input.set_value('普通失败不吞');
+  view.sendMain(eventCx);
+  await drain();
+  const failedNormal = view.pending.find(p => p.words === '普通失败不吞');
+  assert.ok(failedNormal?.failed && !failedNormal.timedOut);
+  pmReceipts.push({ at: fmtAt(fakeNow), at_ms: fakeNow, text: '普通失败不吞', digest: 'nf' });
+  view.logReceipts = [...pmReceipts];
+  onSendHook = async (_target, text) => {
+    logEvents.push({ at: fmtAt(fakeNow), type: 'user', text, offset: logEvents.length * 100 + 900 });
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  view.retry(failedNormal.id, eventCx);
+  await drain();
+  await stepTime(1600);
+  assert.equal(sentOf('普通失败不吞'), 2, 'non-timeout send failure resends instead of being swallowed by receipt');
+  assert.equal(view.pending.length, 0);
 });
 
 test('Paragraph-level quoting: splitMarkdownParagraphs, three quote scopes, #1335 range seam, wire round-trip & i18n', () => {
@@ -11581,6 +11722,19 @@ test('Threads: a PM-owned merge helper hangs under the task it serves, says Merg
   assert.match(after.ended[0].summary, /已合并至 main/);
   assert.equal(after.ended[0].defaultMode, 'chat', 'ended helper opens on its conclusion');
 
+  // Done with custom name and no terminal: `for_task` from `pm.py state` still attaches it without name/prompt guessing.
+  const customDone = {
+    name: 'verify-build', terminal: 't1zz', status: 'done', owner: 'pm-dudu', kind: 'agy',
+    prompt: 'run checks after rebase', summary: 'all checks passed', ended: '2026-11-23 06:10',
+    for_task: task.id,
+  };
+  assert.equal(pmHelperTask(customDone, []), task.id);
+  const afterCustom = threadAgents(task, { terms: [workerTerm], live: [], lang: 'en', pmHelpers: [customDone] });
+  assert.equal(afterCustom.ended.length, 1);
+  assert.equal(afterCustom.ended[0].name, 'verify-build');
+  assert.equal(afterCustom.ended[0].nameSuffix, 'verify-build');
+  assert.equal(afterCustom.ended[0].summary, 'all checks passed');
+
   // taskTree: the helper is under the task's row, not a loose session row.
   const pm = { name: 'pm-dudu', project: 'dudu', repo: '/Users/dev/project/repos/dudu', pane: 'hc:t182', helpers: [otherDone, running] };
   const live = [
@@ -11591,6 +11745,517 @@ test('Threads: a PM-owned merge helper hangs under the task it serves, says Merg
   assert.equal(tree.sessions.length, 0, 'the merge helper is not listed as a separate session');
   const node = tree.groups.flatMap(g => g.nodes).find(n => n.task === task.id);
   assert.deepEqual(node.agents.active.map(a => [a.role, a.nameSuffix]), [['worker', ''], ['helper', '合并中']]);
+  // Live PM helper linked only by `for_task` (terminal has no `helper.task` label) is also excluded from loose sessions.
+  const noLabelTerm = { ...helperTerm, labels: { helper: 'land-dudu-dudu-pm-py-p2-4b', 'helper.of': 'pm-dudu' } };
+  const pmWithForTask = { ...pm, helpers: [otherDone, { ...running, for_task: task.id }] };
+  const treeForTask = taskTree(pmWithForTask, [task], [], { terms: [workerTerm, noLabelTerm], live, lang: 'zh' });
+  assert.equal(treeForTask.sessions.length, 0, 'for_task excludes the live helper from loose sessions');
+  const nodeForTask = treeForTask.groups.flatMap(g => g.nodes).find(n => n.task === task.id);
+  assert.deepEqual(nodeForTask.agents.active.map(a => [a.role, a.nameSuffix]), [['worker', ''], ['helper', '合并中']]);
+  // Reused terminal address after hc restart: an ended or stale for_task helper must not hide a loose session or
+  // a different general PM helper now running on the same address.
+  const reusedLooseTerm = {
+    address: 't1fm', state: 'live', status: 'working', cwd: '/Users/dev/project/repos/dudu',
+    program: { key: 'claude', name: 'Claude', icon: 'claude.svg' }, labels: {},
+  };
+  const pmEndedReuse = { ...pm, helpers: [{ ...done, for_task: task.id }] };
+  const treeEndedReuse = taskTree(pmEndedReuse, [task], [], { terms: [workerTerm, reusedLooseTerm], live, lang: 'zh' });
+  assert.deepEqual(treeEndedReuse.sessions.map(s => s.address), ['t1fm'], 'ended helper must not hide reused loose session');
+  const pmStaleRunningReuse = { ...pm, helpers: [{ ...running, for_task: task.id }] };
+  const treeStaleReuse = taskTree(pmStaleRunningReuse, [task], [], { terms: [workerTerm, reusedLooseTerm], live, lang: 'zh' });
+  assert.deepEqual(treeStaleReuse.sessions.map(s => s.address), ['t1fm'], 'mismatched helper label must not hide reused loose session');
+  const generalHelperTerm = {
+    address: 't1fm', state: 'live', status: 'working', cwd: '/Users/dev/project/repos/dudu',
+    program: { key: 'agy', name: 'Antigravity', icon: 'agy.svg' },
+    labels: { helper: 'pm-general', 'helper.of': 'pm-dudu' },
+  };
+  const pmGeneralReuse = {
+    ...pm,
+    helpers: [
+      { ...done, for_task: task.id },
+      { name: 'pm-general', terminal: 't1fm', status: 'running', owner: 'pm-dudu', kind: 'agy', offline: false },
+    ],
+  };
+  const treeGeneralReuse = taskTree(pmGeneralReuse, [task], [], { terms: [workerTerm, generalHelperTerm], live, lang: 'zh' });
+  assert.deepEqual(treeGeneralReuse.sessions.map(s => s.address), ['t1fm'], 'reused address for general PM helper stays visible');
   // Render cache sees the label.
   assert.notEqual(hostLiveSignature(terms), hostLiveSignature([workerTerm, { ...helperTerm, labels: { ...helperTerm.labels, 'helper.task': '' } }]));
+});
+
+test('PM receipt confirmation: prevents duplicate resend before conversation.jsonl writes (#234)', () => {
+  const t0 = model.eventTime('2026-11-23 20:00:00');
+  const base = { said: '修一下', words: '修一下', to: '', files: [], draftKey: 'pm:pm-dudu' };
+
+  // 1. Delivered bubble confirmed by receipt before conversation.jsonl has any user event.
+  const delivered = { ...base, id: 1, text: '修一下', sentAt: t0, queued: false, deliveredAt: t0 + 200, sentTo: 't182', sentSession: 'fg:100', idleSince: t0 + 200 };
+  const receipt = { at: '2026-11-23 20:00:01', at_ms: t0 + 500, text: '修一下', digest: 'abc' };
+  const r1 = model.reconcilePendingSends([delivered], [], {
+    now: t0 + 15000, pmAddress: 't182', pmSession: 'fg:100', logReady: true, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(r1.failed.length, 0, 'receipt prevents confirmation timeout');
+  assert.equal(r1.requeued.length, 0);
+  assert.equal(r1.confirmed.length, 1);
+  assert.equal(r1.pending[0].received, true);
+  assert.equal(r1.pending[0].failed, '');
+  assert.equal(r1.needsFollowup, false);
+
+  // 2. Verifying resend after timeout: fresh log still empty, but receipt exists -> confirm, never requeue!
+  const verifying = { ...base, id: 2, text: '修一下', sentAt: t0, verifying: true, verifySince: t0 + 20000 };
+  const r2 = model.reconcilePendingSends([verifying], [], {
+    now: t0 + 21000, pmAddress: 't182', logReady: true, logFreshFrom: t0 + 20500, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(r2.requeued.length, 0, 'verifying resend with receipt must never requeue');
+  assert.equal(r2.confirmed.length, 1);
+  assert.equal(r2.pending[0].received, true);
+
+  // 3. PM swapped before conversation.jsonl flushed, but outgoing PM wrote receipt -> confirm, do NOT requeue to new PM!
+  const swapped = { ...base, id: 3, text: '修一下', sentAt: t0, deliveredAt: t0 + 200, sentTo: 't182', sentSession: 'fg:100' };
+  const r3 = model.reconcilePendingSends([swapped], [], {
+    now: t0 + 5000, pmAddress: 't190', pmSession: 'fg:200', logReady: true, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(r3.requeued.length, 0, 'receipt prevents duplicate re-delivery across PM swap');
+  assert.equal(r3.confirmed.length, 1);
+  assert.equal(r3.pending[0].received, true);
+
+  // 4. Stale receipt from before sentAt does NOT confirm a newly sent message with the same text.
+  const oldReceipt = { at: '2026-11-23 19:50:00', at_ms: t0 - 600000, text: '修一下', digest: 'old' };
+  const r4 = model.reconcilePendingSends([verifying], [], {
+    now: t0 + 21000, pmAddress: 't182', logReady: true, logFreshFrom: t0 + 20500, receipts: [oldReceipt], lang: 'zh',
+  });
+  assert.equal(r4.confirmed.length, 0);
+  assert.equal(r4.requeued.length, 1, 'stale receipt before sentAt does not block legitimate resend');
+
+  // 5. Unsent queued bubble is NOT swallowed by a receipt; one receipt only confirms one bubble.
+  const unsentQueued = { ...base, id: 4, text: '修一下', sentAt: t0 + 100, queued: true };
+  const r5 = model.reconcilePendingSends([unsentQueued], [], {
+    now: t0 + 1000, pmAddress: 't182', logReady: true, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(r5.confirmed.length, 0, 'unsent queued bubble must not be swallowed by receipt');
+  assert.equal(r5.pending[0].queued, true);
+
+  const dupA = { ...base, id: 5, text: '修一下', sentAt: t0, deliveredAt: t0 + 100, sentTo: 't182' };
+  const dupB = { ...base, id: 6, text: '修一下', sentAt: t0 + 100, deliveredAt: t0 + 200, sentTo: 't182' };
+  const r6 = model.reconcilePendingSends([dupA, dupB], [], {
+    now: t0 + 1000, pmAddress: 't182', logReady: true, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(r6.confirmed.length, 1, 'a single receipt confirms at most one pending bubble');
+  assert.equal(r6.pending[0].received, true);
+  assert.equal(Boolean(r6.pending[1].received), false);
+
+  // 6. Image/attachment receipt matching (`[Image #1]` vs file path) and truncated long receipt matching.
+  const withImg = { id: 7, text: model.messageText('看图', ['/tmp/a.png']), sentAt: t0, deliveredAt: t0 + 100, files: ['/tmp/a.png'] };
+  const imgReceipt = { at: '2026-11-23 20:00:01', at_ms: t0 + 300, text: '[Image #1] 看图' };
+  assert.ok(model.findReceiptMatch(withImg, [imgReceipt]), 'image-mark receipt matches attachment bubble');
+
+  const longWords = '😀'.repeat(4500);
+  const longReceipt = { at: '2026-11-23 20:00:01', at_ms: t0 + 300, text: '😀'.repeat(4000), len: 4500, truncated: true };
+  assert.ok(model.findReceiptMatch({ id: 8, text: longWords, sentAt: t0 }, [longReceipt]),
+    'truncated emoji receipt matches by Unicode code-point length, not UTF-16 length');
+  assert.equal(model.INTERNAL_PROJECT_FILES.has('receipts.json'), true, 'receipts.json is an internal project file');
+  assert.equal(model.INTERNAL_PROJECT_FILES.has('agy-transcript.json'), true, 'agy-transcript.json is an internal project file');
+
+  // 7. Non-timeout failed bubble (`hc send` failed/offline) must NEVER be swallowed by a receipt.
+  const failedSend = { ...base, id: 9, text: '修一下', sentAt: t0, failed: 'hc send: offline', timedOut: false };
+  const r7 = model.reconcilePendingSends([failedSend], [], {
+    now: t0 + 5000, pmAddress: 't182', logReady: true, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(r7.confirmed.length, 0, 'non-timeout send failure must not be confirmed by receipt');
+  assert.equal(r7.pending[0].failed, 'hc send: offline');
+
+  // 8. Settled receipts deducted: same text sent twice — 1st settles against evFirst, 2nd is verifying.
+  //    The 1st message's receipt is deducted by evFirst, so the 2nd message is NOT falsely confirmed.
+  const evFirst = { at: '2026-11-23 20:00:01', type: 'user', text: '继续' };
+  const recFirst = { at: '2026-11-23 20:00:01', at_ms: t0 + 1500, text: '继续', digest: 'c1' };
+  assert.deepEqual([...model.settledReceiptIndices([recFirst], [evFirst])], [0], 'logged event deducts its matching receipt');
+  const firstDelivered = { ...base, id: 100, text: '继续', sentAt: t0 + 1000, deliveredAt: t0 + 1100, sentTo: 't182' };
+  const secondVerifying = { ...base, id: 10, text: '继续', sentAt: t0 + 1200, verifying: true, verifySince: t0 + 15000 };
+  const r8 = model.reconcilePendingSends([firstDelivered, secondVerifying], [evFirst], {
+    now: t0 + 16000, pmAddress: 't182', logReady: true, logFreshFrom: t0 + 15500, receipts: [recFirst], lang: 'zh',
+  });
+  assert.equal(r8.settled.length, 1, 'first message settles against its logged event');
+  assert.equal(r8.confirmed.length, 0, 'receipt already settled in events must be deducted');
+  assert.equal(r8.requeued.length, 1, 'second duplicate message resends when only the first had a receipt');
+
+  // 9. Strict at_ms window: rapid repeat within 3s ("好" at t0, then "好" at t0+1000ms) must NOT match
+  //    the earlier message's receipt (at_ms = t0+200ms < sentAt = t0+1000ms).
+  const recEarly = { at: '2026-11-23 20:00:00', at_ms: t0 + 200, text: '好', digest: 'ok1' };
+  const rapidSecond = { ...base, id: 11, text: '好', sentAt: t0 + 1000, deliveredAt: t0 + 1050, sentTo: 't182', sentSession: 'fg:100' };
+  const r9 = model.reconcilePendingSends([rapidSecond], [], {
+    now: t0 + 1500, pmAddress: 't190', pmSession: 'fg:200', logReady: true, receipts: [recEarly], lang: 'zh',
+  });
+  assert.equal(r9.confirmed.length, 0, 'receipt with at_ms < sentAt must not swallow a rapid follow-up');
+  assert.equal(r9.requeued.length, 1, 'rapid follow-up requeues on swap when its own receipt is absent');
+
+  // 10. Existing `received` bubble reserves its receipt AND uses strict window in settlePending so an
+  //     earlier identical event (e.g. 30s ago) does NOT prematurely settle and drop the unlogged bubble.
+  const earlierEv = { at: '2026-11-23 19:59:30', type: 'user', text: '修一下' };
+  const receivedBubble = r1.pending[0];
+  const r10 = model.reconcilePendingSends([receivedBubble], [earlierEv], {
+    now: t0 + 20000, pmAddress: 't182', logReady: true, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(r10.settled.length, 0, 'older identical event (30s ago) must not prematurely settle a receipt-confirmed bubble');
+  assert.equal(r10.pending.length, 1);
+
+  // 11. Timeline rendering, pendingSignature, storage, and eventual settlement when log arrives.
+  const tlItem = model.timeline([], [], { pending: [receivedBubble] }).find(i => i.key === 'pending:1');
+  assert.equal(tlItem.pending, false);
+  assert.equal(tlItem.failed, '');
+  assert.equal(tlItem.received, true);
+  assert.notEqual(model.pendingSignature([delivered]), model.pendingSignature([receivedBubble]));
+  assert.deepEqual(model.keepQueuedSends({}, 'pm-dudu', [receivedBubble]), {}, 'receipt-confirmed bubble is not saved back to resend queue');
+
+  const settledLater = model.reconcilePendingSends([receivedBubble], [earlierEv, { at: '2026-11-23 20:00:01', type: 'user', text: '修一下' }], {
+    now: t0 + 25000, pmAddress: 't182', logReady: true, receipts: [receipt], lang: 'zh',
+  });
+  assert.equal(settledLater.pending.length, 0);
+  assert.equal(settledLater.settled.length, 1);
+});
+
+test('cross-timezone (UTC+8 viewer vs UTC-5 host, 13h skew): zero duplicate bubbles, zero false red errors, and accurate ordering', () => {
+  // Simulate viewer on MBP (where eventTime parses naive timestamps) reading a remote host 13 hours behind (-46,800,000 ms).
+  const sendUtcMs = 1795491005000;
+  // Naive local string on remote host (`22:30:05`) would parse 13h EARLIER on a UTC+8 viewer (`eventTime(remoteAt) = sendUtcMs - 13h`).
+  const remoteStateNow = '2026-11-23 22:30:05';
+  const simulatedViewerParsedNow = model.eventTime(remoteStateNow);
+  // Synthesize the true server UTC ms such that `eventTime(remoteStateNow) - serverNowMs === -13h` regardless of test runner's OS TZ!
+  const thirteenHoursMs = 13 * 3600 * 1000;
+  const serverNowMs = simulatedViewerParsedNow + thirteenHoursMs;
+  const clockOffsetMs = model.computeClockOffsetMs({ now: remoteStateNow, server_now_ms: serverNowMs }, serverNowMs + 80);
+  assert.equal(clockOffsetMs, -thirteenHoursMs, 'exact -13h timezone offset derived from (now, server_now_ms) independent of RTT');
+
+  // 1) Pre-upgrade event WITHOUT `at_ms` or `msg_id`: `eventTimeUtcMs` calibrates `-13h` naive string back to exact `serverNowMs`!
+  const legacyRemoteEvent = { at: '2026-11-23 22:30:06', type: 'user', text: '远程发消息不重影' };
+  assert.equal(model.eventTimeUtcMs(legacyRemoteEvent, clockOffsetMs), serverNowMs + 1000);
+
+  const pendingBubble = {
+    id: 1,
+    text: '远程发消息不重影',
+    sentAt: serverNowMs,
+    deliveredAt: serverNowMs + 200,
+    received: true,
+    receiptAt: serverNowMs + 400,
+  };
+  // Without clockOffsetMs (old broken behavior), eventTime is 13h < minAt -> failed to settle!
+  // With clockOffsetMs, settles immediately -> ZERO duplicate bubbles!
+  const reconciled = model.reconcilePendingSends([pendingBubble], [legacyRemoteEvent], {
+    now: serverNowMs + 2000,
+    pmAddress: 't182',
+    logReady: true,
+    clockOffsetMs,
+    lang: 'zh',
+  });
+  assert.equal(reconciled.pending.length, 0, 'cross-timezone receipt-confirmed bubble settles cleanly with zero duplicate bubble');
+  assert.equal(reconciled.settled.length, 1);
+
+  // 2) Reverse direction (+13h skew, UTC-5 viewer reading UTC+8 host): PM reply from 5 minutes BEFORE send must NOT
+  //    falsely trigger `turnEndedAfter` and time out a message sent during a long working turn!
+  const plusOffset = thirteenHoursMs;
+  const hostTrueNow = simulatedViewerParsedNow - plusOffset;
+  const calcPlusOffset = model.computeClockOffsetMs({ now: remoteStateNow, server_now_ms: hostTrueNow }, hostTrueNow);
+  assert.equal(calcPlusOffset, plusOffset);
+  const oldReplyOnUtc8 = { at: '2026-11-23 22:25:00', type: 'pm', by: 'hc:t182', text: '五分钟前的上一轮回复' };
+  const midTurnBubble = { id: 2, text: '长思考中途补充', sentAt: hostTrueNow, deliveredAt: hostTrueNow + 100, sentTo: 't182' };
+  const midRes = model.reconcilePendingSends([midTurnBubble], [oldReplyOnUtc8], {
+    now: hostTrueNow + 25_000,
+    pmAddress: 't182',
+    pmWorking: true,
+    logReady: true,
+    remote: true,
+    clockOffsetMs: calcPlusOffset,
+    lang: 'zh',
+  });
+  assert.equal(midRes.failed.length, 0, '+13h host timestamp must not falsely satisfy turnEndedAfter while PM is working');
+
+  // 3) Causal `msg_id` settles instantaneously even with arbitrary clock corruption and identical text.
+  const bCausal = { id: 3, msgId: 'u-causal-42', text: '好', sentAt: sendUtcMs, deliveredAt: sendUtcMs + 50 };
+  const evCausal = { seq: 9, at: '1999-01-01 00:00:00', at_ms: 915148800000, type: 'user', msg_id: 'u-causal-42', text: '好' };
+  assert.equal(model.settlePending([bCausal], [evCausal]).length, 0, 'msg_id settles regardless of physical timestamps');
+});
+
+test('busy-turn multi-message coalescing: when agy merges 2+ queued user messages with newline, receipts and settlePending match all bubbles', () => {
+  const t0 = model.eventTime('2026-11-23 21:00:00');
+  const b1 = { id: 1, text: '先别动 UI 样式', sentAt: t0, deliveredAt: t0 + 100, sentTo: 't182' };
+  const b2 = { id: 2, text: '顺便把跨时区单测也跑一遍', sentAt: t0 + 1500, deliveredAt: t0 + 1600, sentTo: 't182' };
+
+  // 1) Coalesced receipt in `receipts.json` confirms BOTH pending bubbles immediately (neither times out red or resends).
+  const mergedReceipt = {
+    at: '2026-11-23 21:00:05',
+    at_ms: t0 + 5000,
+    text: '先别动 UI 样式\n顺便把跨时区单测也跑一遍',
+    digest: 'merged-1',
+  };
+  const rConfirm = model.reconcilePendingSends([b1, b2], [], {
+    now: t0 + 25_000,
+    pmAddress: 't182',
+    pmWorking: false,
+    logReady: true,
+    receipts: [mergedReceipt],
+    lang: 'zh',
+  });
+  assert.equal(rConfirm.failed.length, 0, 'neither coalesced bubble may fail with unconfirmedSend');
+  assert.equal(rConfirm.confirmed.length, 2, 'single coalesced receipt confirms both constituent bubbles');
+  assert.equal(rConfirm.pending.every(p => p.received), true);
+
+  // 2) Coalesced `user` event in `conversation.jsonl` (including blank line separator or attachment `[Image #1]` mark) settles ALL constituent bubbles!
+  const mergedEvent = {
+    at: '2026-11-23 21:00:05',
+    at_ms: t0 + 5000,
+    type: 'user',
+    text: '先别动 UI 样式\n\n顺便把跨时区单测也跑一遍',
+  };
+  const rSettle = model.reconcilePendingSends(rConfirm.pending, [mergedEvent], {
+    now: t0 + 26_000,
+    pmAddress: 't182',
+    logReady: true,
+    receipts: [mergedReceipt],
+    lang: 'zh',
+  });
+  assert.equal(rSettle.pending.length, 0, 'coalesced conversation event settles both pending bubbles');
+  assert.equal(rSettle.settled.length, 2);
+
+  // 3) Attachment + follow-up text coalesced into `[Image #1] 看图\n右上角对齐一下`.
+  const bImg = { id: 3, text: model.messageText('看图', ['/tmp/paste-1.png']), files: ['/tmp/paste-1.png'], sentAt: t0, deliveredAt: t0 + 100 };
+  const bFollow = { id: 4, text: '右上角对齐一下', sentAt: t0 + 800, deliveredAt: t0 + 900 };
+  const coalescedImgEv = { at: '2026-11-23 21:00:03', at_ms: t0 + 3000, type: 'user', text: '[Image #1] 看图\n右上角对齐一下' };
+  assert.equal(model.settlePending([bImg, bFollow], [coalescedImgEv]).length, 0);
+
+  // 4) Unsent `queued` bubble or partial non-exhaustive text must NEVER be swallowed by coalesced matching.
+  const bUnsent = { id: 5, text: '顺便把跨时区单测也跑一遍', sentAt: t0 + 2000, queued: true };
+  assert.equal(model.settlePending([b1, bUnsent], [mergedEvent]).length, 2, 'unsent queued bubble must not participate in coalesced settlement');
+  const nonExhaustiveEv = { at: '2026-11-23 21:00:05', at_ms: t0 + 5000, type: 'user', text: '先别动 UI 样式\n顺便把跨时区单测也跑一遍\n还有第三句未知的话' };
+  assert.equal(model.settlePending([b1, b2], [nonExhaustiveEv]).length, 2, 'non-exhaustive partition must not falsely settle subset');
+});
+
+test('PM observability & recovery: pmTurnWorking, pmActivityView, AsyncGate, and pm_pi_compact Stop hook bridge', async () => {
+  // 1) Background-shell-only `working` never shows stuck `• • •`
+  const termShells = { address: 't182', status: 'working', report: { state: 'working', msg: '2 shells still running' } };
+  assert.equal(model.pmTurnWorking(termShells, [{ address: 't182', status: 'working' }]), false);
+  const termAgyBg = { address: 't182', status: 'working', report: { state: 'working', msg: '' } };
+  assert.equal(model.pmTurnWorking(termAgyBg, [{ address: 't182', status: 'working' }], { phase: 'idle', bg_shells: 1 }), false);
+  assert.equal(model.pmTurnWorking(termAgyBg, [{ address: 't182', status: 'working' }], { phase: 'working', bg_shells: 0 }), true);
+
+  // 2) Quiet live activity view: dots <3s -> tool summary -> 90s slow (interrupt) -> 300s stalled (interrupt + rotate)
+  const baseMs = 1795491000000;
+  const vShort = model.pmActivityView('zh', {
+    turn: { phase: 'working', started_ms: baseMs, last_activity_ms: baseMs },
+    working: true,
+    nowMs: baseMs + 1500,
+    serverNowMs: baseMs + 1500,
+  });
+  assert.equal(vShort.mode, 'dots');
+  assert.equal(vShort.label, '');
+
+  const vTool = model.pmActivityView('zh', {
+    turn: { phase: 'working', started_ms: baseMs, last_activity_ms: baseMs + 10_000, activity: { kind: 'tool', tool: 'Bash', summary: 'pm.py diff #301' } },
+    working: true,
+    nowMs: baseMs + 14_000,
+    serverNowMs: baseMs + 14_000,
+  });
+  assert.equal(vTool.mode, 'working');
+  assert.match(vTool.label, /正在运行 pm\.py diff #301 · 14s/);
+  assert.equal(vTool.canInterrupt, false);
+
+  const vSlow = model.pmActivityView('zh', {
+    turn: { phase: 'working', started_ms: baseMs, last_activity_ms: baseMs, activity: { kind: 'tool', tool: 'Bash', summary: 'git fetch' } },
+    working: true,
+    nowMs: baseMs + 95_000,
+    serverNowMs: baseMs + 95_000,
+  });
+  assert.equal(vSlow.mode, 'slow');
+  assert.equal(vSlow.canInterrupt, true);
+  assert.equal(vSlow.canRotate, false);
+
+  const vStalled = model.pmActivityView('zh', {
+    turn: { phase: 'stalled', started_ms: baseMs, last_activity_ms: baseMs, activity: { kind: 'tool', tool: 'Bash', summary: 'sleep 999' } },
+    working: true,
+    nowMs: baseMs + 305_000,
+    serverNowMs: baseMs + 305_000,
+  });
+  assert.equal(vStalled.mode, 'stalled');
+  assert.equal(vStalled.canInterrupt, true);
+  assert.equal(vStalled.canRotate, true);
+
+  // 3) AsyncGate preempts hung RPC past deadline and ignores stale completions
+  const gate = model.createAsyncGate();
+  const tok1 = model.tryEnterAsyncGate(gate, 1000, 5000);
+  assert.equal(tok1, 1);
+  assert.equal(model.tryEnterAsyncGate(gate, 3000, 5000), 0, 'blocked before deadline');
+  assert.equal(gate.again, true);
+  const tok2 = model.tryEnterAsyncGate(gate, 7000, 5000);
+  assert.equal(tok2, 2, 'preempts hung promise after deadline');
+  assert.equal(model.finishAsyncGate(gate, tok1), false, 'stale token ignored');
+  assert.equal(gate.busy, true);
+  assert.equal(model.finishAsyncGate(gate, tok2), false);
+  assert.equal(gate.busy, false);
+
+  // 4) `pm_pi_compact.js` bridges `agent_end` to `pm.py hook-turn` asynchronously
+  const piExt = await import('../pm-dash/skill/scripts/pm_pi_compact.js');
+  const spawned = [];
+  const handlers = new Map();
+  piExt.default(
+    { on(ev, fn) { handlers.set(ev, fn); }, sendMessage() {} },
+    {
+      instructions: 'rules',
+      spawnHook(cmd, args, _opts) {
+        let written = '';
+        spawned.push({ cmd, args, get stdin() { return written; } });
+        return {
+          stdin: { on() {}, end(s) { written = s; } },
+          unref() { spawned[spawned.length - 1].unreffed = true; },
+        };
+      },
+    },
+  );
+  handlers.get('agent_end')(
+    { messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: [{ type: 'text', text: 'pi 回复完成' }] }] },
+    { cwd: '/repo/demo', getContextUsage: () => ({ tokens: 1000 }) },
+  );
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].unreffed, true);
+  assert.equal(JSON.parse(spawned[0].stdin).last_assistant_message, 'pi 回复完成');
+});
+
+test('Steps card subplan rows bound long notes so titles are never squeezed or overlapped', () => {
+  const mkTracker = () => {
+    const nodes = new Map();
+    const tips = [];
+    const makeEl = kind => {
+      const rec = { kind, id: '', styles: [], texts: [], kids: [] };
+      const proxy = new Proxy(() => proxy, {
+        get: (_, key) => {
+          if (key === Symbol.toPrimitive) return () => 0;
+          if (key === '__rec') return rec;
+          return (...args) => {
+            if (key === 'id') { rec.id = String(args[0]); nodes.set(rec.id, rec); }
+            else if (key === 'child') {
+              if (typeof args[0] === 'string') rec.texts.push(args[0]);
+              else if (args[0]?.__rec) rec.kids.push(args[0].__rec);
+            } else if (key === 'children' && Array.isArray(args[0])) {
+              for (const k of args[0]) {
+                if (typeof k === 'string') rec.texts.push(k);
+                else if (k?.__rec) rec.kids.push(k.__rec);
+              }
+            } else if (key === 'when') {
+              if (args[0]) args[1](proxy);
+            } else {
+              rec.styles.push([key, args]);
+            }
+            return proxy;
+          };
+        },
+        apply: () => proxy,
+      });
+      return proxy;
+    };
+    const hasStyle = (rec, name, val) => rec.styles.some(([k, a]) => k === name && (val === undefined ? true : a[0] === val));
+    const ui = {
+      div: () => makeEl('div'),
+      svg: () => makeEl('svg'),
+      h_flex: () => makeEl('h_flex'),
+      v_flex: () => makeEl('v_flex'),
+      withTip: (key, el, text, opts) => { tips.push({ key, text, opts }); return el; },
+    };
+    return { nodes, tips, ui, hasStyle };
+  };
+
+  const longNote = '统一校验所有写入入口并补充长备注回归测试，防止挤垮左侧标题并溢出卡片右边界';
+  const rawSub = `实现后端根治方案（${longNote}）`;
+  const steps = model.taskSteps({
+    status: 'in_progress',
+    plan: [
+      { text: '实现后端根治', state: 'doing', right: 'very-long-right-meta-label-that-must-not-overflow-the-step-card' },
+      { text: '验证发布', state: 'todo' },
+    ],
+    subplan: [
+      `[>] ${rawSub}`,
+      '[ ] 补充单测（覆盖边界）',
+    ],
+  }, { lang: 'zh' });
+
+  assert.equal(steps.steps[0].substeps[0].shortText, '实现后端根治方案');
+  assert.equal(steps.steps[0].substeps[0].note, longNote);
+  assert.equal(steps.steps[0].substeps[0].tip, rawSub);
+
+  const theme = {
+    surface: '#ffffff', raised: '#f4f4f6', hover: '#ececef', border: '#e2e2e7', input: '#d4d4db',
+    foreground: '#18181b', muted: '#52525b', dim: '#71717a', accent: '#2563eb', ansi2: '#16a34a', working: '#16a34a',
+  };
+  const icons = { checkMark: 'check.svg', spinner: 'spin.svg', treeBranch: 'branch.svg', expand: 'exp.svg', chevron: 'chev.svg', windowPop: 'pop.svg' };
+
+  // 1) Detail card (interactive, compact=false)
+  const detail = mkTracker();
+  stepsView.renderStepsCard({
+    ui: detail.ui,
+    steps,
+    theme,
+    lang: 'zh',
+    icons,
+    compact: false,
+    framed: true,
+    cardId: 'thread-plan-card',
+    stepIdPrefix: 'plan-step',
+    isSubOpen: () => true,
+  });
+
+  const subRow = detail.nodes.get('plan-substep-0-0');
+  assert.ok(subRow, 'substep row renders');
+  assert.equal(detail.hasStyle(subRow, 'w_full'), true, 'substep row fills container width');
+  assert.equal(detail.hasStyle(subRow, 'min_w', 0), true, 'substep row sets min_w(0)');
+  assert.equal(detail.hasStyle(subRow, 'overflow_hidden'), true, 'substep row clips overflow');
+
+  const [markBox, titleBox, noteBox] = subRow.kids;
+  assert.ok(markBox && titleBox && noteBox, 'substep row has mark, title, and note children');
+  assert.equal(detail.hasStyle(titleBox, 'flex_1'), true, 'substep title keeps flex_1');
+  assert.equal(detail.hasStyle(titleBox, 'min_w', 0), true, 'substep title keeps min_w(0)');
+  assert.equal(detail.hasStyle(titleBox, 'whitespace_normal'), true, 'substep title wraps cleanly');
+  assert.deepEqual(titleBox.texts, ['实现后端根治方案']);
+
+  assert.equal(detail.hasStyle(noteBox, 'flex_none'), false, 'substep note container must NOT use flex_none');
+  assert.equal(detail.hasStyle(noteBox, 'min_w', 0), true, 'substep note container sets min_w(0)');
+  assert.equal(detail.hasStyle(noteBox, 'max_w', '40%'), true, 'substep note container caps width at 40%');
+  assert.equal(detail.hasStyle(noteBox, 'flex_shrink_1'), true, 'substep note container shrinks when tight');
+  assert.equal(detail.hasStyle(noteBox, 'overflow_hidden'), true, 'substep note container clips overflow');
+  const noteText = noteBox.kids[0];
+  assert.ok(noteText, 'note container has text child');
+  assert.equal(detail.hasStyle(noteText, 'min_w', 0), true, 'note text sets min_w(0)');
+  assert.equal(detail.hasStyle(noteText, 'truncate'), true, 'note text truncates with ellipsis');
+  assert.deepEqual(noteText.texts, [longNote]);
+
+  const subTip = detail.tips.find(x => x.key === 'plan-substep-0-0');
+  assert.ok(subTip, 'substep with long note registers tooltip for full text');
+  assert.equal(subTip.text, rawSub);
+  assert.equal(subTip.opts?.wrap, true, 'substep tooltip wraps outside overflow_hidden row');
+  assert.equal(subTip.opts?.full, true, 'substep tooltip wrapper stays full width');
+
+  // Outer step row & rightMeta also guard against overflow/squeeze
+  const stepRow = detail.nodes.get('plan-step-0');
+  assert.ok(stepRow);
+  assert.equal(detail.hasStyle(stepRow, 'w_full'), true);
+  assert.equal(detail.hasStyle(stepRow, 'min_w', 0), true);
+  assert.equal(detail.hasStyle(stepRow, 'overflow_hidden'), true);
+  const rightMetaBox = stepRow.kids.find(k => k.kids.some(c => c.texts.includes('very-long-right-meta-label-that-must-not-overflow-the-step-card')));
+  assert.ok(rightMetaBox, 'outer step rightMeta box renders');
+  assert.equal(detail.hasStyle(rightMetaBox, 'flex_none'), false, 'outer step rightMeta must NOT use flex_none');
+  assert.equal(detail.hasStyle(rightMetaBox, 'max_w', '40%'), true);
+  assert.equal(detail.hasStyle(rightMetaBox, 'overflow_hidden'), true);
+  assert.equal(detail.hasStyle(rightMetaBox.kids[0], 'truncate'), true);
+
+  // 2) Compact hover card (compact=true) applies the same note bounding rules
+  const compact = mkTracker();
+  stepsView.renderStepsCard({
+    ui: compact.ui,
+    steps,
+    theme,
+    lang: 'zh',
+    icons,
+    compact: true,
+    framed: false,
+    stepIdPrefix: 'hover-step',
+  });
+  const compactSub = compact.nodes.get('plan-substep-0-0');
+  assert.ok(compactSub, 'compact hover substep renders');
+  assert.equal(compact.hasStyle(compactSub, 'min_w', 0), true);
+  assert.equal(compact.hasStyle(compactSub, 'overflow_hidden'), true);
+  assert.equal(compact.hasStyle(compactSub.kids[2], 'max_w', '40%'), true);
+  assert.equal(compact.hasStyle(compactSub.kids[2].kids[0], 'truncate'), true);
 });

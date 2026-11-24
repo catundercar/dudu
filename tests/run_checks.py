@@ -218,7 +218,8 @@ class Run:
         (home / ".gitconfig").write_text(GITCONFIG, encoding="utf-8")
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(STRIP_PREFIXES) and k not in STRIP_NAMES}
-        env.update(HOME=str(home), PM_HOME=str(pm_home), TMPDIR=str(tmp))
+        env.update(HOME=str(home), USERPROFILE=str(home), PM_HOME=str(pm_home),
+                   TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp), PYTHONUTF8="1")
         return env
 
 
@@ -249,9 +250,24 @@ class CommandCheck(Check):
             self.started = time.time()
             folder = run.scratch()
             log = folder / "out.log"
-            with open(log, "wb") as f:
-                proc = subprocess.run(self.argv, cwd=ROOT, stdout=subprocess.PIPE if self.validate else f,
-                                      stderr=f, stdin=subprocess.DEVNULL)
+            try:
+                with open(log, "wb") as f:
+                    proc = subprocess.run(self.argv, cwd=ROOT, stdout=subprocess.PIPE if self.validate else f,
+                                          stderr=f, stdin=subprocess.DEVNULL)
+            except FileNotFoundError as exc:
+                self.ended = time.time()
+                self.ok = False
+                self.summary = f"command not found: {self.argv[0]}"
+                self.detail = [str(exc)]
+                report(self)
+                return
+            except OSError as exc:
+                self.ended = time.time()
+                self.ok = False
+                self.summary = f"cannot start {self.argv[0]}: {exc}"
+                self.detail = [str(exc)]
+                report(self)
+                return
             text = log.read_text(encoding="utf-8", errors="replace")
             self.ended = time.time()
             self.ok = proc.returncode == 0

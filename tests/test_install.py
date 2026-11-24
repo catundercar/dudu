@@ -17,6 +17,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 BUNDLE = REPO / "mods/pm-dash"
+WINDOWS = os.name == "nt"
 # Same node hierarchy as the shipped desktop main.json; no personal content.
 MAIN = {
     "id": "root", "type": "row", "background": "canvas", "version": "1", "children": [
@@ -65,14 +66,15 @@ class InstallTest(unittest.TestCase):
         self.pi = self.root / "pi home"
         self.desktop = self.root / "desktop home"
         # Every agent home points into the temporary directory; real homes are never touched.
-        self.env = dict(os.environ, HOME=str(self.root), CLAUDE_HOME=str(self.claude), CODEX_HOME=str(self.codex),
+        self.env = dict(os.environ, HOME=str(self.root), USERPROFILE=str(self.root),
+                        CLAUDE_HOME=str(self.claude), CODEX_HOME=str(self.codex),
                         PI_CODING_AGENT_DIR=str(self.pi), HERDR_APP_HOME=str(self.desktop))
         self.env.pop("PM_HOME", None)
         self.settings = self.claude / "settings.json"
 
     def run_install(self, *args):
-        result = subprocess.run([str(REPO / "install.sh"), *args], env=self.env,
-                                cwd=self.root, text=True, capture_output=True)
+        cmd = [sys.executable, str(REPO / "install.py"), *args] if WINDOWS else [str(REPO / "install.sh"), *args]
+        result = subprocess.run(cmd, env=self.env, cwd=self.root, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
@@ -80,7 +82,7 @@ class InstallTest(unittest.TestCase):
         return json.loads(self.settings.read_text())
 
     def run_setup(self, *args, bundle=BUNDLE, success=True):
-        result = subprocess.run(["python3", str(bundle / "setup.py"), *args], env=self.env,
+        result = subprocess.run([sys.executable, str(bundle / "setup.py"), *args], env=self.env,
                                 cwd=self.root, text=True, capture_output=True)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -132,7 +134,7 @@ class InstallTest(unittest.TestCase):
         self.run_setup(bundle=bundle)
         installed = self.claude / "skills/pm/scripts"
         # Running pm.py writes __pycache__ beside it; a test file in the bundle is not installed: neither counts.
-        subprocess.run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import pm_events",
+        subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import pm_events",
                         str(installed)], check=True, env=self.env)
         self.assertTrue(list(installed.glob("__pycache__/*")))
         self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
@@ -237,16 +239,21 @@ class InstallTest(unittest.TestCase):
         self.run_setup("--claude-home", str(self.claude))
         board = self.snapshot()
         expected = copy.deepcopy(original)
+        if WINDOWS:
+            setup_mod = load_module("pm_setup_cmp", BUNDLE / "setup.py")
+            cmd_prefix = f"{setup_mod.python_command()} {setup_mod.Agent('claude', str(self.claude)).script_command}"
+        else:
+            cmd_prefix = "python3 ~/.claude/skills/pm/scripts/pm.py"
         expected["hooks"]["SessionStart"].append({"matcher": "^(startup|resume|clear|compact)$", "hooks": [{
-            "type": "command", "command": "python3 ~/.claude/skills/pm/scripts/pm.py hook-session-start", "timeout": 10}]})
+            "type": "command", "command": f"{cmd_prefix} hook-session-start", "timeout": 10}]})
         expected["hooks"]["PreCompact"] = [{"hooks": [{"type": "command", "command":
-            "python3 ~/.claude/skills/pm/scripts/pm.py hook-pre-compact", "timeout": 10}]}]
-        expected["hooks"]["PreToolUse"] = [{"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command":
-            "python3 ~/.claude/skills/pm/scripts/pm.py hook-pre-tool", "timeout": 10}]}]
+            f"{cmd_prefix} hook-pre-compact", "timeout": 10}]}]
+        expected["hooks"]["PreToolUse"] = [{"matcher": "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command":
+            f"{cmd_prefix} hook-pre-tool", "timeout": 10}]}]
         expected["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command":
-            "python3 ~/.claude/skills/pm/scripts/pm.py hook-turn", "timeout": 15}]}]
+            f"{cmd_prefix} hook-turn", "timeout": 15}]}]
         expected["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command":
-            "python3 ~/.claude/skills/pm/scripts/pm.py hook-turn", "timeout": 15, "async": True}]}]
+            f"{cmd_prefix} hook-turn", "timeout": 15, "async": True}]}]
         self.assertEqual(self.read_settings(), expected)
         self.assertEqual(self.skill_files(self.claude), self.bundle_files())
         shutil.rmtree(self.claude)
@@ -254,7 +261,8 @@ class InstallTest(unittest.TestCase):
         self.settings.chmod(0o640)
         self.run_install()
         self.assertEqual(self.snapshot(), board)
-        self.assertEqual(self.settings.stat().st_mode & 0o777, 0o640)
+        if not WINDOWS:
+            self.assertEqual(self.settings.stat().st_mode & 0o777, 0o640)
 
     def claude_status(self, bundle=BUNDLE):
         return json.loads(self.run_setup("--status", bundle=bundle).stdout)["agents"]["claude"]
@@ -311,13 +319,17 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(session["matcher"], "^(startup|resume|clear|compact)$")
         command = session["hooks"][0]
         self.assertEqual(command["timeout"], 10)
-        self.assertEqual(shlex.split(command["command"]), ["python3", str(self.claude / "skills/pm/scripts/pm.py"), "hook-session-start"])
+        if WINDOWS:
+            self.assertTrue(command["command"].endswith(" hook-session-start"))
+            self.assertIn((self.claude / "skills/pm/scripts/pm.py").as_posix(), command["command"])
+        else:
+            self.assertEqual(shlex.split(command["command"]), ["python3", str(self.claude / "skills/pm/scripts/pm.py"), "hook-session-start"])
         pre = hooks["PreCompact"][0]["hooks"][0]
         self.assertFalse(pre.get("async", False))
         self.assertEqual(pre["timeout"], 10)
         self.assertTrue(pre["command"].endswith(" hook-pre-compact"))
         pre_tool = hooks["PreToolUse"][0]
-        self.assertEqual(pre_tool["matcher"], "AskUserQuestion")
+        self.assertEqual(pre_tool["matcher"], "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit")
         self.assertFalse(pre_tool["hooks"][0].get("async", False))
         self.assertEqual(pre_tool["hooks"][0]["timeout"], 10)
         self.assertTrue(pre_tool["hooks"][0]["command"].endswith(" hook-pre-tool"))
@@ -329,7 +341,7 @@ class InstallTest(unittest.TestCase):
             self.assertTrue(hook["command"].endswith(" hook-turn"))
         self.assertFalse(self.codex.exists() or self.pi.exists())
         # The installed launcher finds its package: `state` runs, on a ledger home of its own.
-        state = subprocess.run(["python3", str(self.claude / "skills/pm/scripts/pm.py"), "state"], text=True,
+        state = subprocess.run([sys.executable, str(self.claude / "skills/pm/scripts/pm.py"), "state"], text=True,
                                capture_output=True, env=dict(self.env, PM_HOME=str(self.root / "ledger")))
         self.assertEqual(state.returncode, 0, state.stderr)
         self.assertEqual(json.loads(state.stdout)["tasks"], [])
@@ -373,8 +385,12 @@ class InstallTest(unittest.TestCase):
         self.assertFalse(self.desktop.exists())
         self.assertIn("Skip desktop", output)
         self.assertNotIn("discord", output.lower())
-        for command in ([str(REPO / "install.sh"), "--discord"], [sys.executable, str(REPO / "install.py"), "--discord"],
-                        ["python3", str(BUNDLE / "setup.py"), "--discord"]):
+        cmds = [
+            *(() if WINDOWS else ([str(REPO / "install.sh"), "--discord"],)),
+            [sys.executable, str(REPO / "install.py"), "--discord"],
+            [sys.executable, str(BUNDLE / "setup.py"), "--discord"],
+        ]
+        for command in cmds:
             result = subprocess.run(command, env=self.env, cwd=self.root, text=True, capture_output=True)
             self.assertEqual(result.returncode, 2)
             self.assertIn("unrecognized arguments: --discord", result.stderr)
@@ -671,8 +687,8 @@ class InstallTest(unittest.TestCase):
             with self.subTest(settings=invalid):
                 self.settings.write_text(invalid)
                 before = {str(p): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
-                result = subprocess.run([str(REPO / "install.sh"), "--desktop"], env=self.env,
-                                        cwd=self.root, text=True, capture_output=True)
+                cmd = [sys.executable, str(REPO / "install.py"), "--desktop"] if WINDOWS else [str(REPO / "install.sh"), "--desktop"]
+                result = subprocess.run(cmd, env=self.env, cwd=self.root, text=True, capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Install failed", result.stderr)
                 self.assertEqual({str(p): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}, before)
@@ -698,6 +714,7 @@ class InstallTest(unittest.TestCase):
                 self.assertIn("Keep layout", self.run_install("--uninstall"))
                 self.assertEqual(target.read_text(), content)
 
+    @unittest.skipIf(WINDOWS, "tilde hook paths are POSIX-only; Windows uses absolute paths")
     def test_default_hook_path_uses_tilde(self):
         self.env["HOME"] = str(self.root)
         for variable in ("CLAUDE_HOME", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERDR_APP_HOME"):
@@ -801,20 +818,26 @@ class InstallTest(unittest.TestCase):
         output = self.run_install()
         self.assertIn("Codex runs these hooks once you trust them", output)
         self.assertFalse(self.claude.exists() or self.pi.exists())  # only detected homes
-        command = lambda action: f"python3 {shlex.quote(str(self.codex / 'skills/pm/scripts/pm.py'))} {action}"
+        if WINDOWS:
+            setup_mod = load_module("pm_setup_codex", BUNDLE / "setup.py")
+            prefix = f"{setup_mod.python_command()} {setup_mod.Agent('codex', str(self.codex)).script_command}"
+            command = lambda action: f"{prefix} {action}"
+        else:
+            command = lambda action: f"python3 {shlex.quote(str(self.codex / 'skills/pm/scripts/pm.py'))} {action}"
         expected = copy.deepcopy(original)
         expected["hooks"]["SessionStart"].append(
             {"hooks": [{"type": "command", "command": command("hook-session-start"), "timeout": 10}]})
         expected["hooks"]["PreCompact"] = [{"hooks": [
             {"type": "command", "command": command("hook-pre-compact"), "timeout": 10}]}]
-        expected["hooks"]["PreToolUse"] = [{"matcher": "request_user_input|ask_user|AskUserQuestion", "hooks": [
+        expected["hooks"]["PreToolUse"] = [{"matcher": "request_user_input|ask_user|AskUserQuestion|apply_patch|write_file|edit_file|Edit|Write", "hooks": [
             {"type": "command", "command": command("hook-pre-tool"), "timeout": 10}]}]
         expected["hooks"]["Stop"] = [other, {"hooks": [
             {"type": "command", "command": command("hook-turn"), "timeout": 15, "async": True}]}]
         expected["hooks"]["UserPromptSubmit"] = [{"hooks": [
             {"type": "command", "command": command("hook-turn"), "timeout": 15}]}]
         self.assertEqual(self.codex_hooks(), expected)
-        self.assertEqual((self.codex / "hooks.json").stat().st_mode & 0o777, 0o600)
+        if not WINDOWS:
+            self.assertEqual((self.codex / "hooks.json").stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.codex / "hooks.json.pm-backup").read_text(), text)
         self.assertEqual(self.skill_files(self.codex), self.bundle_files())
         status = json.loads(self.run_setup("--status").stdout)
@@ -956,6 +979,7 @@ class InstallTest(unittest.TestCase):
                 self.assertIn("Manual fallback", self.run_install_py())
                 self.assertFalse(target.exists())
 
+    @unittest.skipIf(WINDOWS, "install.sh is POSIX-only")
     def test_install_sh_skips_broken_python3_stub(self):
         # Simulate Windows where `python3` on PATH is a Microsoft Store stub exiting 9009, while `python` works.
         fakebin = self.root / "fakebin"
@@ -971,6 +995,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Dry run complete", result.stdout)
 
+    @unittest.skipIf(WINDOWS, "install.sh is POSIX-only")
     def test_install_sh_requires_python_3_9(self):
         # A Python 3.8 stub fails the (3, 9) probe; when no 3.9+ interpreter exists on PATH, install.sh fails cleanly.
         fakebin = self.root / "fakebin38"
@@ -1043,7 +1068,8 @@ class WindowsHookTest(unittest.TestCase):
                 for entry in entries for hook in entry["hooks"]]
 
     def test_python_command(self):
-        self.assertEqual(self.setup.python_command(), "python3")  # macOS and Linux: as before
+        with mock.patch.object(self.setup, "WINDOWS", False):
+            self.assertEqual(self.setup.python_command(), "python3")  # macOS and Linux: as before
         self.windows(r"C:\Windows\py.exe")
         self.assertEqual(self.setup.python_command(), "py -3")
         self.assertEqual(self.pm.python_command(), "py -3")
@@ -1087,6 +1113,7 @@ class WindowsHookTest(unittest.TestCase):
         (legacy / "tasks").mkdir()
         env = {k: v for k, v in os.environ.items() if k not in ("PM_HOME", "CLAUDE_HOME", "CODEX_HOME", "PI_CODING_AGENT_DIR")}
         env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
         res = subprocess.run([sys.executable, str(BUNDLE / "setup.py"), "--agents", "claude"],
                              env=env, cwd=str(home), capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
@@ -1097,7 +1124,7 @@ class WindowsHookTest(unittest.TestCase):
         self.assertFalse((home / ".dudu").exists())
         # Once migrated (~/.claude/pm -> ~/.dudu), installer treats ~/.dudu as ledger home and stops hinting.
         os.rename(legacy, home / ".dudu")
-        os.symlink(str(home / ".dudu"), str(legacy))
+        os.symlink(str(home / ".dudu"), str(legacy), target_is_directory=True)
         res2 = subprocess.run([sys.executable, str(BUNDLE / "setup.py"), "--agents", "claude"],
                               env=env, cwd=str(home), capture_output=True, text=True)
         self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
