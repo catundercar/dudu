@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dudu · manage all your coding agents from one session</title>
-<meta name="description" content="Manage all your coding agents from one session. Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.">
+<title>dudu · manage Claude Code, Codex &amp; coding agents from one session</title>
+<meta name="description" content="Open-source workspace for the Herdr desktop app. Manage Claude Code, Codex, Gemini CLI and other coding agents from one session with structured Threads, Library docs, log-verified Memory, and Quote / @ mentions.">
+<link rel="canonical" href="https://catundercar.github.io/dudu/">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)">
@@ -22,6 +23,72 @@
 <meta name="twitter:description" content="Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.">
 <meta name="twitter:image" content="https://catundercar.github.io/dudu/og.png">
 <link rel="icon" href="dudu.svg" type="image/svg+xml">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "dudu",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "url": "https://catundercar.github.io/dudu/",
+      "downloadUrl": "https://github.com/catundercar/dudu",
+      "codeRepository": "https://github.com/catundercar/dudu",
+      "license": "https://opensource.org/licenses/MIT",
+      "description": "Manage Claude Code, Codex, Gemini CLI and other coding agents across projects from one Herdr workspace with structured Threads, Library docs, two-layer Memory, and Quote / @ mentions.",
+      "image": "https://catundercar.github.io/dudu/og.png",
+      "screenshot": [
+        "https://catundercar.github.io/dudu/shot-threads.png",
+        "https://catundercar.github.io/dudu/shot-workspace.png",
+        "https://catundercar.github.io/dudu/preview.png"
+      ],
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Which coding agents work with dudu?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Claude Code and Codex are tested out of the box; pi, Gemini CLI, opencode, and other CLI coding agents can be configured as either project managers or task workers."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How does dudu isolate parallel coding agent tasks?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Each dispatched worker runs in its own git worktree with a configured model profile, cross-model read-only review, and merge checks before changes land on main."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How do Threads, Library, and Memory work together?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Every project opens as one conversation paired with a side panel for Threads (live status, steps, and dependencies), Library (project markdown specs), and two-layer Memory (personal and project decisions verified against the log). You can reference any message with Quote or attach Threads and Library docs using @ in the composer."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does dudu run locally or in the cloud?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "dudu runs locally on your machine inside the Herdr desktop app and can also manage projects on remote machines over Herdr, with a local restart-safe ledger and MIT open-source license."
+          }
+        }
+      ]
+    }
+  ]
+}
+</script>
 <script>
 (() => {
   let mode = "system";
@@ -158,6 +225,15 @@ h2 { font-size: clamp(24px, 3.2vw, 30px); letter-spacing: -.03em; line-height: 1
 .needs li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--ink3); flex: none; }
 .next { margin: 24px 0 0; color: var(--ink2); max-width: 40em; }
 
+/* faq */
+.faq { border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: var(--line); display: grid; gap: 1px; }
+.faq details { background: var(--card); }
+.faq summary { list-style: none; cursor: pointer; padding: 20px 26px; font-weight: 600; font-size: 15.5px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; font-weight: 400; font-size: 20px; line-height: 1; color: var(--ink3); transition: transform .15s; }
+.faq details[open] summary::after { content: "−"; color: var(--ink); }
+.faq details p { margin: 0; padding: 0 26px 22px; color: var(--ink2); font-size: 15px; max-width: 56em; }
+
 footer { margin-top: 96px; border-top: 1px solid var(--line); padding: 24px 0 40px; font-size: 13.5px; color: var(--ink3); }
 footer .wrap { display: flex; align-items: center; gap: 6px; }
 footer .wrap > span { margin-right: auto; display: flex; align-items: center; gap: 8px; }
@@ -273,6 +349,28 @@ cd dudu
       <li>Git</li>
     </ul>
     <p class="next">Then restart your agent sessions, open one in your project inside Herdr, and ask it to manage the project. The <a href="https://github.com/catundercar/dudu/blob/main/docs/guide.md">guide</a> covers getting started, configuration and uninstalling.</p>
+  </section>
+
+  <section id="faq">
+    <h2>FAQ</h2>
+    <div class="faq">
+      <details open>
+        <summary>Which coding agents work with dudu?</summary>
+        <p>Claude Code and Codex are tested out of the box. You can also configure pi, Gemini CLI, opencode, or other CLI coding agents as either the project manager or task workers — including mixing models across worker profiles and read-only reviews.</p>
+      </details>
+      <details>
+        <summary>How does dudu isolate parallel coding tasks?</summary>
+        <p>Each dispatched worker runs in its own git worktree so parallel threads never trample each other. Before merging into main, dudu runs cross-model read-only review and waits for your project's merge checks to pass.</p>
+      </details>
+      <details>
+        <summary>How do Threads, Library, Memory, and @ mentions connect?</summary>
+        <p>Every project opens as one conversation paired with a side panel for <b>Threads</b> (waiting questions, dependencies, live steps), <b>Library</b> (markdown specs right next to the chat), and two-layer <b>Memory</b> (personal and project decisions verified in the log). Use <b>Quote</b> or type <code>@</code> in the composer to pull exact messages, threads, or library docs into your next prompt.</p>
+      </details>
+      <details>
+        <summary>Does dudu run locally or on remote machines?</summary>
+        <p>dudu is MIT-licensed and runs locally inside the Herdr desktop app with a restart-safe task ledger. It also works with remote projects connected through Herdr, opening them in the same project conversation and board view.</p>
+      </details>
+    </div>
   </section>
 </main>
 
