@@ -13,14 +13,14 @@
 <meta property="og:url" content="https://catundercar.github.io/dudu/">
 <meta property="og:site_name" content="dudu">
 <meta property="og:title" content="dudu · manage all your coding agents from one session">
-<meta property="og:description" content="Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.">
+<meta property="og:description" content="Structured Threads, Library, log-verified Memory, and Quote / @ mentions — manage all your coding agents from one Herdr workspace.">
 <meta property="og:image" content="https://catundercar.github.io/dudu/og.png">
 <meta property="og:image:width" content="1280">
 <meta property="og:image:height" content="640">
-<meta property="og:image:alt" content="dudu: manage all your coding agents from one session, with its board of projects and tasks">
+<meta property="og:image:alt" content="dudu: manage all your coding agents from one session, with Threads, Library, Memory and its project board">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="dudu · manage all your coding agents from one session">
-<meta name="twitter:description" content="Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.">
+<meta name="twitter:description" content="Structured Threads, Library, log-verified Memory, and Quote / @ mentions — manage all your coding agents from one Herdr workspace.">
 <meta name="twitter:image" content="https://catundercar.github.io/dudu/og.png">
 <link rel="icon" href="dudu.svg" type="image/svg+xml">
 <script type="application/ld+json">
@@ -119,6 +119,7 @@
   --line: #e4e4e7;
   --code: #f4f4f5;
   --ok: #2f8a4c;
+  --accent: #d97757;
   --shadow: 0 1px 2px rgba(0,0,0,.04), 0 18px 48px -18px rgba(0,0,0,.22);
 }
 :root[data-theme="dark"] {
@@ -130,6 +131,7 @@
   --line: #26262a;
   --code: #131315;
   --ok: #7cc58f;
+  --accent: #e08263;
   --shadow: 0 1px 2px rgba(0,0,0,.3), 0 24px 64px -24px rgba(0,0,0,.85);
 }
 @media (prefers-color-scheme: dark) {
@@ -142,6 +144,7 @@
     --line: #26262a;
     --code: #131315;
     --ok: #7cc58f;
+    --accent: #e08263;
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 24px 64px -24px rgba(0,0,0,.85);
   }
 }
@@ -179,10 +182,10 @@ nav .wrap { display: flex; align-items: center; gap: 8px; height: 60px; }
 .theme[data-mode="system"] .i-system, .theme[data-mode="light"] .i-light, .theme[data-mode="dark"] .i-dark { display: block; }
 
 /* hero */
-.hero { padding: 88px 0 48px; }
+.hero { padding: 80px 0 40px; }
 .eyebrow { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); margin: 0 0 16px; }
-h1 { font-size: clamp(36px, 6vw, 60px); line-height: 1.04; letter-spacing: -.04em; margin: 0 0 22px; font-weight: 700; max-width: 13em; }
-.lede { font-size: 19px; color: var(--ink2); margin: 0 0 36px; max-width: 32em; }
+h1 { font-size: clamp(36px, 6vw, 58px); line-height: 1.05; letter-spacing: -.04em; margin: 0 0 20px; font-weight: 700; max-width: 14em; }
+.lede { font-size: 19px; color: var(--ink2); margin: 0 0 32px; max-width: 34em; }
 
 /* command */
 .cmd { display: flex; align-items: center; gap: 4px; max-width: 760px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 6px 6px 6px 18px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
@@ -193,26 +196,56 @@ h1 { font-size: clamp(36px, 6vw, 60px); line-height: 1.04; letter-spacing: -.04e
 .copy.done .i-copy { display: none; }
 .copy.done .i-check { display: block; }
 
+/* interactive showcase tabs */
+.showcase { padding: 12px 0 24px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink2);
+  font: 500 14px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background-color .15s;
+}
+.tab-btn:hover { color: var(--ink); border-color: color-mix(in srgb, var(--ink) 24%, var(--line)); }
+.tab-btn[aria-selected="true"] {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--ink) 38%, var(--line));
+  background: color-mix(in srgb, var(--ink) 6%, var(--card));
+}
+.tab-btn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink3); opacity: .45; }
+.tab-btn[aria-selected="true"] .dot { background: var(--accent); opacity: 1; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
 /* figures */
 figure { margin: 0; }
 .shot { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow); background: #0d0d0f; }
 .shot img { width: 100%; }
-figcaption { margin-top: 12px; font-size: 13px; color: var(--ink3); }
-.demo { padding: 8px 0 24px; }
+figcaption { margin-top: 12px; font-size: 13.5px; color: var(--ink3); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+figcaption strong { color: var(--ink2); font-weight: 550; }
 
 /* sections */
 section { padding: 72px 0 0; }
 h2 { font-size: clamp(24px, 3.2vw, 30px); letter-spacing: -.03em; line-height: 1.2; margin: 0 0 12px; font-weight: 660; }
-.sub { color: var(--ink2); margin: 0 0 32px; max-width: 34em; }
+.sub { color: var(--ink2); margin: 0 0 32px; max-width: 38em; }
 
 .points { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
 .points li { background: var(--card); padding: 26px 28px 28px; min-width: 0; }
 .points .ic { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); margin-bottom: 16px; }
 .points .ic svg { width: 18px; height: 18px; }
-.points h3 { font-size: 16.5px; letter-spacing: -.01em; margin: 0 0 6px; font-weight: 640; }
+.points h3 { font-size: 16.5px; letter-spacing: -.01em; margin: 0 0 6px; font-weight: 640; display: flex; align-items: center; gap: 8px; }
 .points p { margin: 0; color: var(--ink2); font-size: 15px; }
+.pill-new { font: 600 11px/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .04em; text-transform: uppercase; padding: 3px 6px; border-radius: 6px; color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
 
-.board { padding-top: 40px; }
+/* 2-col visual gallery */
+.gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin-top: 36px; }
+.board { padding-top: 36px; }
 
 .install { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
 .install > div { background: var(--card); padding: 26px 28px; min-width: 0; }
@@ -241,9 +274,9 @@ footer .brand-mark svg { width: 16px; height: 16px; }
 
 @media (max-width: 720px) {
   .wrap { padding: 0 16px; }
-  .hero { padding: 56px 0 36px; }
+  .hero { padding: 52px 0 32px; }
   .lede { font-size: 17px; }
-  .points, .install { grid-template-columns: minmax(0, 1fr); }
+  .points, .install, .gallery { grid-template-columns: minmax(0, 1fr); }
   .points li, .install > div { padding: 22px 20px; }
   .cmd { padding-left: 14px; }
   .cmd pre { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -279,36 +312,71 @@ footer .brand-mark svg { width: 16px; height: 16px; }
   <header class="hero">
     <p class="eyebrow">For the Herdr desktop app · MIT</p>
     <h1>Manage all your coding agents from one session.</h1>
-    <p class="lede">Tell it what you want; it dispatches agents, reviews and merges their work, and shows you only what is waiting for you.</p>
+    <p class="lede">One conversation per project, backed by structured Threads, Library docs, log-verified Memory, and Quote / <code>@</code> mentions right in the composer.</p>
     <div class="cmd">
       <pre id="get"><span class="p">$ </span>git clone https://github.com/catundercar/dudu.git &amp;&amp; cd dudu &amp;&amp; ./install.sh</pre>
       <button class="icon-btn bare copy" type="button" data-copy="get" aria-label="Copy command" title="Copy"><svg class="i-copy" aria-hidden="true"><use href="#copy"/></svg><svg class="i-check" aria-hidden="true"><use href="#check"/></svg></button>
     </div>
   </header>
 
-  <figure class="demo">
-    <div class="shot"><img src="demo.gif" width="960" height="624" alt="dudu board: a task is dispatched, comes back for review, another one gets blocked"></div>
-    <figcaption>The recording uses invented demo data.</figcaption>
-  </figure>
+  <!-- Interactive Animated Demos -->
+  <div class="showcase" aria-label="Interactive feature demos">
+    <div class="tabs" role="tablist">
+      <button class="tab-btn" type="button" role="tab" aria-selected="true" data-tab="threads"><span class="dot"></span>Threads lifecycle</button>
+      <button class="tab-btn" type="button" role="tab" aria-selected="false" data-tab="quote"><span class="dot"></span>Quote &amp; @ mentions</button>
+      <button class="tab-btn" type="button" role="tab" aria-selected="false" data-tab="libmem"><span class="dot"></span>Library &amp; Memory</button>
+      <button class="tab-btn" type="button" role="tab" aria-selected="false" data-tab="board"><span class="dot"></span>Multi-project Board</button>
+    </div>
+
+    <figure class="tab-panel active" data-panel="threads">
+      <div class="shot"><img src="threads-lifecycle.gif" width="1120" height="718" alt="Threads lifecycle: question card #2, waiting dependency #3 on hover, clicking Casual/friendly, live worker steps popover, and verified merge commit cd89387"></div>
+      <figcaption><span><strong>Threads:</strong> asks before editing, tracks waiting dependencies, shows live worker steps on hover, and merges after checks pass.</span><span>Real UI · toy demo repo</span></figcaption>
+    </figure>
+
+    <figure class="tab-panel" data-panel="quote">
+      <div class="shot"><img src="quote-and-at.gif" width="1120" height="718" loading="lazy" alt="Composer Quote and @ mentions: clicking Quote on a message to snap a chip into the composer, then typing @ to attach a thread and a library spec"></div>
+      <figcaption><span><strong>Quote &amp; @ mentions:</strong> click Quote on any message or type <code>@</code> to attach threads, library docs, or files as inline chips.</span><span>Real UI · toy demo repo</span></figcaption>
+    </figure>
+
+    <figure class="tab-panel" data-panel="libmem">
+      <div class="shot"><img src="library-memory.gif" width="1120" height="718" loading="lazy" alt="Library and Memory side panel: opening greeting-spec.md in Library, then switching to Memory to inspect a decision verified in the log"></div>
+      <figcaption><span><strong>Library &amp; Memory:</strong> read markdown specs right beside the chat and inspect project decisions verified against the log.</span><span>Real UI · toy demo repo</span></figcaption>
+    </figure>
+
+    <figure class="tab-panel" data-panel="board">
+      <div class="shot"><img src="demo.gif" width="960" height="624" loading="lazy" alt="dudu board: a task is dispatched, comes back for review, another one gets blocked"></div>
+      <figcaption><span><strong>Board:</strong> every project and task across machines in one overview.</span><span>Invented demo data</span></figcaption>
+    </figure>
+  </div>
 
   <section id="what">
-    <h2>One session that keeps the whole picture</h2>
-    <p class="sub">For each project, one agent session acts as its manager. It hands out the work, checks what comes back, and keeps a task ledger that survives restarts.</p>
+    <h2>One workspace that keeps the whole picture</h2>
+    <p class="sub">Each project opens as one conversation with its manager, paired with a side panel for Threads, Library, and Memory — and a cross-project board whenever you want the full view.</p>
     <ul class="points">
+      <li>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="4" r="1.6"/><circle cx="5" cy="14" r="1.6"/><circle cx="13" cy="9" r="1.6"/><path d="M5 5.6v6.8M5 5.6c0 2.5 2 3.4 4.2 3.4h2.2"/></svg></div>
+        <h3>Structured Threads <span class="pill-new">Updated</span></h3>
+        <p>Tasks track Waiting on you, Working, Not started dependencies, and Finished. Hover any row to inspect active steps, branch, and model profile without leaving the conversation.</p>
+      </li>
+      <li>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.25 4.75A2 2 0 0 1 5.25 2.75h7.5a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2H8.5L5 15.25v-3H5.25a2 2 0 0 1-2-2z"/><path d="M6.5 6.75h5M6.5 9.25h3.25"/></svg></div>
+        <h3>Quote &amp; <code>@</code> in the composer <span class="pill-new">New</span></h3>
+        <p>Click Quote on any message to pull it into the composer with jump-back, or type <code>@</code> to attach Threads, Library docs, and project files as clean inline chips.</p>
+      </li>
+      <li>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3.75c1.8-.65 3.6-.5 5.25.55v9.95c-1.65-1.05-3.45-1.2-5.25-.55z"/><path d="M15 3.75c-1.8-.65-3.6-.5-5.25.55v9.95c1.65-1.05 3.45-1.2 5.25-.55z"/></svg></div>
+        <h3>Library &amp; two-layer Memory <span class="pill-new">New</span></h3>
+        <p>Open project markdown specs in Library right beside the thread. Two-layer Memory (personal and project) records key decisions and verifies them against the conversation log.</p>
+      </li>
       <li>
         <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.25" y="2.25" width="5.5" height="5.5" rx="1.5"/><rect x="10.25" y="2.25" width="5.5" height="5.5" rx="1.5"/><rect x="2.25" y="10.25" width="5.5" height="5.5" rx="1.5"/><rect x="10.25" y="10.25" width="5.5" height="5.5" rx="1.5"/></svg></div>
         <h3>Every project at a glance</h3>
-        <p>A board shows every project and task: what is running, what is in review, what is waiting for you. Progress is kept in a ledger, visible across projects and machines.</p>
+        <p>Switch to Board to see every project and task across local or remote machines: what is running, what is in review, and what is waiting for you, backed by a restart-safe ledger.</p>
       </li>
       <li>
-        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.75A2.25 2.25 0 0 1 5.25 2.5h7.5A2.25 2.25 0 0 1 15 4.75v5a2.25 2.25 0 0 1-2.25 2.25H8.5L5 15v-3h0A2 2 0 0 1 3 10z"/><path d="M6.25 6.25h5.5M6.25 8.75h3.5"/></svg></div>
-        <h3>Open a project, talk to it</h3>
-        <p>A project opens as one conversation with its manager: what you said, its replies, each task as a thread where it started, and its questions as cards with answers to pick.</p>
-      </li>
-      <li>
-        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="3.75" r="1.75"/><circle cx="5" cy="14.25" r="1.75"/><circle cx="13" cy="8" r="1.75"/><path d="M5 5.5v7"/><path d="M5 5.5c0 2.5 2 2.5 4.25 2.5h2"/></svg></div>
+        <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9.5l3 3 7-7.5"/><rect x="2" y="2.25" width="14" height="13.5" rx="2.5"/></svg></div>
         <h3>Dispatch, review, merge</h3>
-        <p>It hands tasks to coding agents in their own worktrees, reviews what they bring back, and merges it. You step in only where a decision is yours.</p>
+        <p>Workers run in isolated worktrees with tiered profiles. Cross-model reviews run read-only, failed reviews escalate automatically, and merges land only after project checks pass.</p>
       </li>
       <li>
         <div class="ic"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="14" height="12" rx="2.25"/><path d="M5.25 7.25L7.5 9.25 5.25 11.25M9.5 11.25h3.25"/></svg></div>
@@ -317,9 +385,20 @@ footer .brand-mark svg { width: 16px; height: 16px; }
       </li>
     </ul>
 
+    <div class="gallery">
+      <figure>
+        <div class="shot"><img src="shot-threads.png" width="1600" height="1025" loading="lazy" alt="Hovering a live working thread in dudu shows Steps #2 on branch dev/greet-function while the worker runs"></div>
+        <figcaption><span><strong>Live Threads popover:</strong> active step, branch, and nested worker in real time.</span></figcaption>
+      </figure>
+      <figure>
+        <div class="shot"><img src="shot-workspace.png" width="1600" height="1025" loading="lazy" alt="dudu workspace with a log-verified Memory record open on the right and two @ mention chips (#2 thread and greeting-spec.md) in the composer"></div>
+        <figcaption><span><strong>Connected context:</strong> verified Memory open beside <code>@</code> thread &amp; library chips.</span></figcaption>
+      </figure>
+    </div>
+
     <figure class="board">
-      <div class="shot"><img src="preview.png" width="3612" height="1580" alt="The dudu board: five projects, their managers and their tasks, with what is running, in review and blocked"></div>
-      <figcaption>The board, with invented demo data.</figcaption>
+      <div class="shot"><img src="preview.png" width="3612" height="1580" loading="lazy" alt="The dudu board: five projects, their managers and their tasks, with what is running, in review and blocked"></div>
+      <figcaption><span><strong>Multi-project Board:</strong> five projects, their managers, and tasks in one view.</span><span>Invented demo data</span></figcaption>
     </figure>
   </section>
 
@@ -387,6 +466,14 @@ document.querySelectorAll("button.copy").forEach((b) => {
     try { await navigator.clipboard.writeText(text); } catch { return; }
     b.classList.add("done"); b.title = "Copied";
     setTimeout(() => { b.classList.remove("done"); b.title = "Copy"; }, 1400);
+  });
+});
+
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const id = btn.dataset.tab;
+    document.querySelectorAll(".tab-btn").forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.panel === id));
   });
 });
 </script>
