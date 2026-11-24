@@ -1,8 +1,8 @@
-# dudu PM board
+# dudu — Multi-Agent Workspace
 
-A Herdr desktop layout with a PM entry above the space and agent lists. Open Board to see a dudu hub connected to project PMs and their tasks, running/review/blocked counts, machine labels, and recent activity. Task rows lead back to live terminals; the original terminal workspace stays available behind the board. Clicking a PM in the sidebar opens its project as one conversation, with each task as a thread card and a side panel per thread. The preview uses invented demo data in the dark theme.
+Manage Claude Code, Codex, Gemini CLI, and other coding agents from one Herdr workspace. Each project opens as a single coordinator conversation paired with a live side panel for structured Threads (status groups, live worker steps, dependencies, and inline question cards), Library markdown docs, and two-layer log-verified Memory — with Quote and `@` mentions right in the composer. Switch to Board for a live hub graph across local and remote machines, or jump into any agent's terminal without leaving the layout. The preview uses invented demo data in the dark theme.
 
-![dudu PM board](preview.png)
+![dudu — Multi-Agent Workspace](preview.png)
 
 ## What you see
 
