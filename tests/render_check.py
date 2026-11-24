@@ -20,15 +20,22 @@ renders, re-renders its view when a file lands in the run's poke folder, and, in
 logs errors thrown in timers, tasks and console.error. Clicks and keys are not tried.
 
 The person's Herdr is never touched: every herdr-app call names this run's app home and
-every hc call this run's core session. The window opens in the background, small, in the
-main screen's bottom-left corner, and is quit at the end; nothing is written under
-~/.config/herdr-app or the real ledger. GPUI draws a window only while some of it is
-visible: covered by other windows, minimized, on another Space or with the display off it
-draws nothing. So the window sits flush in the corner, where a maximized window stops above
-the Dock's row and the Dock's icons do not reach, and is raised above other background
-windows (AXRaise: the app is not activated, the frontmost app and the keyboard stay where
-they were; the report states the frontmost app before and after). A window that still draws
-no frames renders nothing; the check then stops with exit 2 instead of judging the mods.
+every hc call this run's core session. The app opens in the background (`open -g`: the
+frontmost app and the keyboard stay where they were; the report states the frontmost app
+before and after) with its window small, in the main screen's bottom-left corner, and is
+hidden as soon as the window answers (NSRunningApplication.hide, like Cmd-H on it: about a
+second on screen; no Accessibility permission). It is quit at the end; nothing is read or
+written under ~/.config/herdr-app or the real ledger.
+
+Frames are drawn on demand, so the screen may be locked, the display asleep or the window
+covered. On macOS GPUI runs a window's display link only while some of it is visible
+(vendor/gpui-pre-macos/src/window.rs, start_display_link), so cx.notify() alone draws nothing
+then. After each poke the check runs `herdr-app shot`, which (Window::render_current_to_image
+in vendor/gpui-pre/src/window.rs) calls window.draw(cx) on the dirty window and renders the
+scene to an offscreen texture: every mod's render, layout, prepaint and paint run as in a frame
+on screen; only presenting it is skipped. The private window is hidden, so these are its only
+frames, locked screen or not. A window that answers no shot renders nothing; the check then
+stops with exit 2 instead of judging the mods.
 
   python3 tests/render_check.py               # the working tree's mods/ and layouts/
   python3 tests/render_check.py --rev f31fad8 # a commit's
@@ -88,7 +95,7 @@ function wrap(cls, name) {
       let out;
       try { out = real.apply(this, args); } catch (e) { failed(`${name}.${method}`, e); throw e; }
       if (method === 'render') say(`R ${MOD} ${name}`);
-      else if (name === 'default') { poke(args[1]); if (ROLE) listen(this, args[1]); }
+      else if (name === 'default') { poke(args[1]); if (ROLE && !this.headerOnly) listen(this, args[1]); }
       return out;
     };
   }
@@ -129,7 +136,10 @@ function report(view) {
   try { found = typeof view.pm === 'function' ? Boolean(view.pm()) : null; } catch (_) { found = null; }
   return { pm: view.pmName ?? null, machine: view.machine ?? null, error: view.error ? String(view.error) : '',
     found, events: Array.isArray(view.events) ? view.events.length : null,
-    detail: view.detail ?? null, thread: view.thread ?? null, threadTask: view.threadTask === undefined ? null : Boolean(view.threadTask) };
+    detail: view.detail ?? null, thread: view.thread ?? null,
+    threadTask: view.threadTask === undefined ? null : Boolean(view.threadTask),
+    sessionTab: view.threadTab ?? null, sessionState: view.threadSessionState ?? null,
+    sessionItems: Array.isArray(view.threadSession?.items) ? view.threadSession.items.length : null };
 }
 function listen(view, cx) {
   cx.spawn(async cx => {
@@ -138,7 +148,20 @@ function listen(view, cx) {
       say(`CMD ${MOD} ${command}`);
       try {
         if (command.startsWith('rc-page:')) page(command.slice(8));
-        else if (command.startsWith('rc-thread:')) view.openThread(command.slice(10), cx);
+        else if (command.startsWith('rc-thread:')) view.openThread(command.slice(10), cx, { forceOpen: true });
+        else if (command === 'rc-thread-session') {
+          if (typeof view.selectThreadTab === 'function') view.selectThreadTab('session', cx);
+        }
+        else if (command === 'rc-expand-session-tools') {
+          const held = view.threadSession;
+          const ns = [main, __NAMESPACES__].find(x => x && typeof x.sessionTurns === 'function');
+          if (held && Array.isArray(held.items) && ns) {
+            for (const trn of ns.sessionTurns(held.items, { lang: view.lang })) {
+              const toolPart = (trn.parts || []).find(p => p.kind === 'tools');
+              if (toolPart) { (view.sessionToolsOpen ||= new Set()).add(toolPart.key); break; }
+            }
+          }
+        }
         else if (command === 'rc-report') say(`STATE ${MOD} ` + JSON.stringify(report(view)));
       } catch (e) { failed(`command ${command}`, e); }
       cx.notify();
@@ -148,26 +171,34 @@ function listen(view, cx) {
 """
 
 
-# Small, flush in the main screen's bottom-left corner (corner() places it). GPUI draws a window
-# only while some of it is visible (NSWindow occlusionState): fully covered, minimized or with the
-# display off it draws nothing, which drawing() and step() catch and covered() explains.
+# The window's size sets the pages' layout (pm-project's wide/narrow split). It is on screen only
+# from its first frame until hide() hides the app (a second or two), flush in the main screen's
+# bottom-left corner (corner() places it) where it is least in the way meanwhile.
 WINDOW = [40.0, 40.0, 1000.0, 680.0]
+# Drawn by each `herdr-app shot` (Check.frame); deleted at the end.
+FRAME = "frame.png"
+# The main screen's size and its display's UUID (window.json's "display"): without a display it
+# knows, Herdr centers the window (src/place.rs), so the corner needs it. Computed here, not read
+# from the person's window.json, which does not always name one.
 SCREEN = r"""ObjC.import('AppKit'); const f = $.NSScreen.screens.objectAtIndex(0).frame;
-JSON.stringify([f.size.width, f.size.height])"""
-# Raises the window above other background windows; never activates its app (that would take
-# the keyboard). It cannot go above the frontmost app's windows; the corner is for those.
-RAISE = r"""ObjC.import('ApplicationServices');
-if (!$.AXIsProcessTrusted()) 'not trusted'; else {
-  const ref = Ref(), app = $.AXUIElementCreateApplication(__PID__);
-  const e = $.AXUIElementCopyAttributeValue(app, $('AXWindows'), ref), wins = e == 0 ? ObjC.castRefToObject(ref[0]) : null;
-  let done = 0;
-  for (let i = 0; wins && i < wins.count; i++) if ($.AXUIElementPerformAction(wins.objectAtIndex(i), $('AXRaise')) == 0) done++;
-  `raised ${done}`;
-}"""
+ObjC.bindFunction('CGMainDisplayID', ['unsigned int', []]);
+ObjC.bindFunction('CGDisplayCreateUUIDFromDisplayID', ['void *', ['unsigned int']]);
+ObjC.bindFunction('CFUUIDCreateString', ['id', ['void *', 'void *']]);
+const u = $.CGDisplayCreateUUIDFromDisplayID($.CGMainDisplayID());
+JSON.stringify([f.size.width, f.size.height, u ? ObjC.unwrap($.CFUUIDCreateString(null, u)).toLowerCase() : null])"""
+# Hides the private Herdr (NSRunningApplication.hide, like Cmd-H on it): never activates it, needs
+# no Accessibility permission. Herdr activates itself after opening its window (`open -j` does
+# not keep it hidden), so this runs once the window answers.
+HIDE = r"""ObjC.import('AppKit'); const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(__PID__);
+app.isNil() ? 'gone' : (app.hide ? 'hidden' : 'not hidden')"""
+# Read-only: how many of one process's windows are on screen now.
+SHOWN = r"""ObjC.import('CoreGraphics');
+const all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(0, 0))) || [];
+String(all.filter(w => w.kCGWindowOwnerPID == __PID__ && w.kCGWindowLayer == 0 && w.kCGWindowIsOnscreen).length)"""
 
 
 def jxa(script, timeout=10):
-    """Runs a read-only (or own-window) JavaScript for Automation snippet; '' when it fails."""
+    """Runs a read-only (or own-app) JavaScript for Automation snippet; '' when it fails."""
     try:
         r = subprocess.run(["osascript", "-l", "JavaScript", "-e", script], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
@@ -176,12 +207,16 @@ def jxa(script, timeout=10):
 
 
 def corner():
-    """WINDOW's size, flush in the main screen's bottom-left corner (top-left screen coordinates)."""
+    """window.json's place: WINDOW's size, flush in the main screen's bottom-left corner (top-left
+    screen coordinates), on that display."""
     try:
-        width, height = json.loads(jxa(SCREEN))
+        width, height, display = json.loads(jxa(SCREEN))
     except (ValueError, TypeError):
-        return WINDOW
-    return [0.0, float(height) - WINDOW[3], WINDOW[2], WINDOW[3]]
+        return {"state": "windowed", "bounds": WINDOW}
+    place = {"state": "windowed", "bounds": [0.0, float(height) - WINDOW[3], WINDOW[2], WINDOW[3]]}
+    if isinstance(display, str) and display:
+        place["display"] = display
+    return place
 
 
 class Blocked(Exception):
@@ -217,8 +252,16 @@ def copy_plain(src, dst):
 def ledger_source():
     if os.environ.get("PM_HOME"):
         return Path(os.environ["PM_HOME"]).expanduser()
+    canonical = Path.home() / ".dudu"
     default = Path.home() / ".claude/pm"
-    return default if default.is_dir() else Path.home() / ".dudu"
+    if default.is_dir():
+        try:
+            if canonical.exists() and default.samefile(canonical):
+                return canonical
+        except OSError:
+            pass
+        return default
+    return canonical
 
 
 def frontmost():
@@ -227,43 +270,6 @@ def frontmost():
                         "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier"],
                        capture_output=True, text=True, timeout=10)
     return int(r.stdout) if r.stdout.strip().isdigit() else None
-
-
-# Read-only: the windows in front of one window, and whether together they hide all of it.
-COVERED = r"""ObjC.import('CoreGraphics');
-const all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(0, 0))) || [];
-const own = all.filter(w => w.kCGWindowOwnerPID == __PID__ && w.kCGWindowLayer == 0 && w.kCGWindowIsOnscreen);
-let out = { found: own.length > 0, covered: false, by: [] };
-if (own.length) {
-  const me = own[0], b = me.kCGWindowBounds;
-  const above = (ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(2, me.kCGWindowNumber))) || [])
-    .filter(w => w.kCGWindowLayer == 0 && (w.kCGWindowAlpha ?? 1) > 0 && w.kCGWindowBounds);
-  const hit = (w, x, y) => { const r = w.kCGWindowBounds; return x >= r.X && x < r.X + r.Width && y >= r.Y && y < r.Y + r.Height; };
-  const by = new Set(); let hidden = true;
-  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) {
-    const x = b.X + (i + 0.5) * b.Width / 16, y = b.Y + (j + 0.5) * b.Height / 16;
-    const w = above.find(w => hit(w, x, y));
-    if (w) by.add(`${w.kCGWindowOwnerName} (pid ${w.kCGWindowOwnerPID})`); else hidden = false;
-  }
-  out = { found: true, covered: hidden, by: [...by] };
-}
-JSON.stringify(out)"""
-
-
-def covered(pid):
-    """Why a window draws nothing, when other windows hide it; '' when they do not (or unknown)."""
-    if not pid:
-        return ""
-    try:
-        seen = json.loads(jxa(COVERED.replace("__PID__", str(int(pid)))))
-    except ValueError:
-        return ""
-    if not seen.get("found"):
-        return "the private window is not on screen (minimized, on another Space, or the display is off)"
-    if seen.get("covered"):
-        return (f"the private window is entirely behind {', '.join(seen['by'])}; GPUI draws no frames for a "
-                "window that cannot be seen. Keep the bottom-left corner of the main screen clear and run again")
-    return ""
 
 
 def nap(seconds):
@@ -284,7 +290,9 @@ class Check:
         self.exe = None
         self.launched = False
         self.front = None
-        self.raised = ""
+        self.drawn = 0  # frames drawn on demand (not `frames`: scripts that extend Check use that name)
+        self.unframed = ""  # why the last shot drew nothing, when it failed
+        self.hidden = ""
 
     # --- the only two ways out to Herdr: this run's window, this run's core ---------------
     def herdr(self, *args, timeout=20):
@@ -380,6 +388,28 @@ class Check:
         for value in (self.pm["name"], self.thread):
             if not SAFE.match(value):
                 raise Blocked(f"{value!r} cannot be passed in a command; pass --pm/--thread")
+        self.session_thread = None
+        proj_main = self.src / "mods/pm-project/main.js"
+        if proj_main.is_file() and "selectThreadTab" in proj_main.read_text(encoding="utf-8"):
+            pm_py = self.src / "mods/pm-dash/skill/scripts/pm.py"
+            env = clean_env(HC_SESSION=self.session, PM_HOME=str(self.ledger))
+            candidates = [t["id"] for t in sorted(own, key=lambda t: t.get("updated") or "", reverse=True)
+                          if SAFE.match(t.get("id") or "") and t.get("context_tokens", 0) > 0]
+            if not candidates and not self.args.thread:
+                for p in sorted((self.ledger / "tasks").glob(f"{self.project}-*.json"),
+                                key=lambda p: p.stat().st_mtime, reverse=True)[:25]:
+                    if not p.stem.endswith("-review") and SAFE.match(p.stem):
+                        candidates.append(p.stem)
+            for tid in candidates:
+                sr = subprocess.run([sys.executable, str(pm_py), "project", "session", tid, "--limit", "40"],
+                                    capture_output=True, text=True, timeout=20, env=env)
+                if sr.returncode == 0:
+                    try:
+                        if (json.loads(sr.stdout).get("items") or []):
+                            self.session_thread = tid
+                            break
+                    except ValueError:
+                        pass
 
     def install(self):
         version = subprocess.run(["herdr-app", "--version"], capture_output=True, text=True).stdout.split()[-1:]
@@ -388,15 +418,7 @@ class Check:
         write_json(self.app / "settings.json", {"zoom": 1, "sounds": {"enabled": False}, "telemetry": False})
         # The app's own version as the last run: a first start after an update would update herdr-core.
         write_json(self.app / "update-notes.json", {"last_run": version[0] if version else "", "presented": version})
-        # Without the display Herdr centers the window: the person's display id, read only.
-        window = {"state": "windowed", "bounds": corner()}
-        try:
-            display = json.loads((PERSON_HOME / "window.json").read_text(encoding="utf-8")).get("display")
-        except (OSError, ValueError, AttributeError):
-            display = None
-        if isinstance(display, str):
-            window["display"] = display
-        write_json(self.app / "window.json", window)
+        write_json(self.app / "window.json", corner())
         write_json(self.app / "shared.json", {"layout": "pm", "frame.welcomed": "finished",
                                               PROJECT: {"pm": self.pm["name"]}, "pm-dash": {"view": "list", "project": ""}})
         for name in self.mods:
@@ -444,24 +466,43 @@ class Check:
             if r.returncode == 0:
                 try:
                     if json.loads(r.stdout).get("layout") == "pm":
-                        self.raised = jxa(RAISE.replace("__PID__", str(int(self.pid)))) if self.pid else ""
+                        self.hide()
                         return self.drawing()
                 except ValueError:
                     pass
-            nap(0.5)
+            nap(0.2)  # often: the sooner it answers, the sooner it is hidden
         raise Blocked(f"the private Herdr did not answer within 30 s (log: {self.log})")
 
+    def hide(self, wait=5):
+        """Hides the private Herdr, and waits until none of its windows is on screen."""
+        self.hidden = "not hidden"
+        if not self.pid:
+            return
+        started, deadline = time.time(), time.time() + wait
+        while time.time() < deadline:
+            jxa(HIDE.replace("__PID__", str(int(self.pid))))
+            nap(0.2)
+            if jxa(SHOWN.replace("__PID__", str(int(self.pid)))) == "0":
+                self.hidden = f"hidden {time.time() - started:.1f} s after it answered"
+                return
+        self.hidden = f"still on screen {wait} s after it answered"
+
+    def on_screen(self):
+        """Whether a window of the private Herdr is on screen now (read-only); None when unknown."""
+        n = jxa(SHOWN.replace("__PID__", str(int(self.pid)))) if self.pid else ""
+        return int(n) > 0 if n.isdigit() else None
+
     def drawing(self, wait=8):
-        """A window that draws no frames renders no mod (seen while the display was off): then
-        nothing can be judged. The sidebar's pm-list must render again after a poke."""
+        """A window that draws no frames renders no mod: then nothing can be judged. The
+        sidebar's pm-list must render again after a poke (and the frame it draws)."""
         mark, deadline = self.log.stat().st_size, time.time() + wait
         while time.time() < deadline:
             self.poke()
-            nap(0.8)
+            nap(0.3)
             if self.renders(DRIVER, mark):
                 return
         raise Blocked(f"the private window draws no frames ({DRIVER} did not render again within {wait} s): "
-                      + (covered(self.pid) or "is the display off or the screen locked?"))
+                      + (self.unframed or "herdr-app shot answered, but no mod rendered"))
 
     def pids(self):
         r = subprocess.run(["pgrep", "-x", self.exe or "Herdr"], capture_output=True, text=True)
@@ -502,9 +543,30 @@ class Check:
 
     # --- the pages ---------------------------------------------------------------------------
     def poke(self):
-        """Every mod's view renders again: the wrappers watch this folder."""
+        """Every mod's view renders again: the wrappers watch this folder and notify, and
+        frame() draws the frame that renders them."""
         self.pokes += 1
         (self.poke_dir / "poke").write_text(str(self.pokes))
+        nap(0.3)  # the wrappers' watchFolder wakes and calls cx.notify()
+        self.frame()
+
+    def frame(self):
+        """Draws one frame now, whether or not the window can be seen. Returns what went wrong, or ''."""
+        return self.shoot(self.dir / FRAME)
+
+    def shoot(self, path, timeout=30):
+        """`herdr-app shot`: draws the dirty window (window.draw), renders it offscreen and saves it.
+        A shot that fails or does not answer is not a mod's error: the window did not draw, and
+        the step it was for is not judged (exit 2). Returns what went wrong, or ''."""
+        try:
+            r = self.herdr("shot", str(path), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.unframed = f"herdr-app shot did not answer within {timeout} s"
+            return self.unframed
+        answer = (r.stdout + r.stderr).strip()
+        self.unframed = "" if r.returncode == 0 and '"error"' not in r.stdout else f"herdr-app shot: {answer[-300:]}"
+        self.drawn += not self.unframed
+        return self.unframed
 
     def touch_ledger(self):
         """A real change in the ledger copy, for the mods' folder watches: the thread's `updated`."""
@@ -538,13 +600,13 @@ class Check:
             # Three pokes and not even the sidebar rendered: the window stopped drawing.
             if done or time.time() > deadline or (pokes >= 3 and not self.renders(DRIVER, mark)):
                 break
-        self.herdr("shot", str(self.shots / f"{name}.png"))
+        unshot = self.shoot(self.shots / f"{name}.png")
         count = self.renders(mod, mark)
-        if not self.still_drawing():
+        if unshot or not self.still_drawing():
             # The sidebar does not render either: the window stopped drawing, the page was not judged.
             return {"name": name, "mod": mod, "renders": count, "state": state, "stalled": True,
                     "problems": ["the window stopped drawing during this step: "
-                                 + (covered(self.pid) or "display off or screen locked?")]}
+                                 + (unshot or self.unframed or "herdr-app shot answered, but the sidebar did not render")]}
         failing, _ = self.errors(mark)
         if failing:
             problems.append(f"{len(failing)} error(s) from the mods while this page was shown (listed below)")
@@ -558,20 +620,34 @@ class Check:
         mark, deadline = self.log.stat().st_size, time.time() + wait
         self.poke()
         while time.time() < deadline:
-            nap(0.3)
             if self.renders(DRIVER, mark):
                 return True
-        return False
+            nap(0.3)
+            self.frame()  # frames come only from shots: a poke noticed late still gets drawn
+        return bool(self.renders(DRIVER, mark))
 
     def project_shown(self, wait=10):
-        """pm-project is built anew each time its page is shown: wait until it answers with its project."""
+        """pm-project is built anew each time its page is shown, and learns its project when it
+        renders (pmName): draw, and wait until it answers with its project."""
         deadline = time.time() + wait
         while time.time() < deadline:
+            self.poke()  # and a frame: no render, no project
             state = self.report()
             if state and state.get("found"):
                 return ""
-            nap(0.5)
+            nap(0.2)
         return f"{PROJECT} did not show {self.pm['name']} within {wait} s"
+
+    def session_shown(self, wait=10):
+        """Draws until pm-project has loaded the session transcript on its Conversation tab."""
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            self.poke()
+            state = self.report()
+            if state and state.get("sessionTab") == "session" and state.get("sessionState") == "ready":
+                return ""
+            nap(0.2)
+        return f"{PROJECT} did not load session for {self.session_thread} within {wait} s"
 
     def pages(self):
         pm, thread = self.pm["name"], self.thread
@@ -584,6 +660,13 @@ class Check:
             ("project-board", [page(f"board:{pm}")], "pm-dash", None),
             ("thread", [page(f"chat:{pm}"), self.project_shown, f"{PROJECT}.rc-thread:{thread}"], PROJECT,
              lambda s: s.get("detail") is True and s.get("thread") == thread and s.get("threadTask") is True),
+            *([("thread-session",
+                [page(f"chat:{pm}"), self.project_shown, f"{PROJECT}.rc-thread:{self.session_thread}",
+                 f"{PROJECT}.rc-thread-session", self.session_shown, f"{PROJECT}.rc-expand-session-tools"],
+                PROJECT,
+                lambda s: s.get("detail") is True and s.get("thread") == self.session_thread
+                and s.get("sessionTab") == "session" and s.get("sessionState") == "ready"
+                and (s.get("sessionItems") or 0) > 0)] if self.session_thread else []),
             # A project on a machine this private core does not know: the project page (never its
             # terminal) says it cannot read it there, and renders on without errors.
             ("remote-unreachable", [page(f"chat-remote:{UNREACHABLE}/{pm}")], PROJECT,
@@ -638,7 +721,9 @@ class Check:
                          f"{', the private Herdr' if front == self.pid else ''})")
         else:
             lines.append(f"frontmost app: pid {self.front} before the run, pid {front} at the end; "
-                         f"private window {self.raised or 'not raised'}")
+                         f"private window {self.hidden or 'not hidden'}, {self.drawn} frames drawn on demand")
+        if self.on_screen():
+            lines.append("note: the private window is on screen again at the end (something showed the app)")
         status = self.herdr("status", timeout=10)
         try:
             loaded = json.loads(status.stdout).get("errors") or []
@@ -704,6 +789,7 @@ class Check:
         if not self.args.keep:
             for path in (self.app, self.ledger, self.src, self.poke_dir):
                 shutil.rmtree(path, ignore_errors=True)
+            (self.dir / FRAME).unlink(missing_ok=True)
         return notes
 
     @staticmethod
@@ -742,6 +828,9 @@ def main():
         code, lines = check.judge(check.pages())
     except Blocked as e:
         lines = [f"BLOCKED {e}"]
+    except subprocess.TimeoutExpired as e:
+        # The private Herdr or its core stopped answering: nothing judged (exit 2), not a mod's error.
+        lines = [f"BLOCKED {' '.join(map(str, e.cmd[:3]))} did not answer within {e.timeout:.0f} s"]
     except KeyboardInterrupt as e:
         lines = [f"interrupted ({e})"]
     finally:

@@ -10,7 +10,8 @@ Choose either path:
 - **From the repository:** clone or download this repository, then run from its root:
 
 ```bash
-./install.sh
+./install.sh          # macOS / Linux (or Git Bash)
+python install.py     # Windows (cmd / PowerShell) or any platform without Bash
 ```
 
 Both paths use `mods/pm-dash/setup.py`. It copies the PM skill into the skill folder of each coding agent it finds, and adds the skill's hooks for agents that have hooks:
@@ -104,7 +105,32 @@ Use `pm.py --help` for the ledger commands, and `pm.py dispatch --help` and `pm.
 
 ## Configuration
 
-The ledger home holds tasks, PM registrations, project history and your configuration. It is `$PM_HOME` when set; otherwise `~/.claude/pm` if an earlier install already created it; otherwise `~/.dudu`. `pm.py state` prints it as `home`.
+### Ledger home and migration
+
+The ledger home holds tasks, PM registrations, project conversations, memories, helpers, and your configuration. It resolves in this order:
+
+1. `$PM_HOME`, if set;
+2. `~/.claude/pm`, if an earlier install created it as a real directory (not a symlink to `~/.dudu`);
+3. `~/.dudu` (the default for new and migrated installs).
+
+`pm.py home` prints the resolved ledger home and migration status; `pm.py state` also reports it as `home`.
+
+If an earlier install keeps your ledger at `~/.claude/pm`, you can move it to `~/.dudu` safely without losing history or breaking older scripts:
+
+```bash
+pm.py home --migrate --dry-run   # Preview every step and check for running sessions
+pm.py home --migrate             # Back up, move to ~/.dudu, and leave ~/.claude/pm -> ~/.dudu
+```
+
+What `pm.py home --migrate` does:
+
+1. **Refuses while active writers are running.** If a PM, worker, helper, `deliver`, `watch`, `seat`, `wait`, `reattach`, or ledger lock is active, migration refuses and lists what to stop first.
+2. **Creates and verifies a full backup first.** Before moving anything, it packs the entire `~/.claude/pm` directory into `~/.claude/pm-backups/pm-YYYYMMDD-HHMMSS-before-migrate.tgz` (override with `--backup-dir`) and verifies the archive can be read back.
+3. **Preserves non-ledger files in `~/.dudu`.** If `~/.dudu` already contains leftover files from an older standalone service (for example `dudu.db`, `d.sock`, `service.lock`, `agents/`, `hc/`) or other non-ledger files, the whole folder is moved aside to `~/.dudu-legacy-service-YYYYMMDD` (or `~/.dudu-legacy-YYYYMMDD`) rather than deleted. If `~/.dudu` already contains another ledger, migration refuses rather than auto-merging.
+4. **Moves and symlinks.** Moves `~/.claude/pm` to `~/.dudu` and leaves a compatibility symlink `~/.claude/pm -> ~/.dudu` so older `pm.py` copies, installed hooks, and remote skills keep working while newer versions treat `~/.dudu` as canonical. **Keep the `~/.claude/pm` symlink in place — do not delete it:** existing records in `pms/` and `tasks/` can still hold historical absolute `~/.claude/pm/...` paths that rely on it. Re-running `pm.py home --migrate` is idempotent.
+5. **Updates generated settings and lists sessions to restart.** Refreshes `autoMemoryDirectory` paths in generated `pm-settings.json` / `reads/*.json` files and prints which PM and agent sessions to restart or rotate so they pick up `~/.dudu`.
+
+The installer (`./install.sh` / `setup.py`) detects an unmigrated `~/.claude/pm` ledger and prints the migration command; it never migrates automatically.
 
 Create `config.json` in the ledger home to set your preferences; every key is optional:
 
@@ -152,14 +178,19 @@ In the `pm` layout (other layouts are unchanged):
 
 ### PM notifications
 
-Run `pm.py wait <task> --timeout 3600` in the background for a worker's report;
-it also notices a worker that stops without reporting. Run one `pm.py watch` in
-the background for the PM's inbox. Handle its output, then start it again; do not
-repeatedly call `status`, `show`, or read terminal screens while waiting.
+**In the desktop app** the PM waits on nothing. One deliverer per project (`pm.py deliver`, started again by the
+PM's hooks, `claim`, `rotate`, `dispatch`, `review`, `escalate`, `reattach` and every ledger write that is news,
+whenever none runs) lives as long as the PM's terminal: it sends the PM each worker's report, `notify` and
+`event` as one message once the PM is idle (held back while you have an unsent draft there), and tells it about a
+worker that can no longer report: its terminal gone, waiting at a prompt or an error, or, for an agent without
+hooks (pi, agy), a turn that ended without a report. It ends by itself once the PM's terminal is gone, and starts
+the new script after an install. `pm.py wait` refuses in a desktop-app PM's terminal (exit 4), and no `watch` is
+needed there: each would bring the same report twice.
 
-Worker states wake a `watch` only in the herdr terminal UI, where `wait` cannot see
-a worker stop. In the desktop app `watch` is the inbox alone: `wait` already sees
-its worker stop, and a watch woken by the same worker would wake the PM twice.
+**In the herdr terminal UI** run `pm.py wait <task> --timeout 3600` in the background for a worker's report, and
+one `pm.py watch` in the background for the PM's inbox. Handle what it prints, then start it again; do not
+repeatedly call `status`, `show`, or read terminal screens while waiting. `wait` cannot see a TUI worker stop, so
+there `watch` also wakes on worker states.
 
 Start both with the agent's own background tool, the one that reports when the
 command exits (Claude Code: `run_in_background: true`), never with `&`, `nohup`,
@@ -175,13 +206,13 @@ watch there does not see an append), inotify on Linux and directory
 notifications on Windows. On Windows and Linux, where those report every change
 in the folder (every PM's log and offset, every task file), a change wakes only
 when the PM's own inbox log or the waited task's file is not as it was (inode,
-size, modification time). Desktop waits subscribe to `hc events`, following the
-task's terminal when `reattach` or `escalate` replaces it; title animations and
-heartbeats do not trigger state queries. On disconnect the subscription retries
-with bounded backoff, and a fresh snapshot reconciles state. A 60-second
-reconciliation is retained for lost events, filesystems that send no
-notifications, and older writers. The legacy Herdr TUI has no hc stream;
-`watch --interval` controls its state-check fallback only, not desktop polling.
+size, modification time). The deliverer and desktop waits subscribe to `hc events`,
+following the task's terminal when `reattach` or `escalate` replaces it; title
+animations, heartbeats and an agent's progress do not trigger state queries. On
+disconnect the subscription retries with bounded backoff, and a fresh snapshot
+reconciles state. A 60-second reconciliation is retained for lost events,
+filesystems that send no notifications, and older writers. The legacy Herdr TUI
+has no hc stream; `watch --interval` controls its state-check fallback only.
 
 A worker that stops without reporting gets a five-second grace period; repeated
 events cannot shorten it. Inbox offsets, and in the herdr TUI worker snapshots,
@@ -203,8 +234,9 @@ there, not the caller's task's PM. When it finds no PM, `notify` exits 1 and say
 that nothing was delivered; a project without a PM needs no notify.
 
 Installing updated scripts affects newly started waits/watchers. Already running
-processes keep their old code until they exit and the PM starts the next wait;
-there is no need to restart worker terminals. This changes PM coordination, not
+waits keep their old code until they exit and the PM starts the next wait; a
+running deliverer notices the new script and hands over to it. There is no need
+to restart worker terminals. This changes PM coordination, not
 the desktop mods' separate remote-data refresh timers.
 
 ## Uninstall
@@ -262,7 +294,7 @@ Use these steps when automatic layout generation is skipped. Paths below are rel
 
 ## Repository structure
 
-- `install.sh` — desktop installation, preview, and uninstall; calls the shared skill installer.
+- `install.py` / `install.sh` — desktop installation, preview, and uninstall (`install.sh` delegates to `install.py`); calls the shared skill installer.
 - `layouts/pm.json` — distributable PM layout.
 - `mods/pm-dash/` — desktop project/task board, including `setup.py` for per-agent skill/hooks installation and read-only status.
 - `mods/pm-dash/skill/` — the single bundled PM skill (`SKILL.md`, the playbook and reference files), ledger CLI, and browser dashboard.

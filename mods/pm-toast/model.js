@@ -3,37 +3,38 @@
 // the PM's notices show: an agent the PM dispatched reports to the PM, and the
 // PM's own turn ending is what brings the person in.
 
-// True for an agent notice about an agent the PM dispatched: its terminal has a
-// `task` label, or its parent terminal has a non-empty `pm` label. Both notice
-// kinds are hidden. Anything unclear shows the toast (fail open); the PM's own
-// terminal, agents the person started and every other notify() pass through.
+// True for an agent notice about an agent the PM or a worker dispatched: its terminal
+// has a `task` or `helper.of` label, or an ancestor up its `parent` chain is a PM
+// (`pm`, or legacy `pm.retired` from an older peer's rotation), task worker (`task`),
+// or helper (`helper.of`). Both notice kinds ("finished" and "needs you") are hidden.
+// Anything unclear shows the toast (fail open); a PM's own terminal, agents the person
+// started, and every other notify() pass through.
 export function isWorkerNotice(notice, terminals) {
   const action = notice?.action;
   const address = action?.args?.terminal;
   if (action?.name !== 'agent.focus' || typeof address !== 'string' || !address) return false;
   if (!Array.isArray(terminals)) return false;
-  const find = at => terminals.find(t => t?.address === at);
-  const terminal = find(address);
+  const byAddress = new Map();
+  for (const t of terminals) {
+    if (t?.address) byAddress.set(t.address, t);
+  }
+  const terminal = byAddress.get(address);
   if (!terminal) return false;
-  if (terminal.labels?.task) return true;
-  return Boolean(terminal.parent && find(terminal.parent)?.labels?.pm);
+  if (terminal.labels?.pm || terminal.labels?.['pm.retired']) return false;
+  if (terminal.labels?.task || terminal.labels?.['helper.of']) return true;
+  const seen = new Set([address]);
+  for (let up = terminal.parent; up && !seen.has(up); up = byAddress.get(up)?.parent) {
+    seen.add(up);
+    const anc = byAddress.get(up);
+    if (!anc) return false;
+    if (anc.labels?.pm || anc.labels?.['pm.retired'] || anc.labels?.task || anc.labels?.['helper.of']) return true;
+  }
+  return false;
 }
 
-// The notices the pm layout hides: an agent the PM dispatched (isWorkerNotice), and the
-// "finished" notice of a PM that has just been rotated in (`pm.py rotate` labels its terminal
-// pm.quiet=1 for the first turn, which says nothing to the person, and the next turn takes the
-// label away) or rotated out (pm.retired=<project>: its last turn ends after it handed over).
-// A "needs you" still shows: a PM stuck at a prompt must be seen.
+// Hides only agents dispatched by the PM or a worker (`isWorkerNotice`).
 export function isHiddenNotice(notice, terminals) {
-  if (isWorkerNotice(notice, terminals)) return true;
-  const address = notice?.action?.args?.terminal;
-  if (notice?.action?.name !== 'agent.focus' || !address || !Array.isArray(terminals)) return false;
-  // By its title ("<program> finished"): a level alone does not tell a "needs you" apart. A title that says
-  // neither (another language) shows: fail open.
-  const title = String(notice.title ?? '');
-  const finished = /\bfinished\b/i.test(title) && !/needs you/i.test(title) && !['warning', 'error'].includes(notice.level);
-  const labels = terminals.find(t => t?.address === address)?.labels;
-  return finished && Boolean(labels?.['pm.quiet'] || labels?.['pm.retired']);
+  return isWorkerNotice(notice, terminals);
 }
 
 // A copy of pm-dash/model.js's (a mod cannot import from another mod's folder); pm-dash's
@@ -51,12 +52,12 @@ export function focusPlan(address, terms, paned, home = '') {
   const has = new Set(paned.filter(Boolean));
   if (has.has(address)) return { focus: address, peek: '' };
   const byAddress = new Map(terms.map(t => [t.address, t]));
-  // A retired PM up the chain (labeled pm.retired by `pm.py rotate`, or a PM terminal that is not the
-  // project's current one) is passed over: shown on its tab, the thread would invite talking to it.
-  const retired = t => Boolean(t?.labels?.['pm.retired'] || (home && t?.labels?.pm && t.address !== home));
+  // Another PM terminal up the chain (`home` is the project's current PM) is passed over:
+  // shown on its tab, the thread would invite talking to the wrong PM.
+  const otherPm = t => Boolean(home && t?.labels?.pm && t.address !== home);
   const seen = new Set([address]);
   for (let up = byAddress.get(address)?.parent; up && !seen.has(up); up = byAddress.get(up)?.parent) {
-    if (has.has(up) && !retired(byAddress.get(up))) return { focus: up, peek: address };
+    if (has.has(up) && !otherPm(byAddress.get(up))) return { focus: up, peek: address };
     seen.add(up);
   }
   return home && has.has(home) ? { focus: home, peek: address } : none;

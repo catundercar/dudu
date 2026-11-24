@@ -1,14 +1,22 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, window as appWindow, watchFolder, terminals, agents, panes, run, props, closeOverlay, openOverlay, layout as desktopLayout } from 'herdr';
-import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, wireFlows, word, label, taskStatusText, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime } from './model.js';
+import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts, wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, taskSteps, taskDependencies, taskNumber, formatTaskNumber, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime, tooltipLayout } from './model.js';
 import { page, pageView, pageHeader, projectHeader, keepPress, dialogView, initDialog, restoreProject, readLines, archivePopup, NEW_DIALOG, openProject, showPage } from './projects.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
 import { execPython, NO_PYTHON } from './python.js';
+import { renderStepsCard, renderDepsCard } from './steps.js';
 
 // Keep the full mods/<name>/ prefix: Herdr rewrites it when cloning this mod.
 const MOD_FOLDER = 'mods/pm-dash/';
+const SPINNER = 'mods/workspace-chrome/spinner.svg';
+const STEP_ICONS = {
+  checkMark: 'mods/pm-dash/check-mark.svg',
+  treeBranch: 'mods/pm-dash/tree-branch.svg',
+  chevron: 'mods/pm-dash/chevron.svg',
+  spinner: SPINNER,
+};
 const STAGE = 'pm-stage', WORK = 'work';
 
 function findMod(node, mod) {
@@ -23,6 +31,7 @@ function findMod(node, mod) {
 export default class PmDash extends View {
   init(_props, cx) {
     this.state = { pms: [], tasks: [], events: [] };
+    this.hoverTip = '';
     // Opened as one of its own dialogs (new project, archive): only what the dialog needs.
     if (props()?.dialog) { initDialog(this, cx); return; }
     // The Projects page: every project merged (allState), the PM's newest sentence per local project
@@ -38,6 +47,7 @@ export default class PmDash extends View {
     this.queue = []; this.recent = []; this.replayIndex = 0; this.auto = false;
     this.flowLayer = cx.new(FlowLayer);
     this.flowKey = ''; this.hoverTask = null;
+    this.hoverTaskCard = null; this.hoverTaskTimer = null; this.hoverTaskInteractive = false; this.hoverTaskRect = null;
     this.shownStatus = {}; this.shownLive = {}; this.hoverPm = null;
     this.shown = {}; this.statuses = {}; this.tags = {}; this.nudges = {};
     this.serial = 0; this.trip = null; this.lastEvent = Date.now();
@@ -290,7 +300,10 @@ export default class PmDash extends View {
     const held = pending.some(e => row.id === taskId(e.task) || row.id === pmId(e.pm));
     if (!held || !(row.id in this.shownLive)) this.shownLive[row.id] = actual;
     if (!held) this.shownStatus[row.id] = row.status;
-    return { ...row, terminal, terminalExact: exact, status: this.shownStatus[row.id] || row.status, live: this.shownLive[row.id] };
+    const shownStatus = this.shownStatus[row.id] || row.status;
+    const revWorking = row.type === 'task' && !row.cleanup && shownStatus === 'review'
+      && reviewWorking({ ...row, status: shownStatus }, terms, live);
+    return { ...row, terminal, terminalExact: exact, status: shownStatus, live: this.shownLive[row.id], reviewWorking: revWorking };
   }
   projectColor(name, t) {
     const pm = this.state.pms.find(p => (p.name || '') === (name || ''));
@@ -309,100 +322,281 @@ export default class PmDash extends View {
     const waiting = !row.cleanup && row.status === 'blocked' && !row.answered;
     const running = !row.cleanup && row.status === 'in_progress' && !disconnected(row);
     const review = !row.cleanup && row.status === 'review';
+    const liveReview = review && !isClosedTask(row);
     const color = waiting ? t.blocked : review ? t.accent : running ? t.ansi2 : t.dim;
     return div().id(id).max_w(maxWidth).flex_shrink_0().truncate()
       .px(px(8)).py(px(2)).rounded(px(10)).text_size(font(11.5)).font_semibold()
       .line_height(`${Math.max(12, px(18))}px`)
       .text_color(waiting ? solidText(color, t) : row.cleanup ? t.muted : color)
       .when(waiting, el => el.bg(color))
+      .when(liveReview, el => el.bg(withAlpha(t.accent, .14)))
       .when(running, el => el.bg(withAlpha(t.ansi2, .15)))
       .opacity(this.tags[row.id] ? .4 : 1).transition('opacity', 180)
-      .child(running ? label(this.state.lang, 'in_progress') : taskStatusText(this.state.lang, row));
+      .child(running ? label(this.state.lang, 'in_progress') : liveReview ? word(this.state.lang, 'reviewing') : taskStatusText(this.state.lang, row));
   }
   hoverBounds(key, bounds, cx) {
+    if (!bounds) return;
     const previous = this[key];
     if (previous && ['x', 'y', 'width', 'height'].every(k => previous[k] === bounds[k])) return;
     this[key] = bounds;
     if (this.hoverTask || this.peeking()) cx.notify();
   }
-  taskInfoCard(row, g, t) {
+  // Bounded, auto-wrapping, window-clamped hover tooltip anchored to its trigger.
+  withTip(key, el, tip, t, opts = {}) {
+    const text = tip == null ? '' : String(tip).trim();
+    if (!text) return el;
+    const tipKey = `tip:${key}`;
+    const active = this.hoverTip === tipKey;
+    const layout = active ? tooltipLayout(text, {
+      viewWidth: this.size?.width || 0,
+      maxWidth: opts.maxWidth,
+      maxLines: opts.maxLines,
+      placement: opts.placement || 'above-left',
+    }) : null;
+    const onTipHover = (over, cx) => {
+      if (over) {
+        if (this.hoverTip !== tipKey) { this.hoverTip = tipKey; cx.notify(); }
+      } else if (this.hoverTip === tipKey) {
+        this.hoverTip = '';
+        cx.notify();
+      }
+    };
+    const target = opts.noHover ? el : el.on_hover((over, cx) => {
+      opts.onHover?.(over, cx);
+      onTipHover(over, cx);
+    });
+    const wrapBox = () => {
+      const box = div().relative();
+      if (opts.flex1) box.flex_1().min_w(0);
+      else if (opts.full) box.w_full();
+      else if (opts.flexNone) box.flex_none();
+      return box;
+    };
+    if (!active || !layout) return opts.wrap ? wrapBox().child(target) : target;
+    const fill = [t.raised, t.popover, t.surface].find(c => c && c !== t.canvas) || t.raised;
+    const card = v_flex().w(layout.width).max_w(layout.maxWidth).max_h(layout.maxHeight)
+      .px(9).py(6).rounded(8).bg(fill).border_1().border_color(t.border).shadow_lg().overflow_hidden()
+      .children(layout.lines.map(line => div().w_full().whitespace_normal()
+        .text_size(layout.fontSize).line_height(`${layout.lineHeight}px`)
+        .text_color(t.foreground).child(line)));
+    const anchor = div().id(`hover-tip-anchor-${key}`).absolute().w(0).h(0);
+    if (layout.pos.left !== undefined) anchor.left(layout.pos.left);
+    if (layout.pos.right !== undefined) anchor.right(layout.pos.right);
+    if (layout.pos.top !== undefined) anchor.top(layout.pos.top);
+    if (layout.pos.bottom !== undefined) anchor.bottom(layout.pos.bottom);
+    anchor.child(Popup.new(`hover-tip-${key}`, div().w(0).h(0)).anchor(layout.anchor).content(card));
+    return opts.wrap ? wrapBox().child(target).child(anchor) : target.relative().child(anchor);
+  }
+  clearHover(cx, includePm = false, force = false) {
+    const canNotify = cx?.notify && cx?.phase?.() !== 'render';
+    if (!force && this.hoverTaskInteractive && this.hoverTask) {
+      if (this.hoverTaskCard !== this.hoverTask) this.leaveTaskHover(this.hoverTask, cx);
+      const hadOther = this.hoverEnded !== null || Boolean(this.hoverTip) || (includePm && this.hoverPm !== null);
+      this.hoverEnded = null;
+      this.hoverTip = '';
+      if (includePm) this.hoverPm = null;
+      if (hadOther && canNotify) cx.notify();
+      return;
+    }
+    this.hoverTaskTimer?.cancel?.();
+    this.hoverTaskTimer = null;
+    const had = Boolean(this.hoverTask) || Boolean(this.hoverTaskCard) || this.hoverEnded !== null || Boolean(this.hoverTip) || (includePm && this.hoverPm !== null);
+    this.hoverTask = null; this.hoverTaskCard = null; this.hoverTaskInteractive = false; this.hoverTaskRect = null;
+    this.hoverEnded = null;
+    this.hoverTip = '';
+    if (includePm) this.hoverPm = null;
+    if (had && canNotify) cx.notify();
+  }
+  enterTaskHover(taskId, cx) {
+    this.hoverTaskTimer?.cancel?.();
+    this.hoverTaskTimer = null;
+    if (this.hoverTask !== taskId) {
+      this.hoverTask = taskId;
+      this.hoverTaskCard = null;
+      this.hoverTaskRect = null;
+      cx.notify();
+    }
+  }
+  leaveTaskHover(taskId, cx) {
+    if (!taskId || this.hoverTask !== taskId) return;
+    if (!this.hoverTaskInteractive) {
+      this.hoverTask = null; this.hoverTaskCard = null; this.hoverTaskRect = null;
+      cx.notify();
+      return;
+    }
+    if (this.hoverTaskCard === taskId) return;
+    this.hoverTaskTimer?.cancel?.();
+    this.hoverTaskTimer = cx.timer?.after?.(180, cx => {
+      this.hoverTaskTimer = null;
+      if (this.hoverTask === taskId && this.hoverTaskCard !== taskId) {
+        this.hoverTask = null; this.hoverTaskInteractive = false; this.hoverTaskRect = null;
+        cx.notify();
+      }
+    }) || null;
+  }
+  enterTaskCard(taskId, cx) {
+    this.hoverTaskTimer?.cancel?.();
+    this.hoverTaskTimer = null;
+    this.hoverTaskCard = taskId;
+    if (this.hoverTask !== taskId) {
+      this.hoverTask = taskId;
+      cx.notify();
+    }
+  }
+  leaveTaskCard(taskId, cx) {
+    if (this.hoverTaskCard === taskId) this.hoverTaskCard = null;
+    this.leaveTaskHover(taskId, cx);
+  }
+  jumpToDependency(dep, cx) {
+    if (!dep || !dep.clickable) return;
+    this.clearHover(cx, true, true);
+    const targetPm = dep.pm || this.scope || this.state.pms[0]?.name || '';
+    const pmObj = this.allState?.pms?.find(p => p.name === targetPm) || this.state.pms.find(p => p.name === targetPm);
+    if (targetPm) {
+      openProject(targetPm, dep.machine || pmObj?.machine || '', dep.sourceId || dep.id);
+    }
+  }
+  // Event bounds and on_size_change report window logical pixels, whereas element
+  // positions/sizes on stage are pre-zoom kit units. Infer zoom from stageBounds/g.width.
+  stageViewport(g) {
     if (!this.stageBounds || !this.boardBounds) return null;
+    const zoom = this.stageBounds.width > 0 && g.width > 0 ? this.stageBounds.width / g.width : 1;
+    return {
+      zoom,
+      top: (this.boardBounds.y - this.stageBounds.y) / zoom,
+      bottom: (this.boardBounds.y + this.boardBounds.height - this.stageBounds.y) / zoom,
+      left: (this.boardBounds.x - this.stageBounds.x) / zoom,
+      right: (this.boardBounds.x + this.boardBounds.width - this.stageBounds.x) / zoom,
+    };
+  }
+  taskInfoCard(row, g, t, rows, terms = [], liveAgents = []) {
+    const viewport = this.stageViewport(g);
+    if (!viewport) return null;
     const scale = g.scale, px = n => n * scale, font = n => Math.max(10, px(n));
-    const viewport = { top: this.boardBounds.y - this.stageBounds.y,
-      bottom: this.boardBounds.y + this.boardBounds.height - this.stageBounds.y };
-    const width = Math.min(px(520), row.w), details = cleanTaskLog(row.latest);
+    const lang = this.state.lang;
+    const details = cleanTaskLog(row.latest);
+    const logLine = details.text.replace(/\s+/g, ' ').trim();
+    const deps = taskDependencies(row, this.state.tasks, { terms, live: liveAgents });
+    const showDeps = Boolean(deps?.showAsWaiting) && Boolean(deps?.items?.length);
+    this.hoverTaskInteractive = showDeps;
+    const steps = showDeps ? null : taskSteps(row, { lang });
+    const hasSteps = !showDeps && Boolean(steps?.steps?.length);
     const pm = this.state.pms.find(p => p.name === row.pm);
-    const project = pm?.project || row.project || (pm?.sourceName ?? pm?.name) || this.text('unassigned');
-    const metadata = [project, row.branch, details.commit, row.updated].filter(Boolean).join(' · ');
-    const key = JSON.stringify([row.id, row.title, row.status, row.cleanup, row.live, row.latest, metadata,
-      Boolean(row.terminal), width, scale, g.height, viewport.top, viewport.bottom]);
+    const project = !this.state.project ? (pm?.project || row.project || (pm?.sourceName ?? pm?.name) || '') : '';
+    const rowNum = formatTaskNumber(row);
+    const closedMeta = isClosedTask(row) ? this.text('closedReattach') : '';
+    const metaText = [rowNum, project, closedMeta, row.branch].filter(Boolean).join(' · ');
+    if (!showDeps && !hasSteps && !metaText && !logLine) return null;
+    const isWorking = !row.cleanup && !row.offline &&
+      (row.status === 'in_progress' || row.status === 'review' || (row.status === 'blocked' && Boolean(row.answered)));
+    const minHeight = Math.max(60, px(76));
+    const placeOpts = { columnX: g.taskX, stageWidth: g.width, rows, minHeight };
+    const probePos = hoverCardPosition(row, g.height, viewport, minHeight, scale, placeOpts);
+    if (!probePos) return null;
+    const cardWidth = probePos.w;
+    const fill = [t.raised, t.popover, t.selected].find(color => color && color !== t.surface) || t.raised;
+    const buildCard = (maxH = null) => {
+      const live = maxH !== null;
+      const depsCard = showDeps ? renderDepsCard({
+        ui: { div, svg, h_flex, v_flex },
+        deps, theme: t, lang, icons: STEP_ICONS,
+        compact: true, framed: false, scale,
+        cardId: live ? `info-deps:${row.id}` : '',
+        rowIdPrefix: live ? `info-dep-${row.id}` : '',
+        headerMeta: metaText,
+        animate: live,
+        onSelect: live ? (dep, cx) => this.jumpToDependency(dep, cx) : null,
+      }) : null;
+      const stepsCard = !depsCard && hasSteps ? renderStepsCard({
+        ui: { div, svg, h_flex, v_flex },
+        steps, theme: t, lang, icons: STEP_ICONS,
+        compact: true, framed: false, scale,
+        cardId: live ? `info-steps:${row.id}` : '',
+        headerMeta: metaText,
+        spinning: live && isWorking,
+        reviewSpinning: live && Boolean(row.reviewWorking),
+        subSpinning: live && isWorking,
+      }) : null;
+      const hasBody = Boolean(depsCard || stepsCard);
+      return v_flex().w(cardWidth).flex_none()
+        .when(live, el => el.max_h(maxH))
+        .when(live && showDeps, el => el.id(`task-info-card:${row.id}`).on_hover((over, cx) => {
+          if (over) this.enterTaskCard(row.task, cx);
+          else this.leaveTaskCard(row.task, cx);
+        }))
+        .rounded(px(12)).px(px(12)).py(px(10)).gap(px(6)).bg(fill).border_1().border_color(t.border).overflow_hidden()
+        .when(Boolean(depsCard), el => el.child(depsCard))
+        .when(Boolean(stepsCard), el => el.child(stepsCard))
+        .when(!hasBody && Boolean(metaText), el => el.child(
+          div().truncate().font_family('monospace').text_size(font(10.5)).text_color(t.dim).child(metaText),
+        ))
+        .when(Boolean(logLine), el => el.child(
+          div().when(hasBody || Boolean(metaText), d => d.pt(px(5)).border_t(1).border_color(withAlpha(t.border || t.dim, .6)))
+            .child(div().when(live, d => d.id(`info-log:${row.id}`)).truncate().text_size(font(11))
+              .line_height(`${Math.max(13, px(15))}px`).text_color(t.muted).child(logLine)),
+        ));
+    };
+    const contentSig = showDeps
+      ? `deps:${deps.ready}:${(deps?.items || []).map(d => `${d.id}:${d.state}:${d.status}:${d.title}`).join('|')}`
+      : `steps:${(steps?.steps || []).map(s => `${s.state}:${s.text}:${s.round}:${s.right}:${s.substeps?.map(x => `${x.state}:${x.text}`).join(',') || ''}`).join('|')}`;
+    const key = JSON.stringify([row.id, metaText, logLine, contentSig, Math.round(cardWidth * 100), Math.round(scale * 1000)]);
     if (this.hoverMeasure?.key !== key) {
-      this.hoverMeasure = { key, serial: (this.hoverMeasure?.serial || 0) + 1, height: 0, textHeight: 0 };
+      this.hoverMeasure = { key, serial: (this.hoverMeasure?.serial || 0) + 1, cardHeight: 0, ready: false };
     }
     const measured = this.hoverMeasure;
-    const headingHeight = Math.max(16, px(22)), metaHeight = Math.max(12, px(16));
-    const hintHeight = Math.max(12, px(14)), lineHeight = Math.max(15, px(19));
-    const fixed = px(24) + headingHeight + metaHeight + px(16) + (row.terminal ? hintHeight + px(8) : 0);
-    const position = hoverCardPosition(row, g.height, viewport, measured.height || fixed + lineHeight * 4, scale);
-    if (!position) return null;
-    const bodyHeight = Math.min(4, Math.max(0, Math.floor((position.h - fixed + .001) / lineHeight))) * lineHeight;
-    const fill = [t.raised, t.popover, t.selected].find(color => color && color !== t.surface) || t.raised;
-    const textColor = withAlpha(t.foreground, .85);
-    const card = v_flex().id(`task-info:${measured.serial}`).w(position.w).max_h(position.h).flex_none()
-      .rounded(px(12)).px(px(14)).py(px(12)).gap(px(8)).bg(fill).overflow_hidden()
-      .on_size_change((size, cx) => {
-        if (this.hoverMeasure === measured && Math.abs(size.height - measured.height) > .5) {
-          measured.height = size.height; cx.notify();
-        }
-      })
-      .child(h_flex().h(headingHeight).flex_none().gap(px(8)).items_center()
-        .child(this.taskPill(row, t, scale, (position.w - px(28)) * .55, `info-status:${row.id}`))
-        .child(div().flex_1().min_w(0).truncate().text_size(font(13)).font_semibold().text_color(t.foreground).child(row.title)))
-      .child(div().h(metaHeight).flex_none().line_height(`${metaHeight}px`).truncate()
-        .text_size(font(11)).text_color(t.muted).child(metadata))
-      .child(div().relative().flex_none().max_h(bodyHeight).overflow_hidden()
-        .child(div().id(`task-log:${measured.serial}`).w_full().flex_none().whitespace_normal()
-          .text_size(font(12.5)).line_height(`${lineHeight}px`).text_color(textColor)
+    // Measure wrapped step card height offscreen first; never paint an unmeasured/empty card,
+    // and never feed the clamped card's zoomed height back into max_h.
+    if (!measured.ready) {
+      return div().absolute().left(0).top(0).w(0).h(0).overflow_hidden().opacity(0)
+        .child(div().id(`task-log-probe:${measured.serial}`).absolute().left(0).top(0).w(cardWidth).flex_none()
           .on_size_change((size, cx) => {
-            if (this.hoverMeasure === measured && Math.abs(size.height - measured.textHeight) > .5) {
-              measured.textHeight = size.height; cx.notify();
+            if (this.hoverMeasure === measured && size.width > 0 && size.height > 0) {
+              measured.cardHeight = size.height * (cardWidth / size.width);
+              measured.ready = true;
+              cx.notify();
             }
-          }).child(details.text || this.text('noLogs')))
-        // The kit has no multiline clamp. Clip native wrapping at four lines
-        // and cover the last few glyphs with an ellipsis only on real overflow.
-        .when(bodyHeight > 0 && measured.textHeight > bodyHeight + .5, el => el.child(div().absolute().right(0).bottom(0)
-          .h(lineHeight).line_height(`${lineHeight}px`).pl(px(4)).bg(fill).text_color(textColor).text_size(font(12.5)).child('…'))))
-      .when(Boolean(row.terminal), el => el.child(div().h(hintHeight).flex_none().line_height(`${hintHeight}px`)
-        .text_size(font(11)).text_color(t.dim).child(this.text('openTerminal'))));
-    // A zero-height anchor lives in the scrolled stage. Popup supplies only
-    // the floating paint layer; it owns no click, focus or dismissal handler.
-    // The card itself has no pointer handlers, so leaving the row closes it.
-    return Popup.new(`task-info-popup:${row.id}`, div().w(position.w).h(0))
-      .absolute().left(position.x).top(position.y).w(position.w).h(0).anchor('top_left').content(card);
-  }
-  // The ended node's preview: its newest few, right-aligned under (or over) the node like a task's card.
-  endedPeek(row, g, t) {
-    if (!this.stageBounds || !this.boardBounds) return null;
-    const scale = g.scale, px = n => n * scale, font = n => Math.max(10, px(n)), today = this.today();
-    const viewport = { top: this.boardBounds.y - this.stageBounds.y,
-      bottom: this.boardBounds.y + this.boardBounds.height - this.stageBounds.y };
-    const line = Math.max(18, px(24)), more = Math.max(16, px(22)), pad = px(8);
-    const position = hoverCardPosition(row, g.height, viewport, pad * 2 + row.peek.length * line + more, scale);
+          }).child(buildCard(null)));
+    }
+    const cardHeight = Math.max(minHeight, measured.cardHeight);
+    const position = hoverCardPosition(row, g.height, viewport, cardHeight, scale, placeOpts);
     if (!position) return null;
-    const width = Math.min(px(360), row.w);
+    this.hoverTaskRect = showDeps ? { task: row.task, ...position } : null;
+    // A zero-height anchor wrapper positions Popup's trigger in the scrolled stage. Popup supplies
+    // the floating paint layer; non-interactive cards create no hitbox, while waiting-dependency cards allow pointer entry to jump.
+    return div().id(`task-info-anchor:${row.id}`).absolute().left(position.x).top(position.y).w(position.w).h(0).child(
+      Popup.new(`task-info-popup:${row.id}`, div().w(position.w).h(0))
+        .anchor('top_left').content(buildCard(position.h)),
+    );
+  }
+  // The ended node's preview: floats beside the node (or under/over when narrow) without covering neighbors.
+  endedPeek(row, g, t, rows) {
+    const viewport = this.stageViewport(g);
+    if (!viewport) return null;
+    const scale = g.scale, px = n => n * scale, font = n => Math.max(10, px(n)), today = this.today();
+    const line = Math.max(18, px(24)), more = Math.max(16, px(22)), pad = px(8);
+    const minHeight = pad * 2 + line + more;
+    const position = hoverCardPosition(row, g.height, viewport, pad * 2 + row.peek.length * line + more, scale,
+      { columnX: g.taskX, stageWidth: g.width, rows, maxSideWidth: px(360), maxWidth: px(360), minHeight });
+    if (!position) return null;
+    const shownCount = Math.min(row.peek.length, Math.max(1, Math.floor((position.h - pad * 2 - more + line * .25) / line)));
     const fill = [t.raised, t.popover, t.selected].find(color => color && color !== t.surface) || t.raised;
-    const card = v_flex().id(`ended-peek:${row.pm}`).w(width).max_h(position.h).flex_none().px(px(6)).py(pad)
+    const card = v_flex().w(position.w).max_h(position.h).flex_none().px(px(6)).py(pad)
       .rounded(px(12)).bg(fill).overflow_hidden();
-    for (const task of row.peek) {
+    for (const task of row.peek.slice(0, shownCount)) {
+      const tNum = formatTaskNumber(task);
       card.child(h_flex().h(line).flex_none().px(px(8)).gap(px(10)).items_center().text_size(font(12.5))
+        .when(Boolean(tNum), el => el.child(div().flex_none().font_family('monospace').text_size(font(11.5)).text_color(t.dim).child(tNum)))
         .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(task.title || task.sourceId || task.id))
         .child(div().flex_none().text_color(t.muted)
           .child([taskStatusText(this.state.lang, task), endedTime(task.updated, today)].filter(Boolean).join(' · '))));
     }
     card.child(div().h(more).flex_none().line_height(`${more}px`).px(px(8)).text_size(font(11.5)).text_color(t.dim)
       .child(this.text('endedMore', row.count)));
-    return Popup.new(`ended-peek-popup:${row.pm}`, div().w(width).h(0))
-      .absolute().left(row.x + row.w - width).top(position.y).w(width).h(0).anchor('top_left').content(card);
+    const left = position.side === 'left' || position.side === 'right' ? position.x : row.x + row.w - position.w;
+    return div().id(`ended-peek-anchor:${row.pm}`).absolute().left(left).top(position.y).w(position.w).h(0).child(
+      Popup.new(`ended-peek-popup:${row.pm}`, div().w(position.w).h(0))
+        .anchor('top_left').content(card),
+    );
   }
   bundleColor(status, t) {
     return status === 'blocked' ? t.blocked : status === 'review' ? t.accent : status === 'in_progress' ? t.ansi2 : t.muted;
@@ -428,15 +622,18 @@ export default class PmDash extends View {
         else if (this.hoverEnded === pm) this.hoverEnded = null;
         cx.notify();
       })
+      .on_mouse_move((_e, cx) => {
+        if (this.hoverEnded !== pm) { this.hoverEnded = pm; cx.notify(); }
+      })
       .on_click((_e, cx) => this.toggle(this.endedOpen, pm, cx))
       .child(svg('mods/pm-dash/check.svg').size(px(15)).flex_none().text_color(t.muted))
       .child(div().flex_none().font_semibold().text_color(t.foreground).child(this.text('endedCount', row.count)))
       .child(div().flex_1().min_w(0).truncate().text_size(font(12.5)).text_color(t.dim)
         .child(row.recent.length ? this.text('endedRecent', row.recent.join(' · ')) : ''))
-      .when(row.dropped > 0, el => el.child(h_flex().id(`dropped:${pm}`).flex_none().gap(px(4)).px(px(6)).py(px(3))
+      .when(row.dropped > 0, el => el.child(this.withTip(`dropped-${pm}`, h_flex().id(`dropped:${pm}`).flex_none().gap(px(4)).px(px(6)).py(px(3))
         .rounded(px(6)).items_center().text_size(font(11.5)).text_color(row.showDropped ? t.foreground : t.dim)
         .when(row.showDropped, el => el.bg(t.surface)).hover(s => s.bg(t.surface))
-        .tooltip(tip).accessibility_label(tip)
+        .accessibility_label(tip)
         .on_click((_e, cx) => {
           cx.stop_propagation();
           if (!this.showDropped.has(pm)) this.endedOpen.add(pm); // Shown where they are: in the opened list.
@@ -444,7 +641,7 @@ export default class PmDash extends View {
         })
         .child(svg(`mods/pm-dash/${row.showDropped ? 'eye' : 'eye-off'}.svg`).size(px(14)).flex_none()
           .text_color(row.showDropped ? t.foreground : t.dim))
-        .child(String(row.dropped))))
+        .child(String(row.dropped)), tip, t, { placement: 'above-right' })))
       .child(svg(`mods/pm-dash/${row.open ? 'chevron-down' : 'chevron'}.svg`).size(px(14)).flex_none().text_color(t.muted));
   }
   row(row, t, cx, total, scale) {
@@ -479,13 +676,18 @@ export default class PmDash extends View {
       .line_height(`${Math.max(12, px(18))}px`).opacity(this.dim(pm)).transition('opacity', 160);
     if (row.type === 'pm') {
       const away = !row.terminalExact;
+      const awayTip = away ? this.text(row.terminal ? 'pmProjectFallback' : 'pmDesktopMissing') : '';
       const statusColor = working ? t.ansi2 : t.muted;
       el = el.when(!away, el => el.bg(t.surface))
-        .when(away, el => el.tooltip(this.text(row.terminal ? 'pmProjectFallback' : 'pmDesktopMissing')))
         .child(div().absolute().left(px(-3)).top(row.h / 2 - px(3)).w(px(6)).h(px(6)).rounded(px(3)).bg(color))
         .on_hover((over, cx) => {
           if (over) this.hoverPm = row.name || '';
           else if (this.hoverPm === (row.name || '')) this.hoverPm = null;
+          if (awayTip) {
+            const tk = `tip:pm-${row.id}`;
+            if (over) this.hoverTip = tk;
+            else if (this.hoverTip === tk) this.hoverTip = '';
+          }
           cx.notify();
         })
         .child(h_flex().w(px(28)).h(px(28)).flex_none().rounded(px(8))
@@ -505,25 +707,30 @@ export default class PmDash extends View {
         .when(row.waiting > 0, el => el.child(h_flex().min_w(px(20)).h(Math.max(14, px(20))).px(px(6))
           .flex_none().rounded(px(10)).items_center().justify_center().text_size(font(11.5)).font_bold()
           .bg(t.blocked).text_color(solidText(t.blocked, t)).child(String(row.waiting))));
+      if (awayTip) el = this.withTip(`pm-${row.id}`, el, awayTip, t, { placement: 'above-left', noHover: true });
     } else {
       const waiting = !row.cleanup && row.status === 'blocked' && !row.answered;
       const running = !row.cleanup && row.status === 'in_progress' && !disconnected(row);
       const review = !row.cleanup && row.status === 'review';
-      const statusColor = waiting ? t.blocked : review ? t.accent : running ? t.ansi2 : t.dim;
+      const steps = !row.entry && row.plan ? taskSteps(row, { lang: this.state.lang }) : null;
+      const postGate = Boolean(steps?.postGate);
+      const amber = t.working ?? t.ansi3 ?? t.accent;
+      const statusColor = waiting ? t.blocked : review ? t.accent : postGate ? amber : running ? t.ansi2 : t.dim;
       el = el.on_hover((over, cx) => {
-        if (over) this.hoverTask = row.task;
-        else if (this.hoverTask === row.task) this.hoverTask = null;
-        cx.notify();
+        if (over) this.enterTaskHover(row.task, cx);
+        else this.leaveTaskHover(row.task, cx);
       }).on_mouse_move((_event, cx) => {
         // Scrolling dismisses the old card; a fresh pointer position can open
         // the current row even if native hover stayed on the same element.
-        if (this.hoverTask !== row.task) { this.hoverTask = row.task; cx.notify(); }
+        if (this.hoverTask !== row.task) this.enterTaskHover(row.task, cx);
       });
       if (row.entry) {
         // An opened ended list's row, hung on the list's guide 8px to its left (layout).
         const dropped = DROPPED.includes(row.status);
+        const entryNum = formatTaskNumber(row);
         el = el.px(px(8)).rounded(px(6)).text_size(font(12.5)).text_color(t.muted)
           .child(div().absolute().left(-10.5).top(row.h / 2 - 2.5).w(5).h(5).rounded(2.5).bg(t.dim))
+          .when(Boolean(entryNum), node => node.child(div().flex_none().font_family('monospace').text_size(font(11.5)).text_color(t.dim).child(entryNum)))
           .child(div().id(`title:${row.id}`).flex_1().min_w(0).truncate()
             .when(dropped, el => el.line_through().text_color(t.dim)).child(row.title))
           .when(Boolean(row.branch) && row.w >= 360, el => el.child(div().max_w(Math.min(130, row.w * .22)).truncate()
@@ -534,15 +741,34 @@ export default class PmDash extends View {
         if (row.terminal) el = el.cursor_pointer().hover(s => s.bg(t.surface)).on_click(() => this.openTerminal(row));
         return el;
       }
+      const mark = review
+        ? (row.reviewWorking
+          ? svg(SPINNER).size(px(12)).flex_none().text_color(t.accent).spin(900)
+          : h_flex().w(px(9)).h(px(9)).flex_none().rounded(px(4.5)).border(Math.max(1, px(1.3))).border_color(t.accent)
+            .items_center().justify_center()
+            .child(div().w(px(3.5)).h(px(3.5)).rounded(px(2)).bg(t.accent)))
+        : this.dot(statusColor, waiting || running || postGate, t, px(8));
+      const rowNum = formatTaskNumber(row);
+      const showStepChip = Boolean(steps?.hasPlan && steps.pill);
+      const showStatusPill = !(postGate && running);
       el = el.rounded(px(8)).bg(waiting ? withAlpha(t.blocked, .12) : t.surface)
-        .child(this.dot(statusColor, waiting || running || review, t, px(8)))
+        .child(mark)
+        .when(Boolean(rowNum), node => node.child(div().flex_none().font_family('monospace').text_size(font(11.5)).text_color(t.dim).child(rowNum)))
         // Nudge only the title: row edges and packet endpoints stay aligned.
         .child(div().id(`title:${row.id}`).relative().left(px(this.nudges[row.id] || 0)).spring('left', { response: 320, damping: .35 })
           .flex_1().min_w(0).truncate().font_weight(waiting ? 600 : 400)
           .text_color(waiting || running ? t.foreground : row.status === 'proposed' ? t.dim : t.muted).child(row.title));
       if (row.branch && row.w >= 360) el = el.child(div().max_w(Math.min(130, row.w * .22)).truncate().px(px(6)).py(px(2)).rounded(px(5))
         .bg(t.raised).text_color(t.muted).font_family('monospace').text_size(font(11)).opacity(waiting || running ? 1 : .7).child(row.branch));
-      el = el.child(this.taskPill(row, t, scale, row.w * .48));
+      if (showStepChip) {
+        el = el.child(div().id(`steps:${row.id}`).flex_none().max_w(row.w * .46).truncate()
+          .px(px(6)).py(px(2)).rounded(px(6)).font_family('monospace').text_size(font(11)).font_semibold()
+          .line_height(`${Math.max(11, px(16))}px`)
+          .bg(postGate ? withAlpha(amber, .15) : review ? withAlpha(t.accent, .14) : t.raised)
+          .text_color(postGate ? amber : review ? t.accent : t.muted)
+          .child(steps.pill));
+      }
+      if (showStatusPill) el = el.child(this.taskPill(row, t, scale, row.w * .48));
     }
     if (row.terminal) el = el.cursor_pointer().hover(s => s.bg(t.raised)).on_click(() => this.openTerminal(row));
     return el;
@@ -562,14 +788,17 @@ export default class PmDash extends View {
   }
   eventLine(e) {
     const task = this.state.tasks.find(t => t.id === e.task);
+    const numTag = formatTaskNumber(taskNumber(task) || taskNumber(e));
+    const title = task ? (numTag ? `${numTag} ${task.title}` : task.title) : '';
     const text = eventText(e, this.state.lang);
     const said = e.review ? `${label(this.state.lang, e.review)}${text ? `: ${text}` : ''}` : text;
-    return task ? this.text('line', task.title, said || taskStatusText(this.state.lang, task)) : said;
+    return task ? this.text('line', title, said || taskStatusText(this.state.lang, task)) : said;
   }
   render(cx) {
     if (this.dialog) return dialogView(this, theme());
     const onStage = !props()?.overlay && boardVisible(desktopLayout());
     if (onStage && !this.onStage) cx.timer.after(0, () => this.keys.focus());
+    if (!onStage && this.onStage) this.clearHover(null, true, true);
     this.onStage = onStage;
     // Esc, one layer a press (escapeTarget). A dialog over the page has the keyboard: its Esc closes only it.
     return v_flex().id('pm-dash-keys').size_full().min_w(0).min_h(0).track_focus(this.keys)
@@ -579,7 +808,7 @@ export default class PmDash extends View {
           { hoverCard: Boolean(this.hoverTask) || this.peeking(), ended: this.endedOpen.size > 0 }) : null;
         if (!to) return;
         cx.stop_propagation();
-        if (to.hoverCard) { this.hoverTask = null; this.hoverEnded = null; cx.notify(); }
+        if (to.hoverCard) { this.clearHover(cx, false, true); }
         else if (to.ended) { this.endedOpen.clear(); cx.notify(); }
         else if (to.project) openProject(to.project, this.allState.pms.find(p => p.name === to.project)?.machine);
         else if (to.view) showPage(to.view);
@@ -612,20 +841,42 @@ export default class PmDash extends View {
     const px = n => n * g.scale, font = n => Math.max(10, px(n));
     const rows = g.rows.map(r => ['label', 'junction', 'ended', 'day'].includes(r.type) ? r : this.presentation(r, terms, live));
     for (const row of rows) if (row.type === 'junction') row.flows = wireFlows(row, rows);
-    const total = counts({ lang: this.state.lang, pms: this.state.pms, tasks: rows.filter(r => r.type === 'task').map(r => ({...r, worker:r.live})) });
+    const total = counts(this.state);
+    const listed = new Set(this.state.pms.map(p => p.name));
     for (const pm of rows.filter(r => r.type === 'pm')) {
-      pm.waiting = rows.filter(r => r.type === 'task' && (r.pm || '') === (pm.name || '') && r.status === 'blocked' && !r.answered).length;
+      pm.waiting = listed.has(pm.name) ? projectCounts(pm, this.state.tasks).waiting : 0;
     }
     const stage = div().id('board-stage').relative().w(g.width).h(g.height).flex_none()
-      .on_mouse_move((event, cx) => this.hoverBounds('stageBounds', event.bounds, cx));
+      .on_hover((over, cx) => { if (!over) this.clearHover(cx, true); })
+      .on_mouse_move((event, cx) => {
+        this.hoverBounds('stageBounds', event.bounds, cx);
+        if (!event.bounds || !event.position || (!this.hoverTask && this.hoverEnded === null)) return;
+        const zoom = event.bounds.width > 0 && g.width > 0 ? event.bounds.width / g.width : 1;
+        const sx = (event.position.x - event.bounds.x) / zoom, sy = (event.position.y - event.bounds.y) / zoom;
+        const inside = r => r && sx >= r.x - 1 && sx <= r.x + r.w + 1 && sy >= r.y - 1 && sy <= r.y + r.h + 1;
+        let changed = false;
+        if (this.hoverTask && !inside(rows.find(r => r.type === 'task' && r.task === this.hoverTask))) {
+          const rect = this.hoverTaskRect?.task === this.hoverTask ? this.hoverTaskRect : null;
+          const onCard = this.hoverTaskCard === this.hoverTask || (rect && inside(rect));
+          if (!onCard) {
+            if (this.hoverTaskInteractive) this.leaveTaskHover(this.hoverTask, cx);
+            else { this.hoverTask = null; changed = true; }
+          }
+        }
+        if (this.hoverEnded !== null && !inside(rows.find(r => r.type === 'ended' && r.pm === this.hoverEnded))) {
+          this.hoverEnded = null; changed = true;
+        }
+        if (changed) cx.notify();
+      });
     for (const [text, x] of [[this.text('projects'), g.pmX], [this.text('tasks'), g.taskX]]) {
       stage.child(div().absolute().left(x).top(0).h(px(18)).line_height(`${px(18)}px`)
         .text_size(font(11.5)).text_color(t.dim).child(text));
     }
-    for (const machine of g.machines) {
-      stage.child(div().absolute().left(machine.x).top(machine.y).w(machine.w).h(machine.h).px(px(6))
+    for (const [mi, machine] of g.machines.entries()) {
+      stage.child(this.withTip(`machine-${mi}`, div().absolute().left(machine.x).top(machine.y).w(machine.w).h(machine.h).px(px(6))
         .line_height(`${machine.h}px`).rounded(px(5)).bg(t.raised).text_color(t.muted)
-        .font_family('monospace').text_size(font(11)).truncate().tooltip(machine.label).child(machine.label));
+        .font_family('monospace').text_size(font(11)).truncate().child(machine.label),
+        machine.label, t, { placement: 'above-left' }));
     }
     const tr = this.trip, flowing = [];
     for (const wire of g.wires) {
@@ -663,25 +914,39 @@ export default class PmDash extends View {
     }
     stage.child(legend);
     const hovered = rows.find(row => row.type === 'task' && row.task === this.hoverTask);
+    if (this.hoverTask && !hovered) { this.hoverTask = null; this.hoverTaskCard = null; this.hoverTaskInteractive = false; this.hoverTaskRect = null; }
     if (hovered) {
-      const info = this.taskInfoCard(hovered, g, t);
+      const info = this.taskInfoCard(hovered, g, t, rows, terms, live);
       if (info) stage.child(info);
     }
-    const peek = this.peeking() && rows.find(row => row.type === 'ended' && row.pm === this.hoverEnded);
+    const peekRow = rows.find(row => row.type === 'ended' && row.pm === this.hoverEnded);
+    if (this.hoverEnded !== null && !peekRow) this.hoverEnded = null;
+    const peek = this.peeking() && peekRow;
     if (peek && peek.peek?.length) {
-      const card = this.endedPeek(peek, g, t);
+      const card = this.endedPeek(peek, g, t, rows);
       if (card) stage.child(card);
     }
 
     const small = g.frame.width < 800;
     const stats = h_flex().h(52).px(6).flex_none().rounded(12).bg(t.surface).items_center();
     const values = [[total.running, this.text('running'), total.running ? t.ansi2 : t.dim],
-      [total.review, this.text('review'), t.accent], [total.blocked, this.text('blocked'), t.blocked]];
+      [total.review, this.text('review'), total.review ? t.accent : t.dim],
+      [total.waiting, this.text('thread_blocked'), total.waiting ? t.blocked : t.dim]];
     for (const [i, [value, text, color]] of values.entries()) {
       stats.child(h_flex().relative().px(small ? 8 : 16).gap(small ? 4 : 7).items_baseline()
         .when(i > 0, el => el.child(div().absolute().left(0).top(2).bottom(2).w(1).bg(t.border)))
         .child(div().text_size(small ? 20 : 24).font_bold().text_color(color).child(String(value)))
         .child(div().text_size(small ? 11 : 12).text_color(t.muted).child(text)));
+    }
+    if (!this.state.project && total.unclaimed > 0) {
+      stats.child(this.withTip('board-unclaimed', h_flex().id('board-unclaimed').relative().px(small ? 8 : 16).gap(small ? 4 : 6).items_center()
+        .accessibility_label(this.text('unclaimedBlocked', total.unclaimed))
+        .child(div().absolute().left(0).top(2).bottom(2).w(1).bg(t.border))
+        .child(svg('mods/pm-dash/alert.svg').size(small ? 13 : 15).flex_none().text_color(t.ansi3 ?? t.muted))
+        .child(h_flex().gap(small ? 4 : 7).items_baseline()
+          .child(div().text_size(small ? 20 : 24).font_bold().text_color(t.ansi3 ?? t.muted).child(String(total.unclaimed)))
+          .child(div().text_size(small ? 11 : 12).text_color(t.muted).child(this.text('unclaimedShort')))),
+        this.text('unclaimedTip'), t, { placement: 'below-right' }));
     }
     const feed = v_flex().id('board-feed').flex_none().gap(0)
       .when(g.frame.wide, el => el.w(g.frame.feedWidth).border_l(1).border_color(t.border).pl(28))
@@ -748,11 +1013,19 @@ export default class PmDash extends View {
         .child(stats))
       .child(main);
     return keepPress(this, v_flex().id('root')).w_full().flex_1().min_h(0).bg(t.canvas).text_color(t.foreground).text_size(13)
-      .on_mouse_move((event, cx) => this.hoverBounds('boardBounds', event.bounds, cx))
-      .on_size_change((size,cx) => { if (size.width !== this.size.width || size.height !== this.size.height) { this.size=size; this.hoverTask=null; this.hoverEnded=null; cx.notify(); } })
+      .on_hover((over, cx) => { if (!over) this.clearHover(cx, true); })
+      .on_mouse_move((event, cx) => {
+        this.hoverBounds('boardBounds', event.bounds, cx);
+        const sb = this.stageBounds, p = event.position;
+        if (sb && p && (this.hoverTask || this.hoverEnded !== null) &&
+            (p.x < sb.x - 1 || p.x > sb.x + sb.width + 1 || p.y < sb.y - 1 || p.y > sb.y + sb.height + 1)) {
+          this.clearHover(cx);
+        }
+      })
+      .on_size_change((size,cx) => { if (size.width !== this.size.width || size.height !== this.size.height) { this.size=size; this.clearHover(cx, false, true); cx.notify(); } })
       .child(div().relative().flex_1().min_h(0).min_w(0).w_full()
         .child(div().id('scroll').size_full().overflow_scroll()
-          .on_scroll_wheel((_event, cx) => { if (this.hoverTask || this.hoverEnded !== null) { this.hoverTask=null; this.hoverEnded=null; cx.notify(); } }).child(card))
+          .on_scroll_wheel((_event, cx) => { if (this.hoverTask || this.hoverEnded !== null) this.clearHover(cx, false, true); }).child(card))
         .child(Scrollbar.new('scroll').absolute().inset_0().mode('always')));
   }
 }

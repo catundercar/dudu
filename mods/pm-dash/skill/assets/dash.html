@@ -78,6 +78,7 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
 .task { position: relative; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; column-gap: 12px; row-gap: 3px; padding: 10px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; font-size: 14px; transition: opacity .3s, border-color .3s; cursor: default; }
 .task[hidden] { display: none; }
 .task b { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task b .tnum { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink3); font-weight: 450; margin-right: 6px; }
 .task em { font-style: normal; font-size: 12.5px; color: var(--ink3); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .task .latest { grid-column: 2 / 4; margin: 0; font-size: 12.5px; color: var(--ink3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--ink3); }
@@ -365,7 +366,7 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
     let r = R.get(t.id);
     if (!r) {
       const li = document.createElement("li"); li.className = "task"; li.dataset.id = t.id;
-      li.innerHTML = `<i class="dot"></i><b></b><em></em><p class="latest"></p><span class="tag"></span>`;
+      li.innerHTML = `<i class="dot"></i><b><span class="tnum" hidden></span><span class="tt"></span></b><em></em><p class="latest"></p><span class="tag"></span>`;
       r = { li, wire: mkpath(), t: null, shown: null };
       R.set(t.id, r);
       if (primed) li.classList.add("enter");
@@ -386,10 +387,14 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
     let em = ST[t.status] || t.status;
     if (t.status === "in_progress") em = working ? tx("workerBusy", worker) : worker ? `${worker} · ${ago(t.updated)}` : `${ST.in_progress} · ${ago(t.updated)}`;
     else em += ` · ${ago(t.updated)}`;
-    r.li.querySelector("b").textContent = t.title;
+    const numSpan = r.li.querySelector("b .tnum");
+    const numText = Number.isInteger(t.number) && t.number > 0 ? `#${t.number}` : "";
+    numSpan.textContent = numText;
+    numSpan.hidden = !numText;
+    r.li.querySelector("b .tt").textContent = t.title;
     r.li.querySelector("em").textContent = em;
     r.li.querySelector(".latest").textContent = short(t.latest, 140);
-    r.li.title = [t.id, t.branch && tx("branch", t.branch), t.pane && `pane ${t.pane}`, tx("updated", t.updated)].filter(Boolean).join("\n") + "\n\n" + t.latest;
+    r.li.title = [numText ? `${numText} ${t.id}` : t.id, t.branch && tx("branch", t.branch), t.pane && `pane ${t.pane}`, tx("updated", t.updated)].filter(Boolean).join("\n") + "\n\n" + t.latest;
     for (const s of ORDER) r.li.classList.toggle(s, s === t.status);
     r.li.classList.toggle("on", working && !closed);
     r.li.classList.toggle("rest", rest);
@@ -427,9 +432,10 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
     $("feed").innerHTML = ev.map((e) => {
       const t = S.tasks.find((x) => x.id === e.task);
       const [from, to] = route(e);
+      const tagTitle = t ? `${Number.isInteger(t.number) && t.number > 0 ? `#${t.number} ` : ""}${short(t.title, 26)}` : "";
       const what = e.kind === "prompt" ? `<small>${esc(tx("feedPrompt"))}</small>`
         : e.kind === "reply" ? `<small>${esc(tx("feedReply"))}</small>`
-        : `${e.status ? `<span class="st">${esc(ST[e.status] || e.status)}</span>` : ""}${t ? `<small>${esc(short(t.title, 26))}${esc(tx("colon"))}</small>` : ""}${esc(short(e.text, 220))}`;
+        : `${e.status ? `<span class="st">${esc(ST[e.status] || e.status)}</span>` : ""}${t ? `<small>${esc(tagTitle)}${esc(tx("colon"))}</small>` : ""}${esc(short(e.text, 220))}`;
       return `<li class="${fresh.has(e.key) ? "new" : ""}"><time>${esc(e.at.slice(5))}</time><span class="route">${esc(from)} → ${esc(to)}</span><span class="what">${what}</span></li>`;
     }).join("");
   }

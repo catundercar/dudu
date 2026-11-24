@@ -30,23 +30,82 @@ export function waitingCount(pm, tasks) {
   return (Array.isArray(tasks) ? tasks : []).filter(t => t?.pm === pm?.name && t.status === 'blocked' && !t.answered).length;
 }
 
+// Default PM auto-compaction threshold when an older remote `pm.py state` omits `compact_tokens`.
+export const DEFAULT_COMPACT_TOKENS = 200_000;
+export const DEFAULT_ROTATE_TOKENS = DEFAULT_COMPACT_TOKENS;
+
+export function resolveCompactTokens(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value > 0 ? Math.floor(value) : 0;
+  return DEFAULT_COMPACT_TOKENS;
+}
+export const resolveRotateTokens = resolveCompactTokens;
+
+// Positive integer context token count from `pm.py state` (`context_tokens`), or 0 when absent/unknown.
+export function contextTokens(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+// Compact token count ("123k", "800"), or '' when absent/0.
+export function contextShort(tokens) {
+  const n = contextTokens(tokens);
+  if (!n) return '';
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+}
+
+// Context usage label ("上下文 123k" / "Context 123k"), or '' when absent/0.
+export function contextLabel(tokens, lang = 'en') {
+  const short = contextShort(tokens);
+  if (!short) return '';
+  return lang === 'zh' ? `上下文 ${short}` : `Context ${short}`;
+}
+
+// PM context usage relative to `compact_tokens` (`pm.py` configures auto-compaction near `COMPACT_TOKENS`).
+export function pmContextLevel(tokens, compactTokens = DEFAULT_COMPACT_TOKENS) {
+  const n = contextTokens(tokens), limit = resolveCompactTokens(compactTokens);
+  if (!n) return 'none';
+  if (!limit) return 'normal';
+  if (n > limit) return 'over';
+  return n > Math.floor(limit * 0.8) ? 'near' : 'normal';
+}
+
+// Tooltip line for a PM's context usage, noting when it nears or passes `compact_tokens`.
+export function pmContextTip(tokens, lang = 'en', compactTokens = DEFAULT_COMPACT_TOKENS) {
+  const short = contextShort(tokens), limit = resolveCompactTokens(compactTokens), zh = lang === 'zh';
+  if (!short) return '';
+  const cap = contextShort(limit);
+  if (!limit || !cap) return zh ? `上下文 ${short}` : `Context ${short}`;
+  const level = pmContextLevel(tokens, limit);
+  if (level === 'over') return zh ? `上下文 ${short} · 已超 ${cap} 压缩阈值` : `Context ${short} · over ${cap} compact threshold`;
+  if (level === 'near') return zh ? `上下文 ${short} · 接近 ${cap} 压缩阈值` : `Context ${short} · approaching ${cap} compaction`;
+  return zh ? `上下文 ${short}（压缩阈值 ${cap}）` : `Context ${short} (compact above ${cap})`;
+}
+
 // local: this computer's `pm.py state`; remote: {machine: state} as pm-nav caches it.
 // A remote PM keeps its own name for terminal lookup and is keyed "<machine>/<name>".
 export function pmRows(local, remote, terms, live) {
   const sources = [['', local], ...Object.entries(remote || {}).filter(([machine]) => machine)];
-  return sources.flatMap(([machine, state]) => (Array.isArray(state?.pms) ? state.pms : []).map(pm => {
-    const row = { ...pm, type: 'pm', machine, sourceName: pm.name };
-    const { terminal, exact } = terminalTargetFor(row, terms);
-    return { key: machine ? `${machine}/${pm.name}` : pm.name, label: pmName(pm), machine,
-      terminal: terminal || null, exact, status: pmStatus(pm, terminal, exact, live),
-      program: exact ? terminal.program : null, seed: lastEventAt(state.events, pm.name),
-      project: pm.project || '', archived: pm.archived || null, waiting: waitingCount(pm, state.tasks) };
-  })).sort(byUrgency);
+  return sources.flatMap(([machine, state]) => {
+    const pms = Array.isArray(state?.pms) ? state.pms : [];
+    const tasks = pms.some(pm => !Number.isFinite(pm?.counts?.waiting)) ? foldReviews(state?.tasks) : [];
+    const stateCompact = state?.compact_tokens ?? state?.rotate_tokens;
+    return pms.map(pm => {
+      const row = { ...pm, type: 'pm', machine, sourceName: pm.name };
+      const { terminal, exact } = terminalTargetFor(row, terms);
+      const ctx = contextTokens(pm.context_tokens);
+      const rawCompact = pm.compact_tokens ?? stateCompact;
+      const hasCompact = typeof rawCompact === 'number' && Number.isFinite(rawCompact);
+      return { key: machine ? `${machine}/${pm.name}` : pm.name, label: pmName(pm), machine,
+        terminal: terminal || null, exact, status: pmStatus(pm, terminal, exact, live),
+        program: exact ? terminal.program : null, seed: lastEventAt(state.events, pm.name),
+        project: pm.project || '', archived: pm.archived || null, waiting: waitingCount(pm, tasks),
+        ...(ctx ? { contextTokens: ctx, ...(hasCompact ? { compactTokens: resolveCompactTokens(rawCompact) } : {}) } : {}) };
+    });
+  }).sort(byUrgency);
 }
 const byUrgency = (a, b) => RANK[b.status] - RANK[a.status] || a.label.localeCompare(b.label) ||
   a.machine.localeCompare(b.machine);
 
-// A live terminal labelled pm=<project> (not retired) that no ledger row names, on this computer or another
+// A live terminal labelled pm=<project> that no ledger row names, on this computer or another
 // machine: a PM this ledger has no registration for. It gets a row of its own, so no PM goes missing; the
 // row shows its terminal (there is no project here to open). rows: pmRows' rows, archived ones included.
 export function labelledPmRows(rows, terms, live) {
@@ -55,7 +114,7 @@ export function labelledPmRows(rows, terms, live) {
   const extra = [];
   for (const t of terms) {
     const project = t.labels?.pm;
-    if (t.state !== 'live' || !project || t.labels['pm.retired'] || !t.address || shown.has(t.address)) continue;
+    if (t.state !== 'live' || !project || !t.address || shown.has(t.address)) continue;
     const slash = t.address.lastIndexOf('/'), machine = slash < 0 ? '' : t.address.slice(0, slash);
     if (named.has(`${machine}\n${project}`)) continue;
     named.add(`${machine}\n${project}`);
@@ -165,12 +224,11 @@ export function underNav(tree) {
 // Copies of pm-dash/model.js (a mod cannot import from another mod's folder);
 // model.test.mjs checks that they stay identical.
 export const LEDGER_HOME_SH = 'if [ -n "$PM_HOME" ]; then printf %s "$PM_HOME"; ' +
-  'elif [ -d "$HOME/.claude/pm" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
-// A retired PM's terminal (`pm.py rotate` labels it pm.retired=<project>) is nobody's: not the
-// project's PM, and not the terminal of a task that was parked on it.
+  'elif [ -d "$HOME/.claude/pm" ] && ! [ "$HOME/.claude/pm" -ef "$HOME/.dudu" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
+// Live terminals on the row's machine (`''` means local, so no `machine/` prefix).
 function liveTerminalsFor(row, terms) {
   const machine = row.machine || '';
-  return terms.filter(t => t.state === 'live' && !t.labels?.['pm.retired'] &&
+  return terms.filter(t => t.state === 'live' &&
     (machine ? t.address?.startsWith(`${machine}/`) : !t.address?.includes('/')));
 }
 export function terminalFor(row, terms) {
@@ -210,12 +268,12 @@ export function focusPlan(address, terms, paned, home = '') {
   const has = new Set(paned.filter(Boolean));
   if (has.has(address)) return { focus: address, peek: '' };
   const byAddress = new Map(terms.map(t => [t.address, t]));
-  // A retired PM up the chain (labeled pm.retired by `pm.py rotate`, or a PM terminal that is not the
-  // project's current one) is passed over: shown on its tab, the thread would invite talking to it.
-  const retired = t => Boolean(t?.labels?.['pm.retired'] || (home && t?.labels?.pm && t.address !== home));
+  // Another PM terminal up the chain (`home` is the project's current PM) is passed over:
+  // shown on its tab, the thread would invite talking to the wrong PM.
+  const otherPm = t => Boolean(home && t?.labels?.pm && t.address !== home);
   const seen = new Set([address]);
   for (let up = byAddress.get(address)?.parent; up && !seen.has(up); up = byAddress.get(up)?.parent) {
-    if (has.has(up) && !retired(byAddress.get(up))) return { focus: up, peek: address };
+    if (has.has(up) && !otherPm(byAddress.get(up))) return { focus: up, peek: address };
     seen.add(up);
   }
   return home && has.has(home) ? { focus: home, peek: address } : none;

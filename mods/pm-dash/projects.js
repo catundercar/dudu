@@ -4,8 +4,8 @@ import { div, svg } from 'gpui-kit';
 import { v_flex, h_flex, InputState, Input, Scrollbar } from 'gpui-base';
 import { home, appHome, exec, run, props, closeOverlay, layout, shared, setShared, spaces, pickFolder, notify } from 'herdr';
 import {
-  word, withAlpha, solidText, countChips, projectCards, pageTotals, archiveThreads, archivedDay, age, folderName,
-  ledgerOpen, startArgv, projectName, agentName, KINDS, lastPmLine,
+  word, withAlpha, solidText, countChips, projectCards, pageTotals, unclaimedBlocked, archiveThreads, archivedDay, age, folderName,
+  ledgerOpen, startArgv, projectName, agentName, KINDS, lastPmLine, lostSummary, formatTaskNumber,
 } from './model.js';
 import { execPython } from './python.js';
 
@@ -33,7 +33,13 @@ export function page() {
 }
 export function showPage(view) { setShared(PAGE, { view, project: '' }); select(BOARD); }
 // A remote project (its card's key is "<machine>/<name>") opens too: pm-project reads it from that machine.
-export function openProject(pm, machine = '') { setShared(PROJECT, machine ? { pm, machine } : { pm }); select(PROJECT); }
+export function openProject(pm, machine = '', thread = '') {
+  const payload = { pm };
+  if (machine) payload.machine = machine;
+  if (thread) { payload.thread = thread; payload.jumpSeq = Date.now(); }
+  setShared(PROJECT, payload);
+  select(PROJECT);
+}
 const shortPath = path => {
   const p = String(path || ''), h = home();
   return h && (p === h || p.startsWith(h + '/')) ? '~' + p.slice(h.length) : p;
@@ -57,12 +63,13 @@ export const NEW_DIALOG = { mod: 'pm-dash', props: { dialog: 'new' }, kind: 'dia
 export const keepPress = (v, el) => el.on_mouse_down('left', (_e, cx) => { v.keys?.focus(); cx.stop_propagation(); });
 
 const icon = (name, size = 16) => svg(ICON(name)).size(size).flex_none();
-function iconButton(id, name, tip, action, t, { size = 28, glyph = 16, on = false } = {}) {
-  return h_flex().id(id).size(size).flex_none().rounded(7).items_center().justify_center().cursor_pointer()
+const tipWrap = (v, key, el, tip, t, opts) => (v?.withTip ? v.withTip(key, el, tip, t, opts) : el);
+function iconButton(v, id, name, tip, action, t, { size = 28, glyph = 16, on = false, placement = 'above-right' } = {}) {
+  return tipWrap(v, id, h_flex().id(id).size(size).flex_none().rounded(7).items_center().justify_center().cursor_pointer()
     .text_color(on ? t.foreground : t.muted).when(on, el => el.bg(t.raised))
-    .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).accessibility_label(tip)
+    .hover(s => s.bg(t.hover).text_color(t.foreground)).accessibility_label(tip)
     .on_click((_e, cx) => { cx.stop_propagation(); action(cx); })
-    .child(icon(name, glyph));
+    .child(icon(name, glyph)), tip, t, { placement });
 }
 // Two or more views of one thing: each an icon and a word, the shown one raised.
 export function segmented(id, options, active, t) {
@@ -96,11 +103,11 @@ export function pageHeader(v, view, t) {
       ['list', 'list', text('listView'), () => showPage('list')],
       ['board', 'board', text('boardView'), () => showPage('board')],
     ], view === 'board' ? 'board' : 'list', t)))
-    .child(keepPress(v, h_flex().id('page-new')).ml(8).size(32).flex_none().rounded(16).items_center().justify_center().cursor_pointer()
+    .child(keepPress(v, tipWrap(v, 'page-new', h_flex().id('page-new').ml(8).size(32).flex_none().rounded(16).items_center().justify_center().cursor_pointer()
       .bg(t.foreground).text_color(t.canvas).hover(s => s.opacity(.88))
-      .tooltip(text('newProject')).accessibility_label(text('newProject'))
+      .accessibility_label(text('newProject'))
       .on_click(() => v.openNew())
-      .child(icon('plus', 16)));
+      .child(icon('plus', 16)), text('newProject'), t, { placement: 'below-right' })));
 }
 
 // The header over one project's board: its name and folder, and the way back to its conversation.
@@ -132,25 +139,31 @@ function line(card, lang, t) {
 function card(v, c, t, now) {
   const lang = v.state.lang, hovered = v.hoverCard === c.key, local = !c.machine;
   const chips = countChips(c.counts);
+  const lostText = lostSummary(lang, c.lost);
   const meta = h_flex().gap(12).items_center().text_size(12).text_color(t.dim)
     .when(Boolean(c.agent), el => el.child(div().child(c.agent)))
     .when(Boolean(c.machine), el => el.child(div().font_family('monospace').child(c.machine)))
+    .when(Boolean(lostText), el => el.child(div().id(`lost-${c.key}`).text_color(t.ansi3 ?? t.accent).child(lostText)))
     .children(chips.map(([k, n]) => div().when(k === 'waiting', el => el.text_color(t.blocked)).child(word(lang, `count_${k}`, n))))
-    .when(!chips.length && c.line.length > 0, el => el.child(div().child(word(lang, 'noOpen'))));
+    .when(!chips.length && !lostText && c.line.length > 0, el => el.child(div().child(word(lang, 'noOpen'))));
   const right = h_flex().flex_none().gap(8).items_center().text_size(12).text_color(t.dim)
     .when(hovered && local, el => el.child(h_flex().gap(2).p(2).rounded(9).bg(t.raised)
-      .child(iconButton(`open-${c.key}`, 'open', word(lang, 'openProject'), () => openProject(c.key), t))
-      .child(iconButton(`archive-${c.key}`, 'archive', word(lang, 'archiveProject'), () => v.openArchive(c.key), t))))
+      .child(iconButton(v, `open-${c.key}`, 'open', word(lang, 'openProject'), () => openProject(c.key), t))
+      .child(iconButton(v, `archive-${c.key}`, 'archive', word(lang, 'archiveProject'), () => v.openArchive(c.key), t))))
     .when(c.counts.waiting > 0 && !hovered, el => el.child(badge(c.counts.waiting, t)))
     .when(c.at > 0, el => el.child(div().child(age(Math.max(0, now - c.at), lang))));
-  return h_flex().id(`card-${c.key}`).w_full().px(14).py(16).gap(14).items_start().rounded(12)
+  const remoteTip = !local ? word(lang, 'remoteProject') : '';
+  const rowEl = h_flex().id(`card-${c.key}`).w_full().px(14).py(16).gap(14).items_start().rounded(12)
     .when(hovered, el => el.bg(t.surface))
     .on_hover((over, cx) => {
       if (over) v.hoverCard = c.key; else if (v.hoverCard === c.key) v.hoverCard = null;
+      if (remoteTip) {
+        const tk = `tip:card-${c.key}`;
+        if (over) v.hoverTip = tk; else if (v.hoverTip === tk) v.hoverTip = '';
+      }
       cx.notify();
     })
     .cursor_pointer().on_click(() => openProject(c.key, c.machine))
-    .when(!local, el => el.tooltip(word(lang, 'remoteProject')))
     .child(h_flex().size(34).flex_none().rounded(9).bg(t.raised).items_center().justify_center().child(mark(c.status, t, 9)))
     .child(v_flex().flex_1().min_w(0).gap(5)
       .child(h_flex().gap(10).items_baseline()
@@ -159,6 +172,7 @@ function card(v, c, t, now) {
       .child(line(c, lang, t))
       .child(meta))
     .child(right);
+  return remoteTip ? tipWrap(v, `card-${c.key}`, rowEl, remoteTip, t, { placement: 'above-left', noHover: true }) : rowEl;
 }
 
 function archivedCard(v, c, t) {
@@ -196,13 +210,24 @@ export function pageView(v, view, t) {
       .child(div().px(14).pt(6).pb(16).text_size(13).text_color(t.muted).child(text('archivedSummary', archived.length)))
       .children(archived.map(c => archivedCard(v, c, t)));
   } else {
-    const total = pageTotals(active);
+    const total = pageTotals(active, v.allState);
+    const unclaimed = unclaimedBlocked(v.allState);
     body.child(div().px(14).pt(4).pb(18).text_size(13).text_color(t.muted)
       .child(text('pageSummary', total.projects, total.working, total.waiting)))
       .children(active.map((c, i) => v_flex().w_full()
         .when(i > 0, el => el.child(div().mx(14).h(1).bg(v.hoverCard === c.key || v.hoverCard === active[i - 1].key ? t.canvas : t.border)))
         .child(card(v, c, t, now))))
       .when(!active.length, el => el.child(div().px(14).py(16).text_color(t.dim).child(text('noProjects'))))
+      .when(unclaimed.count > 0, el => el.child(tipWrap(v, 'unclaimed-blocked', h_flex().id('unclaimed-blocked').mt(14).mx(14).px(12).py(10).gap(10)
+        .rounded(10).bg(t.surface).items_center().cursor_pointer().hover(s => s.bg(t.raised))
+        .accessibility_label(text('unclaimedBlocked', unclaimed.count))
+        .on_click(() => showPage('board'))
+        .child(icon('alert', 15).text_color(t.ansi3 ?? t.muted))
+        .child(div().flex_none().text_size(13).font_medium().text_color(t.foreground)
+          .child(text('unclaimedBlocked', unclaimed.count)))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.dim)
+          .child(unclaimed.tasks.slice(0, 3).map(x => x.title || x.sourceId || x.id).join(' · ')))
+        .child(icon('chevron', 12).text_color(t.muted)), text('unclaimedTip'), t, { placement: 'above-left' })))
       .when(archived.length > 0, el => el.child(h_flex().id('to-archived').mt(18).mx(14).gap(8).items_center()
         .text_size(13).text_color(t.muted).cursor_pointer().hover(s => s.text_color(t.foreground))
         .on_click(() => showPage('archived'))
@@ -337,7 +362,7 @@ function newDialog(v, t) {
   return v_flex().size_full().p(24).gap(18).bg(t.popover).text_color(t.foreground).text_size(14)
     .child(h_flex().items_center()
       .child(div().flex_1().text_size(17).font_semibold().child(text('newProject')))
-      .child(iconButton('new-close', 'close', text('cancel'), close, t)))
+      .child(iconButton(v, 'new-close', 'close', text('cancel'), close, t, { placement: 'below-right' })))
     .child(field(text('folder'), t, v_flex().gap(8).child(folderRow).when(Boolean(hint), el => el.child(hint))))
     .child(field(text('name'), t, Input.new(v.nameInput).h(40).px(12).items_center().rounded(10).border_1()
       .border_color(t.input || t.border).bg(t.background).text_size(14).text_color(t.foreground)))
@@ -351,11 +376,11 @@ function newDialog(v, t) {
     .child(h_flex().gap(10).items_center()
       .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.dim).child(v.busy ? text('creating') : text('placeHint')))
       .child(div().text_size(12).text_color(t.dim).child('⌘↵'))
-      .child(h_flex().id('new-submit').size(36).flex_none().rounded(18).items_center().justify_center()
+      .child(tipWrap(v, 'new-submit', h_flex().id('new-submit').size(36).flex_none().rounded(18).items_center().justify_center()
         .bg(ready ? t.solid : t.raised).text_color(ready ? t.solid_foreground : t.muted)
-        .tooltip(text('create')).accessibility_label(text('create'))
+        .accessibility_label(text('create'))
         .when(ready, el => el.cursor_pointer().on_click((_e, cx) => submitNew(v, cx)))
-        .child(v.busy ? svg(SPINNER).size(15).spin(900) : icon('send', 15))));
+        .child(v.busy ? svg(SPINNER).size(15).spin(900) : icon('send', 15)), text('create'), t, { placement: 'above-right' })));
 }
 
 function archiveDialog(v, t) {
@@ -368,9 +393,13 @@ function archiveDialog(v, t) {
       .child(icon('archive', 15))
       .child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(text('archiveTitle', pm ? projectName(pm) : '…'))))
     .child(div().whitespace_normal().line_height('20px').text_color(t.muted).child(text(threads.length ? 'archiveLead' : 'archiveNone')))
-    .when(threads.length > 0, el => el.child(v_flex().gap(4).children(threads.slice(0, 6).map(x => h_flex().h(20).gap(14).items_center()
-      .child(div().w(42).flex_none().text_size(12.5).text_color(x.status === 'blocked' ? t.blocked : t.dim).child(text(`thread_${x.status}`)))
-      .child(div().flex_1().min_w(0).truncate().child(x.title || x.id))))))
+    .when(threads.length > 0, el => el.child(v_flex().gap(4).children(threads.slice(0, 6).map(x => {
+      const xNum = formatTaskNumber(x);
+      return h_flex().h(20).gap(10).items_center()
+        .child(div().w(42).flex_none().text_size(12.5).text_color(x.status === 'blocked' ? t.blocked : t.dim).child(text(`thread_${x.status}`)))
+        .when(Boolean(xNum), rowEl => rowEl.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(xNum)))
+        .child(div().flex_1().min_w(0).truncate().child(x.title || x.id));
+    }))))
     .child(div().whitespace_normal().line_height('20px').text_color(t.muted).child(text('archiveKeep')))
     .when(Boolean(v.failure), el => el.child(div().whitespace_normal().text_size(12).text_color(t.blocked).child(text('failedAction', v.failure))))
     .child(div().flex_1())

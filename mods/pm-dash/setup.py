@@ -20,9 +20,21 @@ AGENTS = {
     "codex": ("Codex", "CODEX_HOME", ".codex", "hooks.json"),
     "pi": ("pi", "PI_CODING_AGENT_DIR", ".pi/agent", None),
 }
-# Every agent with hooks gets all three. The turn hook only notes the turn for the board and prints the
-# hand-over reminder; what UserPromptSubmit prints is added to the session's context, so it stays synchronous.
-HOOKS = [("SessionStart", "hook-session-start", 10), ("UserPromptSubmit", "hook-turn", 15), ("Stop", "hook-turn", 15)]
+# Every agent with hooks gets all five. SessionStart syncs the ledger after compaction; PreCompact outputs
+# PM preservation rules (Claude Code & Codex); PreToolUse redirects PM interactive question tools to ledger
+# question cards; hook-turn logs conversation turns (UserPromptSubmit output is added to the session's
+# context, so only Stop runs asynchronously).
+HOOKS = [
+    ("SessionStart", "hook-session-start", 10),
+    ("PreCompact", "hook-pre-compact", 10),
+    ("PreToolUse", "hook-pre-tool", 10),
+    ("UserPromptSubmit", "hook-turn", 15),
+    ("Stop", "hook-turn", 15),
+]
+PRE_TOOL_MATCHERS = {
+    "claude": "AskUserQuestion",
+    "codex": "request_user_input|ask_user|AskUserQuestion",
+}
 SCRIPT = "skills/pm/scripts/pm.py"
 WINDOWS = os.name == "nt"
 
@@ -72,13 +84,43 @@ def agent_list(text):
 
 
 def ledger_home():
-    """The rule pm.py uses: PM_HOME, else ~/.claude/pm where an earlier install keeps it, else ~/.dudu."""
+    """The rule pm.py uses: PM_HOME, else ~/.claude/pm where an earlier install keeps it (unless it links to ~/.dudu),
+    else ~/.dudu."""
+    env = os.environ.get("PM_HOME")
+    if env:
+        return Path(env)
+    canonical = Path.home() / ".dudu"
     earlier = Path.home() / ".claude" / "pm"
-    return Path(os.environ.get("PM_HOME") or (earlier if earlier.exists() else Path.home() / ".dudu"))
+    if earlier.exists():
+        try:
+            if canonical.exists() and earlier.samefile(canonical):
+                return canonical
+        except OSError:
+            pass
+        return earlier
+    return canonical
 
 
-# What the skill install leaves out of the bundled skill/. Python writes __pycache__ into an installed copy too.
-SKILL_EXCLUDED = ("test_pm.py", "test_pm_events.py", "__pycache__", ".DS_Store")
+def legacy_ledger_path():
+    """Return ~/.claude/pm when it is an unmigrated legacy ledger directory (not a symlink to ~/.dudu and PM_HOME is unset)."""
+    if os.environ.get("PM_HOME"):
+        return None
+    canonical = Path.home() / ".dudu"
+    earlier = Path.home() / ".claude" / "pm"
+    if not earlier.is_dir() or earlier.is_symlink():
+        return None
+    try:
+        if canonical.exists() and earlier.samefile(canonical):
+            return None
+    except OSError:
+        pass
+    return earlier
+
+
+# What the skill install leaves out of the bundled skill/, as fnmatch patterns matched against every part of a path:
+# test files and test folders (scripts/test_*.py, scripts/tests/), and what Python and Finder write into a copy.
+# Anything else, a new module or a package folder beside pm.py included, is installed and fingerprinted.
+SKILL_EXCLUDED = ("test_*.py", "tests", "__pycache__", ".DS_Store")
 
 
 def fingerprint(skill):
@@ -186,6 +228,8 @@ class Agent:
                 entry = {"hooks": [hook]}
                 if event == "SessionStart" and self.name == "claude":
                     entry["matcher"] = "^(startup|resume|clear|compact)$"
+                if event == "PreToolUse" and self.name in PRE_TOOL_MATCHERS:
+                    entry["matcher"] = PRE_TOOL_MATCHERS[self.name]
                 if event == "Stop":
                     hook["async"] = True  # both Claude Code and Codex accept the key
                 entries.append(entry)
@@ -325,6 +369,12 @@ class Setup:
         if any(agent.name == "codex" for agent in self.agents):
             print("Codex runs these hooks once you trust them (it asks at its next start) and while `hooks` is on "
                   "under [features] in ~/.codex/config.toml (the default; check with `codex features list`).")
+        legacy = legacy_ledger_path()
+        if legacy is not None:
+            print(f"Note: legacy ledger found at {legacy} (default is now {Path.home() / '.dudu'}).")
+            print("  To migrate it with a full backup and compatibility symlink:")
+            print(f"    {python_command()} {first.script_command} home --migrate --dry-run")
+            print(f"    {python_command()} {first.script_command} home --migrate")
         if self.args.dry_run:
             print("Dry run complete; no files written.")
         else:

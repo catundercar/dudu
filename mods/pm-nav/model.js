@@ -44,20 +44,37 @@ export function waitingCount(pm, tasks) {
   return (Array.isArray(tasks) ? tasks : []).filter(t => t?.pm === pm?.name && t.status === 'blocked' && !t.answered).length;
 }
 
-// The same task statuses used by the dashboard's ledger summary. What waits is the sum of the
-// listed (not archived) projects' badges, so a blocked task with no PM is not counted here.
+// How many of a project's threads are actively working (in progress and terminal not offline):
+// pm.py's `counts.working`, else the same rule locally for an older remote pm.py.
+export function workingCount(pm, tasks) {
+  if (Number.isFinite(pm?.counts?.working)) return pm.counts.working;
+  return (Array.isArray(tasks) ? tasks : []).filter(t => t?.pm === pm?.name && t.status === 'in_progress' && !t.offline).length;
+}
+
+// Unified overview counts across local and remote machines: prefers pm.py's top-level `state.counts`
+// (and falls back to per-PM `counts` / folded tasks for an older remote pm.py). Only non-archived
+// projects count here; unclaimed blocked tasks are shown separately in the overview, not in `blocked`.
 export function summary(local, remote = {}) {
-  // A review thread counts with the task it reviews (foldReviews).
-  const states = [local, ...Object.values(remote)].filter(state =>
-    state && Array.isArray(state.pms) && Array.isArray(state.tasks)).map(state => ({ ...state, tasks: foldReviews(state.tasks) }));
-  const listed = states.flatMap(state => state.pms.filter(pm => !pm?.archived).map(pm => waitingCount(pm, state.tasks)));
-  const tasks = states.flatMap(state => state.tasks);
-  return {
-    projects: listed.length,
-    // In progress and not offline: a task whose terminal is gone is no work going on (pm-dash's `disconnected`).
-    active: tasks.filter(task => task.status === 'in_progress' && !task.offline).length,
-    blocked: listed.reduce((n, waiting) => n + waiting, 0),
-  };
+  let projects = 0, active = 0, blocked = 0;
+  for (const state of [local, ...Object.values(remote || {})]) {
+    if (!state || !Array.isArray(state.pms) || !Array.isArray(state.tasks)) continue;
+    const c = state.counts;
+    if (c && Number.isFinite(c.working) && Number.isFinite(c.waiting)) {
+      projects += Number.isFinite(c.projects) ? c.projects : state.pms.filter(pm => !pm?.archived).length;
+      active += c.working;
+      blocked += c.waiting;
+      continue;
+    }
+    const listed = state.pms.filter(pm => !pm?.archived);
+    const needsTasks = listed.some(pm => !Number.isFinite(pm?.counts?.waiting) || !Number.isFinite(pm?.counts?.working));
+    const tasks = needsTasks ? foldReviews(state.tasks) : [];
+    projects += listed.length;
+    for (const pm of listed) {
+      active += workingCount(pm, tasks);
+      blocked += waitingCount(pm, tasks);
+    }
+  }
+  return { projects, active, blocked };
 }
 
 // Half an em per Latin character, one em per wide CJK character. The kit
@@ -78,7 +95,7 @@ export function navText(counts, lang, width) {
 // Copies of pm-dash/model.js (a mod cannot import from another mod's folder);
 // model.test.mjs checks that both stay identical.
 export const LEDGER_HOME_SH = 'if [ -n "$PM_HOME" ]; then printf %s "$PM_HOME"; ' +
-  'elif [ -d "$HOME/.claude/pm" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
+  'elif [ -d "$HOME/.claude/pm" ] && ! [ "$HOME/.claude/pm" -ef "$HOME/.dudu" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
 export const PM_SCRIPTS = ['.config/herdr-app/mods/pm-dash/skill/scripts/pm.py', '.claude/skills/pm/scripts/pm.py',
   '.codex/skills/pm/scripts/pm.py', '.pi/agent/skills/pm/scripts/pm.py'];
 export function remoteStateCommand(scripts = PM_SCRIPTS) {
