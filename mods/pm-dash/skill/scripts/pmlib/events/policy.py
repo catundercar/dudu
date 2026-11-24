@@ -26,12 +26,13 @@ FIELDS_ONLY = re.compile(r"^[a-z_]+=[^,;]*(?:, [a-z_]+=[^,;]*)*$")  # field chan
 _BG_SHELL_MSG = re.compile(r"\bshells?\s+still\s+running\b", re.I)
 
 
-def manager_ready_for_batch(term_info, last_turn_stopped):
+def manager_ready_for_batch(term_info, last_turn_stopped, *, bg_work=False):
     """Pure delivery readiness policy for a manager terminal: returns `(ready, if_idle_flag)`.
 
     Ready when `agent_state` is `"idle"` (with `--if idle`) or `"done"` (without `--if idle`), OR when
-    `agent_state == "working"` solely because background shell commands are still running (`shell(s) still running`)
-    and the manager's `Stop` hook has already fired after its latest `UserPromptSubmit` (without `--if idle`)."""
+    `agent_state == "working"` solely because background shell commands / child processes are still running
+    (`shell(s) still running` or `bg_work=True`) and the manager's foreground turn has already stopped
+    (without `--if idle`)."""
     if term_info is None:
         return False, False
     if hasattr(term_info, "agent_state") and not isinstance(term_info, dict):
@@ -47,7 +48,7 @@ def manager_ready_for_batch(term_info, last_turn_stopped):
         return True, True
     if state == "done":
         return True, False
-    if state == "working" and bool(last_turn_stopped) and bool(_BG_SHELL_MSG.search(msg)):
+    if state == "working" and bool(last_turn_stopped) and (bool(_BG_SHELL_MSG.search(msg)) or bool(bg_work)):
         return True, False
     return False, False
 

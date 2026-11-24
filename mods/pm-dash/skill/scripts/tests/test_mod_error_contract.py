@@ -21,6 +21,8 @@ def _run_pm(*args: str, ledger: Path, env_extra: dict[str, str] | None = None, s
     env["PM_NO_DISCORD"] = "1"
     if env_extra:
         env.update(env_extra)
+        if "HOME" in env_extra and "USERPROFILE" not in env_extra:
+            env["USERPROFILE"] = env_extra["HOME"]
     return subprocess.run([sys.executable, str(script), *args], env=env, capture_output=True, text=True, timeout=30)
 
 
@@ -63,9 +65,11 @@ class ModErrorContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         (fake_bin / "hc").chmod(0o755)
+        if os.name == "nt":
+            (fake_bin / "hc.cmd").write_text(f'@echo off\r\n"{sys.executable}" "%~dp0hc" %*\r\n', encoding="utf-8")
         dup = _run_pm(
             "start", "--repo", str(self.repo), ledger=self.ledger,
-            env_extra={"PATH": os.pathsep.join([str(fake_bin), "/usr/bin", "/bin"])},
+            env_extra={"PATH": os.pathsep.join([str(fake_bin), os.environ.get("PATH", "/usr/bin:/bin")])},
         )
         self.assertNotEqual(dup.returncode, 0)
         self.assertIn("already exists", dup.stderr)

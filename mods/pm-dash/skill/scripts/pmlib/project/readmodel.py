@@ -539,7 +539,12 @@ class Projects:
     def events(self, slug: str, before: int | None = None, limit: int = 200, *, after: int | None = None) -> dict:
         if not valid_slug(slug) or not self._project_known(slug):
             raise NotFoundError(f"no project {slug}")
-        return self.store.events(slug, before=before, after=after, limit=limit)
+        out = self.store.events(slug, before=before, after=after, limit=limit)
+        if before is None:
+            receipts = self.store.receipts(slug)
+            if receipts:
+                out["receipts"] = receipts
+        return out
 
     def thread_log(self, task_id: str, before: int | None = None, limit: int = LOG_LIMIT_DEFAULT) -> dict:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0 or limit > LOG_LIMIT_MAX:

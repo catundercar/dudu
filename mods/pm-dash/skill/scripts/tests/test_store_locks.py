@@ -755,9 +755,11 @@ class StoreLocksTest(unittest.TestCase):
         # Next allocation never reuses prior numbers even when no task files exist.
         store = self.ctx.store
         self.assertEqual(store.allocate_task_number("alpha"), 11)
-        # task-seq.json is internal metadata, never exposed in project context/library documents.
+        # task-seq.json and agy-transcript.json are internal metadata, never exposed in project context/library documents.
         self.assertIn(store_mod.TASK_SEQ_FILE, store_mod.INTERNAL_PROJECT_FILES)
-        self.assertEqual([d["path"] for d in Projects(store).context("alpha") if d["path"] == store_mod.TASK_SEQ_FILE], [])
+        self.assertIn("agy-transcript.json", store_mod.INTERNAL_PROJECT_FILES)
+        (self.projects / "alpha" / "agy-transcript.json").write_text('{"version": 2}\n', encoding="utf-8")
+        self.assertEqual([d["path"] for d in Projects(store).context("alpha") if d["path"] in (store_mod.TASK_SEQ_FILE, "agy-transcript.json")], [])
 
     def test_backfill_task_numbers_chronological_idempotent_skips_reviews_and_preserves_updated(self):
         repo = init_git_repo(self.base / "bf-proj")

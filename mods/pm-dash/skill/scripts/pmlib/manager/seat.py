@@ -17,6 +17,13 @@ try:
 except ImportError:
     termios = None
 
+try:
+    import ctypes
+    from ctypes import wintypes as _wintypes
+except ImportError:
+    ctypes = None
+    _wintypes = None
+
 from .. import osutil
 from ..agents.base import READY_MARKS, is_seat_argv, unwrap_seat_argv
 from ..context import Context
@@ -275,9 +282,89 @@ def _seat_child_preexec() -> None:
                 signal.signal(sig, signal.SIG_DFL)
 
 
-def _spawn_seat_child(argv: list[str], cwd: str, env: Mapping[str, str]) -> subprocess.Popen[Any]:
+def _create_win_kill_job() -> int | None:
+    """Create a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so child processes never outlive `seat`."""
+    if not osutil.WINDOWS or ctypes is None or _wintypes is None:
+        return None
+    try:
+        class _IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_uint64) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", _wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", _wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", _wintypes.DWORD),
+                ("SchedulingClass", _wintypes.DWORD),
+            ]
+
+        class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", _IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, _wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = _wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [_wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, _wintypes.DWORD]
+        kernel32.SetInformationJobObject.restype = _wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [_wintypes.HANDLE]
+        kernel32.CloseHandle.restype = _wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            kernel32.CloseHandle(job)
+            return None
+        return int(job)
+    except Exception:
+        return None
+
+
+def _assign_win_job(job: int | None, proc: subprocess.Popen[Any]) -> None:
+    if not job or not osutil.WINDOWS or ctypes is None or _wintypes is None:
+        return
+    with contextlib.suppress(Exception):
+        kernel32 = ctypes.windll.kernel32
+        kernel32.AssignProcessToJobObject.argtypes = [_wintypes.HANDLE, _wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = _wintypes.BOOL
+        handle = getattr(proc, "_handle", None)
+        if handle:
+            kernel32.AssignProcessToJobObject(_wintypes.HANDLE(job), _wintypes.HANDLE(int(handle)))
+
+
+def _close_win_job(job: int | None) -> None:
+    if not job or not osutil.WINDOWS or ctypes is None or _wintypes is None:
+        return
+    with contextlib.suppress(Exception):
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CloseHandle.argtypes = [_wintypes.HANDLE]
+        kernel32.CloseHandle.restype = _wintypes.BOOL
+        kernel32.CloseHandle(_wintypes.HANDLE(job))
+
+
+def _spawn_seat_child(argv: list[str], cwd: str, env: Mapping[str, str],
+                      win_job: int | None = None) -> subprocess.Popen[Any]:
     if osutil.WINDOWS:
-        return subprocess.Popen(argv, cwd=cwd, env=env, **osutil.own_group(background=False))
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, **osutil.own_group(background=False))
+        _assign_win_job(win_job, proc)
+        return proc
     return subprocess.Popen(argv, cwd=cwd, env=env, preexec_fn=_seat_child_preexec)
 
 

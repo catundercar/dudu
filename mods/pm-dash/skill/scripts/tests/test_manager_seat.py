@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -495,19 +496,20 @@ class ProjectLifecycle(unittest.TestCase):
             return [json.loads(c[3])["argv"][-1] for c in self.hc.ops if c[:3] == ("herdr-app", "do", "space.new")]
 
         self.quiet(manager_cmds.cmd_start, argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"))
-        self.assertIn(f"`python3 {PM_SCRIPT.resolve()} handover`", prompts()[-1])  # as before
+        self.assertIn(f"`{self.ctx.procs.pm_script()} handover`", prompts()[-1])  # as before
         self.register()
         self.quiet(manager_cmds.cmd_archive, argparse.Namespace(project=self.repo))
         self.hc.terminals.pop("t7", None)
+        spaced_resolved = Path(SPACED).resolve().as_posix() if osutil.WINDOWS else SPACED
         with _as_windows(self.ctx):
             self.quiet(manager_cmds.cmd_restore, argparse.Namespace(project=self.repo, kind=None, model=None))
         self.assertIn("[from pm.py restore]", prompts()[-1])
-        self.assertIn(f'`py -3 "{SPACED}" handover`', prompts()[-1])
+        self.assertIn(f'`py -3 "{spaced_resolved}" handover`', prompts()[-1])
         for path in self.ctx.home.registrations.glob("*.json"):
             path.unlink()
         with _as_windows(self.ctx):
             self.quiet(manager_cmds.cmd_start, argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"))
-        self.assertIn(f'`py -3 "{SPACED}" handover`', prompts()[-1])
+        self.assertIn(f'`py -3 "{spaced_resolved}" handover`', prompts()[-1])
 
     def test_start_name_and_space(self) -> None:
         self.quiet(manager_cmds.cmd_start, argparse.Namespace(repo=self.repo, kind="codex", model=None, name="家里网络",
@@ -1250,7 +1252,7 @@ class SeamlessRotation(unittest.TestCase):
         self.register_seat(**{"herdr.space": "sp1", "herdr.tab": "tb1"})
         self.out(manager_cmds.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
         prompt = json.loads(self.ctx.home.project_for(self.repo).next_session.read_text(encoding="utf-8"))["argv"][-1]
-        self.assertIn(f"`python3 {PM_SCRIPT.resolve()} handover`", prompt)    # as before on macOS/Linux
+        self.assertIn(f"`{self.ctx.procs.pm_script()} handover`", prompt)    # as before on macOS/Linux
         for path in self.ctx.home.registrations.glob("*.json"):
             path.unlink()
         self.hc.ops.clear()
@@ -1258,7 +1260,8 @@ class SeamlessRotation(unittest.TestCase):
         with _as_windows(self.ctx):
             self.out(manager_cmds.cmd_rotate, argparse.Namespace(repo=self.repo, notes=None, model=None, transcript=""))
         prompt = json.loads(self.ctx.home.project_for(self.repo).next_session.read_text(encoding="utf-8"))["argv"][-1]
-        self.assertIn(f'`py -3 "{SPACED}" handover`', prompt)
+        spaced_resolved = Path(SPACED).resolve().as_posix() if osutil.WINDOWS else SPACED
+        self.assertIn(f'`py -3 "{spaced_resolved}" handover`', prompt)
 
     def test_a_codex_pm_rotates_in_place_with_compaction_flags(self) -> None:
         wrapper = self.register_seat(agent="codex", **{"herdr.space": "sp1", "herdr.tab": "tb1"})
@@ -1456,7 +1459,7 @@ class SeamlessRotation(unittest.TestCase):
             "  106   101 node mcp-server.js",
             f"  200     1 {snap}'git merge other' < /dev/null && pwd -P >| /tmp/cwd"])  # another session's
         run = lambda argv, **kw: type("R", (), {"returncode": 0, "stdout": ps, "stderr": ""})()
-        with mock.patch.object(subprocess, "run", run):
+        with mock.patch.object(osutil, "WINDOWS", False), mock.patch.object(subprocess, "run", run):
             self.assertEqual(background_work({"pid": 100}), ["until python3 /x/pm.py land demo-b; do sleep 60; done"])
             self.assertEqual(background_work({}), [])
 
@@ -1468,7 +1471,10 @@ class SeamlessRotation(unittest.TestCase):
         argv, kw = popen.call_args
         self.assertEqual(argv[0][1:], [str(PM_SCRIPT.resolve()), "end-session", "t7", "--repo", self.repo,
                                        "--agent-pid", "4242"])
-        self.assertTrue(kw["start_new_session"])  # it outlives the session that ran rotate
+        if osutil.WINDOWS:
+            self.assertTrue(kw["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+            self.assertTrue(kw["start_new_session"])  # it outlives the session that ran rotate
 
 
 class PMSeatAndAdopt(unittest.TestCase):
@@ -1476,7 +1482,7 @@ class PMSeatAndAdopt(unittest.TestCase):
     `pm.py adopt <task> [--confirmed]`."""
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory(prefix="pm-seat-")
+        self._tmp = tempfile.TemporaryDirectory(prefix="pm-seat-", ignore_cleanup_errors=osutil.WINDOWS)
         self.tmp = Path(self._tmp.name)
         repo_dir = self.tmp / "seattest"
         repo_dir.mkdir()
@@ -1516,7 +1522,8 @@ class PMSeatAndAdopt(unittest.TestCase):
             "import json, os, sys, time\n"
             "tag = sys.argv[1]\n"
             "with open(sys.argv[2], 'a') as f:\n"
-            "    f.write(json.dumps({'tag': tag, 'pid': os.getpid(), 'pgrp': os.getpgrp(),\n"
+            "    pgrp = os.getpgrp() if hasattr(os, 'getpgrp') else os.getpid()\n"
+            "    f.write(json.dumps({'tag': tag, 'pid': os.getpid(), 'pgrp': pgrp,\n"
             "                        'claudecode': os.environ.get('CLAUDECODE'),\n"
             "                        'pm_home': os.environ.get('PM_HOME')}) + '\\n')\n"
             "if tag == 's1':\n"
@@ -1584,10 +1591,13 @@ class PMSeatAndAdopt(unittest.TestCase):
             encoding="utf-8",
         )
         env = _clean_child_env(self.ctx.home.root)
+        popen_kw: dict[str, object] = {}
+        if osutil.WINDOWS:
+            popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         proc = subprocess.Popen(
             [sys.executable, str(PM_SCRIPT), "seat", "--repo", self.repo, "--no-shell", "--",
              sys.executable, str(sleeper)],
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **popen_kw,
         )
         for _ in range(100):
             if ready_flag.exists():
@@ -1596,7 +1606,10 @@ class PMSeatAndAdopt(unittest.TestCase):
         proj = self.ctx.home.project_for(self.repo)
         proj.root.mkdir(parents=True, exist_ok=True)
         proj.next_session.write_text('{"argv": ["false"], "kind": "claude"}\n', encoding="utf-8")
-        proc.terminate()
+        if osutil.WINDOWS:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
         proc.wait(timeout=10)
         self.assertEqual(Conversation(self.ctx, self.repo).events(), [])  # no fallback notice recorded when terminal closes
         self.assertFalse(proj.next_session.exists())

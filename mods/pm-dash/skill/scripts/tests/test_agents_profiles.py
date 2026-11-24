@@ -38,7 +38,7 @@ if "pmlib.context" not in sys.modules:
             os.environ["PM_HOME"] = _saved_pm_home
 
 import pmlib.cli  # noqa: F401, E402 - wires every pmlib module, as the command line does
-from pmlib import hooks  # noqa: E402
+from pmlib import hooks, osutil  # noqa: E402
 import pmlib.agents.transcripts as pm_sessions  # noqa: E402 - what pm_sessions.py re-exports
 from pmlib.agents.base import strip_codex_args  # noqa: E402
 from pmlib.agents.codex_pool import codex_profile_of  # noqa: E402
@@ -128,7 +128,8 @@ class LaunchArgs(Policy):
 
     def test_launch_wrap(self):
         out = self.ctx.agents.launch_wrap("claude", ["claude", "--model", "opus", "--settings", "/a b/c.json"])
-        self.assertEqual(out, ["zsh", "-ic", "my-claude --yes --model opus --settings '/a b/c.json'"])
+        quoted = osutil.shell_quote("/a b/c.json")
+        self.assertEqual(out, ["zsh", "-ic", f"my-claude --yes --model opus --settings {quoted}"])
         self.assertEqual(self.ctx.agents.launch_wrap("codex", ["codex", "-p", "team-b"]),
                          ["codex", "-p", "team-b"])  # none set
         self.config({"codex": {"launcher": ["wrap", "--"]}})
@@ -917,7 +918,8 @@ class PmStateAndCliTests(unittest.TestCase):
             "session": {"kind": "codex", "id": "codex-abc"},
         }))
 
-        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sub_home), "PM_HOME": str(sub_ledger)}
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sub_home), "USERPROFILE": str(sub_home),
+               "PM_HOME": str(sub_ledger)}
         run = lambda *args: subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "pm.py"), *args],
             capture_output=True, text=True, env=env, timeout=20,
@@ -969,7 +971,8 @@ class PmStateAndCliTests(unittest.TestCase):
             "status": "in_progress", "created": "2026-11-16 10:00",
             "session": {"kind": "claude", "id": self.SID_TASK},
         }))
-        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sub_home), "PM_HOME": str(sub_ledger)}
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sub_home), "USERPROFILE": str(sub_home),
+               "PM_HOME": str(sub_ledger)}
         # `state` quietly degrades (returns valid state without context_tokens).
         st = subprocess.run([sys.executable, str(solo / "pm.py"), "state"],
                             capture_output=True, text=True, env=env, timeout=20)
@@ -1200,7 +1203,8 @@ class PmStateAndCliTests(unittest.TestCase):
             "status": "in_progress", "created": "2026-11-16 09:50",
             "worker": {"kind": "claude", "model": "opus"},
         }))
-        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sub_home), "PM_HOME": str(sub_ledger)}
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sub_home), "USERPROFILE": str(sub_home),
+               "PM_HOME": str(sub_ledger)}
         run = lambda tid: subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "pm.py"), "project", "session", tid],
             capture_output=True, text=True, env=env, timeout=20,

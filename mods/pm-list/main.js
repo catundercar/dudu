@@ -44,6 +44,7 @@ export default class PmList extends View {
   init(_props, cx) {
     this.state = { pms: [], events: [] }; this.remote = {};
     this.error = '';
+    this.loading = false; this.again = false;
     this.compact = false; this.narrow = false;
     this.ledgerHome = '';
     this.hover = null;
@@ -62,10 +63,21 @@ export default class PmList extends View {
     cx.timer.every(10000, cx => this.refresh(cx));
     cx.timer.every(30000, cx => cx.notify()); // "3m" ages without a new read.
   }
+  // Other machines: what pm-nav last read over hc (it writes the cache, this only reads).
+  async readRemoteCache(path = this.ledgerHome) {
+    if (!path) return;
+    const cached = await readTextFile(path + '/cache/remote-states.json').catch(() => null);
+    this.remote = remotePmStates(cached);
+  }
   // PM records live in <ledger home>/pms; the 10-second read covers a missing folder.
   setLedgerHome(path, cx) {
     if (typeof path !== 'string' || !path || path === this.ledgerHome) return;
     this.ledgerHome = path;
+    // Populate remote projects from cache immediately, even before local `pm.py state` returns.
+    cx.spawn(async cx => {
+      await this.readRemoteCache(path);
+      cx.notify();
+    });
     cx.spawn(async cx => {
       try {
         while (this.ledgerHome === path) {
@@ -87,11 +99,11 @@ export default class PmList extends View {
         this.state = state;
         this.setLedgerHome(state.home, cx);
         this.error = '';
-        // Other machines: what pm-nav last read over hc (it writes the cache, this only reads).
-        const cached = this.ledgerHome && await readTextFile(this.ledgerHome + '/cache/remote-states.json').catch(() => null);
-        this.remote = remotePmStates(cached);
       } catch (e) { this.error = String(e); }
       finally {
+        // Always refresh remote cache even if local `pm.py state` failed so remote projects
+        // stay registered instead of falling back to "Not in this ledger".
+        await this.readRemoteCache(this.ledgerHome || home() + '/.dudu');
         this.loading = false;
         cx.notify();
         if (this.again) { this.again = false; this.refresh(cx); }

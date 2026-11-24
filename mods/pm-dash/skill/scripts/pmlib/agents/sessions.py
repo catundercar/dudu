@@ -38,7 +38,7 @@ HELPER_PROMPT = re.compile(
     r"|You are helper \S+ for \S+ \(read-only\)"
     r"|你是 \S+ 的临时 helper \S+（只读）"
 )
-REVIEW_PROMPT = re.compile(r"Review \(read-only\) of task |审查（只读）任务 ")  # review_brief's first words
+REVIEW_PROMPT = re.compile(r"Review(?: \(read-only\))? of task |审查(?:（只读）)?任务 ")  # review_brief's first words
 
 
 def own_transcript(*, env=None, claude_projects=None):

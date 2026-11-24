@@ -202,6 +202,7 @@ class Context:
     claude_dir: Path | None = None
     claude_projects: Path | None = None
     codex_sessions: Path | None = None
+    agy_dir: Path | None = None
     herdr_docs: Path | None = None
     after_save: tuple[Any, ...] = ()
     seat_alive: Any = None

@@ -1,7 +1,7 @@
 import { View, div, svg } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, watchFolder, nextCommand, layout, focused, run, shared, setShared, openOverlay } from 'herdr';
-import { summary, navText, estimateTextWidth, focusKey, shouldReturnToWork, pageBefore, pageBack, projectKeys, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand } from './model.js';
+import { summary, navText, estimateTextWidth, focusKey, isOverlayTerminalFocus, shouldReturnToWork, pageBefore, pageBack, projectKeys, WRITE_REMOTE_CACHE, LEDGER_HOME_SH, remoteStateCommand } from './model.js';
 import { execPython } from './python.js';
 
 // The sidebar deliberately depends on the original pm-dash bundle.
@@ -148,11 +148,13 @@ export default class PmNav extends View {
     });
   }
   refreshRemote(cx) {
-    if (this.remoteLoading) return;
+    const startedNow = Date.now();
+    if (this.remoteLoading && startedNow - (this.remoteLoadingAt || 0) < 18000) return;
     this.remoteLoading = true;
+    this.remoteLoadingAt = startedNow;
     cx.spawn(async cx => {
       try {
-        const result = await exec('hc', ['machine', 'ls', '--json'], { timeout: 4000 });
+        const result = await exec('hc', ['machine', 'ls', '--json'], { timeout: 6000 });
         if (result.code !== 0) return;
         const listing = JSON.parse(result.stdout);
         const machines = Array.isArray(listing) ? listing : listing?.machines;
@@ -162,7 +164,7 @@ export default class PmNav extends View {
         for (const name of Object.keys(this.remoteStates)) if (!names.includes(name)) delete this.remoteStates[name];
         await Promise.all(names.map(async name => {
           try {
-            const r = await exec('hc', ['exec', '--on', name, remoteStateCommand()], { timeout: 4000 });
+            const r = await exec('hc', ['exec', '--on', name, remoteStateCommand()], { timeout: 10000 });
             if (r.code !== 0) return;
             const state = JSON.parse(r.stdout);
             if (['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) this.remoteStates[name] = state;
@@ -176,7 +178,7 @@ export default class PmNav extends View {
           }
         } catch (_) { /* Cache writes are best effort; the sidebar is already updated. */ }
       } catch (_) { /* Discovery failures leave the last good board intact. */ }
-      finally { this.remoteLoading = false; }
+      finally { if (this.remoteLoadingAt === startedNow) this.remoteLoading = false; }
     });
   }
   publish(cx) {
@@ -208,9 +210,12 @@ export default class PmNav extends View {
     // Away: the board or a project view (pm-project) covers the workspace; a later focus change returns to it.
     // The Projects page is on when the board child shows it, not one project's board.
     const shown = projectsShown();
-    const away = Boolean(stage?.active) && stage.active !== WORK, focus = focusKey(focused());
+    const away = Boolean(stage?.active) && stage.active !== WORK;
+    const curFocused = focused();
+    const focus = focusKey(curFocused);
+    const overlayFocus = away && isOverlayTerminalFocus(curFocused, shared('pm-project-win-terminals'));
     this.fit();
-    const returnToWork = shouldReturnToWork(away, this.awayShown, focus, this.focus);
+    const returnToWork = shouldReturnToWork(away, this.awayShown, focus, this.focus, { overlayFocus });
     if (shown !== this.boardShown) cx.timer.after(0, cx => this.checkSetup(cx));
     // Opening the board establishes a fresh baseline. Only later navigation
     // returns to work; live layout/focus data already triggers render, no polling.
@@ -220,7 +225,9 @@ export default class PmNav extends View {
     if (this.boardShown && !shown) this.covered = null;
     this.boardShown = shown;
     this.awayShown = away;
-    this.focus = focus;
+    // Keep the last non-overlay workspace focus as baseline so closing a floating agent
+    // terminal window (which restores focus to the underlying pane) does not return to work.
+    if (!overlayFocus) this.focus = focus;
     if (returnToWork) run('layout.select', { stack: STAGE, child: WORK });
     const on = shown && !returnToWork, n = this.setupAvailable ? this.counts : null;
     const error = this.setupAvailable ? this.error : '';

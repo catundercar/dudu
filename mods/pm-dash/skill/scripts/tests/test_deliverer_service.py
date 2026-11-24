@@ -499,7 +499,7 @@ class InboxAndNotifierTests(unittest.TestCase):
         )
         res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10, check=True)
         wired = json.loads(res.stdout)
-        self.assertEqual(wired, {"seat_alive": True, "holds": 1, "watchers": 2})
+        self.assertEqual(wired, {"seat_alive": True, "holds": 1, "watchers": 3})
 
 
 if __name__ == "__main__":

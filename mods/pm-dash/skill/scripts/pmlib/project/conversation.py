@@ -3,6 +3,7 @@ for appending an event, reading them all, reading what came after a byte offset,
 user and the PM. Layer 2."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,23 @@ from typing import Any
 from ..context import Context
 from ..home import project_slug
 from ..osutil import clip
+from ..store import _stamp_to_ms, file_lock, local_tz_offset, lock_file, replace_task_file, unlock_file, write_atomic
+
+
+RECEIPT_LIMIT = 50
+RECEIPT_TEXT_LIMIT = 4000
+
+
+def read_receipts(path: str | Path) -> list[dict[str, Any]]:
+    """Recent PM user-message receipts at `path`, oldest first; empty when absent or unreadable."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = raw.get("receipts") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+    return [r for r in items if isinstance(r, dict) and r.get("at") and (r.get("text") or r.get("digest"))]
 
 
 def conversation_events(path: str | Path) -> list[dict[str, Any]]:
@@ -68,7 +86,14 @@ class Conversation:
     def _record_impl(self, kind: str, at: str | None = None, **fields: Any) -> Any:
         try:
             stamp = at or self.ctx.clock.now_sec()
-            return self.ctx.store.append_event(self.slug, {"at": stamp, "type": kind, **fields})
+            extra = dict(fields)
+            if kind in ("user", "pm", "agent"):
+                now_ms = int(self.ctx.clock.time() * 1000)
+                if "at_ms" not in extra:
+                    extra["at_ms"] = now_ms if at is None else _stamp_to_ms(stamp, now_ms)
+                if "tz" not in extra:
+                    extra["tz"] = local_tz_offset(self.ctx.clock.datetime_now())
+            return self.ctx.store.append_event(self.slug, {"at": stamp, "type": kind, **extra})
         except (OSError, TypeError, ValueError):
             return None
 
@@ -86,6 +111,65 @@ class Conversation:
     def events(self) -> list[dict[str, Any]]:
         """The events of the project's conversation log, oldest first."""
         return self.ctx.store.all_events(self.slug)
+
+    def record_receipt(
+        self,
+        text: str,
+        *,
+        at: str | None = None,
+        at_ms: int | None = None,
+        pane: str = "",
+        session: str = "",
+        msg_id: str = "",
+        msg_ids: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically record a receipt in projects/<slug>/receipts.json as soon as the PM receives a user prompt.
+
+        Written before conversation.jsonl append so a frontend resend check sees PM receipt even if
+        conversation.jsonl is delayed or fails to write. Errors are swallowed.
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        try:
+            self.files.ensure()
+            stamp = at or self.ctx.clock.now_sec()
+            ms = int(at_ms) if at_ms is not None else int(self.ctx.clock.time() * 1000)
+            norm = " ".join(raw.split())
+            digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()
+            truncated = len(raw) > RECEIPT_TEXT_LIMIT
+            entry: dict[str, Any] = {
+                "at": stamp,
+                "at_ms": ms,
+                "digest": digest,
+                "len": len(norm),
+                "text": raw[:RECEIPT_TEXT_LIMIT] if truncated else raw,
+            }
+            if truncated:
+                entry["truncated"] = True
+            if pane:
+                entry["pane"] = pane
+            if session:
+                entry["session"] = session
+            if msg_id:
+                entry["msg_id"] = str(msg_id)
+            if msg_ids:
+                clean_ids = [str(x) for x in msg_ids if x]
+                if clean_ids:
+                    entry["msg_ids"] = clean_ids
+            lock_path = self.files.receipts_lock
+            with file_lock(lock_path, timeout=5.0, lock_fn=lock_file, unlock_fn=unlock_file):
+                existing = read_receipts(self.files.receipts)
+                existing.append(entry)
+                payload = (json.dumps({"receipts": existing[-RECEIPT_LIMIT:]}, ensure_ascii=False) + "\n").encode("utf-8")
+                write_atomic(self.files.receipts, payload, replace_fn=replace_task_file)
+            return entry
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def receipts(self) -> list[dict[str, Any]]:
+        """Recent user-message receipts for this project, oldest first."""
+        return read_receipts(self.files.receipts)
 
     def tail(self, turns: int = 6, width: int = 700) -> list[dict[str, str]]:
         """The last exchanges in the conversation log: what the user said and the PM's reply to it.

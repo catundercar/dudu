@@ -50,6 +50,14 @@ class ProjectFiles:
         return self.root / "conversation.jsonl"
 
     @property
+    def receipts(self) -> Path:
+        return self.root / "receipts.json"
+
+    @property
+    def receipts_lock(self) -> Path:
+        return self.root / "receipts.lock"
+
+    @property
     def delivered(self) -> Path:
         return self.root / "delivered.json"
 
@@ -80,6 +88,18 @@ class ProjectFiles:
     @property
     def taken_in(self) -> Path:
         return self.root / "taken-in.json"
+
+    @property
+    def agy_transcript(self) -> Path:
+        return self.root / "agy-transcript.json"
+
+    @property
+    def pm_turn(self) -> Path:
+        return self.root / "pm-turn.json"
+
+    @property
+    def pm_turn_lock(self) -> Path:
+        return self.root / "pm-turn.lock"
 
     @property
     def task_seq(self) -> Path:

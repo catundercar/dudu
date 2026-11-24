@@ -1491,10 +1491,10 @@ class ContextStoreAndProjectTests(LedgerCase):
             self.assertNotIn(sym, listed)
 
         # Valid reads in both roots, including nested file sharing a top-level internal name.
-        self.assertEqual(projects.document("dudu", "project", "decisions.md"), "- 决定一\n")
+        self.assertEqual(projects.document("dudu", "project", "decisions.md").replace("\r\n", "\n"), "- 决定一\n")
         self.assertEqual(projects.document("dudu", "project", "docs/notes/taken-in.json"), '{"ok": 1}')
         self.assertEqual(projects.document("dudu", "docs", "notes/taken-in.json"), '{"ok": 1}')
-        self.assertEqual(projects.document("dudu", "docs", "decisions.md"), "- 决定一\n")
+        self.assertEqual(projects.document("dudu", "docs", "decisions.md").replace("\r\n", "\n"), "- 决定一\n")
         self.assertIn("hi", projects.document("dudu", "user", "personal.md"))
 
         # Traversal, bad roots, bad slugs -> ValueError / NotFoundError.
@@ -1561,7 +1561,7 @@ class ContextStoreAndProjectTests(LedgerCase):
         (alt.home.projects / "demo").mkdir(parents=True)
         (alt.home.registrations / "demo.json").write_text(json.dumps({"name": "pm-demo", "project": "demo",
                                                                        "repo": "/work/demo"}))
-        (alt.home.projects / "demo/decisions.md").write_text("- 另一份账本\n", encoding="utf-8")
+        (alt.home.projects / "demo/decisions.md").write_text("- 另一份账本\n", encoding="utf-8", newline="\n")
         self.assertEqual(alt.store.document("demo", "project", "decisions.md"), "- 另一份账本\n")
         self.assertIn("Context 标签", self.ctx.store.document("demo", "project", "decisions.md"))
 
@@ -1639,7 +1639,7 @@ class ContextStoreAndProjectTests(LedgerCase):
 
     def test_os_open_includes_o_binary_for_windows_compatibility(self):
         self.write_reg("dudu")
-        self.write_file("projects/dudu/decisions.md", "- 决定\r\n")
+        self.write_file("projects/dudu/decisions.md", "- 决定\r\n".encode("utf-8"))
         self.write_file(
             "projects/dudu/memory/win-rule.md",
             '---\nname: win-rule\ndescription: "Windows binary open check"\nmetadata:\n  type: project\n---\n\n内容\n',
@@ -2181,7 +2181,10 @@ class LibraryAndMemoryTests(unittest.TestCase):
         self.assertNotEqual(self.pm("files", "missing-proj", ok=False).returncode, 0)
 
         # Non-git directories expose no repo files and allow no repo file preview.
-        shutil.rmtree(self.repo / ".git")
+        def _rm_readonly(func, p, _exc):
+            os.chmod(p, 0o600)
+            func(p)
+        shutil.rmtree(self.repo / ".git", onerror=_rm_readonly)
         self.put(self.repo, "keep/hello.js", "export default 1;\n")
         nongit = self.pm("files", "proj")
         self.assertEqual(nongit, {"project": "proj", "files": [], "truncated": False})

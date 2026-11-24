@@ -85,7 +85,7 @@ CHECK_REGISTRATIONS_PM = textwrap.dedent("""
     assert len(ctx.after_save) == 2, len(ctx.after_save)
     assert ctx.seat_alive is not None
     assert ctx.caller_projects is not None
-    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies"], ctx.deliver_watchers
+    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies", "agy-transcript"], ctx.deliver_watchers
     assert len(ctx.deliver_holds) == 1, ctx.deliver_holds
     assert not hasattr(deliver, "_WATCHERS") and not hasattr(deliver, "_HOLDS")
     assert pm.Context is context.Context
@@ -106,7 +106,7 @@ CHECK_CLI_DIRECT_IMPORT = textwrap.dedent("""
     assert len(ctx.after_save) == 2, len(ctx.after_save)
     assert ctx.seat_alive is not None
     assert ctx.caller_projects is not None
-    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies"], ctx.deliver_watchers
+    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies", "agy-transcript"], ctx.deliver_watchers
     assert len(ctx.deliver_holds) == 1, ctx.deliver_holds
     assert not hasattr(deliver, "_WATCHERS") and not hasattr(deliver, "_HOLDS")
 

@@ -55,9 +55,19 @@ class ReportAndWait(unittest.TestCase):
             ctx = make_ctx(self.root / f"lang-{lang}", config={"lang": lang})
             text = workers_brief.report_section_for(ctx, "p-x")
             self.assertIn(word, text)
+            self.assertIn("update p-x --plan", text)
+            self.assertIn("log p-x", text)
             self.assertIn("update p-x --status review --commit <sha> --note", text)
             self.assertIn("update p-x --status blocked --note", text)
             self.assertIn("600", text)
+        en = workers_brief.report_section_for(make_ctx(self.root / "en-req", config={"lang": "en"}), "p-x")
+        self.assertIn("3-8", en)
+        self.assertIn("required", en)
+        self.assertNotIn("optional", en.lower())
+        zh = workers_brief.report_section_for(make_ctx(self.root / "zh-req", config={"lang": "zh"}), "p-x")
+        self.assertIn("3~8", zh)
+        self.assertIn("必须", zh)
+        self.assertNotIn("可选", zh)
         # What was sent is kept, report section included, for a resend by hand.
         ctx_en = make_ctx(self.root / "sent-en", config={})
         sent = workers_brief.keep_sent_for(ctx_en, "p-x", "Do the thing.")
@@ -582,7 +592,7 @@ class Offline(unittest.TestCase):
         tid = self.task("lock")
         lock = self.ctx.home.root / "reattach" / f"{tid}.lock"
         lock.parent.mkdir(parents=True, exist_ok=True)
-        dead = subprocess.Popen(["true"])
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
         lock.write_text(f"{dead.pid} 0\n")                     # its process is gone: taken over at once
         self.reattach(tid)

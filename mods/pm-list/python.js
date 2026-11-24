@@ -36,14 +36,18 @@ export async function findPython(run, candidates = PYTHON_CANDIDATES) {
   return null;
 }
 
-// One answer per mod while it is found; a miss is asked again next time (Herdr restarted with a
-// new PATH, or the person clicked Set up again).
-let found = null;
-export function python(run) {
-  if (!found) found = findPython(run).then(py => { if (!py) found = null; return py; });
-  return found;
+// Cache only a resolved Python per mod — never an in-flight Promise. When Herdr reloads a mod or
+// switches layouts, an earlier view's pending exec task is stranded and never settles; caching the
+// pending Promise at module scope would wedge every future view instance forever. A miss is probed
+// again next time (Herdr restarted with a new PATH, or the person clicked Set up again).
+let resolved = null;
+export async function python(run) {
+  if (resolved) return resolved;
+  const py = await findPython(run);
+  if (py) resolved = py;
+  return py;
 }
-export function forgetPython() { found = null; }
+export function forgetPython() { resolved = null; }
 
 // exec(<python>, args, options) with the Python found; rejects with Error(NO_PYTHON) when there is none.
 export async function execPython(run, args, options) {

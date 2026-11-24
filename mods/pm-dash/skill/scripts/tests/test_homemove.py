@@ -48,12 +48,14 @@ def write_fake_hc(bin_dir: Path, terminals: list | None = None) -> Path:
         encoding="utf-8",
     )
     hc_path.chmod(0o755)
+    if os.name == "nt":
+        (bin_dir / "hc.cmd").write_text(f'@echo off\r\n"{sys.executable}" "%~dp0hc" %*\r\n', encoding="utf-8")
     return hc_path
 
 
 class HomeMoveTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="pm-homemove-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="pm-homemove-", ignore_cleanup_errors=(os.name == "nt"))
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name) / "home"
         self.home.mkdir()
@@ -89,9 +91,13 @@ class HomeMoveTest(unittest.TestCase):
         base_path = os.environ.get("PATH", "/usr/bin:/bin")
         env = {
             "HOME": str(self.home),
-            "PATH": f"{self.fake_bin}:{base_path}",
+            "USERPROFILE": str(self.home),
+            "PATH": f"{self.fake_bin}{os.pathsep}{base_path}",
             "LANG": "en_US.UTF-8",
         }
+        for key in ("SYSTEMROOT", "COMSPEC", "PATHEXT", "TEMP", "TMP"):
+            if key in os.environ:
+                env[key] = os.environ[key]
         env.update(extra)
         return env
 
@@ -177,9 +183,9 @@ class HomeMoveTest(unittest.TestCase):
         (self.target / "dudu.db-wal").write_bytes(b"wal")
         (self.target / "service.lock").write_text("", encoding="utf-8")
         (self.target / "agents" / "old.txt").write_text("legacy agent", encoding="utf-8")
-        # Create a real Unix domain socket (short path check in case tmpdir is long).
+        # Create a real Unix domain socket on POSIX (short path check in case tmpdir is long).
         sock_path = self.target / "d.sock"
-        if len(str(sock_path).encode("utf-8")) < 100:
+        if hasattr(socket, "AF_UNIX") and len(str(sock_path).encode("utf-8")) < 100:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 s.bind(str(sock_path))
@@ -187,14 +193,16 @@ class HomeMoveTest(unittest.TestCase):
                 s.close()
 
     def hold_flock(self, lock_path: Path) -> subprocess.Popen:
-        """Start a child process holding an exclusive flock on `lock_path` until tearDown."""
+        """Start a child process holding an exclusive lock on `lock_path` until tearDown."""
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         proc = subprocess.Popen(
             [
                 sys.executable, "-c",
-                "import fcntl, os, sys, time\n"
+                "import os, sys, time\n"
+                f"sys.path.insert(0, {str(SCRIPTS)!r})\n"
+                "from pmlib.store import lock_file\n"
                 "f = open(sys.argv[1], 'a+')\n"
-                "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "lock_file(f)\n"
                 "f.seek(0); f.truncate(0); f.write(str(os.getpid())); f.flush()\n"
                 "print('LOCKED', flush=True)\n"
                 "time.sleep(30)\n",
@@ -253,17 +261,17 @@ class HomeMoveTest(unittest.TestCase):
             # Migrated symlink ~/.claude/pm -> ~/.dudu: canonical ~/.dudu wins
             self.source.rmdir()
             self.target.mkdir(parents=True)
-            os.symlink(str(self.target), str(self.source))
+            os.symlink(str(self.target), str(self.source), target_is_directory=True)
             self.assertEqual(resolved({}), self.target)
             # Custom symlink ~/.claude/pm -> /elsewhere: keeps ~/.claude/pm
             self.source.unlink()
             elsewhere = self.home / "elsewhere"
             elsewhere.mkdir()
-            os.symlink(str(elsewhere), str(self.source))
+            os.symlink(str(elsewhere), str(self.source), target_is_directory=True)
             self.assertEqual(resolved({}), self.source)
             # Dangling symlink ~/.claude/pm -> missing: falls back to ~/.dudu
             self.source.unlink()
-            os.symlink(str(self.home / "missing"), str(self.source))
+            os.symlink(str(self.home / "missing"), str(self.source), target_is_directory=True)
             self.assertEqual(resolved({}), self.target)
 
     def test_home_inspect_and_dry_run_write_nothing(self):

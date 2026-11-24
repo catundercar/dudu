@@ -1,7 +1,7 @@
 // pi coding agent extension for PM working-set compaction and post-compact ledger sync.
 // Loaded via `pi -e .../pm_pi_compact.js` for PM sessions (`pm.py` keeps `.js`, as pi's
 // extension loader loads `.ts`/`.js` files only).
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,13 +49,57 @@ export function readCompactSync(cwd, run = execFileSync) {
   }
 }
 
+export function extractPiAssistantReply(event) {
+  if (!event || typeof event !== "object") return "";
+  if (typeof event.last_assistant_message === "string" && event.last_assistant_message.trim()) {
+    return event.last_assistant_message.trim();
+  }
+  const messages = Array.isArray(event.messages) ? event.messages : [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role !== "assistant") continue;
+    if (typeof m.content === "string" && m.content.trim()) return m.content.trim();
+    if (Array.isArray(m.content)) {
+      const parts = m.content
+        .filter(b => b && b.type === "text" && typeof b.text === "string" && b.text.trim())
+        .map(b => b.text.trim());
+      if (parts.length) return parts.join("\n\n");
+    }
+  }
+  return "";
+}
+
+export function emitPiTurnHook(payload, spawnFn = spawn) {
+  try {
+    const child = spawnFn(PYTHON, [PM_SCRIPT, "hook-turn"], {
+      stdio: ["pipe", "ignore", "ignore"],
+      detached: true,
+    });
+    if (child?.stdin) {
+      child.stdin.on?.("error", () => {});
+      child.stdin.end(JSON.stringify(payload));
+    }
+    child?.unref?.();
+  } catch (_) {
+    // Hook sync is best-effort and never interrupts pi.
+  }
+}
+
 export default function pmCompactExtension(pi, deps = {}) {
   const threshold = deps.threshold ?? compactThreshold();
   const run = deps.execFileSync ?? execFileSync;
+  const spawnHook = deps.spawnHook ?? (deps.execFileSync ? null : spawn);
   const customInstructions = deps.instructions ?? readPreCompactInstructions(run);
   let compacting = false;
 
-  pi.on("agent_end", (_event, ctx) => {
+  pi.on("agent_end", (event, ctx) => {
+    if (spawnHook) {
+      const reply = extractPiAssistantReply(event);
+      emitPiTurnHook(
+        { hook_event_name: "Stop", cwd: ctx?.cwd || process.cwd(), last_assistant_message: reply },
+        spawnHook,
+      );
+    }
     if (compacting || ctx?.hasPendingMessages?.()) return;
     const usage = ctx?.getContextUsage?.();
     if (!usage || typeof usage.tokens !== "number" || usage.tokens <= threshold) return;

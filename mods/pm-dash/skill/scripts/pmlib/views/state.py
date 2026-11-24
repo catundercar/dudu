@@ -13,7 +13,7 @@ from ..ledger.ledger import Ledger
 from ..ledger.task import ACTIVE, CLOSED, needs_cleanup, task_number
 from ..manager.launch import pm_compact_tokens
 from ..osutil import stale_lock
-from ..project.conversation import conversation_events
+from ..project.conversation import conversation_events, read_receipts
 from ..project.project import ProjectRegistry
 from ..project.readmodel import (
     LiveSnapshot,
@@ -25,6 +25,8 @@ from ..project.readmodel import (
     task_closed,
     task_offline,
 )
+from ..project.turn_state import TurnTracker
+from ..store import local_tz_offset
 from ..workers.lifecycle import term_status
 from ..workers.sessions import ATTACHED, pm_session_info_for, task_session_info_for
 
@@ -47,11 +49,31 @@ def engine_mark(task):
     return mark | ({"escalated": ups} if mark and ups else {})
 
 
-def state_helpers(record, hc_live=None, live_rows=None):
+def _helper_term_for_task(term, name, live_rows, ended_rows):
+    if not term:
+        return ""
+    row = None
+    if isinstance(live_rows, dict) and term in live_rows:
+        row = live_rows.get(term)
+    elif isinstance(ended_rows, dict) and term in ended_rows:
+        row = ended_rows.get(term)
+    if not isinstance(row, dict):
+        return ""
+    labels = row.get("labels")
+    if not isinstance(labels, dict):
+        return ""
+    lbl_helper = str(labels.get("helper") or "")
+    if lbl_helper and name and lbl_helper != name:
+        return ""
+    return str(labels.get("helper.task") or "")
+
+
+def state_helpers(record, hc_live=None, live_rows=None, ended_rows=None):
     """Helper entries of a task or PM as `pm.py state` exposes them: compact, read-only, enriched with live hc
     status when `hc_live`/`live_rows` were fetched. Keeps ledger order (oldest first, matching `helper ls`)."""
     out = []
     for h in helper_entries(record):
+        name = str(h.get("name") or "")
         term = str(h.get("terminal") or "")
         status = str(h.get("status") or "")
         is_running = status == "running"
@@ -63,8 +85,9 @@ def state_helpers(record, hc_live=None, live_rows=None):
                 live_state = (term_status(row) or "live") if isinstance(row, dict) else "offline"
             elif offline:
                 live_state = "offline"
+        for_task = str(h.get("for_task") or "") or _helper_term_for_task(term, name, live_rows, ended_rows)
         item = {
-            "name": str(h.get("name") or ""),
+            "name": name,
             "terminal": term,
             "pane": f"hc:{term}" if term else "",
             "parent": str(h.get("parent") or ""),
@@ -87,6 +110,8 @@ def state_helpers(record, hc_live=None, live_rows=None):
             item["provider"] = str(h["provider"])
         if h.get("fallback"):
             item["fallback"] = str(h["fallback"])
+        if for_task:
+            item["for_task"] = for_task
         out.append(item)
     return out
 
@@ -118,6 +143,7 @@ def dash_state(ctx=None):
         runtime = rec.get("runtime") or ("tui" if pane_val and not pane_val.startswith("hc:") else "")
         repo_ok = bool(repo and Path(repo).is_dir())
         pm_agent = rec.get("agent", "")
+        receipts = read_receipts(home.project_for(repo).receipts)[-20:] if repo else []
         pm_entry = {"name": rec["name"], "project": rec.get("project", ""), "repo": repo,
                     "pane": pane_val, "runtime": runtime, "repo_ok": repo_ok,
                     "status": live.get("agent_status") if alive else "offline",
@@ -129,7 +155,8 @@ def dash_state(ctx=None):
                     if repo else "",
                     # Sessions under either folder work in this project (the project view lists them).
                     "worktrees": str(ctx.git.worktree_home(repo)) if repo else ""} | (
-                        {"context_tokens": ctx_tokens} if ctx_tokens > 0 else {})
+                        {"context_tokens": ctx_tokens} if ctx_tokens > 0 else {}) | (
+                        {"receipts": receipts} if receipts else {})
         pms.append(pm_entry)
         pm_sources.append((rec, pm_entry, alive, repo_ok))
 
@@ -168,10 +195,19 @@ def dash_state(ctx=None):
         hc_live = None if live_rows is None else set(live_rows)
     else:
         hc_live, hc_ended = None, None
-    for rec, p, _, _ in pm_sources:
-        pm_helpers = state_helpers(rec, hc_live, live_rows)
+    for rec, p, alive, _ in pm_sources:
+        pm_helpers = state_helpers(rec, hc_live, live_rows, hc_ended)
         if pm_helpers:
             p["helpers"] = pm_helpers
+        repo = rec.get("repo") or ""
+        if repo:
+            term_addr = str(rec.get("terminal") or (p["pane"][3:] if str(p.get("pane") or "").startswith("hc:") else ""))
+            term_row = (live_rows or {}).get(term_addr) if term_addr and isinstance(live_rows, dict) else None
+            p["turn"] = TurnTracker(ctx, repo).live_snapshot(
+                rec,
+                {"agent_status": p.get("status") if alive else "offline", "name": p.get("name")},
+                term_info=term_row,
+            )
     tui_panes = set(by_pane) if listing else None
     by_id_all = {t["id"]: t for t in every if isinstance(t, dict) and t.get("id")}
     left = []
@@ -186,7 +222,7 @@ def dash_state(ctx=None):
         ctx_tokens = sessions.context_tokens(task_session_info_for(ctx, t, sessions, every)) if sessions else 0
         is_offline = task_offline(t, hc_live, tui_panes)
         closed_rec = task_closed(t, hc_ended) if is_offline else None
-        task_helpers = state_helpers(t, hc_live, live_rows)
+        task_helpers = state_helpers(t, hc_live, live_rows, hc_ended)
         dep_info = evaluate_depends_on(t, by_id_all) if (t["status"] == "proposed" or t.get("depends_on")) else None
         dep_fields = {}
         if dep_info is not None:
@@ -297,7 +333,10 @@ def dash_state(ctx=None):
     events = sorted(events, key=lambda e: e["at"])[-120:]
     task_numbers = {t["id"]: task_number(t) for t in every if task_number(t)}
     default_compact = pm_compact_tokens("claude", ctx=ctx)
-    return {"now": ctx.clock.now_sec(), "pms": pms, "tasks": tasks,
+    return {"now": ctx.clock.now_sec(),
+            "server_now_ms": int(ctx.clock.time() * 1000),
+            "server_tz": local_tz_offset(ctx.clock.datetime_now()),
+            "pms": pms, "tasks": tasks,
             "ready_tasks": [t["id"] for t in tasks if t["status"] == "proposed" and t.get("ready")],
             "counts": counted["totals"],
             "agents": agent_map, "events": events, "lang": tr("en", "zh"), "home": str(home.root), "retired_parts": parts,

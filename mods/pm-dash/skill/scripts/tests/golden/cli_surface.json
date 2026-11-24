@@ -4630,6 +4630,35 @@
       }
      ]
     },
+    "interrupt": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "slug",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      }
+     ]
+    },
     "library": {
      "arguments": [
       {
@@ -5051,6 +5080,98 @@
        "options": [
         "--if-version"
        ],
+       "required": false,
+       "type": null
+      }
+     ]
+    },
+    "send": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "slug",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "msg_id",
+       "nargs": null,
+       "options": [
+        "--msg-id"
+       ],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": "",
+       "dest": "question",
+       "nargs": null,
+       "options": [
+        "--question"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "text",
+       "nargs": null,
+       "options": [
+        "--text"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "from_file",
+       "nargs": null,
+       "options": [
+        "--from"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "words",
+       "nargs": "*",
+       "options": [],
        "required": false,
        "type": null
       }
@@ -5713,6 +5834,19 @@
      "nargs": null,
      "options": [
       "--codex-profile"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "full",
+     "nargs": 0,
+     "options": [
+      "--full"
      ],
      "required": false,
      "type": null

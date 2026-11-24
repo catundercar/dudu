@@ -587,6 +587,50 @@ class Events(unittest.TestCase):
         conv.record("pm", text="收到 ready", after="deliver")
         self.assertEqual(Conversation(self.ctx(), self.repo).tail(), [{"user": "进展如何", "pm": "a 在跑"}])
 
+    def test_review_without_subplan_adds_lightweight_pm_note(self):
+        no_sub = self.task("nosub", branch="dev/nosub")
+        self.update(no_sub, status="review", commit="aaa111", note="done; checks pass")
+        has_sub = self.task("hassub", pane="hc:t21", branch="dev/hassub",
+                            subplan=[{"text": "impl", "state": "done"}])
+        self.be("hc:t21")
+        self.update(has_sub, status="review", commit="bbb222", note="done with plan")
+        manual = self.task("manual", pane="hc:t22", dispatched=False, branch="dev/manual")
+        self.be("hc:t22")
+        self.update(manual, status="review", commit="ccc333", note="manual session done")
+        start, end, items = self.pending_batch()
+        text = self.batch_text(start, end, items)
+        self.assertIn("note: no subplan recorded", text)
+        # Only the dispatched task without subplan gets the note (not the one with subplan or manual task).
+        self.assertEqual(text.count("note: no subplan recorded"), 1)
+        # Reporting itself is not blocked: all tasks reached review status.
+        self.assertEqual(self.load(no_sub)["status"], "review")
+        self.assertEqual(self.load(has_sub)["status"], "review")
+        self.assertEqual(self.load(manual)["status"], "review")
+
+    def test_review_with_auto_review_combined_batch_notes_missing_subplan(self):
+        parent = self.task("par", branch="dev/par", commit="ccc333")
+        rev = self.task("par-review", pane="hc:t25", review_of=parent, status="in_progress")
+        self.entry(
+            rev,
+            "status=done; no blockers",
+            by="hc:t25",
+            status="done",
+            source="worker",
+            wake=True,
+            review_of=parent,
+            worker_commit="ccc333",
+            worker_note="implemented feature",
+        )
+        self.clock.advance(SETTLE + 1)
+        text = self.batch_text(*self.pending_batch())
+        self.assertIn("note: no subplan recorded", text)
+        # Once the parent has a subplan, the combined delivery omits the note.
+        p = self.load(parent)
+        p["subplan"] = [{"text": "step 1", "state": "done"}]
+        self.save(p)
+        text_with = self.batch_text(*self.pending_batch())
+        self.assertNotIn("note: no subplan recorded", text_with)
+
     def test_a_deliverer_starts_only_for_an_app_pm(self):
         Delivery(self.ctx(), self.repo).ensure_running()
         self.register(archived=True)
@@ -1238,7 +1282,7 @@ class TaskDependencies(unittest.TestCase):
                         "commit", "-q", "-m", "feat"], check=True)
         vfile = self.ctx.home.project_for(self.repo).verify
         vfile.parent.mkdir(parents=True, exist_ok=True)
-        vfile.write_text("true\n")
+        vfile.write_text(f'"{sys.executable}" -c "pass"\n' if os.name == "nt" else "true\n")
 
         a_id, _ = self.new_task(
             "Landable A", status="review", slug="land-a", branch="dev/feat", worktree=str(wt),

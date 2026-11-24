@@ -44,9 +44,10 @@ from pmlib.ledger.ledger import Ledger  # noqa: E402
 from pmlib.ledger.question import QUESTION_FIELDS  # noqa: E402
 from pmlib.manager.handover import conversation_tail, handover_talk, unanswered  # noqa: E402
 from pmlib.manager.rotate import retire_name  # noqa: E402
-from pmlib.project.conversation import Conversation  # noqa: E402
+from pmlib.project.conversation import Conversation, RECEIPT_LIMIT, RECEIPT_TEXT_LIMIT, read_receipts  # noqa: E402
 from pmlib.project.project import ProjectRegistry, pm_name  # noqa: E402
-from pmlib.project.readmodel import answered_tasks  # noqa: E402
+from pmlib.project.readmodel import Projects, answered_tasks  # noqa: E402
+from pmlib.views import state as state_view  # noqa: E402
 from pmlib.terminals.tui import TuiHost  # noqa: E402
 from pmlib.workers.lifecycle import end_worker_for  # noqa: E402
 
@@ -586,8 +587,20 @@ class TakenIn(unittest.TestCase):
         self.ctx.home.projects.mkdir(parents=True, exist_ok=True)
         before = {p for p in state.rglob("*")}
         unreadable = self.write([self.prompt(0, "x"), self.queued(1, "y")], name="locked.jsonl")
-        os.chmod(unreadable, 0)
-        self.addCleanup(os.chmod, unreadable, 0o644)
+        if os.name == "nt":
+            import msvcrt
+            lock_fh = open(unreadable, "r+b")
+            msvcrt.locking(lock_fh.fileno(), msvcrt.LK_NBLCK, 64)
+
+            def _unlock_win() -> None:
+                lock_fh.seek(0)
+                msvcrt.locking(lock_fh.fileno(), msvcrt.LK_UNLCK, 64)
+                lock_fh.close()
+
+            self.addCleanup(_unlock_win)
+        else:
+            os.chmod(unreadable, 0)
+            self.addCleanup(os.chmod, unreadable, 0o644)
         inputs = ["", "[]", '"Stop"', "null", "{}", '{"hook_event_name": "Stop"}',
                   json.dumps({"hook_event_name": "Stop", "transcript_path": 5, "last_assistant_message": ["x"]}),
                   json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": ["a", 1], "transcript_path": ["p"]}),
@@ -782,7 +795,7 @@ class TerminalUI(unittest.TestCase):
         name = start[2]
         self.assertTrue(len(name) <= 32 and name.endswith("-review"), name)  # herdr's limit for agent names
         self.assertEqual(start[start.index("--", 3) + 1:],
-                         ("--model", "sonnet", "--disallowedTools", "Edit,Write,NotebookEdit"))
+                         ("--model", "sonnet"))
         prompt = next(c for c in self.herdr_calls if c[:2] == ("agent", "prompt"))
         self.assertEqual(prompt[2], name)
         self.assertIn("update tui-r-review --status done", prompt[3])
@@ -1132,6 +1145,198 @@ class PmQuestionCardsAndStaleBlockedTest(unittest.TestCase):
                       "--option", "推", "--option", "先不", "--recommend")
         command(manager(), "update", qid, "--status", "done", "--note", "用户说先不")
         self.assertNotIn("handled_by", self.conversation()[-1])
+
+
+class UserPromptReceiptTests(unittest.TestCase):
+    """PM writes an atomic receipt in projects/<slug>/receipts.json immediately when UserPromptSubmit fires,
+    before conversation.jsonl is appended, and exposes receipts via `pm.py state` and `pm.py project events`."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="pm-hooks-receipt-")
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve()
+        self.git = GitRepo(worktree_base=self.base / "worktrees")
+        self.repo = self.git.project_root(tempfile.mkdtemp(dir=self.base))
+        self.slug = project_slug(self.repo)
+        self.hc = FakeHc()
+        self.ctx = make_ctx(self.base, pane="hc:t182", hc=self.hc, git=self.git, clock=SystemClock(), out=StdOutput())
+        self.ctx.hc_terminal = "t182"
+        self.ctx.caller = Caller(self.ctx)
+        self.ctx.home.registrations.mkdir(parents=True, exist_ok=True)
+        self.ctx.home.registration(self.slug).write_text(json.dumps({
+            "name": pm_name(self.repo),
+            "pane": "hc:t182",
+            "runtime": "hc",
+            "project": Path(self.repo).name,
+            "repo": self.repo,
+        }))
+
+    def run_hook(self, payload, *, ctx=None):
+        ctx = self.ctx if ctx is None else ctx
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            hooks.cmd_hook_turn(argparse.Namespace(), ctx=ctx)
+
+    def test_receipt_written_before_conversation_append_and_survives_log_failure(self):
+        """Even if conversation.jsonl append fails or hasn't happened yet, the receipt is already on disk
+        and visible through both `pm.py state` and `pm.py project events`."""
+        receipt_path = self.ctx.home.project(self.slug).receipts
+        seen_receipt_before_log = []
+
+        real_append = self.ctx.store.append_event
+
+        def failing_append(slug, event, *, timeout=None):
+            # At the moment conversation.jsonl append is attempted, receipts.json must already exist on disk!
+            seen_receipt_before_log.extend(read_receipts(receipt_path))
+            raise OSError("simulated conversation.jsonl lock failure")
+
+        with mock.patch.object(self.ctx.store, "append_event", side_effect=failing_append):
+            self.run_hook({
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": self.repo,
+                "session_id": "sess-pm-1",
+                "prompt": "帮我看下这个竞态问题",
+            })
+
+        self.assertEqual(len(seen_receipt_before_log), 1, "receipt must be written before conversation.jsonl append")
+        self.assertEqual(seen_receipt_before_log[0]["text"], "帮我看下这个竞态问题")
+        self.assertEqual(seen_receipt_before_log[0]["pane"], "hc:t182")
+        self.assertEqual(seen_receipt_before_log[0]["session"], "sess-pm-1")
+        self.assertGreater(seen_receipt_before_log[0]["at_ms"], 0)
+        self.assertTrue(seen_receipt_before_log[0]["digest"])
+        # conversation.jsonl was never written because append_event raised OSError.
+        self.assertEqual(Conversation(self.ctx, self.repo).events(), [])
+
+        # Both `pm.py project events` and `pm.py state` expose the receipt immediately.
+        proj_events = Projects(self.ctx.store).events(self.slug)
+        self.assertEqual(proj_events["events"], [])
+        self.assertEqual(len(proj_events["receipts"]), 1)
+        self.assertEqual(proj_events["receipts"][0]["text"], "帮我看下这个竞态问题")
+
+        # Paging backward (`before=...`) omits receipts.
+        older_page = Projects(self.ctx.store).events(self.slug, before=0)
+        self.assertNotIn("receipts", older_page)
+
+        state = state_view.dash_state(ctx=self.ctx)
+        pm_row = next(p for p in state["pms"] if p["repo"] == self.repo)
+        self.assertEqual(len(pm_row["receipts"]), 1)
+        self.assertEqual(pm_row["receipts"][0]["text"], "帮我看下这个竞态问题")
+
+        # Restore real append and verify non-user prompts do NOT write receipts.
+        self.ctx.store.append_event = real_append
+        for raw in (
+            "<hc from=\"t9\">worker ping</hc>",
+            "[from pm.py rotate] handover",
+            "/compact",
+            "<task-notification>done</task-notification>",
+        ):
+            self.run_hook({"hook_event_name": "UserPromptSubmit", "cwd": self.repo, "prompt": raw})
+        self.assertEqual(len(read_receipts(receipt_path)), 1, "non-user prompts must not add receipts")
+
+    def test_receipt_cap_and_long_text_truncation(self):
+        conv = Conversation(self.ctx, self.repo)
+        for i in range(RECEIPT_LIMIT + 10):
+            conv.record_receipt(f"msg-{i}")
+        got = conv.receipts()
+        self.assertEqual(len(got), RECEIPT_LIMIT)
+        self.assertEqual(got[0]["text"], "msg-10")
+        self.assertEqual(got[-1]["text"], f"msg-{RECEIPT_LIMIT + 9}")
+
+        long_text = "😀" * (RECEIPT_TEXT_LIMIT + 250)
+        entry = conv.record_receipt(long_text)
+        self.assertTrue(entry["truncated"])
+        self.assertEqual(len(entry["text"]), RECEIPT_TEXT_LIMIT)
+        self.assertEqual(entry["len"], len(long_text))
+        # receipts.json is an internal project file and must not appear in project documents.
+        doc_paths = [d.get("path") for d in self.ctx.store.documents(self.slug)]
+        self.assertNotIn("receipts.json", doc_paths)
+
+
+class WorkerSubplanReminder(unittest.TestCase):
+    """Fallback PreToolUse reminder: remind a dispatched worker once on its first edit/write without a subplan."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="pm-hooks-subplan-")
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve()
+        self.repo = str(self.base / "repo")
+        (self.base / "repo").mkdir()
+
+    def make(self, pane="hc:t20", *, lang="en"):
+        ctx = make_ctx(self.base, pane=pane, out=StdOutput(), config={"lang": lang})
+        ctx.hc_terminal = pane[3:] if pane.startswith("hc:") else ""
+        ctx.caller = Caller(ctx)
+        return ctx
+
+    def save_task(self, tid="repo-work", **fields):
+        ctx = self.make()
+        task = {
+            "id": tid,
+            "title": "work",
+            "project": "repo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t20",
+            "dispatched": True,
+            "created": ctx.clock.now(),
+            "log": [],
+            **fields,
+        }
+        Ledger(ctx).save(task)
+        return tid
+
+    def fire_pre_tool(self, tool_name="Edit", pane="hc:t20", *, lang="en"):
+        ctx = self.make(pane=pane, lang=lang)
+        out = io.StringIO()
+        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool_name, "cwd": self.repo})
+        with mock.patch.object(sys, "stdin", io.StringIO(payload)), contextlib.redirect_stdout(out):
+            hooks.cmd_hook_pre_tool(argparse.Namespace(), ctx=ctx)
+        return out.getvalue().strip()
+
+    def test_reminds_once_on_first_edit_when_subplan_missing(self):
+        tid = self.save_task("repo-nosub")
+        # Read-only / non-edit tools stay silent and do not trigger or consume the reminder.
+        self.assertEqual(self.fire_pre_tool("Read"), "")
+        self.assertEqual(self.fire_pre_tool("Bash"), "")
+        # First edit triggers a non-blocking additionalContext reminder once.
+        raw = self.fire_pre_tool("Edit")
+        resp = json.loads(raw)
+        hso = resp["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PreToolUse")
+        self.assertNotIn("permissionDecision", hso)
+        self.assertIn(f"update {tid} --plan", hso["additionalContext"])
+        self.assertIn("sub-steps", hso["additionalContext"])
+        saved = Ledger(self.make()).load(tid).raw
+        self.assertTrue(saved.get("subplan_reminded"))
+        # Subsequent edit/write calls never remind again.
+        self.assertEqual(self.fire_pre_tool("Edit"), "")
+        self.assertEqual(self.fire_pre_tool("Write"), "")
+
+    def test_zh_reminder_and_codex_apply_patch(self):
+        tid = self.save_task("repo-zh")
+        resp = json.loads(self.fire_pre_tool("apply_patch", lang="zh"))
+        ctx_msg = resp["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(f"update {tid} --plan", ctx_msg)
+        self.assertIn("子步骤", ctx_msg)
+
+    def test_does_not_remind_when_subplan_present(self):
+        self.save_task("repo-hassub", subplan=[{"text": "step 1", "state": "doing"}])
+        self.assertEqual(self.fire_pre_tool("Edit"), "")
+        self.assertEqual(self.fire_pre_tool("Write"), "")
+
+    def test_skips_review_manual_and_pm_sessions(self):
+        self.save_task("repo-rev", pane="hc:t22", review_of="repo-other")
+        self.save_task("repo-manual", pane="hc:t23", dispatched=False)
+        for pane in ("hc:t22", "hc:t23"):
+            self.assertEqual(self.fire_pre_tool("Edit", pane=pane), "")
+        # Registered PM session calling Edit is ignored.
+        ctx = self.make(pane="hc:t7")
+        ctx.home.registrations.mkdir(parents=True, exist_ok=True)
+        ctx.home.registration(project_slug(self.repo)).write_text(json.dumps({
+            "name": pm_name(self.repo), "pane": "hc:t7", "project": "repo", "repo": self.repo,
+        }))
+        self.save_task("repo-pm", pane="hc:t7", dispatched=True)
+        self.assertEqual(self.fire_pre_tool("Edit", pane="hc:t7"), "")
 
 
 if __name__ == "__main__":

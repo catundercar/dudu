@@ -106,7 +106,7 @@ def register_land_review_commands(sub):
     la.add_argument("--delegate", action="store_true", help="alias for `pm.py approve`: delegate merge asynchronously to worker/helper")
     la.add_argument("--via", choices=["auto", "worker", "helper"], default="auto", help="with --delegate: auto|worker|helper")
     la.add_argument("--note", help="with --delegate: extra instructions for the executor")
-    rv = sub.add_parser("review", help="start a read-only reviewer on a task's branch, as thread <id>-review")
+    rv = sub.add_parser("review", help="start a reviewer on a task's branch, as thread <id>-review")
     rv.add_argument("id")
     rv.add_argument("--name", help="the reviewer's terminal name (default: <worker>-review)")
     rv.add_argument("--kind", help="reviewer program (default: config.json reviewer, else claude by the review table "
@@ -120,4 +120,6 @@ def register_land_review_commands(sub):
                                   "review/审查 by lang, a dash and the task's)")
     rv.add_argument("--bug", help="the BUG number the tab shows (default: in --tab, else the task's)")
     rv.add_argument("--codex-profile", help="codex profile for a codex reviewer (default: the pool's pick)")
+    rv.add_argument("--full", action="store_true",
+                    help="force a full diff (base...branch) instead of incremental re-review since last_reviewed_commit")
     rv.add_argument("--dry-run", action="store_true", help="print what would start as JSON; start nothing")

@@ -3,14 +3,18 @@ import { v_flex, h_flex, TextView, TextareaState, Textarea, InputState, Input, S
 import { theme, home, appHome, exec, readTextFile, writeTextFile, watchFolder, layout, run, terminals, agents, panes, spaces, shared, setShared, props, openOverlay, closeOverlay, window as appWindow } from 'herdr';
 import {
   word, timeline, parseConversation, settlePending, answeredTasks, markAnswered, bellStops, bellNext, bellCount, bellThread, detailQuestion, askKey, timelineRows, rowOf, rowOfKey, blockIndexForKey, riseAfterWheel, riseAfterJump, answerText, clock, dayLabel, shortPath,
-  sendArgv, readScreenArgv, pmLiveStatus, pmTurnWorking, pmSessionKey, pmCanReceive, isDialogOrDraftSendError, isTargetGoneSendError, isQueueableSendError, reconcilePendingSends, classifyPmDialog, pmBlockedBannerText,
+  sendArgv, makeClientMsgId, projectSendArgv, projectInterruptArgv, rotatePmArgs,
+  readScreenArgv, pmLiveStatus, pmTurnWorking, pmActivityView, pmSessionKey, pmCanReceive,
+  createAsyncGate, tryEnterAsyncGate, finishAsyncGate, computeClockOffsetMs, eventTimeUtcMs,
+  isDialogOrDraftSendError, isTargetGoneSendError, isQueueableSendError, reconcilePendingSends, classifyPmDialog, pmBlockedBannerText,
   QUEUE_KEY, readQueuedSends, keepQueuedSends, restoreQueuedPending, RESEND_VERIFY_WAIT_MS, logKey,
+  mergeReceipts, settledReceiptIndices, findReceiptMatch, findCoalescedReceiptMatches, confirmReceiptBubble,
   withoutTerminalEnv, SEND_ENV, REATTACH_ENV, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
   disconnected, isClosedTask, closedDetailText, closedTip, terminalAction, reattachArgv,
   pmStartState, startPmArgs, startPmArgv, lostShown, mergeDismissedLost, lostSummary, bringBackSteps,
   engineLabel, engineTip, engineChip, wasEscalated, endedEngine, escapeStep, searchShortcutLabel,
   subThreads, parentThread, foldParts, PARTS_LIMIT, foldReviews, threadFor,
-  taskTree, taskSteps, taskDependencies, threadAgents, resolveAgentProgram, AGENT_WINDOW_MAX, agentWindowOpen, toggleAgentWindow, focusAgentWindow, closeAgentWindow, setAgentWindowOverlay, toggleAgentWindowMode, reconcileAgentWindows, resolveHelperResultPath,
+  taskTree, taskSteps, taskDependencies, threadAgents, resolveAgentProgram, AGENT_WINDOW_MAX, normalizeAgentWindowSize, nextAgentWindowSize, agentWindowDimensions, agentWindowTerminalAddresses, agentWindowOpen, toggleAgentWindow, focusAgentWindow, closeAgentWindow, setAgentWindowOverlay, toggleAgentWindowMode, setAgentWindowSize, reconcileAgentWindows, resolveHelperResultPath,
   age, eventTime, workingTasks, reviewWorking, taskNumber, formatTaskNumber, threadLink, resolveThreadRef, decorateThreadLinks, logText, draftKey, draftText, readDrafts, keepDraft,
   validInputTokens, draftTokens, projectFilesArgv, parseRefLink, parseMentionSpans, splitMentionSegments,
   detectMentionQuery, parseGitLsFiles, indexRepoFiles, buildMentionMenu, REPO_FILES_LIMIT, MENTION_KEY_BINDINGS, SEARCH_KEY_BINDINGS,
@@ -118,8 +122,12 @@ export default class PmProject extends View {
     this.lastHeaderActionSeq = 0;
     this.ringAction = null;
     this.state = { pms: [], tasks: [] };
-    this.events = []; this.pending = []; this.pendingByPm = new Map(); this.seq = 0; this.pastes = [];
-    this.flushingQueue = false; this.queueTimer = false; this.confirmTimer = false; this.lastLogReadAt = 0; this.confirmLogProbes = new Set();
+    this.events = []; this.logReceipts = []; this.logTurn = null; this.clockOffsetMs = 0; this.serverNowMs = 0; this.serverNowAt = 0;
+    this.pending = []; this.pendingByPm = new Map(); this.seq = 0; this.pastes = [];
+    this.flushingQueue = false; this.flushingQueueAt = 0; this.queueTimer = false; this.confirmTimer = false; this.lastLogReadAt = 0; this.confirmLogProbes = new Set();
+    this.refreshGate = createAsyncGate(); this.logGate = createAsyncGate();
+    this.interruptingPm = ''; this.rotatingPm = ''; this.turnTickTimer = false; this._lastPmLiveEdge = ''; this.edgeReadTimer = false;
+    this.noProjectSendFor = '';
     this.pmDialog = null; this.pmDialogLoading = false; this.pmDialogAt = 0; this.pmSendBlockError = '';
     this.error = ''; this.logError = '';
     // pmName: the project's key as shared names it; machine: the machine it is on ('' here), whose
@@ -425,28 +433,76 @@ export default class PmProject extends View {
     }, cx);
   }
 
+  _enterGate(prop, now, maxBusyMs) {
+    let gate = this[prop];
+    if (!gate || typeof gate.seq !== 'number') {
+      gate = { seq: 0, activeToken: 0, busy: false, deadline: 0, again: false };
+      this[prop] = gate;
+    }
+    const entered = tryEnterAsyncGate(gate, now, maxBusyMs);
+    if (typeof entered === 'number') return entered;
+    const stamp = Number(now) || 0;
+    if (gate.busy && stamp < gate.deadline) { gate.again = true; return 0; }
+    const token = ++gate.seq;
+    gate.activeToken = token;
+    gate.busy = true;
+    gate.deadline = stamp + maxBusyMs;
+    gate.again = false;
+    return token;
+  }
+
+  _leaveGate(prop, token) {
+    const gate = this[prop];
+    if (!gate || typeof gate.seq !== 'number') return { rerun: false, busy: false };
+    const finished = finishAsyncGate(gate, token);
+    if (typeof finished === 'boolean') return { rerun: finished, busy: Boolean(gate.busy) };
+    if (token !== gate.activeToken) return { rerun: false, busy: Boolean(gate.busy) };
+    const rerun = Boolean(gate.again);
+    gate.busy = false;
+    gate.activeToken = 0;
+    gate.deadline = 0;
+    gate.again = false;
+    return { rerun, busy: false };
+  }
+
+  isPmWorking(pmTerm, live, activeTurn) {
+    const w = pmTurnWorking(pmTerm, live, activeTurn);
+    return typeof w === 'boolean' ? w : pmLiveStatus(pmTerm, live) === 'working';
+  }
+
   refresh(cx) {
-    if (this.loading) { this.again = true; return; }
+    const now = this.nowMs();
+    const token = this._enterGate('refreshGate', now, 18000);
+    if (!token) { this.again = true; return; }
     this.loading = true;
     const machine = this.machine;
     cx.spawn(async cx => {
       try {
         // A project on another machine is read there, through herdr-core (its folders cannot be watched
-        // from here: the 10-second read keeps it current).
+        // from here: the 10-second read + live status edge trigger keeps it current).
         const r = machine ? await exec(...remotePmArgv(['state']), { on: machine, timeout: 15000 })
-          : await execPython(exec, [appHome() + PM_SCRIPT, 'state']);
+          : await execPython(exec, [appHome() + PM_SCRIPT, 'state'], { timeout: 15000 });
         if (r.code !== 0) throw new Error(r.stderr || `pm.py: ${r.code}`);
         const state = JSON.parse(r.stdout);
         if (!Array.isArray(state.pms) || !Array.isArray(state.tasks)) throw new Error('state is missing pms/tasks arrays');
         if (machine === this.machine) {
+          const gotAt = this.nowMs();
           this.state = state; this.stateFor = machine;
+          const off = computeClockOffsetMs(state, gotAt);
+          this.clockOffsetMs = typeof off === 'number' && Number.isFinite(off) ? off : 0;
+          if (Number(state.server_now_ms) > 0) {
+            this.serverNowMs = Number(state.server_now_ms);
+            this.serverNowAt = gotAt;
+          }
           this.error = '';
           if (machine) this.remoteHome = typeof state.home === 'string' ? state.home : '';
           else { this.setLedgerHome(state.home, cx); this.arm(cx); }
+          if (this.pending?.length) this.reconcilePending(cx);
         }
       } catch (e) { if (machine === this.machine) this.error = String(e?.message || e).trim(); }
       finally {
-        this.loading = false;
+        const { rerun, busy } = this._leaveGate('refreshGate', token);
+        if (!busy) this.loading = false;
         this.readLog(cx);
         this.readThread(cx);
         if ((this.machine && !this.libraryProbed) ||
@@ -457,7 +513,7 @@ export default class PmProject extends View {
           this.readMemory(cx);
         }
         cx.notify();
-        if (this.again) { this.again = false; this.refresh(cx); }
+        if (rerun || this.again) { this.again = false; this.refresh(cx); }
       }
     });
   }
@@ -483,16 +539,16 @@ export default class PmProject extends View {
     const pm = this.pm(), path = pm?.conversation || '', slug = projectSlug(pm), on = this.where();
     if (path !== this.logPath || slug !== this.logSlug) {
       this.logPath = path; this.logSlug = slug;
-      this.logState = null; this.events = []; this.pastes = [];
+      this.logState = null; this.events = []; this.logReceipts = []; this.logTurn = null; this.pastes = [];
       this.lastLogReadAt = 0; this.confirmLogProbes = new Set();
       this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
     }
     if (!path || !slug) { this.lastLogReadAt = this.nowMs(); this.reconcilePending(cx); this.notifySafe(cx); return; }
-    if (this.logLoading) { this.logAgain = true; return; }
+    const startedAt = this.nowMs();
+    const token = this._enterGate('logGate', startedAt, 18000);
+    if (!token) { this.logAgain = true; return; }
     this.logLoading = true;
     const machine = this.machine;
-    // When this read began: a log it returns has every line written before then (a resend checks it).
-    const startedAt = this.nowMs();
     cx.spawn(async cx => {
       try {
         let fallback = Boolean(machine && this.remoteNoProject === machine);
@@ -511,8 +567,25 @@ export default class PmProject extends View {
             const raw = String(r.stdout || '').trim();
             const got = raw ? JSON.parse(raw) : { events: [], from: 0, offset: 0, earlier: false };
             if (path === this.logPath && slug === this.logSlug && machine === this.machine) {
+              const gotAt = this.nowMs();
               this.logState = after != null ? appendEventWindow(this.logState, got) : freshEventWindow(got);
               this.events = this.logState.events;
+              this.logReceipts = Array.isArray(got.receipts) ? got.receipts : [];
+              if (got.turn && typeof got.turn === 'object') this.logTurn = got.turn;
+              if (Number(got.server_now_ms) > 0) {
+                this.serverNowMs = Number(got.server_now_ms);
+                this.serverNowAt = gotAt;
+              }
+              if (got.server_tz || got.server_now_ms) {
+                const off = computeClockOffsetMs({
+                  now: this.state?.now || '',
+                  server_now_ms: got.server_now_ms,
+                  server_tz: got.server_tz,
+                }, gotAt);
+                if (typeof off === 'number' && Number.isFinite(off) && (off || !this.clockOffsetMs)) {
+                  this.clockOffsetMs = off;
+                }
+              }
               if (got.more) this.logAgain = true;
             }
           }
@@ -539,9 +612,10 @@ export default class PmProject extends View {
         }
       } catch (e) { if (path === this.logPath && machine === this.machine) this.logError = String(e?.message || e); }
       finally {
-        this.logLoading = false;
+        const { rerun, busy } = this._leaveGate('logGate', token);
+        if (!busy) this.logLoading = false;
         cx.notify();
-        if (this.logAgain) { this.logAgain = false; this.readLog(cx); }
+        if (rerun || this.logAgain) { this.logAgain = false; this.readLog(cx); }
       }
     });
   }
@@ -2685,6 +2759,105 @@ export default class PmProject extends View {
     for (const step of steps) uploaded.delete(step.key);
     return message;
   }
+  // Project composer delivery: uploads remote attachments first, then sends via idempotent
+  // `pm.py project send <slug> --msg-id <id>` (atomically logging to conversation.jsonl on the host),
+  // falling back transparently to `this.send` if a remote peer runs an older `pm.py`.
+  async deliverProject(address, words, files, { msgId = '', question = '', slug = '' } = {}) {
+    const landed = new Map(), uploaded = this.uploaded ||= new Map();
+    const folder = this.machine ? this.pasteFolder(this.pm()) : '';
+    const stage = folder ? `${folder}/sending-${Date.now()}-${this.sending = (this.sending || 0) + 1}` : '';
+    const steps = uploadSteps(files, address, this.machine, { uploaded, stage });
+    if (steps.some(step => step.copy)) this.prune();
+    try {
+      for (const step of steps) {
+        if (step.landed) { landed.set(step.path, step.landed); continue; }
+        try {
+          if (step.copy) {
+            const r = await exec('sh', ['-c', 'mkdir -p "$1" && cp -- "$2" "$3"', 'sh', stage, step.path, step.copy], { timeout: 60000 });
+            if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `cp: ${r.code}`);
+          }
+          const where = landedPath(await exec(...withoutTerminalEnv(step.argv, {
+            platform: this.hostPlatform(), unset: SEND_ENV,
+          }), { timeout: 120000 }));
+          uploaded.set(step.key, where);
+          landed.set(step.path, where);
+        } catch (e) {
+          const error = new Error(word(this.lang, 'uploadFailed', fileName(step.path), this.machine, String(e.message || e).trim()));
+          error.upload = true;
+          throw error;
+        }
+      }
+    } finally {
+      if (steps.some(step => step.copy)) await exec('rm', ['-rf', '--', stage], { timeout: 20000 }).catch(() => {});
+    }
+    const message = messageText(words, sentFiles(files, landed), word(this.lang, 'attachments'));
+    const peerKey = this.machine || '__local__';
+    let sendReply = null;
+    const inlineOk = msgId && slug && this.noProjectSendFor !== peerKey && chunkUtf8Text(message, SAVE_INLINE_BYTES).length <= 1;
+    if (inlineOk) {
+      const r = await this.runProjectWrite(
+        projectSendArgv(slug, { msgId, target: onMachine(address, this.machine), text: message, question }),
+        { timeout: 45000 },
+      );
+      if (r.code !== 0) {
+        if (isOldPmCommand(r)) {
+          this.noProjectSendFor = peerKey;
+          await this.send(address, message);
+        } else {
+          throw new Error((r.stderr || r.stdout).trim() || `pm.py project send: ${r.code}`);
+        }
+      } else {
+        const outStr = String(r.stdout || '').trim();
+        if (outStr.startsWith('{')) {
+          try { sendReply = JSON.parse(outStr); } catch (_) { sendReply = null; }
+        }
+        if (sendReply && sendReply.status === 'queued') {
+          throw new Error(sendReply.reason || 'pm is blocked');
+        }
+      }
+    } else {
+      await this.send(address, message);
+    }
+    for (const step of steps) uploaded.delete(step.key);
+    return { message, reply: sendReply };
+  }
+  activePmTurn() {
+    const pm = this.pm();
+    return this.logTurn || (pm?.turn && typeof pm.turn === 'object' ? pm.turn : null);
+  }
+  interruptPm(cx) {
+    const pm = this.pm(), slug = projectSlug(pm), pmKey = this.pmName;
+    if (!pm || !slug || this.interruptingPm === pmKey) return;
+    this.interruptingPm = pmKey;
+    this.notifySafe(cx);
+    cx.spawn(async cx => {
+      try {
+        await this.runProjectWrite(projectInterruptArgv(slug), { timeout: 15000 });
+      } catch (_) { /* Best-effort interrupt; user can still open terminal or rotate. */ }
+      finally {
+        if (this.interruptingPm === pmKey) this.interruptingPm = '';
+        this.refresh(cx);
+        this.notifySafe(cx);
+      }
+    });
+  }
+  rotatePmFromStall(cx) {
+    const pm = this.pm(), repo = pm?.repo || '', pmKey = this.pmName;
+    if (!pm || !repo || this.rotatingPm === pmKey) return;
+    this.rotatingPm = pmKey;
+    this.notifySafe(cx);
+    cx.spawn(async cx => {
+      try {
+        const reason = this.lang === 'zh' ? '从无响应轮次恢复' : 'Recover from unresponsive turn';
+        await this.runProjectWrite(rotatePmArgs(repo, reason), { timeout: 30000 });
+      } catch (_) { /* Rotation errors show on next refresh if offline. */ }
+      finally {
+        if (this.rotatingPm === pmKey) this.rotatingPm = '';
+        this.refresh(cx);
+        this.notifySafe(cx);
+      }
+    });
+  }
   // The project box's unsettled sends in localStorage, keyed by PM name (survives mod reload / app
   // restart; see QUEUE_KEY for what is kept of each).
   queuedStore() {
@@ -2760,13 +2933,21 @@ export default class PmProject extends View {
       this.bringBackProgress.steps?.some(s => s.kind === 'pm' && s.state === 'running'),
     );
   }
+  // Recent PM user-message receipts from both `pm.py state` and `pm.py project events`.
+  pmReceipts() {
+    const fromLog = Array.isArray(this.logReceipts) ? this.logReceipts : [];
+    const fromState = Array.isArray(this.pm()?.receipts) ? this.pm().receipts : [];
+    if (!fromLog.length) return fromState;
+    if (!fromState.length) return fromLog;
+    return mergeReceipts(fromState, fromLog);
+  }
   reconcilePending(cx, { fromReadLog = false, forceLogReady = false } = {}) {
     if (!Array.isArray(this.pending) || !this.pending.length) return;
     const now = this.nowMs();
     const pmTerm = this.pmTerminal();
     const pmAddress = pmTerm?.address || '';
     const pmSession = pmSessionKey(pmTerm, this.pm());
-    const pmWorking = pmTurnWorking(pmTerm, this.live());
+    const pmWorking = this.isPmWorking(pmTerm, this.live(), this.activePmTurn());
     const logReady = Boolean(forceLogReady || fromReadLog || (!this.logLoading && !this.logError && this.lastLogReadAt > 0));
     const res = reconcilePendingSends(this.pending, this.events, {
       now,
@@ -2779,6 +2960,8 @@ export default class PmProject extends View {
       remote: Boolean(this.machine),
       lang: this.lang,
       logFreshFrom: this.freshLogFrom(),
+      receipts: this.pmReceipts(),
+      clockOffsetMs: this.clockOffsetMs || 0,
     });
     const changed = res.pending !== this.pending;
     if (changed) {
@@ -2793,6 +2976,12 @@ export default class PmProject extends View {
         this.landed(s.draftKey, { text: s.words, files: s.files, quotes: s.quotes || [] }, true);
       }
       this.cleanSent(s.files, s.id);
+    }
+    for (const c of res.confirmed || []) {
+      if ((c.wasTimedOut || c.wasFailed) && c.draftKey) {
+        this.landed(c.draftKey, { text: c.words, files: c.files, quotes: c.quotes || [] }, true);
+      }
+      this.cleanSent(c.files, c.id);
     }
     for (const f of res.failed) {
       if (f.draftKey) {
@@ -2815,7 +3004,7 @@ export default class PmProject extends View {
   scheduleConfirmCheck(cx) {
     if (!cx?.timer?.after || this.confirmTimer) return;
     const needsWatch = (this.pending || []).some(p =>
-      p && !p.failed && (p.verifying || (!p.queued && (p.deliveredAt > 0 || p.inFlight)) || (p.queued && p.swapWaitSince > 0)));
+      p && !p.failed && !p.received && (p.verifying || (!p.queued && (p.deliveredAt > 0 || p.inFlight)) || (p.queued && p.swapWaitSince > 0)));
     if (!needsWatch) return;
     const delay = 1500;
     const scheduledAt = this.nowMs();
@@ -2827,7 +3016,7 @@ export default class PmProject extends View {
       const pmTerm = this.pmTerminal();
       const pmAddress = pmTerm?.address || '';
       const pmSession = pmSessionKey(pmTerm, this.pm());
-      const pmWorking = pmTurnWorking(pmTerm, this.live());
+      const pmWorking = this.isPmWorking(pmTerm, this.live(), this.activePmTurn());
       const probes = (this.confirmLogProbes ||= new Set());
       let wantFreshLog = false;
       for (const p of this.pending || []) {
@@ -2888,7 +3077,8 @@ export default class PmProject extends View {
     });
   }
   flushQueue(cx) {
-    if (this.flushingQueue) return;
+    const checkNow = this.nowMs();
+    if (this.flushingQueue && checkNow - (this.flushingQueueAt || 0) < 50000) return;
     const pmTerm = this.pmTerminal();
     if (!pmTerm) {
       if (this.pending.some(p => p.queued && !p.failed)) this.scheduleQueueFlush(cx);
@@ -2934,39 +3124,50 @@ export default class PmProject extends View {
   }
   deliverBubble(bubble, terminal, cx) {
     const pmName = this.pmName;
+    const slug = projectSlug(this.pm());
     const sentSession = pmSessionKey(terminal, this.pm());
+    const flushStamp = this.nowMs();
     this.flushingQueue = true;
+    this.flushingQueueAt = flushStamp;
     cx.spawn(async cx => {
       let requeued = false;
       let targetChanged = false;
       try {
-        await this.deliver(terminal.address, bubble.said, bubble.files);
+        const res = await this.deliverProject(terminal.address, bubble.said, bubble.files, {
+          msgId: bubble.msgId || '',
+          question: bubble.question || '',
+          slug,
+        });
+        const serverReply = res?.reply;
         const now = this.nowMs();
         const curTerm = this.pmName === pmName ? this.pmTerminal() : terminal;
         const curSession = this.pmName === pmName ? pmSessionKey(curTerm, this.pm()) : sentSession;
-        const pmWorking = this.pmName === pmName ? pmTurnWorking(curTerm, this.live()) : false;
+        const pmWorking = this.pmName === pmName ? this.isPmWorking(curTerm, this.live(), this.activePmTurn()) : false;
         const swappedDuringSend = this.pmName === pmName && (
           (curTerm?.address || '') !== terminal.address ||
           Boolean(sentSession && curSession && curSession !== sentSession)
         );
         const byPm = this.pendingByPm ||= new Map();
         const cur = this.pmName === pmName ? this.pending : (byPm.get(pmName) || []);
-        const cleared = cur.map(p => p.id === bubble.id ? {
-          ...p,
-          queued: false,
-          inFlight: false,
-          inFlightAt: 0,
-          sentTo: terminal.address,
-          sentSession,
-          deliveredAt: now,
-          idleSince: pmWorking ? 0 : now,
-          swapDetectedAt: swappedDuringSend ? now : 0,
-          swapWaitSince: 0,
-          inFlightTo: '',
-          inFlightSession: '',
-          unsure: false,
-          lastError: '',
-        } : p);
+        const serverLogged = Boolean(serverReply?.ok && serverReply.status === 'delivered' && Number(serverReply.offset) > 0);
+        const cleared = cur.map(p => p.id === bubble.id ? (p.received ? p : (serverLogged
+          ? confirmReceiptBubble(p, Number(serverReply.at_ms) || now, now)
+          : {
+            ...p,
+            queued: false,
+            inFlight: false,
+            inFlightAt: 0,
+            sentTo: terminal.address,
+            sentSession,
+            deliveredAt: now,
+            idleSince: pmWorking ? 0 : now,
+            swapDetectedAt: swappedDuringSend ? now : 0,
+            swapWaitSince: 0,
+            inFlightTo: '',
+            inFlightSession: '',
+            unsure: false,
+            lastError: '',
+          })) : p);
         byPm.set(pmName, cleared);
         this.saveQueue(pmName, cleared);
         if (this.pmName === pmName) {
@@ -2987,7 +3188,9 @@ export default class PmProject extends View {
         const transientRetry = !pmSwappedOrGone && (dialogOrDraft || (isQueueableSendError(e) && attempts <= 1));
         const byPm = this.pendingByPm ||= new Map();
         const list = this.pmName === pmName ? this.pending : (byPm.get(pmName) || []);
-        if (pmSwappedOrGone) {
+        if (list.some(p => p.id === bubble.id && p.received)) {
+          // PM receipt already confirmed this message before `hc send` finished/errored: never requeue or fail.
+        } else if (pmSwappedOrGone) {
           requeued = true;
           targetChanged = Boolean(curTerm && curTerm.address !== terminal.address);
           const updated = list.map(p => p.id === bubble.id ? {
@@ -3039,7 +3242,7 @@ export default class PmProject extends View {
           }
         }
       } finally {
-        this.flushingQueue = false;
+        if (this.flushingQueueAt === flushStamp) this.flushingQueue = false;
       }
       this.notifySafe(cx);
       if (this.pmName === pmName) {
@@ -3080,8 +3283,11 @@ export default class PmProject extends View {
     const now = this.nowMs();
     const status = pmLiveStatus(terminal, this.live());
     const mustQueue = !terminal || !pmCanReceive(status) || this.flushingQueue || this.pending.some(p => p.queued && !p.failed);
+    const id = ++this.seq;
+    const rawMsgId = makeClientMsgId(now, id);
     const bubble = {
-      id: ++this.seq,
+      id,
+      msgId: typeof rawMsgId === 'string' ? rawMsgId : '',
       text: message,
       said,
       words: text,
@@ -3134,7 +3340,31 @@ export default class PmProject extends View {
   // and settles as delivered when the log has it, else goes out again (reconcilePendingSends).
   retry(id, cx) {
     const bubble = this.pending.find(p => p.id === id);
-    if (!bubble) return;
+    if (!bubble || bubble.received) return;
+    if (!bubble.upload && (!bubble.failed || bubble.timedOut)) {
+      const receipts = this.pmReceipts();
+      const clockOffsetMs = this.clockOffsetMs || 0;
+      const used = settledReceiptIndices(receipts, this.events, { clockOffsetMs });
+      for (const p of this.pending) {
+        if (p?.received) findReceiptMatch(p, receipts, used, { clockOffsetMs });
+      }
+      const coalesced = findCoalescedReceiptMatches(this.pending, receipts, used, { clockOffsetMs });
+      const hit = (coalesced instanceof Map ? coalesced.get(bubble) : null) || findReceiptMatch(bubble, receipts, used, { clockOffsetMs });
+      if (hit) {
+        const now = this.nowMs();
+        this.pending = this.pending.map(p => p.id === id ? confirmReceiptBubble(p, hit.atMs, now) : p);
+        if (this.pmName) {
+          (this.pendingByPm ||= new Map()).set(this.pmName, this.pending);
+          this.saveQueue(this.pmName, this.pending);
+        }
+        if (bubble.draftKey) {
+          this.landed(bubble.draftKey, { text: bubble.words, files: bubble.files, quotes: bubble.quotes || [] }, true);
+        }
+        this.cleanSent(bubble.files, bubble.id);
+        this.notifySafe(cx);
+        return;
+      }
+    }
     if (!this.pmTerminal() && !this.isPmStarting()) {
       this.pending = this.pending.map(p => p.id === id ? { ...p, failed: word(this.lang, 'offline') } : p);
       if (this.pmName) (this.pendingByPm ||= new Map()).set(this.pmName, this.pending);
@@ -3341,10 +3571,12 @@ export default class PmProject extends View {
     const tLast = tLen ? tasks[tLen - 1] : null;
     const paLen = pastes.length;
     const paLast = paLen ? pastes[paLen - 1] : null;
+    const clockOffsetMs = this.clockOffsetMs || 0;
     const pendingSig = pendingSignature(pending);
     const c = this._timelineCache;
     if (c
       && c.pmName === pmName && c.pmPane === pmPane && c.pmCountsWaiting === pmCountsWaiting && c.today === today && c.typing === typing
+      && c.clockOffsetMs === clockOffsetMs
       && c.events === events && c.eventsLen === evLen && c.eventsFirst === evFirst && c.eventsLast === evLast
       && c.eventsLastText === evLastText && c.eventsLastStatus === evLastStatus
       && c.tasks === tasks && c.tasksLen === tLen && c.tasksFirst === tFirst && c.tasksLast === tLast
@@ -3354,7 +3586,7 @@ export default class PmProject extends View {
       return c;
     }
     const items = timeline(events, tasks, {
-      pending, today, typing, pastes, pm: pmName, pmPane, taskNumbers,
+      pending, today, typing, pastes, pm: pmName, pmPane, taskNumbers, clockOffsetMs,
     });
     const stops = bellStops(items, tasks, pm);
     const blocks = timelineRows(turns(items, pmPane));
@@ -3375,7 +3607,7 @@ export default class PmProject extends View {
     const foldedTasks = foldReviews(markAnswered(tasks, answered));
     const waiting = bellCount(pm, tasks, answered);
     const next = {
-      pmName, pmPane, pmCountsWaiting, today, typing,
+      pmName, pmPane, pmCountsWaiting, today, typing, clockOffsetMs,
       events, eventsLen: evLen, eventsFirst: evFirst, eventsLast: evLast,
       eventsLastText: evLastText, eventsLastStatus: evLastStatus,
       tasks, tasksLen: tLen, tasksFirst: tFirst, tasksLast: tLast,
@@ -4227,7 +4459,7 @@ export default class PmProject extends View {
       if (!opts.wrap) return target;
       const box = div().relative();
       if (opts.flex1) box.flex_1().min_w(0);
-      else if (opts.full) box.w_full();
+      else if (opts.full) box.w_full().min_w(0);
       else if (opts.flexNone) box.flex_none();
       return box.child(target);
     }
@@ -4242,7 +4474,7 @@ export default class PmProject extends View {
     const wrapBox = () => {
       const box = div().relative();
       if (opts.flex1) box.flex_1().min_w(0);
-      else if (opts.full) box.w_full();
+      else if (opts.full) box.w_full().min_w(0);
       else if (opts.flexNone) box.flex_none();
       return box;
     };
@@ -5190,9 +5422,56 @@ export default class PmProject extends View {
     if (item.kind === 'threads') return v_flex().w_full().children(item.rows.map(row => this.threadLine(row, t, this.atWork)));
     if (item.kind === 'about') return this.aboutLine(item, t);
     if (item.kind === 'question') return this.question(item, t, cx, today);
-    // typing: the coordinator is at work.
-    return h_flex().h(28).gap(5).items_center().loop('opacity', { from: .35, to: 1, period: 1400 })
-      .children([0, 1, 2].map(() => div().size(6).rounded(3).bg(t.muted)));
+    // typing: the coordinator is at work (quiet live activity + stall recovery actions).
+    const pmTermNow = this.pmTerminal();
+    const rawActView = pmActivityView(this.lang, {
+      turn: this.activePmTurn(),
+      working: this.isPmWorking(pmTermNow, this.live(), this.activePmTurn()),
+      pendingSending: this.pending.some(p => !p.failed && !p.queued && !p.received),
+      nowMs: this.nowMs(),
+      serverNowMs: this.serverNowMs || 0,
+      receivedAtMs: this.serverNowAt || 0,
+    });
+    const actView = rawActView && typeof rawActView === 'object'
+      ? rawActView
+      : { mode: 'dots', label: '', stalled: false, canInterrupt: false, canRotate: false };
+    const dotsEl = h_flex().gap(5).items_center().flex_none().loop('opacity', { from: .35, to: 1, period: 1400 })
+      .children([0, 1, 2].map(() => div().size(6).rounded(3).bg(actView.stalled ? t.blocked : t.muted)));
+    if (!actView.label && !actView.canInterrupt && !actView.canRotate) {
+      return h_flex().id('pm-typing-line').h(28).items_center().child(dotsEl);
+    }
+    const interrupting = this.interruptingPm === this.pmName;
+    const rotating = this.rotatingPm === this.pmName;
+    const intTip = word(this.lang, interrupting ? 'interruptingPmTip' : 'interruptPmTip');
+    const rotTip = word(this.lang, rotating ? 'rotatingPmTip' : 'rotatePmTip');
+    const openTip = word(this.lang, 'openPm');
+    return h_flex().id('pm-typing-line').w_full().min_h(28).gap(8).items_center()
+      .child(dotsEl)
+      .child(div().id('pm-typing-label').flex_1().min_w(0).truncate().text_size(12.5)
+        .text_color(actView.stalled ? t.blocked : t.dim)
+        .child(actView.label))
+      .when(Boolean(actView.canInterrupt || actView.canRotate), el => el.child(h_flex().id('pm-typing-actions').flex_none().gap(4).items_center()
+        .when(Boolean(actView.canInterrupt && pmTermNow), a => a.child(this.withTip('pm-interrupt-btn',
+          h_flex().id('pm-interrupt-btn').size(24).rounded(7).items_center().justify_center()
+            .text_color(actView.stalled ? t.blocked : t.muted).accessibility_label(intTip)
+            .when(!interrupting, btn => btn.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_e, clickCx) => this.interruptPm(clickCx)))
+            .child(interrupting ? svg(SPINNER).size(13).flex_none().text_color(t.muted).spin(900) : this.icon('stop', 14)),
+          intTip, t, { placement: 'above-right' })))
+        .when(Boolean(actView.canRotate && this.pm()?.repo), a => a.child(this.withTip('pm-rotate-btn',
+          h_flex().id('pm-rotate-btn').size(24).rounded(7).items_center().justify_center()
+            .text_color(t.muted).accessibility_label(rotTip)
+            .when(!rotating, btn => btn.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_e, clickCx) => this.rotatePmFromStall(clickCx)))
+            .child(rotating ? svg(SPINNER).size(13).flex_none().text_color(t.muted).spin(900) : this.icon('refresh', 14)),
+          rotTip, t, { placement: 'above-right' })))
+        .when(Boolean(pmTermNow), a => a.child(this.withTip('pm-open-term-btn',
+          h_flex().id('pm-open-term-btn').size(24).rounded(7).items_center().justify_center()
+            .text_color(t.muted).accessibility_label(openTip).cursor_pointer()
+            .hover(s => s.bg(t.hover).text_color(t.foreground))
+            .on_click(() => this.show(pmTermNow.address))
+            .child(this.icon('terminal', 14)),
+          openTip, t, { placement: 'above-right' })))));
   }
 
   // Quiet icon at the top of the conversation column when earlier events stand before the current window.
@@ -5852,20 +6131,36 @@ export default class PmProject extends View {
 
   // ---- In-Project floating agent small windows (openOverlay({ kind: 'window' })) ----------------
 
-  agentWindowSlotPos(slot) {
+  agentWindowSlotPos(slot, width = 520) {
     const wide = this.viewWidth || 1280;
     const panelW = (this.listResting() || this.detail) ? panelWidth(this.panelWant, wide) : 0;
     const stageW = Math.max(540, wide - panelW);
-    const w = 510;
+    const w = Number(width) || 520;
     const baseX = Math.max(48, Math.round(stageW - w - 36));
     const off = (slot % 2) * 34;
     return { x: Math.max(32, baseX - off), y: 82 + off * 2 };
   }
 
+  rememberedAgentWindowSize() {
+    return normalizeAgentWindowSize(typeof shared === 'function' ? shared('pm-project-agent-window-size') : '');
+  }
+
+  syncAgentWindowTerminals() {
+    if (typeof setShared !== 'function') return;
+    const next = agentWindowTerminalAddresses(this.agentWindows, this.machine);
+    const prev = typeof shared === 'function' ? shared('pm-project-win-terminals') : null;
+    if (Array.isArray(prev) && prev.length === next.length && prev.every((v, i) => v === next[i])) return;
+    setShared('pm-project-win-terminals', next);
+  }
+
   overlayWindowSpec(entry, slot) {
     const isTerm = entry.mode === 'terminal' && Boolean(entry.address);
     const appAddr = onMachine(entry.address, this.machine);
-    const pos = this.agentWindowSlotPos(slot);
+    const size = normalizeAgentWindowSize(entry.size || this.rememberedAgentWindowSize());
+    const dims = agentWindowDimensions(isTerm ? 'terminal' : 'chat', size, {
+      maxWidth: this.viewWidth ? Math.round(this.viewWidth * 0.92) : 0,
+    });
+    const pos = this.agentWindowSlotPos(slot, dims.width);
     const baseProps = {
       agentWindow: isTerm ? 'titlebar' : 'chat',
       key: entry.key,
@@ -5896,13 +6191,14 @@ export default class PmProject extends View {
       slug: projectSlug(this.pm()),
       session: this.winSession,
       mode: isTerm ? 'terminal' : 'chat',
+      size,
     };
     if (isTerm) {
       return {
         kind: 'window',
         key: `pm-agent:${entry.key}`,
-        width: 520,
-        height: 360,
+        width: dims.width,
+        height: dims.height,
         at: pos,
         layout: {
           type: 'column',
@@ -5919,25 +6215,32 @@ export default class PmProject extends View {
       props: baseProps,
       kind: 'window',
       key: `pm-agent:${entry.key}`,
-      width: 510,
-      height: 416,
+      width: dims.width,
+      height: dims.height,
       at: pos,
     };
   }
 
   openOrReplaceAgentOverlay(entry, { forcedMode = false } = {}) {
     if (typeof openOverlay !== 'function') return;
+    const isTerm = entry.mode === 'terminal' && Boolean(entry.address);
+    // Publish floating terminal addresses before opening a terminal overlay so pm-nav recognizes
+    // clicks inside it immediately; when leaving terminal mode, clear after openOverlay replaces it.
+    if (isTerm) this.syncAgentWindowTerminals();
     const slot = this.agentWindowSlot++;
     const ovId = openOverlay(this.overlayWindowSpec({ ...entry, forcedMode }, slot));
     if (ovId) this.agentWindows = setAgentWindowOverlay(this.agentWindows, entry.key, ovId);
+    if (!isTerm) this.syncAgentWindowTerminals();
   }
 
   toggleAgentSmallWindow(spec, cx) {
     if (!spec?.key) return;
-    const res = toggleAgentWindow(this.agentWindows, spec, { max: AGENT_WINDOW_MAX });
+    const sizedSpec = spec.size ? spec : { ...spec, size: this.rememberedAgentWindowSize() };
+    const res = toggleAgentWindow(this.agentWindows, sizedSpec, { max: AGENT_WINDOW_MAX });
     this.agentWindows = res.windows;
     if (res.action === 'close') {
       if (res.closed?.overlayId && typeof closeOverlay === 'function') closeOverlay(res.closed.overlayId);
+      this.syncAgentWindowTerminals();
     } else if (res.action === 'open') {
       if (res.evicted?.overlayId && typeof closeOverlay === 'function') closeOverlay(res.evicted.overlayId);
       this.openOrReplaceAgentOverlay(res.opened);
@@ -5949,15 +6252,19 @@ export default class PmProject extends View {
     const res = closeAgentWindow(this.agentWindows);
     this.agentWindows = res.windows;
     if (res.closed?.overlayId && typeof closeOverlay === 'function') closeOverlay(res.closed.overlayId);
+    this.syncAgentWindowTerminals();
     cx?.notify?.();
   }
 
-  closeOverlayIds(ids, cx = null, { defer = false } = {}) {
+  closeOverlayIds(ids, cx = null, { defer = false, onAfter = null } = {}) {
     const list = (ids || []).filter(Boolean);
-    if (!list.length || typeof closeOverlay !== 'function') return;
     const runClose = () => {
-      for (const id of list) closeOverlay(id);
+      if (typeof closeOverlay === 'function') {
+        for (const id of list) closeOverlay(id);
+      }
+      onAfter?.();
     };
+    if (!list.length && !onAfter) return;
     const shouldDefer = defer || cx?.phase?.() === 'render';
     if (shouldDefer && typeof cx?.timer?.after === 'function') {
       cx.timer.after(0, runClose);
@@ -5968,8 +6275,9 @@ export default class PmProject extends View {
 
   closeAllAgentWindows(cx = null, { defer = false } = {}) {
     const ids = (this.agentWindows || []).map(w => w?.overlayId).filter(Boolean);
+    const had = (this.agentWindows || []).length > 0;
     this.agentWindows = [];
-    this.closeOverlayIds(ids, cx, { defer });
+    this.closeOverlayIds(ids, cx, { defer, onAfter: had ? () => this.syncAgentWindowTerminals() : null });
   }
 
   handleWinEvent(ev, cx) {
@@ -5981,12 +6289,21 @@ export default class PmProject extends View {
       const res = closeAgentWindow(this.agentWindows, ev.key);
       this.agentWindows = res.windows;
       if (res.closed?.overlayId && typeof closeOverlay === 'function') closeOverlay(res.closed.overlayId);
+      this.syncAgentWindowTerminals();
       cx.notify();
     } else if (ev.kind === 'mode') {
       const sw = toggleAgentWindowMode(this.agentWindows, ev.key, ev.mode || '');
       this.agentWindows = sw.windows;
       if (sw.changed && sw.window) {
         this.openOrReplaceAgentOverlay(sw.window, { forcedMode: Boolean(ev.forcedMode) });
+      }
+      cx.notify();
+    } else if (ev.kind === 'size') {
+      const sw = setAgentWindowSize(this.agentWindows, ev.key, ev.size || '');
+      this.agentWindows = sw.windows;
+      if (sw.changed && sw.window) {
+        if (typeof setShared === 'function') setShared('pm-project-agent-window-size', sw.window.size);
+        this.openOrReplaceAgentOverlay(sw.window);
       }
       cx.notify();
     } else if (ev.kind === 'locate' && ev.taskId) {
@@ -6007,7 +6324,7 @@ export default class PmProject extends View {
       const rec = reconcileAgentWindows(this.agentWindows, liveSet);
       if (rec.closed.length) {
         this.agentWindows = rec.windows;
-        this.closeOverlayIds(rec.closed.map(w => w?.overlayId), cx, { defer: true });
+        this.closeOverlayIds(rec.closed.map(w => w?.overlayId), cx, { defer: true, onAfter: () => this.syncAgentWindowTerminals() });
       }
     }
     const ev = shared('pm-project-win-event');
@@ -6217,6 +6534,20 @@ export default class PmProject extends View {
     const numTag = formatTaskNumber(p.threadNumber);
     const titleLabel = p.roleLabel && p.name ? `${p.roleLabel} · ${p.name}` : (p.name || p.roleLabel || 'agent');
     const ov = (typeof props === 'function' ? props()?.overlay : '') || '';
+    const curSize = normalizeAgentWindowSize(p.size);
+    const nextSize = nextAgentWindowSize(curSize);
+    const curSizeLabel = curSize.toUpperCase();
+    const nextSizeLabel = nextSize.toUpperCase();
+    const sizeBtnTip = word(lang, 'windowSizeTip', curSizeLabel, nextSizeLabel);
+    const sizeBtn = this.withTip(`win-size-${p.key || 'x'}`, h_flex().id(`win-size-${p.key || 'x'}`)
+      .h(24).min_w(24).px(5).flex_none().rounded(6).items_center().justify_center()
+      .text_color(t.muted).cursor_pointer()
+      .hover(s => s.bg(t.hover).text_color(t.foreground))
+      .accessibility_label(sizeBtnTip)
+      .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.hoverKey = ''; this.emitWinEvent('size', { size: nextSize }); })
+      .child(div().font_family('monospace').text_size(10.5).font_semibold().child(curSizeLabel)),
+      sizeBtnTip, t, { panel: true, placement: 'below-right' });
     return h_flex().id(`win-titlebar-${p.key || 'x'}`).w_full().h(36).flex_none().pl(12).pr(8).gap(8).items_center()
       .bg(t.surface).border_b(1).border_color(t.border)
       .on_mouse_down('left', () => this.emitWinEvent('focus'))
@@ -6235,6 +6566,7 @@ export default class PmProject extends View {
           () => this.emitWinEvent('mode', { mode: isTerm ? 'chat' : 'terminal', forcedMode: true }),
           t, 13.5,
         )))
+        .child(sizeBtn)
         .when(Boolean(p.taskId), el => el.child(this.winIconBtn(
           `win-locate-${p.key || 'x'}`,
           'hook-up',
@@ -7881,7 +8213,8 @@ export default class PmProject extends View {
       this.machine = ref.machine; this.state = { pms: [], tasks: [], lang: this.state.lang }; this.stateFor = null;
       this.error = ''; this.logError = ''; this.remoteHome = ''; this.remoteNoProject = '';
       this.remoteNoLibrary = ''; this.remoteNoMemory = ''; this.remoteNoSession = ''; this.remoteNoChange = '';
-      this.logSlug = ''; this.logState = null; this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
+      this.logSlug = ''; this.logState = null; this.logReceipts = []; this.logTurn = null; this.clockOffsetMs = 0; this.serverNowMs = 0; this.serverNowAt = 0; this.noProjectSendFor = '';
+      this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
       this.threadLog = null; this.threadLogKept = []; this.threadEarlierLoading = false; this.threadEarlierError = ''; this.threadAnchor = null;
       this.threadLogExpanded = false;
       this.epicOverrides = new Map(); this.expandedDone = new Set(); this.substepsToggle = {}; this.clearHoverNow(null); this.highlightThread = ''; this.pendingScrollThread = '';
@@ -7907,7 +8240,7 @@ export default class PmProject extends View {
       this.closeAllAgentWindows(cx, { defer: true });
       const byPm = this.pendingByPm ||= new Map();
       if (this.pmName) byPm.set(this.pmName, this.pending);
-      this.pmName = wanted; this.events = []; this.pending = this.hydrateQueue(wanted); this.detail = false; this.thread = ''; this.threadTask = null;
+      this.pmName = wanted; this.events = []; this.logReceipts = []; this.logTurn = null; this.pending = this.hydrateQueue(wanted); this.detail = false; this.thread = ''; this.threadTask = null;
       this.pmDialog = null; this.pmSendBlockError = ''; this.pmDialogAt = 0; this.lastLogReadAt = 0; this.confirmLogProbes = new Set();
       this.logSlug = ''; this.logState = null; this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
       this.threadLog = null; this.threadLogKept = []; this.threadEarlierLoading = false; this.threadEarlierError = ''; this.threadAnchor = null;
@@ -8006,9 +8339,40 @@ export default class PmProject extends View {
     try {
     const pmTerm = this.pmTerminal();
     const pmStatus = pmLiveStatus(pmTerm, this.live());
-    const working = pmStatus === 'working';
-    const queuedCount = this.pending.filter(p => p.queued && !p.failed).length;
-    const hasUnconfirmed = this.pending.some(p => !p.failed && (p.verifying || (!p.queued && (p.deliveredAt > 0 || p.inFlight)) || (p.queued && p.swapWaitSince > 0)));
+    const activeTurn = this.activePmTurn();
+    const working = this.isPmWorking(pmTerm, this.live(), activeTurn);
+    // Live terminal edge trigger: when a remote or local PM transitions out of `working` or advances `turn`,
+    // immediately debounce an incremental `readLog` so the reply appears in ~150ms instead of waiting 10s.
+    const edgePrefix = `${this.machine}\0${this.pmName}\0${pmTerm?.address || ''}`;
+    const prevEdge = this._lastPmLiveEdge || '';
+    const nextEdge = `${edgePrefix}\0${pmStatus}\0${pmTerm?.turn || 0}`;
+    if (prevEdge && prevEdge !== nextEdge && prevEdge.startsWith(`${edgePrefix}\0`)) {
+      const [, , , prevStatus, prevTurnStr] = prevEdge.split('\0');
+      const turnAdvanced = (Number(pmTerm?.turn) || 0) > (Number(prevTurnStr) || 0);
+      const finishedWorking = prevStatus === 'working' && pmStatus !== 'working';
+      if ((turnAdvanced || finishedWorking) && !this.edgeReadTimer && cx?.timer?.after) {
+        this.edgeReadTimer = true;
+        const targetPm = this.pmName;
+        cx.timer.after(150, liveCx => {
+          this.edgeReadTimer = false;
+          if (this.pmName === targetPm) this.readLog(liveCx);
+        });
+      }
+    }
+    this._lastPmLiveEdge = nextEdge;
+    const needsTurnTick = working && onStage && Boolean(activeTurn && (Number(activeTurn.started_ms) > 0 || activeTurn.activity));
+    if (needsTurnTick && !this.turnTickTimer && cx?.timer?.after) {
+      this.turnTickTimer = true;
+      const scheduledAt = this.nowMs();
+      cx.timer.after(1000, liveCx => {
+        this.turnTickTimer = false;
+        if (this.nowMs() >= scheduledAt + 500 && this.onStage && this.isPmWorking(this.pmTerminal(), this.live(), this.activePmTurn())) {
+          liveCx.notify();
+        }
+      });
+    }
+    const queuedCount = this.pending.filter(p => p.queued && !p.failed && !p.received).length;
+    const hasUnconfirmed = this.pending.some(p => !p.failed && !p.received && (p.verifying || (!p.queued && (p.deliveredAt > 0 || p.inFlight)) || (p.queued && p.swapWaitSince > 0)));
     if (hasUnconfirmed) this.scheduleConfirmCheck(cx);
     const inRenderPhase = cx?.phase?.() === 'render' && Boolean(cx?.spawn);
     if (pmTerm && !pmCanReceive(pmStatus)) {
@@ -8030,7 +8394,7 @@ export default class PmProject extends View {
     } else if (!pmTerm && queuedCount > 0) {
       this.scheduleQueueFlush(cx);
     }
-    const typingNow = Boolean(working) || this.pending.some(p => !p.failed && !p.queued);
+    const typingNow = Boolean(working) || this.pending.some(p => !p.failed && !p.queued && !p.received);
     const tl = this.resolveTimelineData(pm, today, typingNow);
     const { items, stops, blocks, newest, keys, foldedTasks, waiting } = tl;
     this.items = items;

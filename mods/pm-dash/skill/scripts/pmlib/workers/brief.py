@@ -43,17 +43,21 @@ def report_section_for(ctx: Context, task_id: str) -> str:
     ref = Ledger(ctx).task_ref(task) if task else task_id
     return "\n\n" + ctx.config.tr(
         f"Reporting (task {ref}):\n"
+        f"- Before coding, write 3-8 verifiable sub-steps (required; trivial/single-step edits may skip or write 1-2 steps; "
+        f"silent write, does not wake the PM): `{cmd} update {task_id} --plan \"[>] current; [ ] next; [ ] verify\"`, and update as you progress.\n"
+        f"- If your plan changes mid-way, briefly note why: `{cmd} log {task_id} \"<why the plan changed>\"`\n"
         f"- When done: `{cmd} update {task_id} --status review --commit <sha> --note \"<what changed; which "
         "checks ran; what was not verified>\"`\n"
         f"- When a person has to decide something: `{cmd} update {task_id} --status blocked --note \"<the question>\"`\n"
-        f"- Sub-steps (optional, silent write, does not wake the PM): `{cmd} update {task_id} --plan \"[x] done; [>] current; [ ] next\"`\n"
         "The PM reads only this report, never your screen. Keep the note under 600 characters, and write it, "
         "like every ledger note, in the user's language: the user reads it in the thread panel.",
         f"汇报（任务 {ref}）：\n"
+        f"- 开工先写 3~8 个可检验子步骤（必须，随手小活/单步改动可豁免或写 1~2 步；静默落盘，不唤醒 PM）："
+        f"`{cmd} update {task_id} --plan \"[>] 当前步; [ ] 下一步; [ ] 验证\"`，推进时同步更新。\n"
+        f"- 中途变更计划时简记原因：`{cmd} log {task_id} \"<变更原因>\"`\n"
         f"- 做完时：`{cmd} update {task_id} --status review --commit <sha> --note \"<改了什么；跑了哪些检查；"
         "哪些没验证>\"`\n"
         f"- 需要人来决定时：`{cmd} update {task_id} --status blocked --note \"<问题>\"`\n"
-        f"- 开发子步骤（可选，静默落盘，不唤醒 PM）：`{cmd} update {task_id} --plan \"[x] 已做完; [>] 当前步; [ ] 下一步\"`\n"
         "PM 只看这条汇报，不会读你的屏幕。写在 600 字以内；这条和所有台账记录都用中文写，用户会在线程侧栏里读到。") + "\n"
 
 

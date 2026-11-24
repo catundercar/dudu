@@ -9,6 +9,7 @@ import sys
 
 from ..context import Context
 from ..errors import IdentityError, NotFound, Refused
+from ..events.deliver import Delivery
 from ..homemove import (
     HomeMover,
     _format_bytes,
@@ -35,10 +36,21 @@ from ..memory.layer import (
     MemoryRefused,
     read_memory,
 )
-from ..osutil import WINDOWS
+from ..osutil import WINDOWS, unfailing
 from ..project.project import ProjectRegistry
 from ..project.readmodel import NotFoundError, Projects
-from ..store import DOCUMENT_ROOTS, SLUG_RE, StoreError, VersionConflict, file_lock, lock_file, unlock_file, version_of
+from ..project.turn_state import TurnTracker
+from ..store import (
+    DOCUMENT_ROOTS,
+    SLUG_RE,
+    StoreError,
+    VersionConflict,
+    file_lock,
+    local_tz_offset,
+    lock_file,
+    unlock_file,
+    version_of,
+)
 from ..views import project as views_project
 
 
@@ -379,7 +391,47 @@ def cmd_project(a, ctx=None):
     ledger = Ledger(ctx)
     try:
         if a.project_cmd == "events":
-            out = projects.events(reg.resolve_project_slug(a.slug), before=a.before, after=a.after, limit=a.limit)
+            slug = reg.resolve_project_slug(a.slug)
+            out = projects.events(slug, before=a.before, after=a.after, limit=a.limit)
+            out["server_now_ms"] = int(ctx.clock.time() * 1000)
+            out["server_tz"] = local_tz_offset(ctx.clock.datetime_now())
+            if a.before is None:
+                pm_reg = ctx.store.registration(slug)
+                if pm_reg is not None:
+                    out["turn"] = TurnTracker(ctx, slug).live_snapshot(pm_reg)
+        elif a.project_cmd == "send":
+            slug = reg.resolve_project_slug(a.slug)
+            pm_reg = ctx.store.registration(slug)
+            if pm_reg is None:
+                raise NotFoundError(f"no project {a.slug}")
+            repo = str(pm_reg.get("repo") or "")
+            if repo:
+                unfailing(Delivery(ctx, repo).ensure_running)
+            pos = list(a.words or ())
+            expected_target = ""
+            if a.from_file is not None:
+                send_text = sys.stdin.read() if a.from_file == "-" else Path(a.from_file).read_text(encoding="utf-8")
+                if pos:
+                    expected_target = pos[0]
+            elif a.text is not None:
+                send_text = a.text
+                if pos:
+                    expected_target = pos[0]
+            elif len(pos) >= 2:
+                expected_target, send_text = pos[0], pos[1]
+            elif len(pos) == 1:
+                send_text = pos[0]
+            else:
+                raise ValueError("give the message text positionally or with --text / --from")
+            out = TurnTracker(ctx, slug).send_user_message(
+                msg_id=a.msg_id,
+                text=send_text,
+                question=a.question or "",
+                expected_target=expected_target,
+            )
+        elif a.project_cmd == "interrupt":
+            slug = reg.resolve_project_slug(a.slug)
+            out = TurnTracker(ctx, slug).interrupt_pm()
         elif a.project_cmd == "log":
             out = projects.thread_log(ledger.resolve_id(a.id), before=a.before, limit=a.limit)
         elif a.project_cmd == "context":
@@ -502,6 +554,15 @@ def register_project_command(sub):
     prm.add_argument("slug", help="project slug, PM name or folder")
     prm.add_argument("--topic", action="append", help="only this topic (repeat for more)")
     prm.add_argument("--apply", action="store_true", help="copy them (default: print what would be done)")
+    psend = within.add_parser("send", help="idempotently deliver a UI user message to the project's PM and log it")
+    psend.add_argument("slug", help="project slug, PM name or folder")
+    psend.add_argument("--msg-id", required=True, help="client-generated unique message id for idempotency")
+    psend.add_argument("--question", default="", help="question key this message answers, if any")
+    psend.add_argument("--text", help="message text")
+    psend.add_argument("--from", dest="from_file", help="file containing message text (- for stdin)")
+    psend.add_argument("words", nargs="*", help="[target_terminal] text")
+    pint = within.add_parser("interrupt", help="interrupt the PM terminal's current foreground step without killing it")
+    pint.add_argument("slug", help="project slug, PM name or folder")
 
 
 def register_home_command(sub):

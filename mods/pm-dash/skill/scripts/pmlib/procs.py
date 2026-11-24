@@ -172,14 +172,15 @@ def _process_table() -> tuple[dict[int, tuple[int, int, str]], dict[int, list[in
     children: dict[int, list[int]] = {}
     if osutil.WINDOWS:
         ps_cmd = (
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
             "Get-CimInstance Win32_Process | "
             "Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress"
         )
         try:
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            ).stdout or ""
         except (OSError, subprocess.TimeoutExpired):
             return rows, children
         try:
@@ -432,6 +433,10 @@ def _default_codex_dir(env_map: Mapping[str, str]) -> Path:
     return Path(env_map.get("CODEX_HOME") or Path.home() / ".codex")
 
 
+def _default_agy_dir(env_map: Mapping[str, str]) -> Path:
+    return Path(env_map.get("AGY_DATA_DIR") or Path.home() / ".gemini" / "antigravity-cli")
+
+
 def build_context(
     home_option: str | Path | None = None,
     *,
@@ -459,6 +464,7 @@ def build_context(
     c_dir = _default_claude_dir(env_map)
     c_projects = c_dir / "projects"
     c_sessions = _default_codex_dir(env_map) / "sessions"
+    a_dir = _default_agy_dir(env_map)
     h_docs = Path.home() / ".config" / "herdr-app"
     ctx = context.Context(
         home=home_obj,
@@ -477,6 +483,7 @@ def build_context(
         claude_dir=c_dir,
         claude_projects=c_projects,
         codex_sessions=c_sessions,
+        agy_dir=a_dir,
         herdr_docs=h_docs,
         after_save=tuple(after_save) if after_save is not None else (),
         seat_alive=seat_alive,
@@ -510,6 +517,7 @@ def build_context(
     if deliver_watchers is None:
         helpers_watch_mod = _load_hook_module("pmlib.helpers.watch")
         deps_watch_mod = _load_hook_module("pmlib.events.deps_watch")
+        agy_watch_mod = _load_hook_module("pmlib.events.agy_watch")
         watchers: list[Any] = []
         if helpers_watch_mod is not None:
             watchers.append(context.DeliverWatcher(
@@ -521,6 +529,11 @@ def build_context(
             watchers.append(context.DeliverWatcher(
                 name="dependencies",
                 look=lambda repo, stops, bases: deps_watch_mod.DependencyWatcher(ctx).look(repo, stops, bases),
+            ))
+        if agy_watch_mod is not None:
+            watchers.append(context.DeliverWatcher(
+                name="agy-transcript",
+                look=lambda repo, stops, bases: agy_watch_mod.AgyTranscriptWatcher(ctx).look(repo, stops, bases),
             ))
         ctx.deliver_watchers = tuple(watchers)
     if deliver_holds is None and seat_mod is not None:

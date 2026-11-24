@@ -48,6 +48,8 @@ from .rotate import (
 from .seat import (
     RETIRE_WAIT,
     SEAT_NEXT_MAX_AGE,
+    _close_win_job,
+    _create_win_kill_job,
     _hand_tty_to_child,
     _is_real_hc,
     _reclaim_tty,
@@ -773,13 +775,19 @@ class ManagerSessions:
             proc = active_proc[0]
             if proc is not None and proc.poll() is None:
                 if osutil.WINDOWS:
-                    with contextlib.suppress(OSError):
-                        proc.terminate()
+                    osutil.stop_pid_group(proc.pid)
                 else:
                     with contextlib.suppress(OSError):
                         os.killpg(proc.pid, signum)
 
-        if not osutil.WINDOWS:
+        if osutil.WINDOWS:
+            for sig_name in ("SIGTERM", "SIGBREAK"):
+                sig = getattr(signal, sig_name, None)
+                if sig is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        saved_signals[sig] = signal.getsignal(sig)
+                        signal.signal(sig, _on_stop)
+        else:
             for sig_name, handler in (("SIGINT", signal.SIG_IGN), ("SIGTTOU", signal.SIG_IGN),
                                       ("SIGTTIN", signal.SIG_IGN), ("SIGTERM", _on_stop), ("SIGHUP", _on_stop)):
                 sig = getattr(signal, sig_name, None)
@@ -788,6 +796,7 @@ class ManagerSessions:
                         saved_signals[sig] = signal.getsignal(sig)
                         signal.signal(sig, handler)
 
+        win_job = _create_win_kill_job() if osutil.WINDOWS else None
         had_tty = tty_fd is not None
         last_rc = 0
         hc_term = self.ctx.hc_terminal
@@ -808,7 +817,7 @@ class ManagerSessions:
                 base_turn = ((self.ctx.hc.get_raw(hc_term) or {}).get("turn") or 0) if hc_term else 0
                 if spec.get("rotated_in") and hc_term:
                     self.ctx.hc.label(hc_term, f"pm={Path(repo).name}", "pm.seat=1")
-                proc = _spawn_seat_child(spec["argv"], repo, successor_env(ctx=self.ctx))
+                proc = _spawn_seat_child(spec["argv"], repo, successor_env(ctx=self.ctx), win_job=win_job)
                 active_proc[0] = proc
                 _hand_tty_to_child(tty_fd, proc.pid)
                 write_seat_state(repo, {"pid": os.getpid(), "terminal": hc_term, "agent_pid": proc.pid,
@@ -849,6 +858,7 @@ class ManagerSessions:
             if tty_fd is not None:
                 with contextlib.suppress(OSError):
                     os.close(tty_fd)
+            _close_win_job(win_job)
             proj_files.seat_state.unlink(missing_ok=True)
             if stopping[0]:
                 proj_files.next_session.unlink(missing_ok=True)

@@ -245,7 +245,9 @@ class WorkerSpecAndRegistryResolutionTest(unittest.TestCase):
             settings_file = Path(cl_argv[cl_argv.index("--settings") + 1])
             self.assertTrue(settings_file.is_relative_to(ctx.home.reads))
             data = json.loads(settings_file.read_text())
-            self.assertTrue(any(f"Write(/{(base / 'out.md').resolve()})" == rule for rule in data["permissions"]["allow"]))
+            out_rule = f"Write(//{(base / 'out.md').resolve().as_posix().lstrip('/')})"
+            self.assertIn(out_rule, data["permissions"]["allow"])
+            self.assertTrue(all("\\" not in rule for rule in data["permissions"]["allow"]))
 
             # Context.from_env wires ctx.agents automatically
             env_ctx = context.Context.from_env(home_option=ctx.home.root, env={"PM_HOME": str(ctx.home.root)})
@@ -413,8 +415,8 @@ class LegacyPatchCompatAndDynamicCtxTest(unittest.TestCase):
             off_ctx = make_ctx(td, config={"memory": {"native": False}})
             self.assertEqual(off_ctx.agents.native_memory_settings("claude", mem_root, "pm"), {})
 
-            # Reviewer & helper tool restrictions
-            self.assertEqual(reg.reviewer_extra_argv("claude"), ["--disallowedTools", "Edit,Write,NotebookEdit"])
+            # Reviewer & helper tool restrictions (reviewers can edit/commit test fixes)
+            self.assertEqual(reg.reviewer_extra_argv("claude"), [])
             self.assertEqual(reg.reviewer_extra_argv("codex"), [])
             self.assertEqual(reg.helper_extra_argv("claude", exec_mode=False), ["--disallowedTools", "Edit,NotebookEdit"])
             self.assertEqual(reg.helper_extra_argv("claude", exec_mode=True), [])

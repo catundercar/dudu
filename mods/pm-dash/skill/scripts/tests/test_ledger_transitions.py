@@ -1103,7 +1103,7 @@ class TwoLayerPlanAndAutoReview(LedgerCase):
     def test_land_with_post_merge_steps_stays_active_and_completes_on_done(self):
         vfile = self.ctx.home.project_for(str(self.repo)).verify
         vfile.parent.mkdir(parents=True, exist_ok=True)
-        vfile.write_text("true\n")
+        vfile.write_text(f'"{sys.executable}" -c "pass"\n' if os.name == "nt" else "true\n")
         stalls = StallWatcher(self.ctx)
 
         # 1. Task with post-merge step stays in_progress after land

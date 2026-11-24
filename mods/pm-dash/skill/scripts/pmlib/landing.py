@@ -336,7 +336,7 @@ class Landing:
             raise self._refuse(tr(f"branch {branch} does not exist in {repo}", f"{repo} 里找不到分支 {branch}"))
         branch_head = git.run(repo, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}") or ""
         explicit_commit = req.commit or ""
-        recorded_commit = explicit_commit or task.get("auto_reviewed_commit") or task.get("commit") or ""
+        recorded_commit = explicit_commit or task.get("last_reviewed_commit") or task.get("auto_reviewed_commit") or task.get("commit") or ""
         if recorded_commit:
             resolved_rec = git.run(repo, "rev-parse", "--verify", "--quiet", f"{recorded_commit}^{{commit}}") or ""
             if resolved_rec and branch_head and not branch_matches_approved_commit_for(ctx, repo, branch, base, resolved_rec):
@@ -402,7 +402,11 @@ class Landing:
             # then update executor_pane once the terminal address is known.
             approved["helper_name"] = hname
 
+            prev_approved: list[Any] = []
+
             def _record_approve_helper(cur: dict[str, Any], ch: Change) -> None:
+                if not prev_approved and isinstance(cur.get("land_approved"), dict):
+                    prev_approved.append(copy.deepcopy(cur["land_approved"]))
                 was_blocked = cur.get("status") == "blocked" and self._caller.blocked_by_worker(cur)
                 cur["land_approved"] = dict(approved)
                 cur["status"] = "in_progress"
@@ -417,8 +421,13 @@ class Landing:
             try:
                 hterm = self._start(fields, done)
             except (SystemExit, Exception):
-                # Roll back approval if helper failed to start so ledger stays clean.
-                self._change(tid, lambda cur, _ch: cur.pop("land_approved", None))
+                # Roll back approval if helper failed to start, preserving any prior approval record.
+                def _rollback_helper(cur: dict[str, Any], _ch: Change) -> None:
+                    if prev_approved:
+                        cur["land_approved"] = copy.deepcopy(prev_approved[0])
+                    else:
+                        cur.pop("land_approved", None)
+                self._change(tid, _rollback_helper)
                 raise
             if hterm:
                 def _bind_helper_pane(cur: dict[str, Any], _ch: Change) -> None:
@@ -643,7 +652,7 @@ class Landing:
                     raise PmError(f"git commit: {why_commit}", code=1, stream="stdout")
                 check, why, out = failed
                 said = (tr(f"check failed ({why}), the merge is aborted: {check}", f"检查失败（{why}），已中止合并：{check}")
-                        + "\n" + "\n".join(out.rstrip().splitlines()[-20:]))
+                        + "\n" + "\n".join((out or "").rstrip().splitlines()[-20:]))
                 msg = tr(f"land: check failed ({why}): {check}", f"land：检查失败（{why}）：{check}")
                 self._change(tid, lambda cur, ch: ch.note_on(cur, msg))
                 raise PmError(said, code=1, stream="stdout")

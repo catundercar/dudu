@@ -22,7 +22,7 @@ from pmlib.helpers.service import HelperStartRequest, Helpers
 from pmlib.helpers.watch import HelperWatcher
 from pmlib.home import project_slug
 from pmlib.project.conversation import Conversation
-from pmlib.store import fcntl, lock_file, unlock_file
+from pmlib.store import lock_file, unlock_file
 from tests.fakes import FakeClock, FakeHc, FakeProcs, make_ctx
 
 
@@ -120,7 +120,7 @@ class HelpersServiceTest(unittest.TestCase):
         orig_send = self.hc.send
 
         def _probe_send(term: str, text: str, **kw):
-            if fcntl is not None and start_lock.exists():
+            if start_lock.exists():
                 with open(start_lock, "a+") as f:
                     try:
                         lock_file(f, shared=False)

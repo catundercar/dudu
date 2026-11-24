@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import shutil
 import subprocess
 import time
 from typing import Any, Iterable, Mapping
@@ -17,6 +18,16 @@ from . import events as events_mod
 
 
 SHELL_NAMES = frozenset({"zsh", "bash", "sh", "fish", "-zsh", "-bash", "-sh", "-fish", "pwsh", "powershell", "cmd"})
+
+
+def _exec_bin(prog: str, env: Mapping[str, str] | None = None) -> str:
+    """Resolve `.cmd`/`.bat` shims on Windows so `subprocess.run([prog, ...])` can invoke them without shell=True."""
+    if osutil.WINDOWS and not os.path.isabs(prog):
+        path = env.get("PATH") if env is not None else None
+        found = shutil.which(prog, path=path)
+        if found and found.lower().endswith((".cmd", ".bat")):
+            return found
+    return prog
 
 
 def _opt_int(val: Any) -> int | None:
@@ -234,7 +245,7 @@ class HcHost:
         try:
             cut = args.index("--") if "--" in args else len(args)
             out = subprocess.run(
-                [self.bin(), *args[:cut], "--json", *args[cut:]],
+                [_exec_bin(self.bin(), env=env), *args[:cut], "--json", *args[cut:]],
                 capture_output=True, text=True, timeout=timeout, env=env,
             )
             if out.returncode != 0:
@@ -249,7 +260,7 @@ class HcHost:
             return self._rpc_runner(method, params)
         try:
             out = subprocess.run(
-                [self.bin(), "connect"],
+                [_exec_bin(self.bin()), "connect"],
                 capture_output=True, text=True, timeout=20,
                 input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n",
             )
@@ -608,7 +619,7 @@ def hc(*args, errors=False, env=None, timeout=60):
     try:
         # --json goes before a "--": what follows that belongs to the program being started.
         cut = args.index("--") if "--" in args else len(args)
-        out = subprocess.run([hc_bin(), *args[:cut], "--json", *args[cut:]], capture_output=True, text=True,
+        out = subprocess.run([_exec_bin(hc_bin(), env=env), *args[:cut], "--json", *args[cut:]], capture_output=True, text=True,
                              timeout=timeout, env=env)
         if out.returncode != 0:
             return json.loads(out.stderr or "null") if errors else None
@@ -623,7 +634,7 @@ _DEFAULT_HC = hc
 def hc_rpc(method, params):
     """One call of herdr-core's protocol (`hc connect`, JSON-RPC over stdin and stdout): the reply, or None."""
     try:
-        out = subprocess.run([hc_bin(), "connect"], capture_output=True, text=True, timeout=20,
+        out = subprocess.run([_exec_bin(hc_bin()), "connect"], capture_output=True, text=True, timeout=20,
                              input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n")
     except (OSError, subprocess.TimeoutExpired):
         return None

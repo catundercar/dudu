@@ -157,7 +157,7 @@ class ConfigClockOutputProcessesTest(unittest.TestCase):
             self.assertIsInstance(ctx.config, config.Config)
             self.assertIsInstance(ctx.procs, procs.Processes)
             self.assertNotIn("CLAUDECODE", ctx.procs.clean_session_env())
-            self.assertIn(str(root), ctx.procs.pm_command())
+            self.assertIn(osutil.shell_quote(root), ctx.procs.pm_command())
 
             ctx.store.change_task("demo-t1", lambda _c: {"id": "demo-t1", "status": "proposed"})
             self.assertEqual(ctx.store.task("demo-t1")["status"], "proposed")
@@ -353,7 +353,7 @@ class FakesAndIsolationTest(unittest.TestCase):
 
     def test_procs_and_fake_procs_read_osutil_windows_dynamically(self):
         root = Path("/Users/Jo Doe/ledger")
-        launcher_path = Path("/Users/Jo Doe/pm.py")
+        launcher_path = Path("/Users/Jo Doe/pm.py").resolve() if os.name == "nt" else Path("/Users/Jo Doe/pm.py")
         h = home.Home(root)
         real_procs = procs.Processes(h, env={"PM_HOME": str(root)}, launcher_path=launcher_path)
         fake_procs = FakeProcs(h, env={"PM_HOME": str(root)}, launcher_path=launcher_path)
@@ -362,7 +362,9 @@ class FakesAndIsolationTest(unittest.TestCase):
                 mock.patch.object(osutil.shutil, "which", return_value=r"C:\Windows\py.exe"), \
                 mock.patch.object(home, "current", return_value=h), \
                 mock.patch.object(procs, "launcher", return_value=launcher_path):
-            want = 'py -3 "/Users/Jo Doe/pm.py" --home "/Users/Jo Doe/ledger"'
+            q_script = osutil.shell_quote(launcher_path.resolve())
+            q_root = osutil.shell_quote(root)
+            want = f"py -3 {q_script} --home {q_root}"
             self.assertEqual(real_procs.pm_command(), want)
             self.assertEqual(fake_procs.pm_command(), want)
             with mock.patch.dict(os.environ, {"PM_HOME": str(root)}):
@@ -370,14 +372,14 @@ class FakesAndIsolationTest(unittest.TestCase):
 
             no_home_real = procs.Processes(h, env={}, launcher_path=launcher_path)
             no_home_fake = FakeProcs(h, env={}, launcher_path=launcher_path)
-            self.assertEqual(no_home_real.pm_command(), 'py -3 "/Users/Jo Doe/pm.py"')
-            self.assertEqual(no_home_fake.pm_command(), 'py -3 "/Users/Jo Doe/pm.py"')
+            self.assertEqual(no_home_real.pm_command(), f"py -3 {q_script}")
+            self.assertEqual(no_home_fake.pm_command(), f"py -3 {q_script}")
             with mock.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("PM_HOME", None)
-                self.assertEqual(procs.pm_command(), 'py -3 "/Users/Jo Doe/pm.py"')
+                self.assertEqual(procs.pm_command(), f"py -3 {q_script}")
 
         with mock.patch.object(osutil, "WINDOWS", False):
-            posix_want = "PM_HOME='/Users/Jo Doe/ledger' python3 '/Users/Jo Doe/pm.py'"
+            posix_want = f"PM_HOME={osutil.shell_quote(str(root))} python3 {osutil.shell_quote(str(launcher_path.resolve()))}"
             self.assertEqual(real_procs.pm_command(), posix_want)
             self.assertEqual(fake_procs.pm_command(), posix_want)
 
@@ -514,22 +516,23 @@ class FakesAndIsolationTest(unittest.TestCase):
             self.assertIsNone(fp.spawn_pm(["deliver", td]))
 
             lock_file = Path(td) / "wt" / ".git" / "index.lock"
+            repo_key = str(Path("/repo").resolve())
             git = StubGit(
-                roots={"/repo": "/repo"},
-                git_results={("/repo", "rev-parse", "HEAD"): "abc123"},
-                checkouts={("/repo", "dev/x"): "/wt/x"},
+                roots={repo_key: repo_key},
+                git_results={(repo_key, "rev-parse", "HEAD"): "abc123"},
+                checkouts={(repo_key, "dev/x"): "/wt/x"},
                 owned_worktrees=["/wt/x"],
                 worktree_base=Path(td) / "worktrees",
                 index_locks={"/wt/x": lock_file},
                 undo_ok=True,
             )
-            self.assertEqual(git.git("/repo", "rev-parse", "HEAD"), "abc123")
-            self.assertEqual(git.main_root("/repo"), "/repo")
+            self.assertEqual(git.git(repo_key, "rev-parse", "HEAD"), "abc123")
+            self.assertEqual(git.main_root(repo_key), repo_key)
             self.assertTrue(git.is_owned_worktree("/wt/x"))
             self.assertFalse(git.is_owned_worktree("/elsewhere"))
-            self.assertEqual(git.checkout_of("/repo", "dev/x"), "/wt/x")
+            self.assertEqual(git.checkout_of(repo_key, "dev/x"), "/wt/x")
             self.assertEqual(git.index_lock("/wt/x"), lock_file)
-            self.assertTrue(git.undo_merge("/repo"))
+            self.assertTrue(git.undo_merge(repo_key))
 
     def test_from_env_is_import_order_independent(self):
         with tempfile.TemporaryDirectory() as td:
