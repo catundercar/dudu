@@ -227,7 +227,7 @@ h1 { font-size: clamp(36px, 6vw, 58px); line-height: 1.05; letter-spacing: -.04e
 /* figures */
 figure { margin: 0; }
 .shot { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow); background: #0d0d0f; }
-.shot img { width: 100%; }
+.shot img, .shot video { display: block; width: 100%; height: auto; }
 figcaption { margin-top: 12px; font-size: 13.5px; color: var(--ink3); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 figcaption strong { color: var(--ink2); font-weight: 550; }
 
@@ -330,17 +330,17 @@ footer .brand-mark svg { width: 16px; height: 16px; }
     </div>
 
     <figure class="tab-panel active" data-panel="threads">
-      <div class="shot"><img src="threads-lifecycle.gif" width="1120" height="718" alt="Threads lifecycle: question card #2, waiting dependency #3 on hover, clicking Casual/friendly, live worker steps popover, and verified merge commit cd89387"></div>
-      <figcaption><span><strong>Threads:</strong> asks before editing, tracks waiting dependencies, shows live worker steps on hover, and merges after checks pass.</span><span>Real UI · toy demo repo</span></figcaption>
+      <div class="shot"><video src="threads-lifecycle.mp4" poster="threads-lifecycle.png" width="2560" height="1640" autoplay loop muted playsinline preload="auto" aria-label="Threads lifecycle: parallel Working tasks, In review cross-model reviewers, Waiting on you question card, Paused, Not started dependencies, and Finished merges"></video></div>
+      <figcaption><span><strong>Threads:</strong> parallel workers, cross-model reviews, waiting questions, paused &amp; queued dependencies, and verified merges.</span><span>Invented demo data</span></figcaption>
     </figure>
 
     <figure class="tab-panel" data-panel="quote">
-      <div class="shot"><img src="quote-and-at.gif" width="1120" height="718" loading="lazy" alt="Composer Quote and @ mentions: clicking Quote on a message to snap a chip into the composer, then typing @ to attach a thread and a library spec"></div>
+      <div class="shot"><video src="quote-and-at.mp4" width="1920" height="1230" autoplay loop muted playsinline preload="metadata" aria-label="Composer Quote and @ mentions: clicking Quote on a message to snap a chip into the composer, then typing @ to attach a thread and a library spec"></video></div>
       <figcaption><span><strong>Quote &amp; @ mentions:</strong> click Quote on any message or type <code>@</code> to attach threads, library docs, or files as inline chips.</span><span>Real UI · toy demo repo</span></figcaption>
     </figure>
 
     <figure class="tab-panel" data-panel="libmem">
-      <div class="shot"><img src="library-memory.gif" width="1120" height="718" loading="lazy" alt="Library and Memory side panel: opening greeting-spec.md in Library, then switching to Memory to inspect a decision verified in the log"></div>
+      <div class="shot"><video src="library-memory.mp4" width="1920" height="1230" autoplay loop muted playsinline preload="metadata" aria-label="Library and Memory side panel: opening greeting-spec.md in Library, then switching to Memory to inspect a decision verified in the log"></video></div>
       <figcaption><span><strong>Library &amp; Memory:</strong> read markdown specs right beside the chat and inspect project decisions verified against the log.</span><span>Real UI · toy demo repo</span></figcaption>
     </figure>
 
@@ -474,7 +474,15 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const id = btn.dataset.tab;
     document.querySelectorAll(".tab-btn").forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
-    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.panel === id));
+    document.querySelectorAll(".tab-panel").forEach((p) => {
+      const active = p.dataset.panel === id;
+      p.classList.toggle("active", active);
+      const vid = p.querySelector("video");
+      if (vid) {
+        if (active) { vid.currentTime = 0; vid.play().catch(() => {}); }
+        else { vid.pause(); }
+      }
+    });
   });
 });
 </script>
