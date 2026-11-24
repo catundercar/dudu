@@ -215,11 +215,34 @@
         },
         {
           "id": "pm-project",
-          "type": "block",
-          "window_drag": true,
-          "content": {
-            "mod": "pm-project"
-          }
+          "type": "column",
+          "resizable": false,
+          "children": [
+            {
+              "id": "pm-project-header",
+              "type": "block",
+              "size": {
+                "px": 56
+              },
+              "window_drag": true,
+              "content": {
+                "mod": "pm-project",
+                "props": {
+                  "header": true
+                }
+              }
+            },
+            {
+              "id": "pm-project-body",
+              "type": "block",
+              "content": {
+                "mod": "pm-project",
+                "props": {
+                  "body": true
+                }
+              }
+            }
+          ]
         }
       ]
     }

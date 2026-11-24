@@ -65,3 +65,24 @@ test("a remote project's conversation is come back to with its machine; gone fro
   // Its board (pm-dash scoped to the merged name) the same way.
   assert.deepEqual(roundTrip('pm-board', {}, { project: 'box/pm-dudu' }, pms), { child: 'pm-board', pm: 'box/pm-dudu' });
 });
+
+test('summary prefers pm.py counts and falls back per-machine for older remote pm.py', () => {
+  const local = {
+    pms: [{ name: 'pm-a', counts: { working: 2, waiting: 1 } }],
+    tasks: [{ id: 'orphan', pm: '', status: 'in_progress' }, { id: 'orphan-b', pm: '', status: 'blocked' }],
+    counts: { projects: 1, working: 2, waiting: 1, unclaimed_blocked: 1 },
+  };
+  const remoteOld = {
+    pms: [{ name: 'pm-b' }, { name: 'pm-old', archived: '2026-11-01' }],
+    tasks: [
+      { id: '1', pm: 'pm-b', status: 'in_progress', offline: false },
+      { id: '2', pm: 'pm-b', status: 'in_progress', offline: true },
+      { id: '3', pm: 'pm-b', status: 'review' },
+      { id: '3-r', pm: 'pm-b', status: 'blocked', review_of: '3' },
+      { id: '4', pm: 'pm-old', status: 'in_progress' },
+      { id: '5', pm: '', status: 'in_progress' },
+      { id: '6', pm: '', status: 'blocked' },
+    ],
+  };
+  assert.deepEqual(summary(local, { dev: remoteOld }), { projects: 2, active: 3, blocked: 2 });
+});

@@ -6,7 +6,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, focusPlan, pmId, taskId, counts, eventText, word, taskStatusText, pmColor, wireFlows, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText, scopeState, projectCards, projectCounts, countChips, pageTotals, startArgv, folderName, ledgerOpen, lastPmLine, boardGroups, endedList, endedDays, endedTime, previousDay } from './model.js';
+import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, tooltipLayout, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, focusPlan, pmId, taskId, counts, eventText, word, label, taskSteps, taskDependencies, taskNumber, formatTaskNumber, DROPPED, disconnected, isClosedTask, taskStatusText, pmColor, wireFlows, reviewWorking, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText, scopeState, projectCards, projectCounts, countChips, pageTotals, unclaimedBlocked, startArgv, folderName, ledgerOpen, lastPmLine, boardGroups, endedList, endedDays, endedTime, previousDay } from './model.js';
+import { renderStepsCard, renderDepsCard } from './steps.js';
 
 const setupSummary = (installed = [], ready = [], outdated = []) =>
   ({ summary: { detected: installed, installed, ready, outdated } });
@@ -188,6 +189,11 @@ test('the fallback ledger home follows PM_HOME, then an earlier ~/.claude/pm, th
     mkdirSync(join(dir, '.claude/pm'), { recursive: true });
     assert.equal(home(), `${dir}/.claude/pm`);
     assert.equal(home({ PM_HOME: '/elsewhere' }), '/elsewhere');
+    // Migrated install: ~/.claude/pm symlinks to ~/.dudu -> ~/.dudu is canonical.
+    rmSync(join(dir, '.claude/pm'), { recursive: true, force: true });
+    mkdirSync(join(dir, '.dudu'), { recursive: true });
+    execFileSync('ln', ['-s', `${dir}/.dudu`, `${dir}/.claude/pm`]);
+    assert.equal(home(), `${dir}/.dudu`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -246,18 +252,26 @@ test('task log cleanup removes only a leading machine prefix and retains commit 
   assert.equal(word('en', 'openTerminal'), 'Click to open its terminal');
 });
 
-test('hover card aligns to its task column and flips at the stage or viewport edge', () => {
-  const row = { x: 490, y: 100, w: 600, h: 32 };
-  const original = { ...row };
-  assert.deepEqual(hoverCardPosition(row, 600, { top: 0, bottom: 600 }, 160),
-    { x: 490, y: 138, w: 520, h: 160, side: 'below' });
-  // Exactly enough room below is still below; the stage may end before the viewport.
-  assert.equal(hoverCardPosition(row, 298, { top: 0, bottom: 900 }, 160).side, 'below');
-  assert.deepEqual(hoverCardPosition({ ...row, y: 400 }, 550, { top: 0, bottom: 900 }, 160),
-    { x: 490, y: 234, w: 520, h: 160, side: 'above' });
+test('hover card floats beside the task column so adjacent rows stay uncovered', () => {
+  const rows = [0, 1, 2, 3].map(i => ({ id: `task:t${i}`, x: 460, y: 100 + i * 36, w: 600, h: 32 }));
+  const row = rows[1], original = { ...row };
+  const card = hoverCardPosition(row, 600, { top: 0, bottom: 600 }, 160, 1, { columnX: 460, stageWidth: 1060, rows });
+  assert.deepEqual(card, { x: 54, y: 136, w: 400, h: 160, side: 'left' });
+  // Zero overlap with every row in the task column, including the rows directly above and below.
+  for (const r of rows) assert.ok(card.x + card.w <= r.x - 6, `${card.x + card.w} overlaps ${r.id}`);
+  // Near the bottom of the stage or viewport, y clamps upward while staying beside the row.
+  assert.deepEqual(hoverCardPosition({ ...row, y: 450 }, 550, { top: 0, bottom: 900 }, 160),
+    { x: 54, y: 390, w: 400, h: 160, side: 'left' });
   assert.deepEqual(hoverCardPosition({ ...row, y: 500 }, 1000, { top: 100, bottom: 600 }, 160),
-    { x: 490, y: 334, w: 520, h: 160, side: 'above' });
-  assert.equal(hoverCardPosition({ ...row, w: 204 }, 600, { top: 0, bottom: 600 }, 160).w, 204);
+    { x: 54, y: 440, w: 400, h: 160, side: 'left' });
+  // An indented opened-ended entry clears the whole task column and its guide line.
+  const entry = hoverCardPosition({ x: 486, y: 220, w: 574, h: 26 }, 600, { top: 0, bottom: 600 }, 120, 1, { columnX: 460 });
+  assert.equal(entry.x + entry.w, 454);
+  // A 1-task board whose stage is shorter than one card uses the scroll viewport instead of truncating.
+  assert.equal(hoverCardPosition({ x: 354, y: 50, w: 570, h: 32 }, 122, { top: 0, bottom: 600 }, 154).h, 154);
+  // When the left side is too narrow, a wide right margin fits on the right before touching vertical neighbors.
+  assert.deepEqual(hoverCardPosition({ x: 80, y: 100, w: 240, h: 32 }, 600, { top: 0, bottom: 600 }, 140, 1, { stageWidth: 680 }),
+    { x: 326, y: 100, w: 354, h: 140, side: 'right' });
   assert.deepEqual(row, original);
 });
 
@@ -266,33 +280,172 @@ test('hover card scaling preserves its gap and scrolling translates both visibil
   for (const scale of [.6, .8, 1]) {
     const row = { x: 490, y: 100 * scale, w: 600, h: 32 * scale };
     const card = hoverCardPosition(row, 800 * scale, { top: 0, bottom: 800 * scale }, 160 * scale, scale);
-    close(card.y - row.y - row.h, 6 * scale);
-    close(card.w, 520 * scale);
+    close(row.x - (card.x + card.w), 6 * scale);
+    close(card.w, 400 * scale);
     close(card.h, 160 * scale);
-    assert.equal(card.x, row.x);
-    assert.equal(card.side, 'below');
+    close(card.y, row.y);
+    assert.equal(card.side, 'left');
   }
   const row = { x: 490, y: 400, w: 600, h: 32 };
-  for (const [stageY, side] of [[200, 'above'], [-100, 'below']]) {
+  for (const [stageY, expectedY] of [[200, 360], [-100, 400]]) {
     const viewport = { top: 100 - stageY, bottom: 700 - stageY };
     const card = hoverCardPosition(row, 1000, viewport, 140);
-    assert.equal(card.side, side);
+    assert.equal(card.side, 'left');
     assert.ok(stageY + card.y >= 100 && stageY + card.y + card.h <= 700);
-    close(stageY + card.y, side === 'above' ? stageY + row.y - 6 - card.h : stageY + row.y + row.h + 6);
+    close(card.y, expectedY);
   }
   assert.equal(hoverCardPosition(row, 1000, { top: 432, bottom: 800 }, 140), null);
   assert.equal(hoverCardPosition(row, 1000, { top: 0, bottom: 400 }, 140), null);
 });
 
-test('when neither side fits, hover cards stay in the larger space without covering their task', () => {
+test('vertical fallback avoids neighbor rows and refuses to draw sliver cards below minHeight', () => {
+  // Too narrow on both left and right: falls back above/below, choosing the unobstructed side first.
+  const topRow = { id: 'task:a', x: 80, y: 140, w: 300, h: 32 };
+  const bottomRow = { id: 'task:b', x: 80, y: 176, w: 300, h: 32 };
+  const rows = [topRow, bottomRow];
+  const above = hoverCardPosition(topRow, 500, { top: 0, bottom: 500 }, 100, 1, { stageWidth: 420, rows, minHeight: 70 });
+  assert.deepEqual(above, { x: 80, y: 34, w: 300, h: 100, side: 'above' });
+  const below = hoverCardPosition(bottomRow, 500, { top: 0, bottom: 500 }, 100, 1, { stageWidth: 420, rows, minHeight: 70 });
+  assert.deepEqual(below, { x: 80, y: 214, w: 300, h: 100, side: 'below' });
+  // When neither side fits in a tiny viewport, constrain to the larger side without covering its own row.
   for (const [y, side, expectedY, height] of [[60, 'below', 86, 74], [90, 'above', 0, 84]]) {
-    const row = { x: 350, y, w: 210, h: 20 };
-    const card = hoverCardPosition(row, 160, { top: 0, bottom: 160 }, 180);
-    assert.deepEqual(card, { x: 350, y: expectedY, w: 210, h: height, side });
+    const row = { x: 80, y, w: 210, h: 20 };
+    const card = hoverCardPosition(row, 160, { top: 0, bottom: 160 }, 180, 1, { stageWidth: 300 });
+    assert.deepEqual(card, { x: 80, y: expectedY, w: 210, h: height, side });
     assert.ok(card.y >= 0 && card.y + card.h <= 160);
     assert.ok(side === 'above' ? card.y + card.h + 6 <= row.y : card.y >= row.y + row.h + 6);
   }
+  // Never return a 0-height or empty sliver card when available space is smaller than minHeight.
+  assert.equal(hoverCardPosition({ x: 80, y: 60, w: 210, h: 20 }, 160, { top: 0, bottom: 160 }, 180, 1,
+    { stageWidth: 300, minHeight: 80 }), null);
+  assert.equal(hoverCardPosition({ x: 490, y: 0, w: 210, h: 32 }, 40, { top: 0, bottom: 40 }, 180, 1,
+    { minHeight: 80 }), null);
   assert.equal(hoverCardPosition({ x: 0, y: 0, w: 210, h: 32 }, 32, { top: 0, bottom: 32 }, 180), null);
+});
+
+test('taskInfoCard withholds Popup until offscreen probe measures, resists zoom=0.9 shrink, and clears on leave', () => {
+  const makeEl = (tag, extra = {}) => {
+    const node = { tag, props: { ...extra }, children: [], handlers: {} };
+    const chain = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === '__node') return node;
+        if (prop === 'child') return c => { node.children.push(c?.__node || c); return chain; };
+        if (prop === 'children') return cs => { for (const c of cs) node.children.push(c?.__node || c); return chain; };
+        if (prop === 'content') return c => { node.content = c?.__node || c; return chain; };
+        if (prop === 'when') return (cond, fn) => cond ? fn(chain) : chain;
+        if (prop.startsWith('on_')) return fn => { node.handlers[prop] = fn; return chain; };
+        return (...args) => { node.props[prop] = args.length <= 1 ? args[0] : args; return chain; };
+      },
+    });
+    return chain;
+  };
+  const findById = (n, prefix) => {
+    if (!n || typeof n !== 'object') return null;
+    if (String(n.props?.id || '').startsWith(prefix)) return n;
+    for (const c of [...(n.children || []), ...(n.content ? [n.content] : [])]) {
+      const hit = findById(c, prefix);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const collectHandlers = (n, name, out = []) => {
+    if (!n || typeof n !== 'object') return out;
+    if (n.handlers?.[name]) out.push(n.handlers[name]);
+    for (const c of [...(n.children || []), ...(n.content ? [n.content] : [])]) collectHandlers(c, name, out);
+    return out;
+  };
+  const view = modWithIO('./main.js', {
+    div: () => makeEl('div'), v_flex: () => makeEl('v_flex'), h_flex: () => makeEl('h_flex'),
+    svg: () => makeEl('svg'), PathBuilder: { stroke: () => ({ move_to: () => ({ cubic_bezier_to() {}, build: () => ({}) }) }) },
+    Scrollbar: { new: () => makeEl('scrollbar') },
+    Popup: { new: (id, trigger) => makeEl('Popup', { id, trigger: trigger?.__node || trigger }) },
+    theme: () => ({ canvas: '#111113', background: '#111113', surface: '#1b1b1f', raised: '#27272d',
+      foreground: '#f2f2f5', muted: '#a0a0aa', dim: '#6b6b76', border: '#2e2e36',
+      accent: '#4da3ff', blocked: '#ff6b6b', ansi1: '#ff6b6b', ansi2: '#4cd964',
+      ansi3: '#ffcc00', ansi4: '#4da3ff', ansi5: '#bf5af2', ansi6: '#5ac8fa' }),
+    home: () => '/h', appHome: () => '/a', exec: async () => ({ code: 0, stdout: '' }),
+    readTextFile: async () => '', watchFolder: async () => {}, terminals: () => [], agents: () => [], panes: () => [],
+    run: () => {}, props: () => ({}), closeOverlay: () => {}, openOverlay: () => {}, desktopLayout: () => ({}),
+    setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents,
+    pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts,
+    wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, taskSteps, taskDependencies, taskNumber, formatTaskNumber, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand,
+    pmStatusText, scopeState, archiveThreads: () => [], disconnected, escapeTarget: () => null, DROPPED, endedTime,
+    page: () => ({ view: 'board', project: 'pm-dudu' }), pageView: () => makeEl('page'),
+    pageHeader: () => makeEl('header'), projectHeader: () => makeEl('header'), keepPress: (_v, el) => el,
+    dialogView: () => makeEl('dialog'), initDialog: () => {}, restoreProject: () => {}, readLines: async () => ({}),
+    archivePopup: () => ({}), NEW_DIALOG: {}, openProject: () => {}, showPage: () => {},
+    FlowLayer: class {}, boardVisible: () => true, renderStepsCard, renderDepsCard,
+  });
+  let notifications = 0;
+  const cx = { notify() { notifications++; }, timer: { after() { return { cancel() {} }; }, every() {} } };
+  view.state = {
+    lang: 'zh', project: 'pm-dudu',
+    pms: [{ name: 'pm-dudu', project: 'dudu' }],
+    tasks: [
+      { id: 't1', pm: 'pm-dudu', title: '任务一', status: 'in_progress', latest: '第一行日志\n第二行日志', updated: '2026-11-21 22:00' },
+      { id: 't2', pm: 'pm-dudu', title: '任务二', status: 'in_progress', latest: '相邻行', updated: '2026-11-21 22:01' },
+    ],
+    events: [],
+  };
+  view.size = { width: 1651, height: 921 };
+  view.shown = {}; view.shownStatus = {}; view.shownLive = {}; view.statuses = {}; view.tags = {}; view.nudges = {};
+  view.queue = []; view.endedOpen = new Set(); view.showDropped = new Set(); view.hoverEnded = null; view.hoverPm = null;
+  view.flowLayer = { set_props() {} };
+  globalThis.window = { paint_path: () => makeEl('path') };
+  try {
+    const g = view.geometry();
+    const zoom = 0.9;
+    // Simulate Herdr zoom=0.9: bounds are 0.9x stage kit units.
+    view.boardBounds = { x: 248, y: 56, width: view.size.width * zoom, height: view.size.height * zoom };
+    view.stageBounds = { x: 280, y: 210, width: g.width * zoom, height: g.height * zoom };
+    view.hoverTask = 't1';
+
+    // Frame 1 (unmeasured): must NOT mount Popup; mounts only hidden zero-size probe.
+    const first = view.board(cx).__node;
+    assert.equal(findById(first, 'task-info-popup:'), null);
+    const probe = findById(first, 'task-log-probe:');
+    assert.ok(probe, 'offscreen text probe is mounted on frame 1');
+    const innerWidth = probe.props.w;
+    // Report zoomed 2-line height (0.9x), just as GPUI on_size_change does when zoom=0.9.
+    const lineHeight = Math.max(15, 19 * g.scale);
+    probe.handlers.on_size_change({ width: innerWidth * zoom, height: lineHeight * 2 * zoom }, cx);
+    assert.equal(notifications, 1);
+
+    // Frame 2 (measured): Popup renders beside the row, with positioning on outer anchor (not on Popup) and ZERO on_size_change on the card.
+    const second = view.board(cx).__node;
+    const popup = findById(second, 'task-info-popup:task:t1');
+    const anchor = findById(second, 'task-info-anchor:task:t1');
+    assert.ok(popup, 'Popup is mounted once measured');
+    assert.ok(anchor, 'outer anchor wrapper div is mounted');
+    assert.equal(popup.props.absolute, undefined, 'Popup must not have .absolute() chained');
+    assert.equal(popup.props.left, undefined, 'Popup must not have .left() chained');
+    assert.equal(popup.props.top, undefined, 'Popup must not have .top() chained');
+    assert.equal(collectHandlers(popup, 'on_size_change').length, 0);
+    const initialMaxH = popup.content.props.max_h;
+    assert.ok(initialMaxH > lineHeight * 2, `card height ${initialMaxH} holds header, metadata and 2 log lines`);
+    assert.ok(anchor.props.left + anchor.props.w <= g.taskX - 6 * g.scale + 1e-6, 'card floats to the left of the task column');
+
+    // Frame 3: re-rendering keeps the exact same height without shrinking.
+    const third = view.board(cx).__node;
+    assert.equal(findById(third, 'task-info-popup:task:t1').content.props.max_h, initialMaxH);
+
+    // Moving pointer into the gap between t1 and t2 on stage immediately clears hoverTask.
+    const stageNode = findById(third, 'board-stage');
+    const t1Row = g.rows.find(r => r.task === 't1');
+    stageNode.handlers.on_mouse_move({
+      bounds: view.stageBounds,
+      position: { x: view.stageBounds.x + (t1Row.x + 20) * zoom, y: view.stageBounds.y + (t1Row.y + t1Row.h + 2) * zoom },
+    }, cx);
+    assert.equal(view.hoverTask, null);
+
+    // Leaving the root/stage clears hoverTask and hoverEnded immediately.
+    view.hoverTask = 't1'; view.hoverEnded = 'pm-dudu';
+    second.handlers.on_hover(false, cx);
+    assert.equal(view.hoverTask, null);
+    assert.equal(view.hoverEnded, null);
+  } finally {
+    delete globalThis.window;
+  }
 });
 
 test('cleanup survives local and remote rows without affecting counts or conclusions', () => {
@@ -541,7 +694,7 @@ test('bundles follow urgency, keep ledger order within each, per PM and machine,
   for (const pm of g.rows.filter(r => r.type === 'pm' && r.sourceName === 'a')) {
     assert.deepEqual(g.rows.filter(r => r.type === 'task' && r.pm === pm.name).map(r => r.sourceId), ['3', '1', '5', '2', '6', '4', '0']);
     assert.deepEqual(g.rows.filter(r => r.type === 'label' && r.pm === pm.name).map(r => r.status),
-      ['blocked', 'review', 'in_progress', 'proposed', 'paused']);
+      ['blocked', 'in_progress', 'proposed', 'paused']);
     assert.equal(g.rows.find(r => r.id === `ended:${pm.name}`).count, 1); // the merged one
   }
   assert.equal(g.rows.filter(r => r.type === 'ended').length, 3);
@@ -873,21 +1026,55 @@ test('what waits on the entry is the sum of the listed projects\' badges', () =>
   assert.equal(summary(state, { dev: { pms: [{ name: 'pm-x', counts: { waiting: 2 } }], tasks: [] } }).blocked, 6);
 });
 
-test('dashboard counts blocked work as waiting and running workers without counting idle or closed work', () => {
+test('dashboard counts use unified pm.py rules: claimed waiting, in-progress not offline, and separate unclaimed blocked', () => {
   const result = counts({lang:'zh',pms:[{name:'pm-a',project:'Alpha'}],tasks:[
     {pm:'pm-a',status:'review',worker:'working'}, {pm:'pm-a',status:'blocked'},
-    {pm:'pm-a',status:'in_progress',worker:'working'}, {status:'in_progress',worker:'idle'},
-    {status:'merged',worker:'working'}, {status:'paused',worker:'working'}
+    {pm:'pm-a',status:'in_progress',worker:'idle'}, {pm:'pm-a',status:'in_progress',offline:true},
+    {status:'in_progress',worker:'working'}, {status:'blocked',title:'孤儿阻塞'},
+    {pm:'pm-a',status:'merged',worker:'working'}, {pm:'pm-a',status:'paused',worker:'working'}
   ]});
-  assert.deepEqual(result, {running:1,review:1,blocked:1,waiting:1,conclusion:'Alpha 有 1 件事等你。'});
+  assert.deepEqual(result, {running:1,review:1,blocked:1,waiting:1,unclaimed:1,conclusion:'Alpha 有 1 件事等你。'});
   // Review is the PM's job: a review task alone waits for nobody.
   assert.deepEqual(counts({lang:'zh',pms:[{name:'pm-a',project:'Alpha'}],tasks:[{pm:'pm-a',status:'review'}]}),
-    {running:0,review:1,blocked:0,waiting:0,conclusion:'现在没有等你的事。'});
-  assert.deepEqual(counts({lang:'zh',pms:[],tasks:[]}), {running:0,review:0,blocked:0,waiting:0,conclusion:'现在没有等你的事。'});
+    {running:0,review:1,blocked:0,waiting:0,unclaimed:0,conclusion:'现在没有等你的事。'});
+  assert.deepEqual(counts({lang:'zh',pms:[],tasks:[]}), {running:0,review:0,blocked:0,waiting:0,unclaimed:0,conclusion:'现在没有等你的事。'});
   // A blocked task the user has answered (pm.py's `answered`) waits for the PM: not counted, as on the bell.
   assert.deepEqual(counts({lang:'zh',pms:[{name:'pm-a',project:'Alpha'}],tasks:[{pm:'pm-a',status:'blocked',answered:true}]}),
-    {running:0,review:0,blocked:1,waiting:0,conclusion:'现在没有等你的事。'});
+    {running:0,review:0,blocked:0,waiting:0,unclaimed:0,conclusion:'现在没有等你的事。'});
   assert.equal(projectCounts({ name: 'pm-a' }, [{ pm: 'pm-a', status: 'blocked', answered: true }, { pm: 'pm-a', status: 'blocked' }]).waiting, 1);
+  // Prefers pm.py's top-level `state.counts` when present, and merges local new + remote old states consistently.
+  const localNew = {
+    lang: 'zh',
+    pms: [{ name: 'pm-a', project: 'Alpha', counts: { working: 2, waiting: 1, review: 1, proposed: 0, merged_today: 0 } }],
+    tasks: [{ id: 'u1', pm: '', title: '无主任务', status: 'blocked' }],
+    events: [],
+    counts: { projects: 1, working: 2, waiting: 1, review: 1, proposed: 0, merged_today: 0, unclaimed_blocked: 1 },
+  };
+  const remoteOld = {
+    pms: [{ name: 'pm-b', project: 'Beta' }, { name: 'pm-z', project: 'Old', archived: '2026-11-01' }],
+    tasks: [
+      { id: 'b1', pm: 'pm-b', status: 'in_progress', offline: false },
+      { id: 'b2', pm: 'pm-b', status: 'in_progress', offline: true },
+      { id: 'b3', pm: 'pm-b', status: 'blocked' },
+      { id: 'z1', pm: 'pm-z', status: 'blocked' },
+      { id: 'u2', pm: '', title: '远端无主', status: 'blocked' },
+    ],
+    events: [],
+  };
+  const merged = mergeStates(localNew, { dev: remoteOld });
+  assert.deepEqual(merged.counts, { projects: 2, working: 3, waiting: 2, review: 1, proposed: 0, merged_today: 0, unclaimed_blocked: 2 });
+  const boardCounts = counts(merged);
+  const navCounts = summary(localNew, { dev: remoteOld });
+  const { active } = projectCards(merged);
+  const overview = pageTotals(active, merged);
+  // Every overview surface agrees on waiting (2), working (3), and unclaimed blocked (2).
+  assert.deepEqual([boardCounts.running, navCounts.active, overview.working], [3, 3, 3]);
+  assert.deepEqual([boardCounts.waiting, navCounts.blocked, overview.waiting], [2, 2, 2]);
+  assert.deepEqual([boardCounts.unclaimed, overview.unclaimed, unclaimedBlocked(merged).count], [2, 2, 2]);
+  assert.deepEqual(unclaimedBlocked(merged).tasks.map(t => t.title), ['无主任务', '远端无主']);
+  // Single-project board scopes counts to that project with unclaimed = 0.
+  const scoped = scopeState(merged, 'pm-a');
+  assert.deepEqual([counts(scoped).running, counts(scoped).waiting, counts(scoped).unclaimed], [2, 1, 0]);
   // Its row on the board says so, quietly.
   assert.equal(taskStatusText('zh', { status: 'blocked', answered: true }), '已回答');
   assert.equal(taskStatusText('en', { status: 'blocked', answered: true }), 'Answered');
@@ -967,70 +1154,58 @@ test('built-in text defaults to English and preserves Chinese wording and ledger
   assert.equal(layout({...state,lang:'zh'}).rows.find(r => r.type === 'pm' && !r.name).title, '无 PM');
 });
 
-test('the pm layout hides every agent notice of an agent the PM dispatched', async () => {
-  const { isWorkerNotice } = await import('../pm-toast/model.js');
+test('the pm layout hides every agent notice of an agent the PM or a worker dispatched', async () => {
+  const { isWorkerNotice, isHiddenNotice } = await import('../pm-toast/model.js');
   const terms = [
     { address: 't1', state: 'live', labels: { pm: 'demo' } }, // the PM itself
     { address: 't9', state: 'live', parent: 't1', labels: { task: 'demo-fix' } }, // a task worker
+    { address: 't10', state: 'live', parent: 't9', labels: { helper: 'h1', 'helper.of': 'demo-fix', 'helper.project': 'demo' } }, // worker helper
+    { address: 't11', state: 'live', labels: { helper: 'h2', 'helper.of': 'demo-fix' } }, // helper whose parent worker terminal was removed
+    { address: 't12', state: 'live', parent: 't1', labels: { helper: 'h3', 'helper.of': 'pm-demo' } }, // PM helper
+    { address: 't13', state: 'live', parent: 't9' }, // unlabelled sub-agent spawned by a task worker
     { address: 't5', state: 'live', parent: 't1' }, // the PM's sub-agent without a task
     { address: 'box/t2', state: 'live', labels: { pm: 'api' } },
     { address: 'box/t4', state: 'live', parent: 'box/t2' },
+    { address: 'box/t15', state: 'live', labels: { 'helper.of': 'api-fix' } },
+    { address: 'old/t1', state: 'live', labels: { 'pm.retired': 'api' } }, // older peer rotated-out PM
+    { address: 'old/t2', state: 'live', parent: 'old/t1' }, // unlabelled worker/sub-agent under legacy retired PM
     { address: 't3', state: 'live' }, // an agent the person started
     { address: 't6', state: 'live', parent: 't3' }, // its own sub-agent
     { address: 't8', state: 'live', parent: 't404' }, // parent not listed
+    { address: 'c1', state: 'live', parent: 'c2' }, // cycle guard
+    { address: 'c2', state: 'live', parent: 'c1' },
   ];
   const notice = (terminal, title = 'Claude Code finished') =>
     ({ title, body: 'demo / 1', level: 'success', action: { name: 'agent.focus', args: { terminal } }, overlay: 'o1' });
-  for (const address of ['t9', 't5', 'box/t4']) {
+  for (const address of ['t9', 't10', 't11', 't12', 't13', 't5', 'box/t4', 'box/t15', 'old/t2']) {
     for (const title of ['Claude Code finished', 'Codex needs you']) {
       assert.equal(isWorkerNotice(notice(address, title), terms), true, `${address} ${title}`);
+      assert.equal(isHiddenNotice(notice(address, title), terms), true, `${address} ${title}`);
     }
   }
-  // The PM, the person's own agents and unknown terminals show (fail open).
-  for (const address of ['t1', 'box/t2', 't3', 't6', 't8', 't404', '', undefined]) {
+  // The PM's own notices (including right after a swap or legacy pm.retired), the person's own agents, cycles, and unknown terminals show (fail open).
+  for (const address of ['t1', 'box/t2', 'old/t1', 't3', 't6', 't8', 'c1', 't404', '', undefined]) {
     for (const title of ['Claude Code finished', 'Codex needs you']) {
       assert.equal(isWorkerNotice(notice(address, title), terms), false, `${address} ${title}`);
+      assert.equal(isHiddenNotice(notice(address, title), terms), false, `${address} ${title}`);
     }
   }
   assert.equal(isWorkerNotice(notice('t9'), null), false);
   assert.equal(isWorkerNotice(notice('t9'), [{ address: 't1', labels: { pm: '' } }, { address: 't9', parent: 't1' }]), false);
   assert.equal(isWorkerNotice({ ...notice('t9'), action: { name: 'pane.focus', args: { terminal: 't9' } } }, terms), false);
   for (const props of [null, undefined, {}, { title: 'x finished' }]) assert.equal(isWorkerNotice(props, terms), false);
-});
-
-test('a PM taking over after a rotation makes no notice; the PM\'s later turns do', async () => {
-  const { isHiddenNotice } = await import('../pm-toast/model.js');
-  const notice = (terminal, title = 'Claude Code finished', level = 'success') =>
-    ({ title, level, action: { name: 'agent.focus', args: { terminal } } });
-  const terms = [{ address: 't50', state: 'live', labels: { pm: 'demo', 'pm.quiet': '1' } },
-    { address: 't9', state: 'live', parent: 't50', labels: { task: 'demo-fix' } }, { address: 't3', state: 'live' }];
-  assert.equal(isHiddenNotice(notice('t50'), terms), true);   // the quiet takeover turn
-  assert.equal(isHiddenNotice(notice('t50', 'Claude Code needs you', 'error'), terms), false); // stuck: seen
-  assert.equal(isHiddenNotice(notice('t50', 'Claude Code needs you', 'success'), terms), false); // whatever its level
-  assert.equal(isHiddenNotice(notice('t50', 'Claude Code needs you', undefined), terms), false);
-  assert.equal(isHiddenNotice(notice('t50', 'Claude Code finished', undefined), terms), true);
-  assert.equal(isHiddenNotice(notice('t50', 'Claude Code 已完成'), terms), false);               // unknown words: shown
-  // The PM that handed over: its last turn ends after the rotation, without a word for the person.
-  const retired = [{ address: 't7', state: 'live', labels: { 'pm.retired': 'demo' } }];
-  assert.equal(isHiddenNotice(notice('t7'), retired), true);
-  assert.equal(isHiddenNotice(notice('t7', 'Claude Code needs you', 'error'), retired), false);
-  assert.equal(isHiddenNotice(notice('t9'), terms), true);    // a worker, as before
-  assert.equal(isHiddenNotice(notice('t3'), terms), false);
-  terms[0].labels = { pm: 'demo' };                            // the next turn took the label away
-  assert.equal(isHiddenNotice(notice('t50'), terms), false);
-  assert.equal(isHiddenNotice(notice('t50'), null), false);    // unknown: show it
   const source = readFileSync(new URL('../pm-toast/main.js', import.meta.url), 'utf8');
-  assert.match(source, /this\.hidden = isHiddenNotice\(p, workers\)/);
+  assert.match(source, /this\.hidden = isWorkerNotice\(p, workers\)/);
 });
 
-test('a retired PM terminal is neither the PM nor a task\'s terminal', () => {
-  const old = { address: 't3b', state: 'live', cwd: '/r/dudu', labels: { 'pm.retired': 'dudu' } };
+test('terminal matching skips exited terminals and requires live pm or folder match', () => {
+  const exited = { address: 't3b', state: 'exited', cwd: '/r/dudu', labels: { pm: 'dudu' } };
   const pm = { type: 'pm', name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:t3b' };
-  assert.equal(terminalFor(pm, [old]), undefined);
-  assert.equal(terminalTargetFor(pm, [old]).terminal, undefined);
-  assert.equal(terminalFor({ type: 'task', task: 'dudu-y', pane: 'hc:t3b' }, [old]), undefined);
+  assert.equal(terminalFor(pm, [exited]), undefined);
+  assert.equal(terminalTargetFor(pm, [exited]).terminal, undefined);
+  assert.equal(terminalFor({ type: 'task', task: 'dudu-y', pane: 'hc:t3b' }, [exited]), undefined);
   const next = { address: 't3k', state: 'live', cwd: '/r/dudu', labels: { pm: 'dudu' } };
-  assert.equal(terminalFor(pm, [old, next]), next);
+  assert.equal(terminalFor(pm, [exited, next]), next);
 });
 
 test('Projects cards take their numbers from counts and keep archived projects apart', () => {
@@ -1140,12 +1315,13 @@ test('active tasks bundle by status: a trunk per bundle forks into a branch per 
   const input = board([{ id: 'r1', status: 'review' }, { id: 'w1', status: 'in_progress' }, { id: 'b1', status: 'blocked' },
     { id: 'w2', status: 'in_progress' }, { id: 'x', status: 'later' }, { id: 'p1', status: 'paused' }, { id: 'w3', status: 'in_progress' }]);
   assert.deepEqual(boardGroups(input.tasks).bundles.map(b => [b.status, b.tasks.map(t => t.id)]), [['blocked', ['b1']],
-    ['review', ['r1']], ['in_progress', ['w1', 'w2', 'w3']], ['paused', ['p1']], ['later', ['x']]]);
+    ['in_progress', ['r1', 'w1', 'w2', 'w3']], ['paused', ['p1']], ['later', ['x']]]);
   const g = layout(input, 980);
-  assert.deepEqual(g.rows.filter(r => r.type === 'label').map(r => `${r.title} ${r.count}`), ['等你 1', '待审 1', '进行中 3', '暂停 1', 'later 1']);
-  // A single task's bundle is one line from the PM; the three in progress share one trunk.
-  assert.deepEqual(g.wires.map(w => w.id), ['task:b1', 'task:r1', 'trunk:pm-a:in_progress', 'task:w1', 'task:w2', 'task:w3', 'task:p1', 'task:x']);
+  assert.deepEqual(g.rows.filter(r => r.type === 'label').map(r => `${r.title} ${r.count}`), ['等你 1', '进行中 4', '暂停 1', 'later 1']);
+  // A single task's bundle is one line from the PM; the four in Working (1 review + 3 in progress) share one trunk.
+  assert.deepEqual(g.wires.map(w => w.id), ['task:b1', 'trunk:pm-a:in_progress', 'task:r1', 'task:w1', 'task:w2', 'task:w3', 'task:p1', 'task:x']);
   assert.deepEqual(g.routes['task:w2'], ['trunk:pm-a:in_progress', 'task:w2']);
+  assert.deepEqual(g.routes['task:r1'], ['trunk:pm-a:in_progress', 'task:r1']);
   assert.deepEqual(g.routes['task:b1'], ['task:b1']);
   const working = ids => g.rows.map(r => r.type === 'task' ? { ...r, live: ids.includes(r.task) ? 'working' : 'idle' } : r);
   const trunk = g.wires.find(w => w.id === 'trunk:pm-a:in_progress'), branch = id => g.wires.find(w => w.id === `task:${id}`);
@@ -1347,4 +1523,602 @@ test('without Python the setup card asks for one instead of showing the Store me
   assert.equal(board.noPython, false);
   assert.equal(board.setupStatus, 'ready');
   assert.equal(board.setupDone, true);
+});
+
+test('board status and project cards distinguish closed-can-reattach from disconnected and surface lost agents', async () => {
+  const { isClosedTask, lostSummary } = await import('./model.js');
+  const closedIp = { status: 'in_progress', offline: true, pane: 'hc:t2', closed: { pane: 'hc:t2', at: '2026-11-21 10:00', why: 'idle-workers --close' } };
+  const crashedIp = { status: 'in_progress', offline: true, pane: 'hc:t3' };
+  const closedRev = { status: 'review', offline: true, pane: 'hc:t4', closed: { pane: 'hc:t4', why: 'workers.close_reported' } };
+  const staleClosed = { status: 'in_progress', offline: true, pane: 'hc:t9', closed: { pane: 'hc:t2', why: 'killed' } };
+
+  assert.equal(isClosedTask(closedIp), true);
+  assert.equal(isClosedTask(crashedIp), false);
+  assert.equal(isClosedTask(staleClosed), false);
+
+  assert.equal(taskStatusText('en', closedIp), 'Closed · can reattach');
+  assert.equal(taskStatusText('zh', closedIp), '已关闭，可重连');
+  assert.equal(taskStatusText('en', crashedIp), 'Disconnected');
+  assert.equal(taskStatusText('zh', crashedIp), '已断开');
+  assert.equal(taskStatusText('en', closedRev), 'Review · closed');
+  assert.equal(taskStatusText('zh', closedRev), '待审 · 已关闭');
+
+  const lost = { pm: { address: 't1', how: 'server_stop' }, threads: [{ id: 'a', title: 'A', address: 't2', how: 'server_stop' }], restart: true, key: 'pm@t1;a@t2' };
+  assert.equal(lostSummary('zh', lost), '重启后 PM 和 1 个 agent 没回来');
+  assert.equal(lostSummary('en', lost), 'PM and 1 agent did not come back');
+  const cards = projectCards({
+    pms: [
+      { name: 'pm-dudu', project: 'dudu', lost },
+      { name: 'pm-old', project: 'old', archived: '2026-11-01', lost },
+    ],
+    tasks: [],
+    events: [],
+  });
+  assert.deepEqual(cards.active[0].lost, lost);
+  assert.equal(cards.archived[0].lost, undefined);
+});
+
+test('board bundles merge review and answered tasks into Working ordered by post-gate -> review -> answered -> in_progress', async () => {
+  const { BUNDLES, taskSteps, isPostGateTask, PLAN_STRINGS, STEP_LABEL_UNITS } = await import('./model.js');
+  assert.equal(STEP_LABEL_UNITS, 24);
+  assert.deepEqual(Object.keys(PLAN_STRINGS.en), Object.keys(PLAN_STRINGS.zh));
+  assert.deepEqual(BUNDLES, ['blocked', 'in_progress', 'proposed', 'paused']);
+  const tasks = [
+    { id: 'ip-old', status: 'in_progress', updated: '2026-11-21 10:00' },
+    { id: 'ip-new', status: 'in_progress', updated: '2026-11-21 12:00' },
+    { id: 'ans', status: 'blocked', answered: true, updated: '2026-11-21 11:00' },
+    { id: 'rev-old', status: 'review', updated: '2026-11-21 09:00' },
+    { id: 'rev-new', status: 'review', updated: '2026-11-21 13:00' },
+    { id: 'post', status: 'in_progress', updated: '2026-11-21 08:00',
+      plan: ['[x] 实现接口', '[x] 独立审查', '[x] 合进 main', '[>] 装到 MBP'] },
+    { id: 'wait', status: 'blocked', updated: '2026-11-21 07:00' },
+  ];
+  assert.equal(isPostGateTask(tasks.find(t => t.id === 'post')), true);
+  assert.equal(isPostGateTask(tasks.find(t => t.id === 'ip-new')), false);
+  const grouped = boardGroups(tasks);
+  assert.deepEqual(grouped.bundles.map(b => [b.status, b.tasks.map(t => t.id)]), [
+    ['blocked', ['wait']],
+    ['in_progress', ['post', 'rev-new', 'rev-old', 'ans', 'ip-new', 'ip-old']],
+  ]);
+
+  const postSteps = taskSteps(tasks.find(t => t.id === 'post'), { lang: 'zh' });
+  assert.equal(postSteps.pill, '3/4 · 装到 MBP');
+  assert.equal(postSteps.postGate, true);
+  const objPostTask = {
+    id: 'obj-post',
+    status: 'in_progress',
+    offline: true,
+    plan: [
+      { text: '实现接口', state: 'done', anchor: 'work' },
+      { text: '独立审查', state: 'done', anchor: 'review' },
+      { text: '合进 main', state: 'done', anchor: 'merge' },
+      { text: '同步安装到 MBP 并跑全量测试', state: 'doing', anchor: 'custom' },
+    ],
+  };
+  assert.equal(isPostGateTask(objPostTask), true);
+  const objPostSteps = taskSteps(objPostTask, { lang: 'zh' });
+  assert.equal(objPostSteps.postGate, true);
+  assert.equal(objPostSteps.pill, '3/4 · 同步安装到 MBP 并跑全量…');
+
+  const blockedPlan = [
+    { text: '实现', state: 'done', anchor: 'work' },
+    { text: '独立审查', state: 'todo', anchor: 'review' },
+    { text: '合进 main', state: 'todo', anchor: 'merge' },
+  ];
+  assert.deepEqual(taskSteps({ status: 'blocked', plan: blockedPlan }, { lang: 'zh' }).steps.map(s => s.state), ['done', 'todo', 'todo']);
+  assert.deepEqual(taskSteps({ status: 'blocked', review: { id: 'r1', status: 'in_progress' }, plan: blockedPlan }, { lang: 'zh' }).steps.map(s => s.state), ['done', 'doing', 'todo']);
+  assert.equal(taskSteps({ id: 'legacy', status: 'review' }, { lang: 'zh' }).pill, '');
+  const reviewSteps = taskSteps({
+    id: 'lib',
+    status: 'review',
+    rounds: 1,
+    plan: ['[x] 派出对齐', '[>] 分支实现与单测', '独立代码审查', '合进 main（pm.py land）', '同步安装到本机与 MBP'],
+  }, { lang: 'zh' });
+  assert.equal(reviewSteps.pill, '2/5');
+  assert.equal(reviewSteps.rail.length, 5);
+  assert.equal(reviewSteps.steps[3].shortText, '合进 main');
+  assert.equal(reviewSteps.steps[3].note, 'pm.py land');
+  assert.equal(reviewSteps.steps[3].tip, '合进 main（pm.py land）');
+  assert.equal(word('zh', 'reviewing'), '审查中');
+  assert.equal(word('en', 'reviewing'), 'Reviewing');
+  assert.equal(word('zh', 'planTitle'), '步骤');
+  assert.equal(word('en', 'planTitle'), 'Steps');
+});
+
+test('Board UI renders Reviewing inside Working bundle, step progress chips, postGate amber pill, and hover stage rail (en & zh)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const dashModel = await import('./model.js');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import [\s\S]*?;$/gm, '')
+    .replace('export default class PmDash extends View', 'return class');
+
+  const nodes = new Map();
+  const makeEl = () => {
+    const rec = { id: '', texts: [], kids: [], hover: null, clicks: null, sizeChange: null };
+    const allTexts = r => [...r.texts, ...r.kids.flatMap(allTexts)];
+    const proxy = new Proxy(function () {}, {
+      get: (_, key) => {
+        if (key === Symbol.toPrimitive) return () => 0;
+        if (key === '__rec') return rec;
+        return (...args) => {
+          if (key === 'id') {
+            rec.id = String(args[0]);
+            nodes.set(rec.id, rec);
+          } else if (key === 'child') {
+            if (typeof args[0] === 'string') rec.texts.push(args[0]);
+            else if (args[0]?.__rec) rec.kids.push(args[0].__rec);
+          } else if (key === 'content' && args[0]?.__rec) {
+            rec.kids.push(args[0].__rec);
+          } else if (key === 'children' && Array.isArray(args[0])) {
+            for (const k of args[0]) {
+              if (typeof k === 'string') rec.texts.push(k);
+              else if (k?.__rec) rec.kids.push(k.__rec);
+            }
+          } else if (key === 'on_hover') {
+            rec.hover = args[0];
+          } else if (key === 'on_click') {
+            rec.clicks = args[0];
+          } else if (key === 'on_size_change') {
+            rec.sizeChange = args[0];
+          } else if (key === 'when') {
+            if (args[0]) args[1](proxy);
+          }
+          return proxy;
+        };
+      },
+      apply: () => proxy,
+    });
+    rec.allTexts = () => allTexts(rec);
+    return proxy;
+  };
+  const blankFn = () => makeEl();
+  const svgStub = path => {
+    const el = makeEl();
+    if (path) el.__rec.texts.push(`[svg:${path}]`);
+    return el;
+  };
+  const openedProjects = [];
+  const stubs = {
+    View: class {}, ...dashModel, renderStepsCard, renderDepsCard,
+    div: makeEl, v_flex: makeEl, h_flex: makeEl, svg: svgStub, PathBuilder: { moveTo: () => makeEl() },
+    Scrollbar: { vertical: blankFn },
+    Popup: { new: (id, trig) => makeEl().id(id).child(trig) },
+    FlowLayer: class {},
+    boardVisible: () => true,
+    page: '', pageView: blankFn, pageHeader: blankFn, projectHeader: blankFn, keepPress: blankFn, dialogView: blankFn,
+    initDialog: () => {}, restoreProject: () => {}, readLines: async () => [], archivePopup: blankFn,
+    NEW_DIALOG: 'new', openProject: (...args) => openedProjects.push(args), showPage: () => {},
+    execPython: async () => ({ code: 0, stdout: '{}', stderr: '' }), NO_PYTHON: 'no_python',
+    theme: () => ({
+      canvas: '#111111', background: '#111111', surface: '#1a1a1a', raised: '#222222', popover: '#222222', selected: '#2a2a2a',
+      border: '#333333', input: '#3a3a3a',
+      foreground: '#eeeeee', muted: '#aaaaaa', dim: '#777777', accent: '#4f8cff', accent_foreground: '#ffffff',
+      blocked: '#ff5f56', ansi2: '#27c93f', ansi3: '#f5a623', ansi4: '#6699ff', ansi5: '#c678dd', ansi6: '#56b6c2', ansi1: '#e06c75',
+    }),
+    home: () => '/Users/test', appHome: () => '/app', exec: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    readTextFile: async () => '', appWindow: () => ({}), watchFolder: () => new Promise(() => {}),
+    terminals: () => [
+      { address: 'tw1', state: 'live', labels: { task: 'ip-steps' } },
+      { address: 'tw2', state: 'live', labels: { task: 'post-task' } },
+      { address: 'tw3', state: 'live', labels: { task: 'rev-task' } },
+    ],
+    agents: () => [], panes: () => [], run: () => {}, props: () => ({}), closeOverlay: () => {}, openOverlay: () => {},
+    desktopLayout: () => ({}),
+  };
+  const Mod = new Function(...Object.keys(stubs), source)(...Object.values(stubs));
+  const timers = [];
+  const cx = {
+    focus_handle: () => ({ focus() {} }),
+    spawn: () => {},
+    timer: {
+      after(_ms, fn) {
+        const entry = { fn, cancelled: false, cancel() { this.cancelled = true; } };
+        timers.push(entry);
+        return entry;
+      },
+      every() {},
+    },
+    notify() {},
+    stop_propagation() {},
+  };
+  const tasks = [
+    {
+      id: 'ip-steps', pm: 'pm-dudu', project: 'dudu', title: 'Render UI', status: 'in_progress', updated: '2026-11-21 10:00',
+      branch: 'dev/render-ui',
+      plan: ['[x] Align design', '[>] Build panel with complete untruncated step title', 'Code review', 'Merge'],
+      subplan: ['[x] Left rows', '[>] Detail steps'],
+      latest: 'status=in_progress, commit=abc1234; wiring steps view\nsecond line collapsed',
+    },
+    {
+      id: 'post-task', pm: 'pm-dudu', project: 'dudu', title: 'Deploy to host', status: 'in_progress', updated: '2026-11-21 11:00',
+      plan: ['[x] Implement', '[x] Review', '[x] Merge', '[>] Install on MBP'],
+    },
+    {
+      id: 'rev-task', pm: 'pm-dudu', project: 'dudu', title: 'At-mention fix', status: 'review', updated: '2026-11-21 12:00',
+      plan: ['[x] Code', '[>] Independent review', 'Merge'],
+      subplan: ['[x] Parser', '[x] Popup menu'],
+    },
+  ];
+  const view = Object.assign(Object.create(Mod.prototype), {
+    state: { pms: [{ name: 'pm-dudu', project: 'dudu', status: 'idle', repo: '/r/dudu' }], tasks, events: [], lang: 'en' },
+    allState: { pms: [], tasks: [], events: [] }, lines: {}, scope: 'pm-dudu', hoverCard: null,
+    endedOpen: new Set(), showDropped: new Set(), hoverEnded: null,
+    keys: cx.focus_handle(), onStage: true, size: { width: 1280, height: 720 },
+    queue: [], recent: [], replayIndex: 0, auto: false, flowLayer: { set() {} }, flowKey: '',
+    hoverTask: null, hoverMeasure: null, shownStatus: {}, shownLive: {}, hoverPm: null,
+    shown: {}, statuses: {}, tags: {}, nudges: {}, serial: 0, trip: null,
+    text(k, ...a) { return dashModel.word(this.state.lang, k, ...a); },
+    today: () => '2026-11-21',
+    peeking: () => false,
+    tag() {},
+  });
+
+  const g = view.geometry();
+  view.boardBounds = { x: 0, y: 0, width: view.size.width, height: view.size.height };
+  view.stageBounds = { x: 0, y: 0, width: g.width, height: g.height };
+  const drawn = g.rows.map(r => view.presentation(r, stubs.terminals(), []));
+  for (const r of drawn) view.row(r, stubs.theme(), cx, { waiting: 0 }, g.scale);
+
+  assert.deepEqual(nodes.get('status:task:rev-task')?.texts, ['Reviewing']);
+  assert.deepEqual(nodes.get('steps:task:ip-steps')?.texts, ['1/4']);
+  assert.deepEqual(nodes.get('steps:task:rev-task')?.texts, ['1/3']);
+  assert.deepEqual(nodes.get('steps:task:post-task')?.texts, ['3/4 · Install on MBP']);
+  assert.equal(nodes.has('status:task:post-task'), false, 'postGate in_progress suppresses redundant In progress badge');
+
+  // Hover card shows compact vertical Steps component: doing step expands substeps, done step folds substeps,
+  // long step names are never truncated, latest log is single-line, and card is read-only.
+  view.hoverMeasure = null;
+  const targetRow = drawn.find(r => r.task === 'ip-steps');
+  view.taskInfoCard(targetRow, g, stubs.theme(), drawn);
+  const probe = [...nodes.entries()].find(([id]) => id.startsWith('task-log-probe:'))?.[1];
+  assert.ok(probe?.sizeChange, 'offscreen measurement probe attached');
+  probe.sizeChange({ width: 220, height: 150 }, cx);
+  nodes.clear();
+  view.taskInfoCard(targetRow, g, stubs.theme(), drawn);
+  const stepsText = nodes.get('info-steps:task:ip-steps')?.allTexts().join(' ') || '';
+  assert.match(stepsText, /Steps/);
+  assert.match(stepsText, /dev\/render-ui/);
+  assert.match(stepsText, /1\/4/);
+  assert.match(stepsText, /Align design/);
+  assert.match(stepsText, /Build panel with complete untruncated step title/, 'long step name is not truncated');
+  assert.match(stepsText, /Left rows/, 'doing step expands substeps');
+  assert.match(stepsText, /Detail steps/, 'doing step shows active substep');
+  assert.match(stepsText, /check-mark\.svg/);
+  assert.match(stepsText, /spinner\.svg/);
+  assert.match(stepsText, /tree-branch\.svg/);
+  assert.doesNotMatch(stepsText, /→/, 'no arrow chain in hover card');
+  assert.doesNotMatch(stepsText, /window-pop\.svg/, 'read-only hover card omits window toggle');
+  assert.equal(nodes.get('info-log:task:ip-steps')?.allTexts().join(' '), 'wiring steps view second line collapsed');
+
+  // Review task folds completed substeps on the done work step (`2/2` pill, substep text hidden)
+  view.hoverMeasure = null;
+  const revRow = drawn.find(r => r.task === 'rev-task');
+  view.taskInfoCard(revRow, g, stubs.theme(), drawn);
+  const revProbe = [...nodes.entries()].find(([id]) => id.startsWith('task-log-probe:'))?.[1];
+  revProbe.sizeChange({ width: 220, height: 120 }, cx);
+  nodes.clear();
+  view.taskInfoCard(revRow, g, stubs.theme(), drawn);
+  const revStepsText = nodes.get('info-steps:task:rev-task')?.allTexts().join(' ') || '';
+  assert.match(revStepsText, /2\/2/, 'completed work step folds substeps into 2/2 badge');
+  assert.doesNotMatch(revStepsText, /Popup menu/, 'done step substeps stay folded');
+
+  // Chinese i18n parity in board rows and hover card
+  view.state.lang = 'zh';
+  nodes.clear();
+  const zhG = view.geometry();
+  const zhDrawn = zhG.rows.map(x => view.presentation(x, stubs.terminals(), []));
+  for (const r of zhDrawn) view.row(r, stubs.theme(), cx, { waiting: 0 }, zhG.scale);
+  assert.deepEqual(nodes.get('status:task:rev-task')?.texts, ['审查中']);
+  view.hoverMeasure = null;
+  const zhRow = zhDrawn.find(r => r.task === 'ip-steps');
+  view.taskInfoCard(zhRow, zhG, stubs.theme(), zhDrawn);
+  const zhProbe = [...nodes.entries()].find(([id]) => id.startsWith('task-log-probe:'))?.[1];
+  zhProbe.sizeChange({ width: 220, height: 150 }, cx);
+  nodes.clear();
+  view.taskInfoCard(zhRow, zhG, stubs.theme(), zhDrawn);
+  const zhStepsText = nodes.get('info-steps:task:ip-steps')?.allTexts().join(' ') || '';
+  assert.match(zhStepsText, /步骤/);
+  assert.match(zhStepsText, /自动审/);
+
+  // Task numbers on board rows, ended rows, taskInfoCard, and eventLine (omitted on unnumbered peers)
+  assert.equal(taskNumber({ number: 7 }), 7);
+  assert.equal(formatTaskNumber({ number: 7 }), '#7');
+  assert.equal(formatTaskNumber({}), '');
+  tasks[0].number = 7;
+  tasks.push({ id: 'done-num', pm: 'pm-dudu', project: 'dudu', title: 'Done numbered', status: 'done', number: 5, updated: '2026-11-21 09:00' });
+  view.state.tasks = tasks;
+  view.state.lang = 'en';
+  view.hoverMeasure = null;
+  nodes.clear();
+  const numG = view.geometry();
+  const numDrawn = numG.rows.map(x => view.presentation(x, stubs.terminals(), []));
+  for (const r of numDrawn) view.row(r, stubs.theme(), cx, { waiting: 0 }, numG.scale);
+  assert.ok(nodes.get('title:task:ip-steps'));
+  const ipRow = numDrawn.find(r => r.task === 'ip-steps');
+  view.taskInfoCard(ipRow, numG, stubs.theme(), numDrawn);
+  const numProbe = [...nodes.entries()].find(([id]) => id.startsWith('task-log-probe:'))?.[1];
+  numProbe.sizeChange({ width: 220, height: 150 }, cx);
+  nodes.clear();
+  view.taskInfoCard(ipRow, numG, stubs.theme(), numDrawn);
+  const endedNode = numDrawn.find(r => r.type === 'ended');
+  view.endedPeek(endedNode, numG, stubs.theme(), numDrawn);
+  assert.match(view.eventLine({ task: 'ip-steps', text: 'updated' }), /#7 Render UI/);
+  assert.doesNotMatch(view.eventLine({ task: 'rev-task', text: 'updated' }), /#\d+/);
+  // Check board hover card renders #7 for numbered task
+  assert.equal(nodes.has('task-info-popup:task:ip-steps'), true);
+  assert.match(nodes.get('info-steps:task:ip-steps')?.allTexts().join(' ') || '', /#7/);
+
+  // Proposed task with depends_on on Board: shows Waiting list + Ready to dispatch (en & zh),
+  // persists across row->card transition via grace timer + card hover, and clicking jumps via openProject.
+  tasks.push(
+    { id: 'done-pre', pm: 'pm-dudu', project: 'dudu', title: 'Base schema', status: 'merged', updated: '2026-11-21 09:00' },
+    {
+      id: 'prop-wait', pm: 'pm-dudu', project: 'dudu', title: 'Queued feature', status: 'proposed', updated: '2026-11-21 12:10',
+      depends_on: ['done-pre', 'rev-task'],
+      deps: [
+        { id: 'done-pre', title: 'Base schema', state: 'met', status: 'merged', reason: 'merged' },
+        { id: 'rev-task', title: 'At-mention fix', state: 'waiting', status: 'review', reason: 'review' },
+      ],
+      ready: false,
+      latest: 'Waiting for Base schema & At-mention fix',
+    },
+    {
+      id: 'prop-ready', pm: 'pm-dudu', project: 'dudu', title: 'Ready feature', status: 'proposed', updated: '2026-11-21 12:12',
+      depends_on: ['done-pre'],
+      deps: [{ id: 'done-pre', title: 'Base schema', state: 'met', status: 'merged', reason: 'merged' }],
+      ready: true,
+    },
+  );
+  view.state.lang = 'en';
+  const depG = view.geometry();
+  const depDrawn = depG.rows.map(x => view.presentation(x, stubs.terminals(), []));
+  const waitRow = depDrawn.find(r => r.task === 'prop-wait');
+  const readyRow = depDrawn.find(r => r.task === 'prop-ready');
+  view.hoverTask = 'prop-wait';
+  view.hoverMeasure = null;
+  nodes.clear();
+  view.taskInfoCard(waitRow, depG, stubs.theme(), depDrawn, stubs.terminals(), []);
+  const waitProbe = [...nodes.entries()].find(([id]) => id.startsWith('task-log-probe:'))?.[1];
+  waitProbe.sizeChange({ width: 220, height: 130 }, cx);
+  nodes.clear();
+  view.taskInfoCard(waitRow, depG, stubs.theme(), depDrawn, stubs.terminals(), []);
+  const waitText = nodes.get('info-deps:task:prop-wait')?.allTexts().join(' ') || '';
+  assert.match(waitText, /Waiting/);
+  assert.match(waitText, /1\/2/);
+  assert.match(waitText, /Base schema/);
+  assert.match(waitText, /At-mention fix/);
+  assert.match(waitText, /check-mark\.svg/);
+  assert.match(waitText, /chevron\.svg/);
+
+  // Leaving row does not immediately wipe interactive hover card; entering card cancels timer; clicking dep jumps!
+  timers.length = 0;
+  view.leaveTaskHover('prop-wait', cx);
+  assert.equal(view.hoverTask, 'prop-wait');
+  assert.ok(timers.length > 0);
+  const boardHideTimer = timers.at(-1);
+  nodes.get('task-info-card:task:prop-wait').hover(true, cx);
+  assert.equal(boardHideTimer.cancelled, true, 'entering board hover card cancels hide timer');
+  nodes.get('info-dep-task:prop-wait-rev-task').clicks({}, cx);
+  assert.equal(view.hoverTask, null, 'clicking prerequisite clears hover');
+  assert.deepEqual(openedProjects, [['pm-dudu', '', 'rev-task']], 'clicking Board prerequisite opens project & jumps to task');
+
+  // All-met proposed task shows Ready to dispatch (en) & 可以派了 (zh)
+  view.hoverTask = 'prop-ready';
+  view.hoverMeasure = null;
+  nodes.clear();
+  view.taskInfoCard(readyRow, depG, stubs.theme(), depDrawn, stubs.terminals(), []);
+  const readyProbe = [...nodes.entries()].find(([id]) => id.startsWith('task-log-probe:'))?.[1];
+  readyProbe.sizeChange({ width: 220, height: 110 }, cx);
+  nodes.clear();
+  view.taskInfoCard(readyRow, depG, stubs.theme(), depDrawn, stubs.terminals(), []);
+  assert.match(nodes.get('info-deps:task:prop-ready')?.allTexts().join(' ') || '', /Ready to dispatch/);
+
+  view.state.lang = 'zh';
+  view.hoverMeasure = null;
+  nodes.clear();
+  view.taskInfoCard(readyRow, depG, stubs.theme(), depDrawn, stubs.terminals(), []);
+  const zhReadyProbe = [...nodes.entries()].find(([id]) => id.startsWith('task-log-probe:'))?.[1];
+  zhReadyProbe.sizeChange({ width: 220, height: 110 }, cx);
+  nodes.clear();
+  view.taskInfoCard(readyRow, depG, stubs.theme(), depDrawn, stubs.terminals(), []);
+  const zhReadyText = nodes.get('info-deps:task:prop-ready')?.allTexts().join(' ') || '';
+  assert.match(zhReadyText, /等待/);
+  assert.match(zhReadyText, /可以派了/);
+});
+
+test('reviewWorking gates blue review spinner on active reviewer only (local & remote)', () => {
+  const mkRev = (overrides = {}) => ({
+    id: 't1-review', review_of: 't1', status: 'in_progress', pane: 'hc:tr1', ...overrides,
+  });
+  const mkTask = (overrides = {}) => ({
+    id: 't1', pm: 'pm-dudu', title: 'Review motion', status: 'review', pane: 'hc:tw1', review: mkRev(), ...overrides,
+  });
+
+  // Active local reviewer -> true
+  assert.equal(reviewWorking(mkTask(), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), true);
+  assert.equal(reviewWorking(mkTask(), [{ address: 'tr1', state: 'live', status: 'idle', labels: { task: 't1-review' } }], [{ address: 'tr1', status: 'working' }]), true);
+  // Active remote reviewer (machine namespace inherited from task) -> true
+  const remoteTask = mkTask({ id: 'mbp/t1', sourceId: 't1', machine: 'mbp', review: mkRev({ id: 't1-review', pane: 'hc:tr9' }) });
+  assert.equal(reviewWorking(remoteTask, [{ address: 'mbp/tr9', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), true);
+  assert.equal(reviewWorking(remoteTask, [{ address: 'tr9', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+  // Fallback to review.worker when terminal is not in desktop
+  assert.equal(reviewWorking(mkTask({ review: mkRev({ pane: '', worker: 'working' }) }), [], []), true);
+  assert.equal(reviewWorking(mkTask({ review: mkRev({ pane: '', worker: 'idle' }) }), [], []), false);
+
+  // Static cases: waiting for PM (no review), review done/paused/blocked/offline, reviewer idle/done, non-review task
+  assert.equal(reviewWorking(mkTask({ review: undefined }), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+  assert.equal(reviewWorking(mkTask({ review: mkRev({ status: 'done' }) }), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+  assert.equal(reviewWorking(mkTask({ review: mkRev({ status: 'paused' }) }), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+  assert.equal(reviewWorking(mkTask({ review: mkRev({ status: 'blocked' }) }), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+  assert.equal(reviewWorking(mkTask({ review: mkRev({ offline: true }) }), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+  assert.equal(reviewWorking(mkTask(), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], [{ address: 'tr1', status: 'idle' }]), false);
+  assert.equal(reviewWorking(mkTask(), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], [{ address: 'tr1', status: 'done' }]), false);
+  assert.equal(reviewWorking(mkTask({ status: 'in_progress' }), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+  assert.equal(reviewWorking(mkTask({ cleanup: true }), [{ address: 'tr1', state: 'live', status: 'working', labels: { task: 't1-review' } }], []), false);
+});
+
+test('render safety: pm-dash taskInfoCard guards null renderStepsCard, Popup styles on anchor, render-phase clearHover safe, word() fallback', () => {
+  // word() has both steps.js tips and falls back to key for unknown keys
+  assert.equal(word('en', 'detailReviewStepTip'), 'Click to toggle review window');
+  assert.equal(word('zh', 'detailReviewStepTip'), '点击开关审查小窗');
+  assert.equal(word('en', 'substepsFoldTip', 2, 4), '2/4 sub-steps');
+  assert.equal(word('zh', 'substepsFoldTip', 2, 4), '2/4 个子步骤');
+  assert.equal(word('en', 'unknownFallbackKey'), 'unknownFallbackKey');
+  assert.equal(label('en', ''), 'Unknown');
+  assert.equal(label('en', null), 'Unknown');
+
+  const makeEl = (tag, extra = {}) => {
+    const node = { tag, props: { ...extra }, children: [], handlers: {} };
+    const chain = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === '__node') return node;
+        if (prop === 'child') return c => {
+          if (c == null) throw new TypeError('child(value) expects an element, a string, or an entity');
+          node.children.push(c?.__node || c);
+          return chain;
+        };
+        if (prop === 'children') return cs => {
+          for (const c of cs) {
+            if (c == null) throw new TypeError('children contains null/undefined');
+            node.children.push(c?.__node || c);
+          }
+          return chain;
+        };
+        if (prop === 'content') return c => { node.content = c?.__node || c; return chain; };
+        if (prop === 'when') return (cond, fn) => cond ? fn(chain) : chain;
+        if (prop.startsWith('on_')) return fn => { node.handlers[prop] = fn; return chain; };
+        return (...args) => { node.props[prop] = args.length <= 1 ? (args.length === 0 ? true : args[0]) : args; return chain; };
+      },
+    });
+    return chain;
+  };
+  const findById = (n, prefix) => {
+    if (!n || typeof n !== 'object') return null;
+    if (String(n.props?.id || '').startsWith(prefix)) return n;
+    for (const c of [...(n.children || []), ...(n.content ? [n.content] : [])]) {
+      const hit = findById(c, prefix);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  let visible = false;
+  const view = modWithIO('./main.js', {
+    div: () => makeEl('div'), v_flex: () => makeEl('v_flex'), h_flex: () => makeEl('h_flex'),
+    svg: () => makeEl('svg'), PathBuilder: { stroke: () => ({ move_to: () => ({ cubic_bezier_to() {}, build: () => ({}) }) }) },
+    Scrollbar: { new: () => makeEl('scrollbar') },
+    Popup: { new: (id, trigger) => makeEl('Popup', { id, trigger: trigger?.__node || trigger }) },
+    theme: () => ({ canvas: '#111113', background: '#111113', surface: '#1b1b1f', raised: '#27272d',
+      foreground: '#f2f2f5', muted: '#a0a0aa', dim: '#6b6b76', border: '#2e2e36',
+      accent: '#4da3ff', blocked: '#ff6b6b', ansi1: '#ff6b6b', ansi2: '#4cd964',
+      ansi3: '#ffcc00', ansi4: '#4da3ff', ansi5: '#bf5af2', ansi6: '#5ac8fa' }),
+    home: () => '/h', appHome: () => '/a', exec: async () => ({ code: 0, stdout: '' }),
+    readTextFile: async () => '', watchFolder: async () => {}, terminals: () => [], agents: () => [], panes: () => [],
+    run: () => {}, props: () => ({}), closeOverlay: () => {}, openOverlay: () => {}, desktopLayout: () => ({}),
+    setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents,
+    pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts,
+    wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, formatTaskNumber, tooltipLayout,
+    taskSteps: () => ({ steps: [], progress: '0/0' }),
+    taskDependencies, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand,
+    pmStatusText, scopeState, archiveThreads: () => [], disconnected, escapeTarget: () => null, DROPPED, endedTime,
+    page: () => ({ view: 'board', project: 'pm-dudu' }), pageView: () => makeEl('page'),
+    pageHeader: () => makeEl('header'), projectHeader: () => makeEl('header'), keepPress: (_v, el) => el,
+    dialogView: () => makeEl('dialog'), initDialog: () => {}, restoreProject: () => {}, readLines: async () => ({}),
+    archivePopup: () => ({}), NEW_DIALOG: {}, openProject: () => {}, showPage: () => {},
+    FlowLayer: class {}, boardVisible: () => visible, renderStepsCard, renderDepsCard,
+  });
+
+  view.state = {
+    lang: 'en', project: 'pm-dudu',
+    pms: [{ name: 'pm-dudu', project: 'dudu' }],
+    tasks: [
+      { id: 't-empty-steps', pm: 'pm-dudu', title: 'No Steps Task', status: 'in_progress', latest: 'just a log', updated: '2026-11-22 01:00' },
+      { id: 't-completely-empty', pm: 'pm-dudu', title: 'Bare Task', status: 'in_progress', latest: '', updated: '2026-11-22 01:01' },
+    ],
+    events: [],
+  };
+  view.allState = view.state;
+  view.size = { width: 1280, height: 720 };
+  view.setupStatus = 'ready';
+  view.scope = 'pm-dudu';
+  view.keys = { focus() {} };
+  view.shown = {}; view.shownStatus = {}; view.shownLive = {}; view.statuses = {}; view.tags = {}; view.nudges = {};
+  view.queue = []; view.endedOpen = new Set(); view.showDropped = new Set(); view.hoverEnded = null; view.hoverPm = null;
+  view.flowLayer = { set_props() {} };
+
+  const g = view.geometry();
+  view.boardBounds = { x: 0, y: 0, width: view.size.width, height: view.size.height };
+  view.stageBounds = { x: 0, y: 0, width: g.width, height: g.height };
+  const drawn = g.rows.map(r => view.presentation(r, [], []));
+
+  // taskInfoCard with empty steps & a log line: must not throw on .child(null)
+  const logRow = drawn.find(r => r.task === 't-empty-steps');
+  assert.doesNotThrow(() => view.taskInfoCard(logRow, g, { raised: '#27272d', surface: '#1b1b1f', border: '#2e2e36', dim: '#6b6b76', muted: '#a0a0aa' }, drawn));
+
+  // taskInfoCard with empty steps, no metaText, no logLine: returns null cleanly
+  const bareRow = drawn.find(r => r.task === 't-completely-empty');
+  assert.equal(view.taskInfoCard(bareRow, g, { raised: '#27272d', surface: '#1b1b1f', border: '#2e2e36', dim: '#6b6b76', muted: '#a0a0aa' }, drawn), null);
+
+  // endedPeek puts positioning on outer anchor div, NOT on Popup
+  const endedRow = { type: 'ended', pm: 'pm-dudu', x: g.taskX, y: Math.max(40, g.height - 60), w: 200, h: 32, count: 2,
+    peek: [{ id: 'd1', title: 'Done 1', status: 'merged', updated: '2026-11-22 00:00' }] };
+  const peekTree = view.endedPeek(endedRow, g, { raised: '#27272d', surface: '#1b1b1f', foreground: '#fff', muted: '#aaa', dim: '#666' }, drawn).__node;
+  const peekPopup = findById(peekTree, 'ended-peek-popup:pm-dudu');
+  const peekAnchor = findById(peekTree, 'ended-peek-anchor:pm-dudu');
+  assert.ok(peekPopup && peekAnchor);
+  assert.equal(peekPopup.props.absolute, undefined, 'endedPeek Popup must not chain .absolute()');
+  assert.equal(peekPopup.props.left, undefined, 'endedPeek Popup must not chain .left()');
+  assert.equal(peekAnchor.props.absolute, true);
+
+  // Leaving stage during render() clears hover state & cancels timer without calling cx.notify()
+  let cancelled = false;
+  view.onStage = true;
+  view.hoverTask = 't-empty-steps';
+  view.hoverTaskCard = 't-empty-steps';
+  view.hoverTaskInteractive = true;
+  view.hoverTaskTimer = { cancel() { cancelled = true; } };
+  const renderCx = {
+    phase: () => 'render',
+    notify() { throw new Error('cx.notify() forbidden in render'); },
+    timer: { after() { return { cancel() {} }; } },
+  };
+  assert.doesNotThrow(() => view.clearHover(renderCx, true, true));
+  assert.equal(cancelled, true);
+  assert.equal(view.hoverTask, null);
+  assert.equal(view.hoverTaskCard, null);
+
+  // withTip puts positioning on outer anchor div, NOT on Popup.new(...)
+  view.hoverTip = 'tip:sample';
+  const tipTree = view.withTip('sample', makeEl('div', { id: 'sample-trigger' }), 'A long tooltip message', {
+    raised: '#27272d', popover: '#222', surface: '#1b1b1f', canvas: '#111', border: '#333', foreground: '#fff',
+  }).__node;
+  const tipPopup = findById(tipTree, 'hover-tip-sample');
+  const tipAnchor = findById(tipTree, 'hover-tip-anchor-sample');
+  assert.ok(tipPopup && tipAnchor);
+  assert.equal(tipPopup.props.absolute, undefined, 'withTip Popup must not chain .absolute()');
+  assert.equal(tipPopup.props.left, undefined, 'withTip Popup must not chain .left()');
+  assert.equal(tipAnchor.props.absolute, true);
+});
+
+test('pm-dash tooltipMaxWidth, wrapTooltipText, clampTooltipRect, and tooltipLayout bound width and clamp within viewport', async () => {
+  const m = await import('./model.js');
+  assert.equal(m.tooltipMaxWidth({ viewWidth: 1400 }), 420);
+  assert.equal(m.tooltipMaxWidth({ viewWidth: 320 }), 288);
+  const longTip = m.word('en', 'unclaimedTip') + ' ' + m.word('zh', 'unclaimedTip') + ' ' + 'x'.repeat(260);
+  const lay = m.tooltipLayout(longTip, { viewWidth: 380, placement: 'below-right' });
+  assert.ok(lay.width <= 348 && lay.maxWidth <= 348 && lay.maxWidth <= m.TOOLTIP_MAX_WIDTH);
+  assert.equal(lay.lines.length, m.TOOLTIP_MAX_LINES);
+  assert.equal(lay.truncated, true);
+  assert.ok(lay.lines.at(-1).endsWith('…'));
+  assert.equal(lay.anchor, 'top_right');
+
+  const clamped = m.clampTooltipRect(
+    { x: 350, y: 10, w: 20, h: 20 },
+    { w: 240, h: 60 },
+    { x: 0, y: 0, w: 380, h: 500 },
+    { placement: 'above-right' },
+  );
+  assert.equal(clamped.placement, 'below-right');
+  assert.ok(clamped.x >= m.TOOLTIP_MARGIN && clamped.x + clamped.w <= 380 - m.TOOLTIP_MARGIN);
+  assert.ok(clamped.y >= 30);
 });

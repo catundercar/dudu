@@ -1,7 +1,7 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, watchFolder, layout, run, terminals, agents, panes, shared, setShared, openOverlay } from 'herdr';
-import { foldReviews, allPmRows, splitArchived, archivedDay, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH, focusPlan, opensProject, projectShared } from './model.js';
+import { foldReviews, allPmRows, splitArchived, archivedDay, remotePmStates, track, age, listHeight, underNav, LEDGER_HOME_SH, focusPlan, opensProject, projectShared, contextShort, contextLabel, pmContextLevel, pmContextTip } from './model.js';
 import { execPython } from './python.js';
 
 // Like pm-nav, the list reads the ledger through the original pm-dash bundle.
@@ -44,7 +44,7 @@ export default class PmList extends View {
   init(_props, cx) {
     this.state = { pms: [], events: [] }; this.remote = {};
     this.error = '';
-    this.compact = false;
+    this.compact = false; this.narrow = false;
     this.ledgerHome = '';
     this.hover = null;
     try { this.folded = localStorage.getItem('archived-open') !== 'true'; } catch (_) { this.folded = true; }
@@ -182,13 +182,16 @@ export default class PmList extends View {
     const root = v_flex().id('pm-list-root').size_full().min_w(0).min_h(0).overflow_hidden()
       .bg(t.chrome).text_size(13).text_color(t.foreground)
       .on_size_change((size, cx) => {
-        const compact = size.width < 120;
-        if (compact !== this.compact) { this.compact = compact; cx.notify(); }
+        const compact = size.width < 120, narrow = size.width > 0 && size.width < 220;
+        if (compact !== this.compact || narrow !== this.narrow) {
+          this.compact = compact; this.narrow = narrow; cx.notify();
+        }
       });
     // A project shows in its conversation (pm-project) or on its own board (pm-dash scoped to it).
     const stage = find(layout(), n => n.id === STAGE);
     const viewing = stage?.active === PROJECT ? shared(PROJECT)?.pm : stage?.active === BOARD ? shared('pm-dash')?.project || null : null;
     const tip = row => [row.machine ? `${row.label} · ${row.machine}` : row.label, word(lang, row.status),
+      pmContextTip(row.contextTokens, lang, row.compactTokens ?? row.rotateTokens),
       row.unregistered ? word(lang, 'unregistered')
         : this.viewable(row) ? [!row.exact && word(lang, 'notDesktop'), word(lang, 'view')].filter(Boolean).join('\n')
         : !row.exact && word(lang, row.terminal ? 'project' : 'away')].filter(Boolean).join('\n');
@@ -217,12 +220,18 @@ export default class PmList extends View {
     const list = v_flex().id('pm-list-rows').flex_1().min_h(0).px(8).pb(rows.length || extra ? 6 : 0).overflow_y_scrollbar()
       .children(rows.map(row => {
         const at = this.changed[row.key]?.at, archivable = !row.machine && !row.unregistered && hovered(row);
+        const ctxLevel = pmContextLevel(row.contextTokens, row.compactTokens ?? row.rotateTokens);
+        const ctxColor = ctxLevel === 'over' || ctxLevel === 'near' ? (t.ansi3 || t.accent || t.dim) : t.dim;
+        const shortCtx = Boolean(this.narrow) || Boolean(row.machine) || row.waiting > 0;
+        const ctxText = shortCtx ? contextShort(row.contextTokens) : contextLabel(row.contextTokens, lang);
         return base(row, h_flex()).px(8).h(30).rounded(8).gap(9).on_hover(onHover(row))
           .child(h_flex().w(14).flex_none().justify_center().child(this.lead(t, row.status)))
           .child(div().flex_1().min_w(0).truncate().text_color(['idle', 'unknown'].includes(row.status) ? t.muted : t.foreground).child(row.label))
           .when(Boolean(row.machine), el => el.child(div().flex_none().text_size(10).text_color(t.dim).child(row.machine)))
           .when(row.waiting > 0, el => el.child(h_flex().flex_none().min_w(18).h(18).px(5).rounded(9).items_center()
             .justify_center().bg(t.blocked + '2e').text_color(t.blocked).text_size(11).font_semibold().child(String(row.waiting))))
+          .when(Boolean(ctxText) && !archivable, el => el.child(div().id(`pm-context-${row.key}`).flex_none()
+            .text_size(11).text_color(ctxColor).child(ctxText)))
           // Pointing at a local project offers its archive in place of the time.
           .when(archivable, el => el.child(h_flex().id(`archive-${row.key}`).size(22).flex_none().rounded(6).items_center()
             .justify_center().cursor_pointer().text_color(t.muted).bg(t.raised).hover(s => s.text_color(t.foreground))

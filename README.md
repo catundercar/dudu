@@ -18,7 +18,7 @@ This first version supports the Herdr desktop app. The `herdr` terminal UI is no
 
 - A coding agent CLI, installed and authenticated, for both roles: the manager and the workers. Claude Code and Codex are tested; pi, Gemini CLI, opencode and any other can be configured (see [Configuration](docs/guide.md#configuration)).
 - The Herdr desktop app, with `herdr-app` and `herdr-core` (`hc`) available on your PATH.
-- Bash and Python 3 (tested on Python 3.14). The installer uses only Python's standard library.
+- Python 3 (3.9+; tested on Python 3.12 and 3.14). The installer uses only Python's standard library (Bash is optional: run `python install.py` directly on Windows).
 - Git for repository work and worker worktrees.
 
 ## Install
@@ -26,12 +26,15 @@ This first version supports the Herdr desktop app. The `herdr` terminal UI is no
 Clone or download this repository, then run from its root:
 
 ```bash
-./install.sh
+./install.sh          # macOS / Linux (or Git Bash)
+python install.py     # Windows (cmd / PowerShell) or any platform without Bash
 ```
 
 It copies the skill into each coding agent it finds (Claude Code, Codex, pi), adds their hooks, and installs the desktop mods and a `pm` layout. Restart running agent sessions afterwards. `./install.sh --dry-run` previews without writing files.
 
 The skill's source is this repository (`mods/pm-dash/skill`). To change the skill on any machine, change it here and run `./install.sh` again, or open a pull request; do not edit an installed copy such as `~/.claude/skills/pm`, which the next install replaces. When an installed copy has local edits, the installer first copies it to `install/backups/` in the ledger home (`~/.dudu`) and says so.
+
+The ledger (tasks, registrations, conversations, memories, and `config.json`) lives in `~/.dudu` by default (override with `PM_HOME`). Earlier installs that still keep the ledger in `~/.claude/pm` continue to work and can migrate with `pm.py home --migrate` (backs up first and leaves a `~/.claude/pm -> ~/.dudu` symlink — keep that symlink, because existing `pms/` and `tasks/` records may still reference old absolute paths; see [Ledger home and migration](docs/guide.md#ledger-home-and-migration)).
 
 You can also add it from herdr.dev and click **Set up** on the board. Both paths, every option and what gets written: [Install](docs/guide.md#install) and [Add it from herdr.dev](docs/guide.md#add-it-from-herdrdev).
 

@@ -1,0 +1,472 @@
+{
+ "test_fast_path_step_done": {
+  "exit": 0,
+  "stdout": "demo-plan: in_progress (plan 1/2, next: check)\n",
+  "stderr": "",
+  "hc": [],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-plan.json": "{\n  \"id\": \"demo-plan\",\n  \"title\": \"Plan\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"in_progress\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t1\",\n  \"created\": \"<TIME>\",\n  \"plan\": [\n    {\n      \"text\": \"build\",\n      \"state\": \"done\",\n      \"anchor\": \"work\"\n    },\n    {\n      \"text\": \"check\",\n      \"state\": \"doing\",\n      \"anchor\": \"custom\"\n    }\n  ],\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    }\n  ],\n  \"updated\": \"<TIME>\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-plan\", \"title\": \"Plan\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Plan (`demo-plan`) | in_progress | pm | hc:t1 |  | <MM-DD> <HH:MM> | registered (in_progress) |\n",
+   "candidates/": null
+  }
+ },
+ "test_fast_path_worker_subplan": {
+  "exit": 0,
+  "stdout": "demo-work: in_progress (subplan 1/3)\n",
+  "stderr": "",
+  "hc": [],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"in_progress\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"subplan\": [\n    {\n      \"text\": \"read\",\n      \"state\": \"done\"\n    },\n    {\n      \"text\": \"write\",\n      \"state\": \"doing\"\n    },\n    {\n      \"text\": \"test\",\n      \"state\": \"todo\"\n    }\n  ]\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | in_progress | pm | hc:t2 | feature | <MM-DD> <HH:MM> | registered (in_progress) |\n",
+   "candidates/": null
+  }
+ },
+ "test_row1_wake_and_row7_close_reported": {
+  "exit": 0,
+  "stdout": "demo-work: review\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t2"
+   ]
+  ],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ],
+   [
+    "pm.py",
+    "close-worker",
+    "t2",
+    "--task",
+    "demo-work",
+    "--quiet",
+    "1800",
+    "--timeout",
+    "16200",
+    "--while",
+    "review"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"review\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=review; ready for review\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"hc:t2 ends after 30 idle minutes (workers.close_reported); `pm.py reattach demo-work` resumes its session\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"status=review; ready for review\", \"number\": 1, \"source\": \"worker\", \"wake\": true}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"hc:t2 ends after 30 idle minutes (workers.close_reported); `pm.py reattach demo-work` resumes its session\", \"number\": 1}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | review | pm | hc:t2 | feature | <MM-DD> <HH:MM> | hc:t2 ends after 30 idle minutes (workers.close_reported); `pm.py reattach demo- |\n",
+   "candidates/": null
+  }
+ },
+ "test_row2_collect_research": {
+  "exit": 0,
+  "stdout": "demo-work: blocked\ndemo-work: collected research: probe/README.md\n",
+  "stderr": "",
+  "hc": [],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"blocked\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=blocked; need a decision\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"worktree\": \"<ROOT>/wt/feature\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"blocked\", \"by\": \"hc:t2\", \"text\": \"status=blocked; need a decision\", \"number\": 1, \"source\": \"worker\", \"wake\": true}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | blocked | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=blocked; need a decision |\n",
+   "candidates/": null
+  }
+ },
+ "test_row3_auto_review_failed_is_handed_to_pm": {
+  "exit": 0,
+  "stdout": "demo-rv: review\ndemo-rv: auto-review failed (task demo-rv-review exists and is not a review of demo-rv); handed to PM\n",
+  "stderr": "",
+  "hc": [],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-rv-review.json": "{\n  \"id\": \"demo-rv-review\",\n  \"title\": \"Review: other\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"done\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"review_of\": \"other\",\n  \"created\": \"<TIME>\",\n  \"updated\": \"<TIME>\",\n  \"log\": []\n}\n",
+   "tasks/demo-rv.json": "{\n  \"id\": \"demo-rv\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"review\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"plan\": [\n    {\n      \"text\": \"build\",\n      \"state\": \"done\",\n      \"anchor\": \"work\"\n    },\n    {\n      \"text\": \"review\",\n      \"state\": \"todo\",\n      \"anchor\": \"review\"\n    },\n    {\n      \"text\": \"merge\",\n      \"state\": \"todo\",\n      \"anchor\": \"merge\"\n    }\n  ],\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=review, commit=de063ee; done\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"auto-review failed (task demo-rv-review exists and is not a review of demo-rv); handed to PM (commit de063ee): done\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"worktree\": \"<ROOT>/wt/feature\",\n  \"commit\": \"de063ee\",\n  \"auto_review\": {\n    \"status\": \"failed\",\n    \"commit\": \"de063ee\",\n    \"resolved\": \"de063ee531cebfcfa6efec28415f415326fc7803\",\n    \"note\": \"done\",\n    \"at\": \"<TIME>\",\n    \"error\": \"task demo-rv-review exists and is not a review of demo-rv\",\n    \"failed_at\": \"<TIME>\"\n  }\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"status=review, commit=de063ee; done\", \"number\": 1, \"source\": \"worker\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"auto-review failed (task demo-rv-review exists and is not a review of demo-rv); handed to PM (commit de063ee): done\", \"number\": 1, \"source\": \"worker\", \"wake\": true}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-rv`) | review | pm | hc:t2 | feature | <MM-DD> <HH:MM> | auto-review failed (task demo-rv-review exists and is not a review of demo-rv);  |\n| Review: other (`demo-rv-review`) | done | pm |  |  | <MM-DD> <HH:MM> |  |\n",
+   "candidates/": null
+  }
+ },
+ "test_row3_auto_review_started_stops_the_reactions": {
+  "exit": 0,
+  "stdout": "demo-rv: review\ndemo-rv: auto-review started (demo-rv-review)\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "run",
+    "--bg",
+    "--parent",
+    "t2",
+    "--no-notify",
+    "--name",
+    "demo-rv-review",
+    "--cwd",
+    "<ROOT>/wt/feature",
+    "--",
+    "claude",
+    "--disallowedTools",
+    "Edit,Write,NotebookEdit"
+   ],
+   [
+    "label",
+    "t10",
+    "task=demo-rv-review"
+   ],
+   [
+    "get",
+    "t10"
+   ],
+   [
+    "send",
+    "t10",
+    "Review (read-only) of task #1 demo-rv: Work\nDo not commit, edit files or create branches: read, run the checks, report.\n- Brief: (none recorded)\n- Worktree: <ROOT>/wt/feature; range `git diff main...feature` (`--stat` first, then the source changes)\n- Checklist:\n  1. The diff against the brief: flag anything outside it.\n  2. Red lines: no `git add -A` debris, no secrets, no third-party assets, nothing that touches the user's running apps or system settings.\n  3. Correctness: edge cases the worker could not have seen (destructive file operations, compatibility with old peers, signing, OS-version behaviour). Test a claim in a scratch directory when it is cheap.\n  4. Visual or UX results: look at the evidence image.\n- The project has no verify file: skip the checks.\n\nReport: `PM_HOME=<ROOT>/ledger python3 <SCRIPTS>/pm.py update demo-rv-review --status done --note \"<numbered findings, one per line; none: no blockers>\"`\nThe PM reads only this report. Keep it under 600 characters, in the user's language. Then stop.\n"
+   ]
+  ],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-rv-review.json": "{\n  \"id\": \"demo-rv-review\",\n  \"title\": \"Review: Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"in_progress\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t10\",\n  \"worker_pane\": \"hc:t10\",\n  \"agent\": \"demo-rv-review\",\n  \"brief\": \"<ROOT>/ledger/sent/demo-rv-review.md\",\n  \"tab\": \"review-Work\",\n  \"review_of\": \"demo-rv\",\n  \"worker\": {\n    \"profile\": \"\",\n    \"kind\": \"claude\",\n    \"model\": \"\",\n    \"effort\": \"\",\n    \"advisor\": \"\"\n  },\n  \"created\": \"<TIME>\",\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"review started (claude)\"\n    }\n  ],\n  \"round\": {\n    \"terminal\": \"t10\",\n    \"at\": \"<TIME>\",\n    \"turn\": 0\n  },\n  \"updated\": \"<TIME>\"\n}\n",
+   "tasks/demo-rv.json": "{\n  \"id\": \"demo-rv\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"review\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"plan\": [\n    {\n      \"text\": \"build\",\n      \"state\": \"done\",\n      \"anchor\": \"work\"\n    },\n    {\n      \"text\": \"review\",\n      \"state\": \"doing\",\n      \"anchor\": \"review\"\n    },\n    {\n      \"text\": \"merge\",\n      \"state\": \"todo\",\n      \"anchor\": \"merge\"\n    }\n  ],\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=review, commit=de063ee; done\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"auto-review started (demo-rv-review)\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"worktree\": \"<ROOT>/wt/feature\",\n  \"commit\": \"de063ee\",\n  \"auto_review\": {\n    \"status\": \"running\",\n    \"commit\": \"de063ee\",\n    \"resolved\": \"de063ee531cebfcfa6efec28415f415326fc7803\",\n    \"note\": \"done\",\n    \"at\": \"<TIME>\",\n    \"review_id\": \"demo-rv-review\",\n    \"started_at\": \"<TIME>\"\n  },\n  \"auto_reviewed_commit\": \"de063ee531cebfcfa6efec28415f415326fc7803\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"status=review, commit=de063ee; done\", \"number\": 1, \"source\": \"worker\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv-review\", \"title\": \"Review: Work\", \"status\": \"in_progress\", \"by\": \"hc:t2\", \"text\": \"review started (claude)\"}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"auto-review started (demo-rv-review)\", \"number\": 1, \"source\": \"harness\", \"wake\": false}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1-review Review: Work (`demo-rv-review`) | in_progress | pm | hc:t10 demo-rv-review |  | <MM-DD> <HH:MM> | review started (claude) |\n| #1 Work (`demo-rv`) | review | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=review, commit=de063ee; done |\n",
+   "candidates/": null
+  }
+ },
+ "test_row3_round_limit_skips_review_and_runs_the_rest": {
+  "exit": 0,
+  "stdout": "demo-rv: review\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t2"
+   ]
+  ],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ],
+   [
+    "pm.py",
+    "close-worker",
+    "t2",
+    "--task",
+    "demo-rv",
+    "--quiet",
+    "1800",
+    "--timeout",
+    "16200",
+    "--while",
+    "review"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-rv.json": "{\n  \"id\": \"demo-rv\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"review\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"plan\": [\n    {\n      \"text\": \"build\",\n      \"state\": \"done\",\n      \"anchor\": \"work\"\n    },\n    {\n      \"text\": \"review\",\n      \"state\": \"doing\",\n      \"anchor\": \"review\"\n    },\n    {\n      \"text\": \"merge\",\n      \"state\": \"todo\",\n      \"anchor\": \"merge\"\n    }\n  ],\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=review, commit=de063ee; done (auto-review skipped: round limit reached)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"hc:t2 ends after 30 idle minutes (workers.close_reported); `pm.py reattach demo-rv` resumes its session\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"worktree\": \"<ROOT>/wt/feature\",\n  \"rounds\": 99,\n  \"commit\": \"de063ee\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"status=review, commit=de063ee; done (auto-review skipped: round limit reached)\", \"number\": 1, \"source\": \"worker\", \"wake\": true}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-rv\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t2\", \"text\": \"hc:t2 ends after 30 idle minutes (workers.close_reported); `pm.py reattach demo-rv` resumes its session\", \"number\": 1}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-rv`) | review | pm | hc:t2 | feature | <MM-DD> <HH:MM> | hc:t2 ends after 30 idle minutes (workers.close_reported); `pm.py reattach demo- |\n",
+   "candidates/": null
+  }
+ },
+ "test_row4_send_wait_failure_exits_1_after_the_status_line": {
+  "exit": 1,
+  "stdout": "demo-work: in_progress\ndemo-work: the note was recorded but not sent (hc:t2 is exited). Send it by hand: hc send t2 '[from hc:t1] go left'\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ],
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "get",
+    "t2"
+   ]
+  ],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"in_progress\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=blocked; which way?\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"status=in_progress; go left\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"round\": {\n    \"terminal\": \"t2\",\n    \"at\": \"<TIME>\",\n    \"turn\": 0\n  }\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"blocked\", \"by\": \"hc:t2\", \"text\": \"status=blocked; which way?\", \"number\": 1, \"source\": \"worker\", \"wake\": true}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"status=in_progress; go left\", \"number\": 1, \"source\": \"pm\", \"wake\": false, \"handled_by\": \"pm\"}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | in_progress | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=in_progress; go left |\n",
+   "candidates/": null
+  }
+ },
+ "test_row4_send_wait_resumes_a_worker_blocked_task": {
+  "exit": 0,
+  "stdout": "demo-work: in_progress\ndemo-work: sent to hc:t2\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ],
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "send",
+    "t2",
+    "[from hc:t1] go left"
+   ]
+  ],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"in_progress\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=blocked; which way?\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"status=in_progress; go left\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"round\": {\n    \"terminal\": \"t2\",\n    \"at\": \"<TIME>\",\n    \"turn\": 0\n  }\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"blocked\", \"by\": \"hc:t2\", \"text\": \"status=blocked; which way?\", \"number\": 1, \"source\": \"worker\", \"wake\": true}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"status=in_progress; go left\", \"number\": 1, \"source\": \"pm\", \"wake\": false, \"handled_by\": \"pm\"}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | in_progress | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=in_progress; go left |\n",
+   "candidates/": null
+  }
+ },
+ "test_row5a_merged_closes_review_and_row6_still_runs": {
+  "exit": 0,
+  "stdout": "demo-work: merged\ndemo-work: closed demo-work-review, terminal hc:t3\ndemo-work: terminal hc:t2\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ],
+   [
+    "get",
+    "t3"
+   ],
+   [
+    "kill",
+    "t3"
+   ],
+   [
+    "rm",
+    "t3"
+   ],
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "kill",
+    "t2"
+   ],
+   [
+    "rm",
+    "t2"
+   ]
+  ],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-work-review.json": "{\n  \"id\": \"demo-work-review\",\n  \"title\": \"Review: x\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"done\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"pane\": \"hc:t3\",\n  \"worker_pane\": \"hc:t3\",\n  \"review_of\": \"demo-work\",\n  \"created\": \"<TIME>\",\n  \"updated\": \"<TIME>\",\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"retired with demo-work\"\n    }\n  ],\n  \"closed\": {\n    \"pane\": \"hc:t3\",\n    \"at\": \"<TIME>\",\n    \"why\": \"retire\"\n  },\n  \"retired\": \"<TIME>\"\n}\n",
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"merged\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"status=merged; merged by hand\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"worker_pane\": \"hc:t2\",\n  \"escalations\": [\n    {\n      \"at\": \"<TIME>\"\n    }\n  ],\n  \"closed\": {\n    \"pane\": \"hc:t2\",\n    \"at\": \"<TIME>\",\n    \"why\": \"workers.close_on_close\"\n  }\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"merged\", \"by\": \"hc:t1\", \"text\": \"status=merged; merged by hand\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work-review\", \"title\": \"Review: x\", \"status\": \"done\", \"by\": \"hc:t1\", \"text\": \"retired with demo-work\"}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1-review Review: x (`demo-work-review`) | done | pm | hc:t3 |  | <MM-DD> <HH:MM> | retired with demo-work |\n| #1 Work (`demo-work`) | merged | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=merged; merged by hand |\n",
+   "candidates/": null
+  }
+ },
+ "test_row5b_landed_done_self_closing_worker": {
+  "exit": 0,
+  "stdout": "demo-work: done\ndemo-work: hc:t2 and workspace will retire once this turn ends\n",
+  "stderr": "",
+  "hc": [],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ],
+   [
+    "pm.py",
+    "close-worker",
+    "t2",
+    "--task",
+    "demo-work",
+    "--quiet",
+    "10",
+    "--timeout",
+    "7200",
+    "--while",
+    "merged,released,done,abandoned",
+    "--retire"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"done\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t2\",\n      \"text\": \"status=done; post-merge steps done\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"landed\": {\n    \"commit\": \"abc1234\",\n    \"base\": \"main\",\n    \"branch\": \"feature\",\n    \"at\": \"<TIME>\"\n  }\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"done\", \"by\": \"hc:t2\", \"text\": \"status=done; post-merge steps done\", \"number\": 1, \"source\": \"worker\", \"wake\": true}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | done | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=done; post-merge steps done |\n",
+   "candidates/": null
+  }
+ },
+ "test_row5b_merged_dispatched_retires_the_workspace": {
+  "exit": 0,
+  "stdout": "demo-work: merged\ndemo-work retired: removed worktree <ROOT>/wt/feature, branch feature\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ],
+   [
+    "get",
+    "t2"
+   ]
+  ],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"merged\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"status=merged; landed\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"retired: removed worktree <ROOT>/wt/feature, branch feature\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"worktree\": \"<ROOT>/wt/feature\",\n  \"retired\": \"<TIME>\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"merged\", \"by\": \"hc:t1\", \"text\": \"status=merged; landed\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"merged\", \"by\": \"hc:t1\", \"text\": \"retired: removed worktree <ROOT>/wt/feature, branch feature\", \"number\": 1}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | merged | pm | hc:t2 | feature | <MM-DD> <HH:MM> | retired: removed worktree <PATH> |\n",
+   "candidates/": null
+  }
+ },
+ "test_row5b_retire_refused_prints_not_retired": {
+  "exit": 0,
+  "stdout": "demo-work: merged\nnot retired: feature is not merged into main; pass --force to discard it. Fix that, then run `pm.py retire demo-work`.\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ]
+  ],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"merged\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"status=merged; landed\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"worktree\": \"<ROOT>/wt/feature\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"merged\", \"by\": \"hc:t1\", \"text\": \"status=merged; landed\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | merged | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=merged; landed |\n",
+   "candidates/": null
+  }
+ },
+ "test_row6_close_on_close_and_prune_candidates": {
+  "exit": 0,
+  "stdout": "demo-work: done\ndemo-work: terminal hc:t2\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ],
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "get",
+    "t2"
+   ],
+   [
+    "kill",
+    "t2"
+   ],
+   [
+    "rm",
+    "t2"
+   ]
+  ],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-work.json": "{\n  \"id\": \"demo-work\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"done\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"status=done; finished\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"worker_pane\": \"hc:t2\",\n  \"escalations\": [\n    {\n      \"at\": \"<TIME>\"\n    }\n  ],\n  \"closed\": {\n    \"pane\": \"hc:t2\",\n    \"at\": \"<TIME>\",\n    \"why\": \"workers.close_on_close\"\n  }\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-work\", \"title\": \"Work\", \"status\": \"done\", \"by\": \"hc:t1\", \"text\": \"status=done; finished\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-work`) | done | pm | hc:t2 | feature | <MM-DD> <HH:MM> | status=done; finished |\n",
+   "candidates/": [
+    "someone-else"
+   ]
+  }
+ },
+ "test_row8_review_done_syncs_the_parent": {
+  "exit": 0,
+  "stdout": "demo-par-review: done\n",
+  "stderr": "",
+  "hc": [],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-par-review.json": "{\n  \"id\": \"demo-par-review\",\n  \"title\": \"Review: x\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"done\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"pane\": \"hc:t3\",\n  \"worker_pane\": \"hc:t3\",\n  \"review_of\": \"demo-par\",\n  \"created\": \"<TIME>\",\n  \"updated\": \"<TIME>\",\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t3\",\n      \"text\": \"status=done; no blockers\"\n    }\n  ]\n}\n",
+   "tasks/demo-par.json": "{\n  \"id\": \"demo-par\",\n  \"title\": \"Work\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"review\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t2\",\n  \"created\": \"<TIME>\",\n  \"branch\": \"feature\",\n  \"plan\": [\n    {\n      \"text\": \"build\",\n      \"state\": \"done\",\n      \"anchor\": \"work\"\n    },\n    {\n      \"text\": \"review\",\n      \"state\": \"done\",\n      \"anchor\": \"review\"\n    },\n    {\n      \"text\": \"merge\",\n      \"state\": \"todo\",\n      \"anchor\": \"merge\"\n    }\n  ],\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t3\",\n      \"text\": \"review passed (demo-par-review): no blockers\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"dispatched\": true,\n  \"worker_pane\": \"hc:t2\",\n  \"auto_review\": {\n    \"status\": \"passed\",\n    \"review_id\": \"demo-par-review\",\n    \"commit\": \"abc1234\",\n    \"note\": \"done\",\n    \"resolved\": \"abc1234\",\n    \"finished_at\": \"<TIME>\",\n    \"verdict\": \"no blockers\"\n  }\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-par\", \"title\": \"Work\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-par-review\", \"title\": \"Review: x\", \"status\": \"done\", \"by\": \"hc:t3\", \"text\": \"status=done; no blockers\", \"source\": \"worker\", \"wake\": true, \"review_of\": \"demo-par\", \"worker_commit\": \"abc1234\", \"worker_note\": \"done\"}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-par\", \"title\": \"Work\", \"status\": \"review\", \"by\": \"hc:t3\", \"text\": \"review passed (demo-par-review): no blockers\", \"number\": 1, \"source\": \"reviewer\", \"wake\": false}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #1 Work (`demo-par`) | review | pm | hc:t2 | feature | <MM-DD> <HH:MM> | registered (in_progress) |\n| #1-review Review: x (`demo-par-review`) | done | pm | hc:t3 |  | <MM-DD> <HH:MM> | status=done; no blockers |\n",
+   "candidates/": null
+  }
+ },
+ "test_row9a_dependencies_already_met": {
+  "exit": 0,
+  "stdout": "demo-second: proposed\n",
+  "stderr": "note: all dependencies of demo-second are already met (all deps met: demo-first (done)); ready to dispatch\n",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ]
+  ],
+  "spawns": [],
+  "ledger": {
+   "tasks/demo-first.json": "{\n  \"id\": \"demo-first\",\n  \"title\": \"First\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"done\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t1\",\n  \"created\": \"<TIME>\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (done)\"\n    }\n  ],\n  \"updated\": \"<TIME>\"\n}\n",
+   "tasks/demo-second.json": "{\n  \"id\": \"demo-second\",\n  \"title\": \"Second\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"proposed\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t1\",\n  \"created\": \"<TIME>\",\n  \"number\": 2,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (proposed)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"depends_on=demo-first\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"depends_on\": [\n    \"demo-first\"\n  ],\n  \"deps_notified\": \"ready:demo-first\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-first\", \"title\": \"First\", \"status\": \"done\", \"by\": \"hc:t1\", \"text\": \"registered (done)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-second\", \"title\": \"Second\", \"status\": \"proposed\", \"by\": \"hc:t1\", \"text\": \"registered (proposed)\", \"number\": 2, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-second\", \"title\": \"Second\", \"status\": \"proposed\", \"by\": \"hc:t1\", \"text\": \"depends_on=demo-first\", \"number\": 2, \"source\": \"pm\", \"wake\": false}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #2 Second (`demo-second`) | proposed | pm | hc:t1 |  | <MM-DD> <HH:MM> | depends_on=demo-first |\n| #1 First (`demo-first`) | done | pm | hc:t1 |  | <MM-DD> <HH:MM> | registered (done) |\n",
+   "candidates/": null
+  }
+ },
+ "test_row9b_closing_a_prerequisite_reconciles_dependents": {
+  "exit": 0,
+  "stdout": "demo-first: abandoned\n",
+  "stderr": "",
+  "hc": [
+   [
+    "get",
+    "t1"
+   ]
+  ],
+  "spawns": [
+   [
+    "pm.py",
+    "deliver",
+    "<ROOT>/demo"
+   ]
+  ],
+  "ledger": {
+   "tasks/demo-first.json": "{\n  \"id\": \"demo-first\",\n  \"title\": \"First\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"abandoned\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t1\",\n  \"created\": \"<TIME>\",\n  \"number\": 1,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (in_progress)\"\n    },\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"status=abandoned; dropped\"\n    }\n  ],\n  \"updated\": \"<TIME>\"\n}\n",
+   "tasks/demo-second.json": "{\n  \"id\": \"demo-second\",\n  \"title\": \"Second\",\n  \"project\": \"demo\",\n  \"repo\": \"<ROOT>/demo\",\n  \"status\": \"proposed\",\n  \"base\": \"main\",\n  \"owner\": \"pm\",\n  \"workspace\": \"\",\n  \"pane\": \"hc:t1\",\n  \"created\": \"<TIME>\",\n  \"depends_on\": [\n    \"demo-first\"\n  ],\n  \"number\": 2,\n  \"log\": [\n    {\n      \"at\": \"<TIME>\",\n      \"by\": \"hc:t1\",\n      \"text\": \"registered (proposed)\"\n    }\n  ],\n  \"updated\": \"<TIME>\",\n  \"deps_notified\": \"abandoned:demo-first\"\n}\n",
+   "projects/demo/conversation.jsonl": "{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-first\", \"title\": \"First\", \"status\": \"in_progress\", \"by\": \"hc:t1\", \"text\": \"registered (in_progress)\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-second\", \"title\": \"Second\", \"status\": \"proposed\", \"by\": \"hc:t1\", \"text\": \"registered (proposed)\", \"number\": 2, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"thread\", \"task\": \"demo-first\", \"title\": \"First\", \"status\": \"abandoned\", \"by\": \"hc:t1\", \"text\": \"status=abandoned; dropped\", \"number\": 1, \"source\": \"pm\", \"wake\": false}\n{\"at\": \"<TIME>\", \"type\": \"event\", \"task\": \"demo-second\", \"title\": \"Second\", \"brief\": \"\", \"depends_on\": [\"demo-first\"], \"source\": \"deps\", \"by\": \"pm.py\", \"key\": \"abandoned:demo-first\", \"text\": \"Dependency abandoned (Second): demo-first (abandoned!); update --depends-on, dispatch anyway, or abandon this task\", \"wake\": true}\n",
+   "BOARD.md": "# PM Board\n\nUpdated <TIME>. Ledger: `<ROOT>/ledger/tasks`.\n\n## demo\n\n| Task | Status | Owner | Where | Branch | Updated | Latest |\n| --- | --- | --- | --- | --- | --- | --- |\n| #2 Second (`demo-second`) | proposed | pm | hc:t1 |  | <MM-DD> <HH:MM> | registered (proposed) |\n| #1 First (`demo-first`) | abandoned | pm | hc:t1 |  | <MM-DD> <HH:MM> | status=abandoned; dropped |\n",
+   "candidates/": null
+  }
+ }
+}

@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import copy
+import fnmatch
 import importlib.util
 import json
 import os
@@ -32,8 +33,26 @@ MAIN = {
 }
 PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
 PM_BOARD = {"id": "pm-board", "type": "block", "window_drag": True, "content": {"mod": "pm-dash"}}
-PM_PROJECT = {"id": "pm-project", "type": "block", "window_drag": True, "content": {"mod": "pm-project"}}
+PM_PROJECT_HEADER = {
+    "id": "pm-project-header", "type": "block", "size": {"px": 56},
+    "window_drag": True, "content": {"mod": "pm-project", "props": {"header": True}},
+}
+PM_PROJECT_BODY = {
+    "id": "pm-project-body", "type": "block",
+    "content": {"mod": "pm-project", "props": {"body": True}},
+}
+PM_PROJECT = {
+    "id": "pm-project", "type": "column", "resizable": False,
+    "children": [PM_PROJECT_HEADER, PM_PROJECT_BODY],
+}
 MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
+# What the skill install must leave out, written here on its own (not read from setup.py) so a wrong list there fails:
+# any test file, any tests/ folder, Python's cache and Finder's file, matched against every part of a path.
+SKILL_EXCLUDED = ("test_*.py", "tests", "__pycache__", ".DS_Store")
+
+
+def skill_excluded(relative):
+    return any(fnmatch.fnmatch(part, pattern) for part in Path(relative).parts for pattern in SKILL_EXCLUDED)
 
 
 class InstallTest(unittest.TestCase):
@@ -127,6 +146,63 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
         self.assertEqual((installed / "pm_events.py").read_bytes(), events.read_bytes())
 
+    def copied_bundle(self):
+        bundle = self.root / "app home/mods/pm-dash"
+        shutil.copytree(BUNDLE, bundle, ignore=shutil.ignore_patterns("__pycache__"))
+        return bundle
+
+    def test_scripts_tests_folder_is_never_installed_or_fingerprinted(self):
+        bundle = self.copied_bundle()
+        tests = bundle / "skill/scripts/tests"
+        (tests / "golden").mkdir(parents=True, exist_ok=True)
+        (tests / "replay_helper.py").write_text("print('not a test_ name, still under tests/')\n")
+        (tests / "golden/extra.json").write_text("{}\n")
+        self.run_setup(bundle=bundle)
+        installed = self.claude / "skills/pm/scripts"
+        self.assertTrue((installed / "pm.py").is_file())
+        self.assertFalse((installed / "tests").exists())
+        # A change under scripts/tests/ is not a change of the installed skill.
+        (tests / "golden/extra.json").write_text('{"changed": true}\n')
+        (tests / "another.py").write_text("x = 1\n")
+        self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
+
+    def test_a_test_file_of_any_name_is_never_installed_or_fingerprinted(self):
+        bundle = self.copied_bundle()
+        scripts = bundle / "skill/scripts"
+        (scripts / "test_brand_new_area.py").write_text("import unittest\n")
+        (scripts / "pmlib").mkdir(exist_ok=True)  # the bundle has pmlib/ since pm.py became a launcher
+        (scripts / "pmlib/test_inside_package.py").write_text("import unittest\n")
+        self.run_setup(bundle=bundle)
+        installed = self.claude / "skills/pm/scripts"
+        self.assertFalse((installed / "test_brand_new_area.py").exists())
+        self.assertFalse((installed / "pmlib/test_inside_package.py").exists())
+        (scripts / "test_brand_new_area.py").write_text("import unittest  # edited\n")
+        (scripts / "test_yet_another.py").write_text("\n")
+        self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
+
+    def test_a_package_folder_beside_pm_py_is_installed_and_fingerprinted(self):
+        bundle = self.copied_bundle()
+        package = bundle / "skill/scripts/pmlib"
+        package.mkdir(exist_ok=True)  # the bundle has pmlib/ since pm.py became a launcher
+        (package / "__init__.py").write_text('"""pm.py\'s package."""\n')
+        (package / "x.py").write_text("VALUE = 1\n")
+        self.run_setup(bundle=bundle)
+        installed = self.claude / "skills/pm/scripts/pmlib"
+        self.assertEqual((installed / "__init__.py").read_bytes(), (package / "__init__.py").read_bytes())
+        self.assertEqual((installed / "x.py").read_text(), "VALUE = 1\n")
+        self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
+        # pm.py of one version beside a pmlib module of another: outdated, and an update copies the module.
+        (package / "x.py").write_text("VALUE = 2\n")
+        status = json.loads(self.run_setup("--status", bundle=bundle).stdout)
+        self.assertFalse(status["agents"]["claude"]["script_matches"])
+        self.assertEqual(status["summary"]["outdated"], ["claude"])
+        self.run_setup(bundle=bundle)
+        self.assertEqual((installed / "x.py").read_text(), "VALUE = 2\n")
+        self.assertTrue(self.claude_status(bundle=bundle)["script_matches"])
+        # A module only in the installed copy (left from an older layout) counts too.
+        (installed / "stale.py").write_text("OLD = True\n")
+        self.assertFalse(self.claude_status(bundle=bundle)["script_matches"])
+
     def test_setup_status_partial_install_invalid_settings_and_no_writes(self):
         self.run_setup()
         self.write_settings({"hooks": {"SessionStart": []}})
@@ -163,6 +239,10 @@ class InstallTest(unittest.TestCase):
         expected = copy.deepcopy(original)
         expected["hooks"]["SessionStart"].append({"matcher": "^(startup|resume|clear|compact)$", "hooks": [{
             "type": "command", "command": "python3 ~/.claude/skills/pm/scripts/pm.py hook-session-start", "timeout": 10}]})
+        expected["hooks"]["PreCompact"] = [{"hooks": [{"type": "command", "command":
+            "python3 ~/.claude/skills/pm/scripts/pm.py hook-pre-compact", "timeout": 10}]}]
+        expected["hooks"]["PreToolUse"] = [{"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command":
+            "python3 ~/.claude/skills/pm/scripts/pm.py hook-pre-tool", "timeout": 10}]}]
         expected["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command":
             "python3 ~/.claude/skills/pm/scripts/pm.py hook-turn", "timeout": 15}]}]
         expected["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command":
@@ -183,7 +263,7 @@ class InstallTest(unittest.TestCase):
     def bundle_files():
         return {str(p.relative_to(BUNDLE / "skill")): p.read_bytes()
                 for p in (BUNDLE / "skill").rglob("*") if p.is_file()
-                and p.name not in ("test_pm.py", "test_pm_events.py", ".DS_Store") and "__pycache__" not in p.parts}
+                and not skill_excluded(p.relative_to(BUNDLE / "skill"))}
 
     @staticmethod
     def skill_files(home):
@@ -208,9 +288,16 @@ class InstallTest(unittest.TestCase):
         self.assertIn("No coding agent home found", output)
         self.assertTrue((self.claude / "skills/pm/scripts/pm.py").is_file())
         self.assertTrue((self.claude / "skills/pm/SKILL.md").is_file())
-        self.assertFalse((self.claude / "skills/pm/scripts/test_pm.py").exists())
-        self.assertFalse((self.claude / "skills/pm/scripts/test_pm_events.py").exists())
+        installed = self.claude / "skills/pm"
+        self.assertEqual([str(p.relative_to(installed)) for p in installed.rglob("*") if p.name.startswith("test_")], [])
+        self.assertFalse((installed / "scripts/tests").exists())
+        self.assertTrue((BUNDLE / "skill/scripts/tests").is_dir())  # the bundle has one, so the check means something
         self.assertTrue((self.claude / "skills/pm/scripts/pm_events.py").is_file())
+        self.assertTrue((self.claude / "skills/pm/scripts/pm_sessions.py").is_file())
+        self.assertTrue((self.claude / "skills/pm/scripts/pm_store.py").is_file())
+        self.assertTrue((self.claude / "skills/pm/scripts/pm_project.py").is_file())
+        self.assertTrue((self.claude / "skills/pm/scripts/pmlib/cli.py").is_file())
+        self.assertTrue((self.claude / "skills/pm/scripts/pmlib/procs.py").is_file())
         self.assertFalse(list((self.claude / "skills/pm").rglob("__pycache__")))
         for name in MODS:
             mod = self.desktop / "mods" / name
@@ -225,6 +312,15 @@ class InstallTest(unittest.TestCase):
         command = session["hooks"][0]
         self.assertEqual(command["timeout"], 10)
         self.assertEqual(shlex.split(command["command"]), ["python3", str(self.claude / "skills/pm/scripts/pm.py"), "hook-session-start"])
+        pre = hooks["PreCompact"][0]["hooks"][0]
+        self.assertFalse(pre.get("async", False))
+        self.assertEqual(pre["timeout"], 10)
+        self.assertTrue(pre["command"].endswith(" hook-pre-compact"))
+        pre_tool = hooks["PreToolUse"][0]
+        self.assertEqual(pre_tool["matcher"], "AskUserQuestion")
+        self.assertFalse(pre_tool["hooks"][0].get("async", False))
+        self.assertEqual(pre_tool["hooks"][0]["timeout"], 10)
+        self.assertTrue(pre_tool["hooks"][0]["command"].endswith(" hook-pre-tool"))
         for event in ("UserPromptSubmit", "Stop"):
             hook = hooks[event][0]["hooks"][0]
             # The prompt hook's output joins the session's context, so only Stop may run in the background.
@@ -232,6 +328,11 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(hook["timeout"], 15)
             self.assertTrue(hook["command"].endswith(" hook-turn"))
         self.assertFalse(self.codex.exists() or self.pi.exists())
+        # The installed launcher finds its package: `state` runs, on a ledger home of its own.
+        state = subprocess.run(["python3", str(self.claude / "skills/pm/scripts/pm.py"), "state"], text=True,
+                               capture_output=True, env=dict(self.env, PM_HOME=str(self.root / "ledger")))
+        self.assertEqual(state.returncode, 0, state.stderr)
+        self.assertEqual(json.loads(state.stdout)["tasks"], [])
 
     def test_repeat_install_is_identical(self):
         self.run_install("--desktop")
@@ -243,7 +344,7 @@ class InstallTest(unittest.TestCase):
         for path in stale:
             self.assertFalse(path.exists())
         self.assertEqual(self.settings.read_bytes(), first)
-        self.assertEqual([len(entries) for entries in self.read_settings()["hooks"].values()], [1, 1, 1])
+        self.assertEqual([len(entries) for entries in self.read_settings()["hooks"].values()], [1, 1, 1, 1, 1])
         self.run_install("--uninstall")
         self.assertNotIn("hooks", self.read_settings())
         # A linked development install must neither delete nor copy onto the source.
@@ -267,12 +368,13 @@ class InstallTest(unittest.TestCase):
 
     def test_desktop_is_optional_and_discord_is_gone(self):
         output = self.run_install()
-        self.assertEqual(list(self.read_settings()["hooks"]), ["SessionStart", "UserPromptSubmit", "Stop"])
+        self.assertEqual(list(self.read_settings()["hooks"]), ["SessionStart", "PreCompact", "PreToolUse", "UserPromptSubmit", "Stop"])
         self.assertNotIn("hook-mirror", self.settings.read_text())
         self.assertFalse(self.desktop.exists())
         self.assertIn("Skip desktop", output)
         self.assertNotIn("discord", output.lower())
-        for command in ([str(REPO / "install.sh"), "--discord"], ["python3", str(BUNDLE / "setup.py"), "--discord"]):
+        for command in ([str(REPO / "install.sh"), "--discord"], [sys.executable, str(REPO / "install.py"), "--discord"],
+                        ["python3", str(BUNDLE / "setup.py"), "--discord"]):
             result = subprocess.run(command, env=self.env, cwd=self.root, text=True, capture_output=True)
             self.assertEqual(result.returncode, 2)
             self.assertIn("unrecognized arguments: --discord", result.stderr)
@@ -483,41 +585,61 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(target.read_bytes(), own)
 
     def test_existing_layout_gets_window_drag(self):
-        # A pm layout from before the pages' title bars moved the window, unmarked and edited by the person.
+        # A pm layout from before pm-board had window_drag, and with legacy single-block pm-project.
         self.seed_layout()
         target = self.desktop / "layouts/pm.json"
         layout = json.loads((REPO / "layouts/pm.json").read_text())
-        board, project = layout["children"][1]["children"][1:]
-        del board["window_drag"], project["window_drag"]
+        board = layout["children"][1]["children"][1]
+        del board["window_drag"]
+        layout["children"][1]["children"][2] = {
+            "id": "pm-project", "type": "block", "window_drag": True, "content": {"mod": "pm-project"},
+        }
         layout["background"] = "custom"
         target.write_text(json.dumps(layout))
         before = target.read_bytes()
-        message = f"Let the pm-board and pm-project title bars move the window in {target}"
-        self.assertIn(f"Would {message}", self.run_install("--dry-run"))
+        board_msg = f"Let the pm-board title bar move the window in {target}"
+        proj_msg = f"Split pm-project into header and body blocks in {target}"
+        dry = self.run_install("--dry-run")
+        self.assertIn(f"Would {board_msg}", dry)
+        self.assertIn(f"Would {proj_msg}", dry)
         self.assertEqual(target.read_bytes(), before)
-        self.assertIn(message, self.run_install())
+        applied = self.run_install()
+        self.assertIn(board_msg, applied)
+        self.assertIn(proj_msg, applied)
         self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
         expected = copy.deepcopy(layout)
         expected["children"][1]["children"][1:] = copy.deepcopy([PM_BOARD, PM_PROJECT])
         self.assertEqual(json.loads(target.read_text()), expected)
         self.assertIn("already contains pm-nav", self.run_install())
-        # The person's own choice stays: an explicit false, and nodes that only share a block's id
-        # (another mod in it, or a column), whichever block they stand for.
+        # Legacy single-block pm-project with explicit window_drag=False and custom keys preserves all unknown keys.
+        layout_no_drag = copy.deepcopy(expected)
+        layout_no_drag["children"][1]["children"][2] = {
+            "id": "pm-project", "type": "block", "window_drag": False,
+            "background": "surface", "size": {"weight": 2}, "min": 420,
+            "content": {"mod": "pm-project"},
+        }
+        target.write_text(json.dumps(layout_no_drag))
+        self.assertIn(proj_msg, self.run_install())
+        migrated = json.loads(target.read_text())
+        migrated_proj = migrated["children"][1]["children"][2]
+        self.assertEqual(migrated_proj["type"], "column")
+        self.assertEqual(migrated_proj["background"], "surface")
+        self.assertEqual(migrated_proj["size"], {"weight": 2})
+        self.assertEqual(migrated_proj["min"], 420)
+        self.assertNotIn("window_drag", migrated_proj)
+        self.assertNotIn("content", migrated_proj)
+        self.assertEqual(migrated_proj["children"][0]["window_drag"], False)
+        self.assertNotIn("window_drag", migrated_proj["children"][1])
+        # Non-matching nodes (explicit False on pm-board, other mods sharing the id, or already a column) stay untouched.
         stage = expected["children"][1]["children"]
-        stage[2]["window_drag"] = False
-        stage[1] = {"id": "pm-board", "type": "block", "content": {"mod": "other"}}
-        stage.append({"id": "pm-project", "type": "block", "content": {"mod": "other"}})
-        stage.append({"id": "pm-project", "type": "column", "content": {"mod": "pm-project"}, "children": []})
+        stage[1]["window_drag"] = False
+        stage.append({"id": "pm-board", "type": "block", "content": {"mod": "other"}})
+        stage.append({"id": "pm-project", "type": "block", "window_drag": True, "content": {"mod": "other"}})
+        stage.append({"id": "pm-project", "type": "column", "window_drag": True, "content": {"mod": "pm-project"}, "children": []})
         target.write_text(json.dumps(expected))
         own = target.read_bytes()
         self.assertIn("already contains pm-nav", self.run_install())
         self.assertEqual(target.read_bytes(), own)
-        # Beside those, a real pm-project block without the field gains it, and only it.
-        stage[2] = {"id": "pm-project", "type": "block", "content": {"mod": "pm-project"}}
-        target.write_text(json.dumps(expected))
-        self.assertIn(f"Let the pm-project title bar move the window in {target}", self.run_install())
-        stage[2]["window_drag"] = True
-        self.assertEqual(json.loads(target.read_text()), expected)
 
     def test_uninstall_keeps_ledger_and_other_hooks(self):
         self.seed_layout()
@@ -584,8 +706,9 @@ class InstallTest(unittest.TestCase):
         self.run_install("--agents", "claude,codex")
         for name, file in (("claude", "settings.json"), ("codex", "hooks.json")):
             settings = json.loads((self.root / f".{name}" / file).read_text())
-            for event, action in (("SessionStart", "hook-session-start"), ("Stop", "hook-turn"),
-                                  ("UserPromptSubmit", "hook-turn")):
+            for event, action in (("SessionStart", "hook-session-start"), ("PreCompact", "hook-pre-compact"),
+                                  ("PreToolUse", "hook-pre-tool"),
+                                  ("Stop", "hook-turn"), ("UserPromptSubmit", "hook-turn")):
                 self.assertEqual(settings["hooks"][event][0]["hooks"][0]["command"],
                                  f"python3 ~/.{name}/skills/pm/scripts/pm.py {action}")
 
@@ -636,8 +759,7 @@ class InstallTest(unittest.TestCase):
 
     def test_an_install_from_before_the_record_is_backed_up_when_it_differs(self):
         skill = self.claude / "skills/pm"
-        shutil.copytree(BUNDLE / "skill", skill, ignore=shutil.ignore_patterns(
-            "test_pm.py", "test_pm_events.py", "__pycache__", ".DS_Store"))
+        shutil.copytree(BUNDLE / "skill", skill, ignore=shutil.ignore_patterns(*SKILL_EXCLUDED))
         self.assertNotIn("Back up local changes", self.run_install())  # the same files as the bundle
         (self.root / ".dudu/install/skill-claude.json").unlink()
         (skill / "scripts/pm.py").write_text("# an older or edited copy\n")
@@ -683,6 +805,10 @@ class InstallTest(unittest.TestCase):
         expected = copy.deepcopy(original)
         expected["hooks"]["SessionStart"].append(
             {"hooks": [{"type": "command", "command": command("hook-session-start"), "timeout": 10}]})
+        expected["hooks"]["PreCompact"] = [{"hooks": [
+            {"type": "command", "command": command("hook-pre-compact"), "timeout": 10}]}]
+        expected["hooks"]["PreToolUse"] = [{"matcher": "request_user_input|ask_user|AskUserQuestion", "hooks": [
+            {"type": "command", "command": command("hook-pre-tool"), "timeout": 10}]}]
         expected["hooks"]["Stop"] = [other, {"hooks": [
             {"type": "command", "command": command("hook-turn"), "timeout": 15, "async": True}]}]
         expected["hooks"]["UserPromptSubmit"] = [{"hooks": [
@@ -753,10 +879,135 @@ class InstallTest(unittest.TestCase):
         result = self.run_setup("--agents", "claude,gemini", success=False)
         self.assertIn("choose from claude, codex, pi", result.stderr)
 
+    def run_install_py(self, *args):
+        result = subprocess.run([sys.executable, str(REPO / "install.py"), *args], env=self.env,
+                                cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    def test_install_py_matches_install_sh_and_needs_no_bash(self):
+        # Running install.py directly (as on Windows without Bash) produces identical files, hooks, and layout.
+        self.seed_layout()
+        self.write_settings({"env": {"KEEP": "yes"}})
+        pyc_before = sorted(str(p) for p in (REPO / "__pycache__", BUNDLE / "__pycache__") if p.exists()
+                            for p in p.rglob("*"))
+        self.run_install_py("--dry-run", "--desktop")
+        self.assertFalse((self.claude / "skills/pm").exists())
+        self.assertFalse((self.desktop / "layouts/pm.json").exists())
+        pyc_after = sorted(str(p) for p in (REPO / "__pycache__", BUNDLE / "__pycache__") if p.exists()
+                           for p in p.rglob("*"))
+        self.assertEqual(pyc_after, pyc_before)
+
+        self.run_install_py("--desktop")
+        py_snapshot = self.snapshot()
+        layout = json.loads((self.desktop / "layouts/pm.json").read_text())
+        self.assertEqual(layout["generated_by"], "dudu install.sh")
+        self.assertEqual(layout["toast"], "pm-toast")
+        self.assertEqual(layout["children"][1]["children"][1:], [PM_BOARD, PM_PROJECT])
+        for name in MODS:
+            self.assertTrue((self.desktop / "mods" / name / "main.js").is_file())
+        self.assertTrue((self.claude / "skills/pm/scripts/pm.py").is_file())
+
+        # Re-running with install.sh is identical, and install.py --uninstall cleans up cleanly.
+        self.run_install("--desktop")
+        self.assertEqual(self.snapshot(), py_snapshot)
+        self.run_install_py("--uninstall")
+        self.assertFalse((self.claude / "skills/pm").exists())
+        self.assertFalse((self.desktop / "layouts/pm.json").exists())
+        for name in MODS:
+            self.assertFalse((self.desktop / "mods" / name).exists())
+        self.assertNotIn("hooks", self.read_settings())
+
+    def test_install_py_splits_legacy_pm_project_and_rejects_reserved_split_ids(self):
+        self.seed_layout()
+        target = self.desktop / "layouts/pm.json"
+        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        layout["children"][1]["children"][2] = {
+            "id": "pm-project", "type": "block", "window_drag": False,
+            "background": "surface", "size": {"weight": 2},
+            "content": {"mod": "pm-project"},
+        }
+        target.write_text(json.dumps(layout))
+        before = target.read_bytes()
+        proj_msg = f"Split pm-project into header and body blocks in {target}"
+        self.assertIn(f"Would {proj_msg}", self.run_install_py("--dry-run"))
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIn(proj_msg, self.run_install_py())
+        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        migrated = json.loads(target.read_text())["children"][1]["children"][2]
+        self.assertEqual(migrated["type"], "column")
+        self.assertEqual(migrated["resizable"], False)
+        self.assertEqual(migrated["background"], "surface")
+        self.assertEqual(migrated["size"], {"weight": 2})
+        self.assertNotIn("window_drag", migrated)
+        self.assertNotIn("content", migrated)
+        self.assertEqual(migrated["children"][0], dict(PM_PROJECT_HEADER, window_drag=False))
+        self.assertEqual(migrated["children"][1], PM_PROJECT_BODY)
+        # Idempotent once split.
+        self.assertIn("already contains pm-nav", self.run_install_py())
+
+        # main.json containing pm-project-header or pm-project-body falls back to manual layout.
+        for reserved in ("pm-project-header", "pm-project-body"):
+            with self.subTest(reserved=reserved):
+                target.unlink(missing_ok=True)
+                bad_main = copy.deepcopy(MAIN)
+                bad_main["children"][1]["children"].append({"id": reserved, "type": "block", "content": {"mod": "other"}})
+                self.seed_layout(bad_main)
+                self.assertIn("Manual fallback", self.run_install_py())
+                self.assertFalse(target.exists())
+
+    def test_install_sh_skips_broken_python3_stub(self):
+        # Simulate Windows where `python3` on PATH is a Microsoft Store stub exiting 9009, while `python` works.
+        fakebin = self.root / "fakebin"
+        fakebin.mkdir()
+        stub = fakebin / "python3"
+        stub.write_text("#!/bin/sh\nexit 127\n")
+        stub.chmod(0o755)
+        real_py = fakebin / "python"
+        real_py.symlink_to(sys.executable)
+        env = dict(self.env, PATH=f"{fakebin}:/usr/bin:/bin")
+        result = subprocess.run([str(REPO / "install.sh"), "--dry-run"], env=env,
+                                cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Dry run complete", result.stdout)
+
+    def test_install_sh_requires_python_3_9(self):
+        # A Python 3.8 stub fails the (3, 9) probe; when no 3.9+ interpreter exists on PATH, install.sh fails cleanly.
+        fakebin = self.root / "fakebin38"
+        fakebin.mkdir()
+        probe_38 = (
+            "#!/bin/sh\n"
+            '[ "$1" = "-3" ] && shift\n'
+            f'exec "{sys.executable}" -c "import sys; sys.version_info = (3, 8, 19); exec(sys.argv[1])" "$2"\n'
+        )
+        for name in ("python3", "py", "python"):
+            stub = fakebin / name
+            stub.write_text(probe_38)
+            stub.chmod(0o755)
+        # Also test that install.sh skips the 3.8 python3 stub when a 3.9+ python is available.
+        with_py = self.root / "fakebin38_ok"
+        with_py.mkdir()
+        (with_py / "python3").write_text(probe_38)
+        (with_py / "python3").chmod(0o755)
+        (with_py / "python").symlink_to(sys.executable)
+        ok = subprocess.run(["/bin/bash", str(REPO / "install.sh"), "--dry-run"],
+                            env=dict(self.env, PATH=f"{with_py}:/usr/bin:/bin"),
+                            cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIn("Dry run complete", ok.stdout)
+
+        # When every candidate fails the 3.9 probe, install.sh exits non-zero with the 3.9+ message.
+        fail = subprocess.run(["/bin/bash", str(REPO / "install.sh"), "--dry-run"],
+                              env=dict(self.env, PATH=f"{fakebin}:/bin"),
+                              cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(fail.returncode, 0)
+        self.assertIn("Python 3.9+ is required", fail.stderr)
+
 
 def load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # pm.py, imported, turns the module registered under its name into pmlib's forwarder
     spec.loader.exec_module(module)
     return module
 
@@ -816,15 +1067,42 @@ class WindowsHookTest(unittest.TestCase):
         self.windows(None)
         first = self.install()
         self.assertTrue(all(c.startswith('"C:/Users/Ann Lee/') for c in first), first)
-        self.assertEqual(len(first), 3)
+        self.assertEqual(len(first), 5)
         self.windows(r"C:\Windows\py.exe")
         second = self.install()
-        self.assertEqual(len(second), 3, second)  # replaced, not added next to the old ones
+        self.assertEqual(len(second), 5, second)  # replaced, not added next to the old ones
         self.assertTrue(all(c.startswith("py -3 ") for c in second), second)
 
     def test_windows_path_forms(self):
         self.assertEqual(self.setup.PureWindowsPath(r"C:\Users\Ann\.claude\skills\pm\scripts\pm.py").as_posix(),
                          "C:/Users/Ann/.claude/skills/pm/scripts/pm.py")
+
+    def test_installer_hints_migration_for_legacy_ledger_and_recognizes_symlink(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        home = Path(temp.name)
+        claude = home / ".claude"
+        legacy = claude / "pm"
+        legacy.mkdir(parents=True)
+        (legacy / "tasks").mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("PM_HOME", "CLAUDE_HOME", "CODEX_HOME", "PI_CODING_AGENT_DIR")}
+        env["HOME"] = str(home)
+        res = subprocess.run([sys.executable, str(BUNDLE / "setup.py"), "--agents", "claude"],
+                             env=env, cwd=str(home), capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("legacy ledger found", res.stdout)
+        self.assertIn("home --migrate --dry-run", res.stdout)
+        # Installer must never auto-migrate the ledger.
+        self.assertTrue(legacy.is_dir() and not legacy.is_symlink())
+        self.assertFalse((home / ".dudu").exists())
+        # Once migrated (~/.claude/pm -> ~/.dudu), installer treats ~/.dudu as ledger home and stops hinting.
+        os.rename(legacy, home / ".dudu")
+        os.symlink(str(home / ".dudu"), str(legacy))
+        res2 = subprocess.run([sys.executable, str(BUNDLE / "setup.py"), "--agents", "claude"],
+                              env=env, cwd=str(home), capture_output=True, text=True)
+        self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
+        self.assertNotIn("legacy ledger found", res2.stdout)
+        self.assertTrue((home / ".dudu" / "install" / "skill-claude.json").is_file())
 
 
 if __name__ == "__main__":

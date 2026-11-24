@@ -123,14 +123,13 @@ test('an age reads in the largest whole unit, in the view\'s language', () => {
   assert.deepEqual(spans.map(ms => age(ms, 'zh')), ['刚刚', '刚刚', '1 分钟', '16 小时', '2 天']);
 });
 
-test('a retired PM terminal is not the PM', () => {
+test('an exited PM terminal is not matched as live; a live PM terminal takes over', () => {
   const pm = { name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:t3b', status: 'idle' };
-  const old = { address: 't3b', state: 'live', cwd: '/r/dudu', labels: { 'pm.retired': 'dudu' }, status: 'working' };
-  // Neither by the recorded pane nor as the project folder's terminal.
-  const [row] = pmRows({ pms: [pm] }, {}, [old], [{ address: 't3b', status: 'working' }]);
+  const exited = { address: 't3b', state: 'exited', cwd: '/r/dudu', labels: {}, status: 'working' };
+  const [row] = pmRows({ pms: [pm] }, {}, [exited], [{ address: 't3b', status: 'working' }]);
   assert.deepEqual([row.terminal, row.exact, row.status], [null, false, 'idle']);
   const next = { address: 't3k', state: 'live', cwd: '/r/dudu', labels: { pm: 'dudu' }, status: 'working' };
-  assert.equal(pmRows({ pms: [pm] }, {}, [old, next], []).at(0).terminal.address, 't3k');
+  assert.equal(pmRows({ pms: [pm] }, {}, [exited, next], []).at(0).terminal.address, 't3k');
 });
 
 test('archived projects leave the list for the fold, newest first; waiting comes from counts', () => {
@@ -146,6 +145,17 @@ test('archived projects leave the list for the fold, newest first; waiting comes
   assert.ok(active.every(r => !r.label.startsWith('PM-')));
   assert.deepEqual(archived.map(r => [r.label, archivedDay(r.archived)]), [['dsh-dudu', '11-04'], ['homenet', '10-31']]);
   assert.deepEqual(active.map(r => [r.label, r.waiting]).sort(), [['appkit', 2], ['dudu', 0], ['hub', 1]]);
+  // Without counts (older pm.py), review threads fold before counting waiting so a task and its review count once.
+  const old = {
+    pms: [{ name: 'pm-hub', project: 'hub' }],
+    tasks: [
+      { id: 'a', pm: 'pm-hub', status: 'blocked' },
+      { id: 'a-review', pm: 'pm-hub', status: 'blocked', review_of: 'a' },
+      { id: 'b', pm: 'pm-hub', status: 'review' },
+      { id: 'b-review', pm: 'pm-hub', status: 'blocked', review_of: 'b' },
+    ],
+  };
+  assert.equal(pmRows(old, {}, [], [])[0].waiting, 2);
 });
 
 // The bug: on a computer connected to another machine's herdr-core, a click on that machine's project
@@ -197,15 +207,16 @@ test('a terminal labelled as a PM that the ledger does not name gets one row, he
   assert.equal(list.allPmRows({}, {}, [term('t4', { labels: { pm: 'p' } })], [{ address: 't4', status: 'working' }])[0].status, 'working');
 });
 
-test('a PM the ledger names, an exited, retired or unlabelled terminal gets no extra row', () => {
+test('a PM the ledger names, an exited or unlabelled terminal gets no extra row', () => {
   const pms = [{ name: 'pm-project', project: 'project', pane: 'hc:t9', status: 'idle' }];
   // The ledger's PM, matched or by name on the same machine: no second row.
   assert.equal(list.allPmRows({ pms }, {}, [term('t3', { labels: { pm: 'project' } })], []).length, 1);
   assert.equal(list.allPmRows({}, { dev: { pms } }, [term('dev/t3', { labels: { pm: 'project' } })], []).length, 1);
   // The same project on another machine is another PM.
   assert.equal(list.allPmRows({ pms }, {}, [term('dev/t3', { labels: { pm: 'project' } })], []).length, 2);
-  for (const t of [term('t5', { state: 'exited', labels: { pm: 'x' } }), term('t5', { labels: { pm: 'x', 'pm.retired': 'x' } }),
-    term('t5')]) assert.deepEqual(list.labelledPmRows([], [t], []), []);
+  for (const t of [term('t5', { state: 'exited', labels: { pm: 'x' } }), term('t5')]) {
+    assert.deepEqual(list.labelledPmRows([], [t], []), []);
+  }
 });
 
 test('the view lists PMs only: their workers are left to the Agents list', () => {
@@ -224,8 +235,7 @@ test('the view lists PMs only: their workers are left to the Agents list', () =>
     return node;
   };
   const terms = [term('t3', { labels: { pm: 'proj' } }), term('t62', { parent: 't3', labels: { task: 'x' }, name: 'worker' }),
-    term('t63', { parent: 't62' }), term('t70', { parent: 't3', labels: { pm: 'nested' } }), term('t71', { parent: 't70' }),
-    term('t2', { labels: { pm: 'proj', 'pm.retired': 'proj' } }), term('t64', { parent: 't2' })];
+    term('t63', { parent: 't62' }), term('t70', { parent: 't3', labels: { pm: 'nested' } }), term('t71', { parent: 't70' })];
   const bindings = {
     ...list, View: class {}, div: element, svg: element, image: element, v_flex: element, h_flex: element,
     theme: () => ({}), home: () => '/h', appHome: () => '/a', exec: async () => ({}), readTextFile: async () => '',
@@ -246,4 +256,103 @@ test('the view lists PMs only: their workers are left to the Agents list', () =>
   // A click on the PM row still shows its terminal (no project view in this layout).
   clicks.get('pm-pm-proj')();
   assert.deepEqual(calls.pop(), ['pane.focus', { terminal: 't3' }]);
+});
+
+test('PM context usage formats cleanly, flags compact threshold, and omits 0 or missing tokens', () => {
+  const { contextTokens, contextShort, contextLabel, pmContextLevel, pmContextTip } = list;
+  for (const empty of [undefined, null, 0, -50, NaN, false, true, '12000']) {
+    assert.equal(contextTokens(empty), 0);
+    assert.equal(contextShort(empty), '');
+    assert.equal(contextLabel(empty, 'zh'), '');
+    assert.equal(pmContextLevel(empty), 'none');
+    assert.equal(pmContextTip(empty, 'zh'), '');
+  }
+  assert.equal(contextLabel(800, 'zh'), '上下文 800');
+  assert.equal(contextLabel(123_012, 'zh'), '上下文 123k');
+  assert.equal(contextLabel(123_012, 'en'), 'Context 123k');
+  // Strict `>` against `compact_tokens` (200_000 is 'near', 200_001 is 'over'; 160_000 is 'normal', 160_001 is 'near').
+  assert.equal(pmContextLevel(160_000), 'normal');
+  assert.equal(pmContextLevel(160_001), 'near');
+  assert.equal(pmContextLevel(200_000), 'near');
+  assert.equal(pmContextLevel(200_001), 'over');
+  // Custom `compact_tokens` from `pm.py state` (`PM_COMPACT_TOKENS`) overrides the 200k fallback per machine.
+  assert.equal(pmContextLevel(210_000, 400_000), 'normal');
+  assert.equal(pmContextLevel(320_001, 400_000), 'near');
+  assert.equal(pmContextLevel(400_001, 400_000), 'over');
+  assert.match(pmContextTip(175_000, 'zh'), /接近 200k 压缩阈值/);
+  assert.match(pmContextTip(210_000, 'zh'), /已超 200k 压缩阈值/);
+  assert.match(pmContextTip(410_000, 'zh', 400_000), /已超 400k 压缩阈值/);
+  assert.match(pmContextTip(410_000, 'en', 400_000), /over 400k compact threshold/);
+
+  const state = {
+    compact_tokens: 300_000,
+    pms: [
+      { name: 'pm-claude', project: 'claude-proj', pane: 'hc:t1', status: 'working', context_tokens: 250_000 },
+      { name: 'pm-codex', project: 'codex-proj', pane: 'hc:t4', status: 'working', context_tokens: 210_000, compact_tokens: 220_000 },
+      { name: 'pm-nocompact', project: 'nocompact-proj', pane: 'hc:t5', status: 'idle', context_tokens: 210_000, compact_tokens: 0 },
+      { name: 'pm-agy', project: 'agy-proj', pane: 'hc:t2', status: 'working' },
+      { name: 'pm-zero', project: 'zero-proj', pane: 'hc:t3', status: 'idle', context_tokens: 0 },
+    ],
+    lang: 'zh',
+  };
+  const rows = pmRows(state, {
+    dev: { pms: [{ name: 'pm-rem', project: 'rem', pane: 'hc:r1', status: 'idle', context_tokens: 185_000 }] },
+    old: { rotate_tokens: 250_000, pms: [{ name: 'pm-old', project: 'old', pane: 'hc:o1', status: 'idle', context_tokens: 260_000 }] },
+  }, [], []);
+  const byName = Object.fromEntries(rows.map(r => [r.label, r]));
+  assert.equal(byName['claude-proj'].contextTokens, 250_000);
+  assert.equal(byName['claude-proj'].compactTokens, 300_000);
+  assert.equal(byName['codex-proj'].compactTokens, 220_000, 'per-PM compact_tokens overrides state-level default');
+  assert.equal(pmContextLevel(byName['codex-proj'].contextTokens, byName['codex-proj'].compactTokens), 'near');
+  assert.equal(byName['nocompact-proj'].compactTokens, 0, 'per-PM compact_tokens=0 disables threshold warning');
+  assert.equal(pmContextLevel(byName['nocompact-proj'].contextTokens, byName['nocompact-proj'].compactTokens), 'normal');
+  assert.equal(byName['rem'].compactTokens, undefined, 'older remote state without compact_tokens falls back cleanly');
+  assert.equal(byName['old'].compactTokens, 250_000, 'older remote state with rotate_tokens maps cleanly');
+  assert.equal(byName['agy-proj'].contextTokens, undefined);
+  assert.equal(byName['zero-proj'].contextTokens, undefined);
+
+  // Render PmList: shows "上下文 182k" in warning color, never renders "0", and yields to archive button on hover.
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import .*;$/gm, '').replace('export default class PmList', 'class PmList');
+  const rendered = [];
+  const element = () => {
+    const rec = { id: '', texts: [], colors: [], tips: [] };
+    const node = new Proxy({}, {
+      get: (_, key) => (...args) => {
+        if (key === 'id') { rec.id = args[0]; rendered.push(rec); }
+        if (key === 'child' && typeof args[0] === 'string') rec.texts.push(args[0]);
+        if (key === 'text_color') rec.colors.push(args[0]);
+        if (key === 'tooltip') rec.tips.push(args[0]);
+        if (key === 'when' && args[0]) args[1](node);
+        return node;
+      },
+    });
+    return node;
+  };
+  const themeObj = { dim: '#666', muted: '#999', foreground: '#eee', ansi3: '#f5a623', blocked: '#ff5555' };
+  const bindings = {
+    ...list, View: class {}, div: element, svg: element, image: element, v_flex: element, h_flex: element,
+    theme: () => themeObj, home: () => '/h', appHome: () => '/a', exec: async () => ({}), readTextFile: async () => '',
+    watchFolder: async () => {}, layout: () => null, run: () => {}, terminals: () => [], agents: () => [], panes: () => [],
+    shared: () => null, setShared: () => {}, openOverlay: () => {}, execPython: async () => ({}),
+    localStorage: { setItem() {}, getItem() { return null; } },
+  };
+  const PmList = new Function(...Object.keys(bindings), `${source}; return PmList;`)(...Object.values(bindings));
+  const view = new PmList();
+  Object.assign(view, { state, remote: {}, changed: {}, folded: true, compact: false, narrow: false, hover: null, error: '' });
+  view.render({ notify() {}, stop_propagation() {} });
+
+  const ctxNode = rendered.find(r => r.id === 'pm-context-pm-claude');
+  assert.ok(ctxNode, 'claude PM renders context node');
+  assert.deepEqual(ctxNode.texts, ['上下文 250k']);
+  assert.ok(ctxNode.colors.includes('#f5a623'), '250k > 240k (80% of 300k compact_tokens) uses warning color');
+  assert.equal(rendered.some(r => r.id === 'pm-context-pm-agy' || r.id === 'pm-context-pm-zero'), false);
+  assert.equal(rendered.some(r => r.texts.some(t => /\b0k?\b/.test(t) && t.includes('上下文'))), false);
+
+  // Hovering the local row offers archive in place of context/age so nothing crowds.
+  rendered.length = 0;
+  view.hover = 'pm-claude';
+  view.render({ notify() {}, stop_propagation() {} });
+  assert.equal(rendered.some(r => r.id === 'pm-context-pm-claude'), false);
+  assert.equal(rendered.some(r => r.id === 'archive-pm-claude'), true);
 });

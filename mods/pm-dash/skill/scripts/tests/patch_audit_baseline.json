@@ -1,0 +1,4 @@
+{
+  "comment": "Known patch-contract baseline (cleared in Stage 6c after deleting test_pm.py and legacy bridges). Run `patch_audit.py --no-baseline` to view all raw findings.",
+  "entries": []
+}

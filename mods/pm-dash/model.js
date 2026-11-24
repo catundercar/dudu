@@ -1,9 +1,57 @@
+export const STEP_LABEL_UNITS = 24; // ~12 CJK chars or 24 ASCII chars for short step labels
+export const PLAN_STRINGS = {
+  en: {
+    reviewing: 'Reviewing',
+    planTitle: 'Steps',
+    planProgress: (done, total) => `${done}/${total}`,
+    planAutoReview: 'Auto-review',
+    planAutoReviewTip: 'Auto-starts an independent reviewer on commit',
+    planNoReview: 'No review',
+    planNoReviewTip: 'No code review in this task plan',
+    planRound: n => `R${n}`,
+    planFoldedRounds: n => n === 1 ? 'R1' : `R1–${n}`,
+    planFallbackWork: 'Work',
+    planFallbackReview: 'Review',
+    planFallbackDone: 'Done',
+    planPostStep: (done, total, step) => `${done}/${total} · ${step}`,
+    depsTitle: 'Waiting',
+    depsReady: 'Ready to dispatch',
+    depsJumpTip: title => `Open ${title}`,
+    depsAbandoned: 'Abandoned',
+    depsMissing: 'Missing',
+    substepsFoldTip: (done, total) => `${done}/${total} sub-steps`,
+    detailReviewStepTip: 'Click to toggle review window',
+  },
+  zh: {
+    reviewing: '审查中',
+    planTitle: '步骤',
+    planProgress: (done, total) => `${done}/${total}`,
+    planAutoReview: '自动审',
+    planAutoReviewTip: '提交后自动拉起独立审查',
+    planNoReview: '免审',
+    planNoReviewTip: '本任务计划不含代码审查',
+    planRound: n => `第${n}轮`,
+    planFoldedRounds: n => n === 1 ? '第1轮' : `第1-${n}轮`,
+    planFallbackWork: '执行',
+    planFallbackReview: '审查',
+    planFallbackDone: '完成',
+    planPostStep: (done, total, step) => `${done}/${total} · ${step}`,
+    depsTitle: '等待',
+    depsReady: '可以派了',
+    depsJumpTip: title => `跳转到 ${title}`,
+    depsAbandoned: '已放弃',
+    depsMissing: '不存在',
+    substepsFoldTip: (done, total) => `${done}/${total} 个子步骤`,
+    detailReviewStepTip: '点击开关审查小窗',
+  },
+};
+
 const STRINGS = {
   en: {
     in_progress: 'In progress', working: 'Working', blocked: 'Blocked', review: 'Review',
     reviewed: 'Reviewed',
     idle: 'Idle', done: 'Done', offline: 'Offline', pending: 'Pending', cancelled: 'Cancelled', unknown: 'Unknown',
-    disconnected: 'Disconnected',
+    disconnected: 'Disconnected', closedReattach: 'Closed · can reattach', reviewClosed: 'Review · closed',
     paused: 'Paused', proposed: 'Proposed', merged: 'Merged', released: 'Released', abandoned: 'Abandoned',
     cleanup: 'Merged · not retired',
     noPm: 'No PM', unassigned: 'Unassigned project',
@@ -55,13 +103,16 @@ const STRINGS = {
     failedAction: text => `Failed: ${text}`,
     endedCount: n => `Ended ${n}`, endedRecent: titles => `Latest: ${titles}`, endedMore: n => `Click to see all ${n}`,
     showDropped: n => `Show ${n} abandoned`, hideDropped: n => `Hide ${n} abandoned`,
+    unclaimedBlocked: n => `Unclaimed blocked ${n}`, unclaimedShort: 'Unclaimed',
+    unclaimedTip: 'Blocked tasks with no project PM (not counted in waiting for you). Click to view on the board.',
     today: 'Today', yesterday: day => `Yesterday · ${day}`, earlier: 'Earlier',
+    ...PLAN_STRINGS.en,
   },
   zh: {
     in_progress: '进行中', working: '工作中', blocked: '阻塞', review: '待审',
     reviewed: '审查有结果',
     idle: '空闲', done: '完成', offline: '离线', pending: '待办', cancelled: '取消', unknown: '未知',
-    disconnected: '已断开',
+    disconnected: '已断开', closedReattach: '已关闭，可重连', reviewClosed: '待审 · 已关闭',
     paused: '暂停', proposed: '提议', merged: '已合并', released: '已发布', abandoned: '放弃',
     cleanup: '已合并 · 待回收',
     noPm: '无 PM', unassigned: '未分配项目',
@@ -111,12 +162,15 @@ const STRINGS = {
     failedAction: text => `没有成功：${text}`,
     endedCount: n => `已结束 ${n}`, endedRecent: titles => `最近：${titles}`, endedMore: n => `点开看全部 ${n} 条`,
     showDropped: n => `显示放弃的 ${n} 条`, hideDropped: n => `隐藏放弃的 ${n} 条`,
+    unclaimedBlocked: n => `无人认领的阻塞 ${n}`, unclaimedShort: '无人认领',
+    unclaimedTip: '没有对应项目 PM 的阻塞任务（不计入「等你」）。点击到看板查看。',
     today: '今天', yesterday: day => `昨天 · ${day}`, earlier: '更早',
+    ...PLAN_STRINGS.zh,
   },
 };
 export function word(lang, key, ...args) {
   const value = STRINGS[lang === 'zh' ? 'zh' : 'en'][key];
-  return typeof value === 'function' ? value(...args) : value;
+  return typeof value === 'function' ? value(...args) : value ?? key;
 }
 export const label = (lang, status) => word(lang, status) || status || word(lang, 'unknown');
 
@@ -131,10 +185,11 @@ export function setupState(status) {
 }
 
 // The ledger home pm.py uses: PM_HOME, else ~/.claude/pm where an earlier install
-// keeps it, else ~/.dudu. `pm.py state` reports it as `home`; this shell line
-// answers the same question before the first state arrives.
+// keeps it (not when ~/.claude/pm symlinks to ~/.dudu), else ~/.dudu. `pm.py state`
+// reports it as `home`; this shell line answers the same question before the first
+// state arrives.
 export const LEDGER_HOME_SH = 'if [ -n "$PM_HOME" ]; then printf %s "$PM_HOME"; ' +
-  'elif [ -d "$HOME/.claude/pm" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
+  'elif [ -d "$HOME/.claude/pm" ] && ! [ "$HOME/.claude/pm" -ef "$HOME/.dudu" ]; then printf %s "$HOME/.claude/pm"; else printf %s "$HOME/.dudu"; fi';
 
 // Where another machine may keep pm.py: the desktop bundle, then each agent's skill folder.
 export const PM_SCRIPTS = ['.config/herdr-app/mods/pm-dash/skill/scripts/pm.py', '.claude/skills/pm/scripts/pm.py',
@@ -154,13 +209,47 @@ export function pmStatusText(lang, row) {
 // A task in progress whose terminal is gone (`pm.py state`: offline) is no work going on.
 export const disconnected = row => Boolean(row?.offline) && row.status === 'in_progress';
 
+// True when an offline task's terminal was ended on purpose (`closed` from `pm.py state`, matching `pane`).
+export const isClosedTask = row => Boolean(row?.offline && row?.closed && typeof row.closed === 'object'
+  && !Array.isArray(row.closed) && (!row.closed.pane || !row.pane || row.closed.pane === row.pane));
+
 export function taskStatusText(lang, row) {
   if (row.cleanup) return word(lang, 'cleanup');
-  if (disconnected(row)) return word(lang, 'disconnected');
+  if (disconnected(row)) return word(lang, isClosedTask(row) ? 'closedReattach' : 'disconnected');
   // Answered (pm.py's `answered`): it waits for the PM now, not for the user.
   if (row.status === 'blocked') return word(lang, row.answered ? 'answered' : 'blockedWaiting');
+  if (row.status === 'review' && isClosedTask(row)) return word(lang, 'reviewClosed');
   if (['review', 'paused', 'proposed', 'done', 'merged', 'released', 'abandoned', 'cancelled'].includes(row.status)) return label(lang, row.status);
   return row.live === 'working' ? word(lang, 'workingNow') : label(lang, row.status);
+}
+
+export function lostSummary(lang, lost) {
+  if (!lost || typeof lost !== 'object') return '';
+  const hasPm = Boolean(lost.pm && typeof lost.pm === 'object');
+  const n = Array.isArray(lost.threads) ? lost.threads.length : 0;
+  if (!hasPm && !n) return '';
+  const restart = Boolean(lost.restart);
+  if (lang === 'zh') {
+    if (hasPm && n) return restart ? `重启后 PM 和 ${n} 个 agent 没回来` : `PM 和 ${n} 个 agent 停了`;
+    if (hasPm) return restart ? '重启后 PM 没回来' : 'PM 停了';
+    return restart ? `重启后 ${n} 个 agent 没回来` : `${n} 个 agent 停了`;
+  }
+  const agentsWord = n === 1 ? '1 agent' : `${n} agents`;
+  if (hasPm && n) return restart ? `PM and ${agentsWord} did not come back` : `PM and ${agentsWord} stopped`;
+  if (hasPm) return restart ? 'PM did not come back' : 'PM stopped';
+  return restart ? `${agentsWord} did not come back` : `${agentsWord} stopped`;
+}
+
+// Task numbers (`#42`) assigned per project; absent on review threads and older remote peers.
+// pm-project and pm-dash keep identical copies of `taskNumber` and `formatTaskNumber`.
+export function taskNumber(value) {
+  const raw = value && typeof value === 'object' ? (value.number ?? value.num) : value;
+  return Number.isInteger(raw) && raw > 0 ? raw : null;
+}
+
+export function formatTaskNumber(value) {
+  const num = taskNumber(value);
+  return num ? `#${num}` : '';
 }
 
 // Strip only a leading ledger status/commit prefix, never prose mentioning
@@ -173,18 +262,58 @@ export function cleanTaskLog(latest) {
 
 // Rows already contain scaled stage coordinates. The viewport is translated
 // into that same coordinate system from the current painted stage bounds.
-export function hoverCardPosition(row, stageHeight, viewport, height, scale = 1) {
-  const top = Math.max(0, viewport.top), bottom = Math.min(stageHeight, viewport.bottom);
-  if (row.y + row.h <= top || row.y >= bottom) return null;
+// Prefer floating beside the row (left, then right) so adjacent rows in the
+// vertical task list stay uncovered and reachable; fall back above/below only
+// when neither horizontal side fits, still avoiding neighbor rows when possible.
+export function hoverCardPosition(row, stageHeight, viewport, height, scale = 1, options = {}) {
+  const top = Math.max(0, viewport.top), stageBottom = Math.min(stageHeight, viewport.bottom);
+  if (!(height > 0) || row.y + row.h <= top || row.y >= stageBottom) return null;
   const gap = 6 * scale;
-  const below = Math.max(0, bottom - row.y - row.h - gap);
-  const above = Math.max(0, row.y - gap - top);
-  // Prefer below, flip above if it fits. In a tiny viewport neither side may
-  // fit: use the larger side and constrain the card, never cover its own row.
+  const minW = options.minWidth ?? 200 * scale;
+  const maxSideW = options.maxSideWidth ?? 400 * scale;
+  const maxW = options.maxWidth ?? 520 * scale;
+  const minH = Math.max(0, options.minHeight ?? 0);
+  // A short 1-task stage may be shorter than one card while the scroll viewport has plenty of room.
+  const sideBottom = stageBottom - top >= height ? stageBottom
+    : Math.min(viewport.bottom, Math.max(stageBottom, top + height));
+  const sideSpan = sideBottom - top;
+  const leftEdge = Math.max(0, viewport.left ?? 0);
+  const anchorX = options.columnX ?? row.x;
+  const leftW = anchorX - gap - leftEdge;
+  if (leftW >= minW && sideSpan > 0 && sideSpan >= minH) {
+    const w = Math.min(maxSideW, leftW), h = Math.min(height, sideSpan);
+    const y = Math.max(top, Math.min(row.y, sideBottom - h));
+    return { x: anchorX - gap - w, y, w, h, side: 'left' };
+  }
+  const stageW = options.stageWidth ?? Math.max(row.x + row.w, viewport.right ?? 0);
+  const rightEdge = viewport.right !== undefined ? Math.min(stageW, viewport.right) : stageW;
+  const rightW = rightEdge - (row.x + row.w) - gap;
+  if (rightW >= minW && sideSpan > 0 && sideSpan >= minH) {
+    const w = Math.min(maxSideW, rightW), h = Math.min(height, sideSpan);
+    const y = Math.max(top, Math.min(row.y, sideBottom - h));
+    return { x: row.x + row.w + gap, y, w, h, side: 'right' };
+  }
+  const w = Math.min(maxW, row.w);
+  if (w <= 0) return null;
+  const vpBelow = Math.max(0, stageBottom - row.y - row.h - gap);
+  const vpAbove = Math.max(0, row.y - gap - top);
+  let clearBelow = vpBelow, clearAbove = vpAbove;
+  if (Array.isArray(options.rows)) {
+    for (const other of options.rows) {
+      if (!other || other === row || (row.id && other.id === row.id) || !(other.h > 0)) continue;
+      if (other.x + other.w <= row.x || other.x >= row.x + w) continue;
+      if (other.y >= row.y + row.h) clearBelow = Math.min(clearBelow, Math.max(0, other.y - row.y - row.h - gap * 2));
+      else if (other.y + other.h <= row.y) clearAbove = Math.min(clearAbove, Math.max(0, row.y - other.y - other.h - gap * 2));
+    }
+  }
+  const canClear = clearBelow >= height || clearAbove >= height ||
+    ((clearBelow > 0 || clearAbove > 0) && Math.max(clearBelow, clearAbove) >= minH && minH > 0);
+  const below = canClear ? clearBelow : vpBelow;
+  const above = canClear ? clearAbove : vpAbove;
   const up = below < height && (above >= height || above > below);
   const h = Math.min(height, up ? above : below);
-  return h > 0 ? { x: row.x, y: up ? row.y - gap - h : row.y + row.h + gap,
-    w: Math.min(520 * scale, row.w), h, side: up ? 'above' : 'below' } : null;
+  return h > 0 && h >= minH ? { x: row.x, y: up ? row.y - gap - h : row.y + row.h + gap,
+    w, h, side: up ? 'above' : 'below' } : null;
 }
 
 export function cachedRemoteStates(text, now = Date.now()) {
@@ -203,6 +332,8 @@ export function cachedRemoteStates(text, now = Date.now()) {
 // Missing/failed remote reads are omitted without affecting the local snapshot.
 export function mergeStates(local, remote = {}) {
   const merged = { lang: local?.lang, pms: [], tasks: [], events: [] };
+  const totals = { projects: 0, working: 0, waiting: 0, review: 0, proposed: 0, merged_today: 0, unclaimed_blocked: 0 };
+  let hasCounts = false;
   for (const [machine, state] of [['', local], ...Object.entries(remote).filter(([name]) => name)]) {
     if (!state || !['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) continue;
     const key = value => machine ? `${machine}/${value || ''}` : value || '';
@@ -212,12 +343,37 @@ export function mergeStates(local, remote = {}) {
     const into = new Map(tasks.filter(t => t.review).map(t => [t.review.id, t.id]));
     const asReview = e => !into.has(e.task) ? e : { ...e, status: '', review: e.status && e.status !== 'in_progress' ? 'reviewed' : 'review',
       text: String(e.text || '').replace(/^status=\w+;?\s*/, '') };
+    const c = state.counts;
+    if (c && Number.isFinite(c.working) && Number.isFinite(c.waiting) && Number.isFinite(c.unclaimed_blocked)) {
+      hasCounts = true;
+      totals.projects += Number.isFinite(c.projects) ? c.projects : state.pms.filter(p => !p?.archived).length;
+      totals.working += c.working;
+      totals.waiting += c.waiting;
+      totals.review += Number.isFinite(c.review) ? c.review : 0;
+      totals.proposed += Number.isFinite(c.proposed) ? c.proposed : 0;
+      totals.merged_today += Number.isFinite(c.merged_today) ? c.merged_today : 0;
+      totals.unclaimed_blocked += c.unclaimed_blocked;
+    } else {
+      const activePms = state.pms.filter(p => !p?.archived);
+      const allPmNames = new Set(state.pms.map(p => p?.name).filter(Boolean));
+      totals.projects += activePms.length;
+      for (const pm of activePms) {
+        const pc = projectCounts(pm, tasks);
+        totals.working += pc.working;
+        totals.waiting += pc.waiting;
+        totals.review += pc.review;
+        totals.proposed += pc.proposed;
+        totals.merged_today += pc.merged_today;
+      }
+      totals.unclaimed_blocked += tasks.filter(t => (!t?.pm || !allPmNames.has(t.pm)) && t.status === 'blocked' && !t.answered).length;
+    }
     merged.pms.push(...state.pms.map(p => ({ ...p, machine, sourceName: p.name, name: key(p.name) })));
     merged.tasks.push(...tasks.map(t => ({ ...t, machine, sourceId: t.id, sourcePm: t.pm,
       id: key(t.id), pm: key(t.pm) })));
     merged.events.push(...state.events.map(asReview).map(e => ({ ...e, machine, key: key(e.key),
       pm: key(e.pm), task: e.task ? key(into.get(e.task) || e.task) : '' })));
   }
+  if (hasCounts) merged.counts = totals;
   merged.events.sort((a, b) => (Date.parse((a.at || '').replace(' ', 'T')) || 0) -
     (Date.parse((b.at || '').replace(' ', 'T')) || 0));
   return merged;
@@ -249,27 +405,38 @@ export function fitBoard(state, width, height, fixedHeight, view = {}) {
 // ---- Bundles: one PM's tasks on the board ---------------------------------------
 
 // Active tasks bundle by status, the one waiting for the user first; an unknown status (or none)
-// follows in a bundle of its own. Ended tasks fold into one node; abandoned ones (and cancelled)
-// hide behind it.
-export const BUNDLES = ['blocked', 'review', 'in_progress', 'proposed', 'paused'];
+// follows in a bundle of its own. Reviewing and answered tasks stay in the Working ('in_progress')
+// bundle, sorted post-gate -> review -> answered -> in_progress (newest updated first inside each).
+// Ended tasks fold into one node; abandoned ones (and cancelled) hide behind it.
+export const BUNDLES = ['blocked', 'in_progress', 'proposed', 'paused'];
 export const ENDED = ['done', 'merged', 'released'];
 export const DROPPED = ['abandoned', 'cancelled'];
 const newestFirst = (a, b) => String(b.updated || '').localeCompare(String(a.updated || ''));
 const bundleRank = status => BUNDLES.includes(status) ? BUNDLES.indexOf(status) : BUNDLES.length;
+const workingSubRank = task => {
+  if (isPostGateTask(task)) return 0;
+  if (task?.status === 'review') return 1;
+  if (task?.status === 'blocked' && task?.answered) return 2;
+  return 3;
+};
 
-// Stable throughout: ledger order within a bundle, and among ended tasks of the same minute.
+// Stable throughout: urgency then newest-first within Working, ledger order within other bundles,
+// and among ended tasks of the same minute.
 export function boardGroups(tasks) {
   const bundles = [], ended = [], dropped = [];
   for (const task of tasks) {
     if (ENDED.includes(task.status)) ended.push(task);
     else if (DROPPED.includes(task.status)) dropped.push(task);
     else {
-      const status = task.status || '';
+      const rawStatus = task.status || '';
+      const status = rawStatus === 'review' || (rawStatus === 'blocked' && task.answered) ? 'in_progress' : rawStatus;
       let bundle = bundles.find(b => b.status === status);
       if (!bundle) bundles.push(bundle = { status, tasks: [] });
       bundle.tasks.push(task);
     }
   }
+  const working = bundles.find(b => b.status === 'in_progress');
+  if (working) working.tasks.sort((a, b) => workingSubRank(a) - workingSubRank(b) || newestFirst(a, b));
   bundles.sort((a, b) => bundleRank(a.status) - bundleRank(b.status));
   return { bundles, ended: ended.sort(newestFirst), dropped: dropped.sort(newestFirst) };
 }
@@ -467,25 +634,40 @@ export function pmColor(name) {
   return palette[hash % palette.length];
 }
 
+// Unified overview/board counts using pm.py's definitions:
+// - waiting ("等你"): claimed by an active PM, blocked and not answered (review does not count).
+// - running ("在干活"): claimed by an active PM, in progress and terminal not offline.
+// - unclaimed ("没人认领的阻塞"): blocked and not answered with no registered PM; tracked separately.
+// Prefers `state.counts` (and per-PM `pm.counts`) from pm.py, falling back to folded tasks for older pm.py.
 export function counts(state) {
-  const review = state.tasks.filter(t => t.status === 'review').length;
-  const blocked = state.tasks.filter(t => t.status === 'blocked').length;
-  // A blocked task the user has answered (pm.py's `answered`) waits for the PM, not for the user.
-  const asking = state.tasks.filter(t => t.status === 'blocked' && !t.answered);
-  const running = state.tasks.filter(t => t.status === 'in_progress' && t.worker === 'working').length;
-  // Only blocked work waits for the user; review is the PM's job.
-  const waiting = asking.length;
-  const groups = new Map();
-  for (const task of asking) {
-    const pm = state.pms.find(p => p.name === task.pm);
-    const name = pm?.project || (pm?.sourceName ?? pm?.name) || task.project || word(state.lang, 'unassigned');
-    const key = JSON.stringify([task.machine || '', pm?.name || name]);
-    const group = groups.get(key) || { name, count: 0 };
-    group.count++;
-    groups.set(key, group);
+  const pms = Array.isArray(state?.pms) ? state.pms : [];
+  const activePms = pms.filter(p => !p?.archived);
+  const allPmNames = new Set(pms.map(p => p?.name).filter(Boolean));
+  const tasks = foldReviews(state?.tasks);
+  const c = state?.counts;
+  const hasStateCounts = Boolean(c && Number.isFinite(c.working) && Number.isFinite(c.waiting) && Number.isFinite(c.unclaimed_blocked));
+  let running = 0, review = 0, waiting = 0, unclaimed = 0;
+  const waitingByPm = [];
+  for (const pm of activePms) {
+    const pc = projectCounts(pm, tasks);
+    running += pc.working;
+    review += pc.review;
+    waiting += pc.waiting;
+    if (pc.waiting > 0) {
+      waitingByPm.push({ name: pm.project || (pm.sourceName ?? pm.name) || word(state?.lang, 'unassigned'), count: pc.waiting });
+    }
   }
-  const conclusion = word(state.lang, 'conclusion', [...groups.values()].map(({ name, count }) => word(state.lang, 'waitingForProject', name, count)));
-  return { running, review, blocked, waiting, conclusion };
+  if (hasStateCounts) {
+    running = c.working;
+    waiting = c.waiting;
+    review = Number.isFinite(c.review) ? c.review : review;
+    unclaimed = c.unclaimed_blocked;
+  } else {
+    unclaimed = tasks.filter(t => (!t?.pm || !allPmNames.has(t.pm)) && t.status === 'blocked' && !t.answered).length;
+  }
+  const blocked = waiting;
+  const conclusion = word(state?.lang, 'conclusion', waitingByPm.map(({ name, count }) => word(state?.lang, 'waitingForProject', name, count)));
+  return { running, review, blocked, waiting, unclaimed, conclusion };
 }
 
 export function eventText(e, lang) {
@@ -500,11 +682,10 @@ export function pointAt(points, u) {
   const v = 1 - u, c = [v*v*v, 3*v*v*u, 3*v*u*u, u*u*u];
   return { x: points.reduce((s,p,i) => s + c[i]*p[0], 0), y: points.reduce((s,p,i) => s + c[i]*p[1], 0) };
 }
-// A retired PM's terminal (`pm.py rotate` labels it pm.retired=<project>) is nobody's: not the
-// project's PM, and not the terminal of a task that was parked on it.
+// Live terminals on the row's machine (`''` means local, so no `machine/` prefix).
 function liveTerminalsFor(row, terms) {
   const machine = row.machine || '';
-  return terms.filter(t => t.state === 'live' && !t.labels?.['pm.retired'] &&
+  return terms.filter(t => t.state === 'live' &&
     (machine ? t.address?.startsWith(`${machine}/`) : !t.address?.includes('/')));
 }
 export function terminalFor(row, terms) {
@@ -546,12 +727,12 @@ export function focusPlan(address, terms, paned, home = '') {
   const has = new Set(paned.filter(Boolean));
   if (has.has(address)) return { focus: address, peek: '' };
   const byAddress = new Map(terms.map(t => [t.address, t]));
-  // A retired PM up the chain (labeled pm.retired by `pm.py rotate`, or a PM terminal that is not the
-  // project's current one) is passed over: shown on its tab, the thread would invite talking to it.
-  const retired = t => Boolean(t?.labels?.['pm.retired'] || (home && t?.labels?.pm && t.address !== home));
+  // Another PM terminal up the chain (`home` is the project's current PM) is passed over:
+  // shown on its tab, the thread would invite talking to the wrong PM.
+  const otherPm = t => Boolean(home && t?.labels?.pm && t.address !== home);
   const seen = new Set([address]);
   for (let up = byAddress.get(address)?.parent; up && !seen.has(up); up = byAddress.get(up)?.parent) {
-    if (has.has(up) && !retired(byAddress.get(up))) return { focus: up, peek: address };
+    if (has.has(up) && !otherPm(byAddress.get(up))) return { focus: up, peek: address };
     seen.add(up);
   }
   return home && has.has(home) ? { focus: home, peek: address } : none;
@@ -565,6 +746,30 @@ export function wireFlows(wire, rows) {
   if (!target || target.live !== 'working') return false;
   return target.type === 'pm' || (target.type === 'task' &&
     !['paused', 'proposed', 'done', 'merged', 'released', 'abandoned', 'cancelled'].includes(target.status));
+}
+
+// True when a task in review has a live reviewer actively working right now.
+// Stays false while waiting for PM verdict (no active review thread, or review already ended/done),
+// when the reviewer is offline/idle/blocked/paused/proposed, or when the task is not in review.
+export function reviewWorking(task, terms = [], live = []) {
+  if (!task || typeof task !== 'object' || task.cleanup) return false;
+  if (task.status !== 'review') return false;
+  const r = task.review;
+  if (!r || typeof r !== 'object' || !r.id) return false;
+  if (r.status !== 'in_progress' || r.offline) return false;
+  const rRow = {
+    type: 'task',
+    task: r.id,
+    sourceId: r.sourceId ?? r.id,
+    pane: r.pane,
+    machine: r.machine ?? task.machine ?? '',
+  };
+  const rTerm = terminalFor(rRow, terms || []);
+  if (rTerm) {
+    const status = (live || []).find(a => a.address === rTerm.address)?.status || rTerm.status;
+    return status === 'working';
+  }
+  return r.worker === 'working';
 }
 
 // Arc-length resampling at 2px, retaining the residual between fine segments.
@@ -630,7 +835,17 @@ export function scopeState(state, project = '') {
   const pms = state.pms.filter(keep), shown = new Set(pms.map(pm => pm.name));
   const hidden = new Set(state.pms.filter(pm => !keep(pm)).map(pm => pm.name));
   const mine = pm => project ? shown.has(pm) : !hidden.has(pm);
-  return { ...state, project, pms, tasks: state.tasks.filter(t => mine(t.pm)), events: state.events.filter(e => mine(e.pm)) };
+  const tasks = state.tasks.filter(t => mine(t.pm));
+  const events = state.events.filter(e => mine(e.pm));
+  const out = { ...state, project, pms, tasks, events };
+  if (project) {
+    if (pms.length === 1 && pms[0]?.counts && typeof pms[0].counts === 'object') {
+      out.counts = { projects: 1, ...projectCounts(pms[0], tasks), unclaimed_blocked: 0 };
+    } else {
+      delete out.counts;
+    }
+  }
+  return out;
 }
 
 const OPEN = ['blocked', 'in_progress', 'review', 'proposed'];
@@ -675,14 +890,27 @@ export function projectCards(state, lines = {}, today = '') {
   const cards = state.pms.map(pm => ({
     key: pm.name, name: projectName(pm), repo: pm.repo || '', machine: pm.machine || '', status: pm.status || '',
     agent: agentName(pm.agent), archived: pm.archived || null, counts: projectCounts(pm, state.tasks, today),
+    ...(!pm.archived && pm.lost && typeof pm.lost === 'object' ? { lost: pm.lost } : {}),
     at: lastEventAt(state.events, pm.name), line: lines[pm.name] || [],
     paused: state.tasks.filter(t => (t.pm || '') === pm.name && t.status === 'paused').map(t => t.title || t.sourceId || t.id),
   }));
   return { active: cards.filter(c => !c.archived).sort((a, b) => b.at - a.at || a.name.localeCompare(b.name)),
     archived: cards.filter(c => c.archived).sort((a, b) => String(b.archived).localeCompare(String(a.archived))) };
 }
-export const pageTotals = cards => ({ projects: cards.length,
-  working: cards.reduce((n, c) => n + c.counts.working, 0), waiting: cards.reduce((n, c) => n + c.counts.waiting, 0) });
+// Blocked tasks with no registered PM: not counted in "waiting for you", shown separately in the overview.
+export function unclaimedBlocked(state) {
+  const pmNames = new Set((Array.isArray(state?.pms) ? state.pms : []).map(p => p?.name).filter(Boolean));
+  const tasks = foldReviews(state?.tasks).filter(t => (!t?.pm || !pmNames.has(t.pm)) && t.status === 'blocked' && !t.answered);
+  const count = Number.isFinite(state?.counts?.unclaimed_blocked) ? state.counts.unclaimed_blocked : tasks.length;
+  return { count, tasks };
+}
+export function pageTotals(cards, state = null) {
+  const c = state?.counts;
+  const projects = Number.isFinite(c?.projects) ? c.projects : cards.length;
+  const working = Number.isFinite(c?.working) ? c.working : cards.reduce((n, card) => n + card.counts.working, 0);
+  const waiting = Number.isFinite(c?.waiting) ? c.waiting : cards.reduce((n, card) => n + card.counts.waiting, 0);
+  return state ? { projects, working, waiting, unclaimed: unclaimedBlocked(state).count } : { projects, working, waiting };
+}
 
 // The PM's newest words in a conversation log (JSON lines): the first line of its last `pm` event,
 // as text and link pieces ([title](thread:id) keeps its title), without markdown marks.
@@ -766,4 +994,685 @@ export function foldReviews(tasks) {
   };
   return list.filter(t => !(t.review_of && reviews.get(t.review_of) === t))
     .map(t => reviews.has(t.id) ? fold(t, reviews.get(t.id)) : t);
+}
+
+// ---- Two-layer prompt-driven task plan (`task.plan` + `task.subplan`) ----------------------
+
+export function inferStepAnchor(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return 'custom';
+  const tags = raw.match(/(?:^|\s)@(work|review|merge|custom|none)(?=\s|$)/gi);
+  if (tags) {
+    const k = tags[tags.length - 1].trim().slice(1).toLowerCase();
+    return k === 'none' ? 'custom' : k;
+  }
+  const negReviewRe = /(?:免|不|无需|不用|不做|跳过|无)(?:代码)?(?:审查|评审|复审|review)|\b(?:no|without|skip(?:ping)?)\s+(?:code\s+)?reviews?\b/i;
+  const userSignoffRe = /(?:等你|用户|待你)(?:审查|审阅|确认|验收)|(?:和|与|给)用户|\b(?:your|user|human)\s+(?:review|sign-?off|approval|check)\b|\bwith\s+(?:the\s+)?(?:user|you|human)\b/i;
+  const reviewHeadRe = /^\s*(?:(?:独立\s*)?(?:代码\s*)?(?:审查|复审|评审)|送审|(?:independent\s+)?(?:code\s+)?(?:re-?)?review(?:ing)?(?![a-z]))/i;
+  const negMergeRe = /(?:不|无需|不用|暂不|先不|免)(?:合入|合并|合进|合到|合\s*(?:main|master|主分支|主线)|land)|\b(?:no|without|don'?t|do\s+not|not|skip(?:ping)?)\s+(?:code\s+)?(?:merge|land)(?:ing)?\b/gi;
+  const mergeAnchorRe = /合进|合入|合到|合\s*(?:main|master|主分支|主线)|合并(?:进|入|到|\s*(?:main|master|主分支|主线|分支)|$)|(?:^|[^a-z])(?:pm\.py\s+)?land(?:\s+(?:to|into|on|in|branch|main|master)\b|\s*$)|(?:^|[^a-z])merge(?:\s+(?:to|into|with|branch|main|master|pr)\b|\s*$)/i;
+  const coreWorkRe = /实现|开发|编码|修复|重构|调研|设计|翻译|\b(?:implement\w*|develop\w*|refactor\w*|research\w*|design\w*|translat\w*)\b/i;
+  const customPostRe = /安装|装到|部署|发布|挂分支|待验收|等你|审阅|\b(?:install\w*|deploy\w*|release\w*|hold\w*|await\w*|sign-?off)\b/i;
+  const workAnchorRe = /实现|开发|编写|编码|修复|改造|重构|调研|设计|出稿|交互稿|翻译|译为|修改|改动|调整|补充|补齐|盘点|迁移|优化|执行任务|\b(?:implement\w*|develop\w*|build\w*|code|coding|fix\w*|refactor\w*|research\w*|design\w*|translat\w*|modif\w*|updat\w*|migrat\w*|optimi[sz]\w*|patch\w*|writ(?:e|ing)|draft\w*)\b/i;
+
+  const reviewMatch = reviewHeadRe.exec(raw);
+  if (reviewMatch && !negReviewRe.test(raw) && !userSignoffRe.test(raw)) {
+    const tail = raw.slice(reviewMatch[0].length);
+    if (!workAnchorRe.test(tail) && !mergeAnchorRe.test(tail.replace(negMergeRe, ' '))) return 'review';
+  }
+  const mergeClean = raw.replace(negMergeRe, ' ');
+  if (mergeAnchorRe.test(mergeClean)) return 'merge';
+  if (customPostRe.test(raw) && !coreWorkRe.test(raw)) return 'custom';
+  if (workAnchorRe.test(raw)) return 'work';
+  return 'custom';
+}
+
+export function parsePlanItems(raw) {
+  if (!raw) return [];
+  let items;
+  if (typeof raw === 'string') {
+    items = raw.split(/[\n;；]/).map(s => s.trim()).filter(Boolean);
+  } else if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === 'object') {
+    items = Array.isArray(raw.steps) ? raw.steps : Array.isArray(raw.items) ? raw.items : [];
+  } else {
+    return [];
+  }
+  const normState = (v, doneFlag) => {
+    if (doneFlag === true) return 'done';
+    const s = String(v || '').trim().toLowerCase();
+    if (['done', 'completed', 'checked', 'x'].includes(s)) return 'done';
+    if (['doing', 'in_progress', 'active', 'running', 'working', '>'].includes(s)) return 'doing';
+    if (['todo', 'pending', 'open'].includes(s)) return 'todo';
+    return '';
+  };
+  const normAnchor = v => {
+    const s = String(v || '').trim().toLowerCase().replace(/^@/, '');
+    if (['work', 'impl', 'execute', 'exec'].includes(s)) return 'work';
+    if (s === 'review') return 'review';
+    if (['merge', 'land'].includes(s)) return 'merge';
+    if (s === 'custom' || s === 'none') return 'custom';
+    return '';
+  };
+  const out = [];
+  for (const item of items) {
+    if (item == null) continue;
+    let isObject = false;
+    let text = '';
+    let state = '';
+    let explicitState = false;
+    let explicitAnchor = '';
+    let right = '';
+    let at = '';
+    let commit = '';
+    let round = 0;
+    if (typeof item === 'string') {
+      text = item.trim().replace(/^(?:[-*+]|\d+[.)])\s+/, '');
+    } else if (typeof item === 'object' && !Array.isArray(item)) {
+      isObject = true;
+      text = String(item.text ?? item.title ?? item.label ?? item.name ?? '').trim();
+      const st = normState(item.state ?? item.status, item.done);
+      if (st) { state = st; explicitState = true; }
+      explicitAnchor = normAnchor(item.anchor ?? item.role ?? item.kind ?? item.tag);
+      right = String(item.right || '');
+      at = String(item.at || '');
+      commit = String(item.commit || '');
+      if (Number.isFinite(Number(item.round)) && Number(item.round) > 0) round = Math.floor(Number(item.round));
+    } else {
+      continue;
+    }
+    const prefix = /^\s*(?:\[([^\]]*)\]|([✓✔◌○]))\s*(.*)$/.exec(text);
+    if (prefix) {
+      const mark = (prefix[1] != null ? prefix[1] : prefix[2]).trim().toLowerCase();
+      if (!explicitState) {
+        if (['x', '✓', '✔'].includes(mark)) { state = 'done'; explicitState = true; }
+        else if (['>', '*', '~', '◌'].includes(mark)) { state = 'doing'; explicitState = true; }
+        else if (mark === '' || mark === '○') { state = 'todo'; explicitState = true; }
+      }
+      text = prefix[3].trim();
+    }
+    const tagRe = /(?:^|\s)@(work|review|merge|custom|none)(?=\s|$)/gi;
+    let foundTag = '';
+    text = text.replace(tagRe, (_, k) => { foundTag = k.toLowerCase(); return ' '; }).replace(/\s+/g, ' ').trim();
+    if (!explicitAnchor && foundTag) explicitAnchor = normAnchor(foundTag);
+    if (!text && foundTag) {
+      text = { work: 'Work', review: 'Review', merge: 'Merge', custom: 'Step' }[foundTag] || '';
+    }
+    if (!text) continue;
+    out.push({
+      text,
+      state: state || 'todo',
+      explicitState,
+      anchor: explicitAnchor || (isObject ? 'custom' : inferStepAnchor(text)),
+      explicitAnchor: Boolean(explicitAnchor),
+      right,
+      at,
+      commit,
+      round,
+    });
+  }
+  return out;
+}
+
+export function taskSteps(task, { lang = 'en' } = {}) {
+  const summarizeStep = raw => {
+    const src = String(raw || '').trim();
+    const notes = [];
+    const stripped = src.replace(/（([^）]*)）|\(([^)]*)\)/g, (_, zhNote, enNote) => {
+      const n = String(zhNote ?? enNote ?? '').trim();
+      if (n) notes.push(n);
+      return '';
+    });
+    const core = stripped.replace(/\s+/g, ' ').trim() || src;
+    let units = 0;
+    let cut = '';
+    let clipped = false;
+    for (const ch of core) {
+      const w = ch.codePointAt(0) > 255 ? 2 : 1;
+      if (units + w > STEP_LABEL_UNITS) { clipped = true; break; }
+      cut += ch;
+      units += w;
+    }
+    const shortText = clipped ? `${cut.trimEnd()}…` : core;
+    const note = notes.join(' · ');
+    const tip = shortText !== src ? src : '';
+    return { shortText, note, tip };
+  };
+  const outer = parsePlanItems(task?.plan);
+  const sub = parsePlanItems(task?.subplan);
+  const status = String(task?.status || '');
+  const rawRounds = Math.max(0, Number(task?.rounds) || 0, Array.isArray(task?.review_history) ? task.review_history.length : 0);
+  const hasPlan = outer.length > 0;
+  const hasSubplan = sub.length > 0;
+  const substeps = sub.map((s, index) => ({ index, text: s.text, ...summarizeStep(s.text), state: s.state }));
+
+  let steps;
+  if (!hasPlan) {
+    const hadReview = status === 'review' || Boolean(task?.review) || rawRounds > 0 ||
+      (Array.isArray(task?.log) && task.log.some(e => /\bstatus=review\b/.test(String(e?.text || ''))));
+    const templates = hadReview
+      ? [
+          { text: word(lang, 'planFallbackWork'), anchor: 'work' },
+          { text: word(lang, 'planFallbackReview'), anchor: 'review' },
+          { text: word(lang, 'planFallbackDone'), anchor: 'custom' },
+        ]
+      : [
+          { text: word(lang, 'planFallbackWork'), anchor: 'work' },
+          { text: word(lang, 'planFallbackDone'), anchor: 'custom' },
+        ];
+    const doneReview = Boolean(task?.review && ['done', 'merged', 'released'].includes(task.review.status));
+    steps = templates.map((tpl, index) => {
+      let state = 'todo';
+      if (['done', 'released', 'merged'].includes(status)) {
+        state = 'done';
+      } else if (['abandoned', 'cancelled', 'proposed'].includes(status)) {
+        state = 'todo';
+      } else if (status === 'review') {
+        state = tpl.anchor === 'work' ? 'done' : tpl.anchor === 'review' ? 'doing' : 'todo';
+      } else if (status === 'paused') {
+        if (hadReview && doneReview) state = tpl.anchor === 'work' || tpl.anchor === 'review' ? 'done' : 'todo';
+        else state = tpl.anchor === 'work' ? 'doing' : 'todo';
+      } else {
+        state = tpl.anchor === 'work' ? 'doing' : 'todo';
+      }
+      return {
+        index,
+        text: tpl.text,
+        ...summarizeStep(tpl.text),
+        state,
+        anchor: tpl.anchor,
+        right: '',
+        at: '',
+        commit: '',
+        round: 0,
+        substeps: null,
+        subProgress: null,
+      };
+    });
+    if (['done', 'released', 'merged', 'review'].includes(status)) {
+      for (const s of substeps) if (s.state === 'doing') s.state = 'done';
+    } else if (['abandoned', 'cancelled', 'proposed'].includes(status)) {
+      for (const s of substeps) if (s.state === 'doing') s.state = 'todo';
+    }
+  } else {
+    steps = outer.map((item, index) => ({
+      index,
+      text: item.text,
+      ...summarizeStep(item.text),
+      state: item.state,
+      anchor: item.anchor,
+      right: item.right,
+      at: item.at,
+      commit: item.commit,
+      round: item.round,
+      substeps: null,
+      subProgress: null,
+    }));
+    const closeDoingSub = () => {
+      for (const s of substeps) if (s.state === 'doing') s.state = 'done';
+    };
+    if (['done', 'released'].includes(status)) {
+      for (const s of steps) s.state = 'done';
+      closeDoingSub();
+    } else if (['abandoned', 'cancelled'].includes(status)) {
+      for (const s of steps) if (s.state === 'doing') s.state = 'todo';
+      for (const s of substeps) if (s.state === 'doing') s.state = 'todo';
+    } else if (status === 'proposed') {
+      for (const s of steps) if (s.state === 'doing') s.state = 'todo';
+      for (const s of substeps) if (s.state === 'doing') s.state = 'todo';
+    } else if (status === 'paused') {
+      // Preserve recorded step states while paused.
+    } else if (status === 'merged' || (status === 'in_progress' && Boolean(task?.landed || task?.merged_at))) {
+      closeDoingSub();
+      let mi = -1;
+      for (let i = steps.length - 1; i >= 0; i--) if (steps[i].anchor === 'merge') { mi = i; break; }
+      if (mi >= 0) {
+        for (let i = 0; i <= mi; i++) steps[i].state = 'done';
+        const nextIdx = steps.findIndex((s, i) => i > mi && s.state !== 'done');
+        for (let i = mi + 1; i < steps.length; i++) {
+          if (i === nextIdx) steps[i].state = 'doing';
+          else if (steps[i].state === 'doing') steps[i].state = 'todo';
+        }
+      } else if (status === 'merged') {
+        for (const s of steps) s.state = 'done';
+      }
+    } else if (status === 'review') {
+      closeDoingSub();
+      let ri = steps.findIndex(s => s.anchor === 'review' && s.state !== 'done');
+      if (ri < 0) {
+        for (let i = steps.length - 1; i >= 0; i--) if (steps[i].anchor === 'review') { ri = i; break; }
+      }
+      if (ri >= 0) {
+        for (let i = 0; i < ri; i++) steps[i].state = 'done';
+        steps[ri].state = 'doing';
+        for (let i = ri + 1; i < steps.length; i++) if (steps[i].state === 'doing') steps[i].state = 'todo';
+      } else {
+        let wi = steps.findIndex(s => s.state === 'doing');
+        if (wi < 0) wi = steps.findIndex(s => s.anchor === 'work' && s.state !== 'done');
+        if (wi < 0) {
+          for (let i = steps.length - 1; i >= 0; i--) if (steps[i].anchor === 'work') { wi = i; break; }
+        }
+        if (wi >= 0 && wi < steps.length - 1) {
+          for (let i = 0; i <= wi; i++) steps[i].state = 'done';
+          const nextIdx = steps.findIndex((s, i) => i > wi && s.state !== 'done');
+          for (let i = wi + 1; i < steps.length; i++) {
+            if (i === nextIdx) steps[i].state = 'doing';
+            else if (steps[i].state === 'doing') steps[i].state = 'todo';
+          }
+        } else if (wi >= 0) {
+          for (let i = 0; i < wi; i++) steps[i].state = 'done';
+          steps[wi].state = 'doing';
+        }
+      }
+    } else {
+      // in_progress or blocked
+      let di = steps.findIndex(s => s.state === 'doing');
+      const unansweredBlocked = status === 'blocked' && !task?.answered;
+      const reviewLive = Boolean(task?.review && !['done', 'merged', 'released', 'abandoned', 'cancelled', 'paused', 'proposed'].includes(task.review.status));
+      if (di >= 0 && steps[di].anchor === 'review' && !reviewLive) {
+        steps[di].state = 'todo';
+        let wi = -1;
+        for (let i = di - 1; i >= 0; i--) if (steps[i].anchor === 'work') { wi = i; break; }
+        if (wi < 0 && di > 0) wi = 0;
+        if (wi >= 0 && !(unansweredBlocked && steps[wi].state === 'done')) {
+          steps[wi].state = 'doing';
+          di = wi;
+        } else {
+          di = -1;
+        }
+      }
+      if (di < 0) {
+        let mergeDone = -1;
+        for (let i = steps.length - 1; i >= 0; i--) {
+          if (steps[i].anchor === 'merge' && steps[i].state === 'done') { mergeDone = i; break; }
+        }
+        if (mergeDone >= 0) {
+          const next = steps.findIndex((s, i) => i > mergeDone && s.state === 'todo');
+          if (next >= 0 && !(unansweredBlocked && steps[next].anchor === 'review' && !reviewLive)) {
+            steps[next].state = 'doing';
+          }
+        } else {
+          const workTodo = steps.findIndex(s => s.anchor === 'work' && s.state === 'todo');
+          const anyTodo = steps.findIndex(s => s.state === 'todo');
+          const pick = workTodo >= 0 ? workTodo : anyTodo;
+          if (pick >= 0 && !(unansweredBlocked && steps[pick].anchor === 'review' && !reviewLive)) {
+            steps[pick].state = 'doing';
+          }
+        }
+      }
+    }
+  }
+
+  const isOpenActive = !['done', 'merged', 'released', 'abandoned', 'cancelled', 'paused', 'proposed'].includes(status) &&
+    !(status === 'blocked' && !task?.answered);
+  const activeIndex = steps.findIndex(s => s.state === 'doing');
+  const active = activeIndex >= 0 ? steps[activeIndex] : null;
+  const hasPriorDoneMerge = activeIndex > 0 && steps.slice(0, activeIndex).some(s => s.anchor === 'merge' && s.state === 'done');
+  const hasPriorDoneReviewNoMoreGates = activeIndex > 0 &&
+    steps.slice(0, activeIndex).some(s => s.anchor === 'review' && s.state === 'done') &&
+    !steps.slice(activeIndex).some(s => s.anchor === 'work' || s.anchor === 'review' || s.anchor === 'merge');
+  const postGate = Boolean(hasPlan && isOpenActive && active && active.anchor === 'custom' &&
+    (hasPriorDoneMerge || hasPriorDoneReviewNoMoreGates));
+
+  const reviewOpen = status === 'review' ||
+    Boolean(task?.review && !['done', 'merged', 'released', 'abandoned', 'cancelled', 'paused', 'proposed'].includes(task.review.status));
+  const pastReview = postGate || steps.some(s => s.anchor === 'merge' && s.state === 'done') ||
+    (steps.some(s => s.anchor === 'review' && s.state === 'done') && !steps.some(s => s.anchor === 'review' && s.state !== 'done'));
+  let round = 0;
+  let foldedRounds = 0;
+  if (reviewOpen) {
+    round = Math.max(1, rawRounds);
+    foldedRounds = round > 1 ? round - 1 : 0;
+  } else if (['in_progress', 'blocked'].includes(status) && !pastReview && rawRounds >= 1) {
+    round = rawRounds + 1;
+    foldedRounds = rawRounds;
+  } else {
+    round = 0;
+    foldedRounds = rawRounds > 1 ? rawRounds - 1 : 0;
+  }
+  const foldedLabel = foldedRounds > 0 ? word(lang, 'planFoldedRounds', foldedRounds) : '';
+  if (active && round > 1 && (active.anchor === 'review' || active.anchor === 'work')) {
+    active.round = round;
+  }
+
+  let attachedSubsteps = [];
+  if (hasSubplan && steps.length) {
+    let attachIdx = -1;
+    if (active && active.anchor === 'work') attachIdx = activeIndex;
+    else if (active && active.anchor !== 'review' && active.anchor !== 'merge' && !postGate && !steps.some(s => s.anchor === 'work')) {
+      attachIdx = activeIndex;
+    } else {
+      const bound = activeIndex >= 0 ? activeIndex : steps.length;
+      for (let i = bound - 1; i >= 0; i--) if (steps[i].anchor === 'work' && steps[i].state === 'done') { attachIdx = i; break; }
+      if (attachIdx < 0) for (let i = steps.length - 1; i >= 0; i--) if (steps[i].anchor === 'work' && steps[i].state === 'done') { attachIdx = i; break; }
+      if (attachIdx < 0) for (let i = bound - 1; i >= 0; i--) if (steps[i].state === 'done') { attachIdx = i; break; }
+      if (attachIdx < 0) attachIdx = steps.findIndex(s => s.anchor === 'work');
+      if (attachIdx < 0) attachIdx = 0;
+    }
+    const subDone = substeps.filter(s => s.state === 'done').length;
+    steps[attachIdx].substeps = substeps;
+    steps[attachIdx].subProgress = { done: subDone, total: substeps.length };
+    attachedSubsteps = substeps;
+  }
+
+  const done = steps.filter(s => s.state === 'done').length;
+  const total = steps.length;
+  const progress = total ? `${done}/${total}` : '';
+  const pill = !hasPlan ? '' : postGate && active ? word(lang, 'planPostStep', done, total, active.shortText) : progress;
+  const activeSubstep = attachedSubsteps.find(s => s.state === 'doing') || null;
+  const noReview = Boolean(task?.no_review) || (hasPlan && !steps.some(s => s.anchor === 'review'));
+  const autoReview = !noReview && task?.auto_review !== false && hasPlan && steps.some(s => s.anchor === 'review');
+  const rail = [
+    ...(foldedRounds > 0 ? [{ kind: 'folded', state: 'done', text: foldedLabel }] : []),
+    ...steps.map(s => ({ kind: 'step', state: s.state, text: s.shortText, anchor: s.anchor, round: s.round })),
+  ];
+  return {
+    hasPlan,
+    hasSubplan,
+    done,
+    total,
+    progress,
+    pill,
+    postGate,
+    activeIndex,
+    activeStep: active,
+    activeSubstep,
+    round,
+    foldedRounds,
+    foldedLabel,
+    noReview,
+    autoReview,
+    paused: status === 'paused',
+    steps,
+    rail,
+  };
+}
+
+export function isPostGateTask(task) {
+  if (!task?.plan) return false;
+  return taskSteps(task).postGate;
+}
+
+export function taskDependencies(task, allTasks = [], { terms = [], live = [] } = {}) {
+  const rawList = Array.isArray(task?.deps) && task.deps.length
+    ? task.deps
+    : (Array.isArray(task?.depends_on) ? task.depends_on.map(id => ({ id })) : []);
+  if (!rawList.length) return null;
+  const list = Array.isArray(allTasks) ? allTasks : [];
+  const taskMachine = task?.machine || '';
+  const findTarget = depId => {
+    const namespaced = taskMachine ? `${taskMachine}/${depId}` : depId;
+    return list.find(t => t && (t.id === depId || t.id === namespaced ||
+      ((t.machine || '') === taskMachine && t.sourceId === depId))) || null;
+  };
+  const items = [];
+  for (const raw of rawList) {
+    const depId = typeof raw === 'string' ? raw.trim() : String(raw?.id || '').trim();
+    if (!depId) continue;
+    const entry = typeof raw === 'object' && raw ? raw : { id: depId };
+    const target = findTarget(depId);
+    const status = String(target?.status || entry.status || 'missing');
+    let state;
+    if (target) {
+      if (['merged', 'done', 'released'].includes(status) || Boolean(target.landed)) state = 'met';
+      else if (['abandoned', 'cancelled'].includes(status)) state = 'abandoned';
+      else state = 'waiting';
+    } else if (['met', 'waiting', 'abandoned', 'missing'].includes(entry.state)) {
+      state = entry.state;
+    } else {
+      state = 'missing';
+    }
+    const isMet = state === 'met';
+    const isBroken = state === 'abandoned' || state === 'missing';
+    const isReview = !isMet && !isBroken && status === 'review';
+    const isReviewWorking = isReview && target ? reviewWorking(target, terms, live) : false;
+    const isBlocked = !isMet && !isBroken && status === 'blocked' && !target?.answered;
+    const isWorking = !isMet && !isBroken && !target?.offline &&
+      (status === 'in_progress' || (status === 'blocked' && Boolean(target?.answered)));
+    items.push({
+      id: depId,
+      targetId: target?.id || (taskMachine ? `${taskMachine}/${depId}` : depId),
+      sourceId: target?.sourceId || depId,
+      pm: target?.pm || task?.pm || '',
+      sourcePm: target?.sourcePm || task?.sourcePm || '',
+      machine: target?.machine ?? taskMachine,
+      title: String(target?.title || entry.title || depId),
+      state,
+      status,
+      isMet,
+      isBroken,
+      isReview,
+      isReviewWorking,
+      isBlocked,
+      isWorking,
+      clickable: state !== 'missing',
+    });
+  }
+  if (!items.length) return null;
+  const metCount = items.filter(i => i.isMet).length;
+  const total = items.length;
+  const allMet = metCount === total;
+  const ready = Boolean(task?.status === 'proposed' && allMet);
+  return {
+    hasDeps: true,
+    showAsWaiting: task?.status === 'proposed',
+    items,
+    metCount,
+    total,
+    progress: `${metCount}/${total}`,
+    allMet,
+    ready,
+    broken: items.some(i => i.isBroken),
+  };
+}
+
+// ---- Bounded hover tooltips (max width, CJK/word wrapping, line cap, panel/window clamping) ----
+
+export const TOOLTIP_MAX_WIDTH = 420;
+export const TOOLTIP_MIN_WIDTH = 56;
+export const TOOLTIP_MAX_LINES = 5;
+export const TOOLTIP_FONT_SIZE = 11.5;
+export const TOOLTIP_LINE_HEIGHT = 16.5;
+export const TOOLTIP_PAD_X = 18;
+export const TOOLTIP_PAD_Y = 12;
+export const TOOLTIP_MARGIN = 16;
+export const TOOLTIP_GAP = 6;
+
+function isWideCodePoint(code) {
+  return code > 0xFFFF
+    || (code >= 0x1100 && code <= 0x115F)
+    || (code >= 0x2E80 && code <= 0xA4CF)
+    || (code >= 0xAC00 && code <= 0xD7A3)
+    || (code >= 0xF900 && code <= 0xFAFF)
+    || (code >= 0xFE10 && code <= 0xFE19)
+    || (code >= 0xFE30 && code <= 0xFE6F)
+    || (code >= 0xFF00 && code <= 0xFF60)
+    || (code >= 0xFFE0 && code <= 0xFFE6);
+}
+
+function charEmWidth(ch) {
+  const code = ch.codePointAt(0) || 0;
+  if (isWideCodePoint(code)) return 1.0;
+  if (' ilI1.,:;\'!|()[]/-·tfjr'.includes(ch)) return 0.38;
+  if ('WMmw@%#GOQ'.includes(ch)) return 0.78;
+  return 0.58;
+}
+
+function measureEm(str) {
+  let w = 0;
+  for (const ch of str) w += charEmWidth(ch);
+  return w;
+}
+
+function isBreakAfter(ch) {
+  const code = ch.codePointAt(0) || 0;
+  return ch === ' ' || ch === '\t' || isWideCodePoint(code)
+    || '/-·,;。，、：；）】」'.includes(ch);
+}
+
+export function tooltipMaxWidth({
+  panelWidth: panelW = 0,
+  viewWidth = 0,
+  maxWidth = TOOLTIP_MAX_WIDTH,
+  margin = TOOLTIP_MARGIN,
+} = {}) {
+  const base = Number.isFinite(maxWidth) && maxWidth > 0 ? maxWidth : TOOLTIP_MAX_WIDTH;
+  let cap = Math.max(80, Math.min(TOOLTIP_MAX_WIDTH, base));
+  if (Number.isFinite(panelW) && panelW > 0) {
+    cap = Math.min(cap, Math.max(80, Math.floor(panelW - margin * 2)));
+  }
+  if (Number.isFinite(viewWidth) && viewWidth > 0) {
+    cap = Math.min(cap, Math.max(80, Math.floor(viewWidth - margin * 2)));
+  }
+  return Math.round(cap);
+}
+
+export function wrapTooltipText(text, maxWidthPx, {
+  maxLines = TOOLTIP_MAX_LINES,
+  fontSize = TOOLTIP_FONT_SIZE,
+  padX = TOOLTIP_PAD_X,
+} = {}) {
+  const clean = String(text ?? '').replace(/\r\n?/g, '\n').trim();
+  if (!clean) return { lines: [], text: '', truncated: false, longestEm: 0 };
+  const innerW = Math.max(40, (Number.isFinite(maxWidthPx) && maxWidthPx > 0 ? maxWidthPx : TOOLTIP_MAX_WIDTH) - padX);
+  const budgetEm = Math.max(4, innerW / fontSize);
+  const limit = Math.max(1, Math.floor(maxLines || TOOLTIP_MAX_LINES));
+  const rawLines = [];
+  for (const para of clean.split('\n')) {
+    const trimmed = para.replace(/\s+$/g, '');
+    if (!trimmed) {
+      if (rawLines.length && rawLines[rawLines.length - 1] !== '') rawLines.push('');
+      continue;
+    }
+    const chars = Array.from(trimmed);
+    let buf = [];
+    let w = 0;
+    let lastBreakIdx = -1;
+    let lastBreakW = 0;
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      if (!buf.length && (ch === ' ' || ch === '\t')) continue;
+      const cw = charEmWidth(ch);
+      if (buf.length > 0 && w + cw > budgetEm) {
+        if (lastBreakIdx > 0 && lastBreakW >= budgetEm * 0.35) {
+          const head = buf.slice(0, lastBreakIdx).join('').replace(/\s+$/g, '');
+          const tail = buf.slice(lastBreakIdx);
+          while (tail.length && (tail[0] === ' ' || tail[0] === '\t')) tail.shift();
+          rawLines.push(head);
+          buf = tail;
+          w = measureEm(buf.join(''));
+          lastBreakIdx = -1;
+          lastBreakW = 0;
+          for (let j = 0; j < buf.length; j++) {
+            if (isBreakAfter(buf[j])) {
+              lastBreakIdx = j + 1;
+              lastBreakW = measureEm(buf.slice(0, j + 1).join(''));
+            }
+          }
+          if (buf.length > 0 && w + cw > budgetEm) {
+            rawLines.push(buf.join('').replace(/\s+$/g, ''));
+            buf = [];
+            w = 0;
+            lastBreakIdx = -1;
+            lastBreakW = 0;
+          }
+        } else {
+          rawLines.push(buf.join('').replace(/\s+$/g, ''));
+          buf = [];
+          w = 0;
+          lastBreakIdx = -1;
+          lastBreakW = 0;
+        }
+        if (!buf.length && (ch === ' ' || ch === '\t')) continue;
+      }
+      buf.push(ch);
+      w += cw;
+      if (isBreakAfter(ch)) {
+        lastBreakIdx = buf.length;
+        lastBreakW = w;
+      }
+    }
+    if (buf.length) rawLines.push(buf.join('').replace(/\s+$/g, ''));
+  }
+  while (rawLines.length && rawLines[rawLines.length - 1] === '') rawLines.pop();
+  let truncated = false;
+  let lines = rawLines;
+  if (rawLines.length > limit) {
+    truncated = true;
+    lines = rawLines.slice(0, limit);
+    const ellBudget = Math.max(2, budgetEm - 1.0);
+    const chars = Array.from(lines[limit - 1]);
+    while (chars.length > 0 && measureEm(chars.join('')) > ellBudget) chars.pop();
+    lines[limit - 1] = `${chars.join('').replace(/\s+$/g, '')}…`;
+  }
+  const longestEm = lines.reduce((m, l) => Math.max(m, measureEm(l)), 0);
+  return { lines, text: lines.join('\n'), truncated, longestEm };
+}
+
+export function clampTooltipRect(triggerRect, cardSize, boundsRect, {
+  placement = 'above-left',
+  gap = TOOLTIP_GAP,
+  margin = TOOLTIP_MARGIN,
+} = {}) {
+  const wantBelow = String(placement || '').startsWith('below');
+  const wantRight = String(placement || '').endsWith('right');
+  const minX = boundsRect.x + margin;
+  const maxX = Math.max(minX, boundsRect.x + boundsRect.w - cardSize.w - margin);
+  const minY = boundsRect.y + margin;
+  const maxY = Math.max(minY, boundsRect.y + boundsRect.h - cardSize.h - margin);
+  const yAbove = triggerRect.y - gap - cardSize.h;
+  const yBelow = triggerRect.y + triggerRect.h + gap;
+  const fitsAbove = yAbove >= minY;
+  const fitsBelow = yBelow <= maxY;
+  const roomAbove = triggerRect.y - gap - minY;
+  const roomBelow = (boundsRect.y + boundsRect.h - margin) - (triggerRect.y + triggerRect.h + gap);
+  let vert = wantBelow ? 'below' : 'above';
+  if (vert === 'above' && !fitsAbove && (fitsBelow || roomBelow > roomAbove)) vert = 'below';
+  else if (vert === 'below' && !fitsBelow && (fitsAbove || roomAbove > roomBelow)) vert = 'above';
+  const rawY = vert === 'below' ? yBelow : yAbove;
+  const rawX = wantRight ? triggerRect.x + triggerRect.w - cardSize.w : triggerRect.x;
+  const x = Math.round(Math.max(minX, Math.min(maxX, rawX)));
+  const y = Math.round(Math.max(minY, Math.min(maxY, rawY)));
+  return { x, y, w: cardSize.w, h: cardSize.h, placement: `${vert}-${wantRight ? 'right' : 'left'}` };
+}
+
+export function tooltipLayout(text, opts = {}) {
+  const fontSize = opts.fontSize || TOOLTIP_FONT_SIZE;
+  const lineHeight = opts.lineHeight || TOOLTIP_LINE_HEIGHT;
+  const padX = opts.padX ?? TOOLTIP_PAD_X;
+  const padY = opts.padY ?? TOOLTIP_PAD_Y;
+  const maxLines = opts.maxLines || TOOLTIP_MAX_LINES;
+  const gap = opts.gap ?? TOOLTIP_GAP;
+  const margin = opts.margin ?? TOOLTIP_MARGIN;
+  const maxWidth = tooltipMaxWidth(opts);
+  const wrapped = wrapTooltipText(text, maxWidth, { maxLines, fontSize, padX });
+  if (!wrapped.lines.length) return null;
+  const width = Math.min(maxWidth, Math.max(TOOLTIP_MIN_WIDTH, Math.ceil(wrapped.longestEm * fontSize + padX + 10)));
+  const height = Math.ceil(wrapped.lines.length * lineHeight + padY);
+  const maxHeight = Math.ceil(maxLines * lineHeight + padY + 4);
+  const placement = opts.placement || 'above-left';
+  let anchor = 'bottom_left';
+  let pos = { left: 0, top: -gap };
+  if (placement === 'above-right') { anchor = 'bottom_right'; pos = { right: 0, top: -gap }; }
+  else if (placement === 'below-left') { anchor = 'top_left'; pos = { left: 0, bottom: -gap }; }
+  else if (placement === 'below-right') { anchor = 'top_right'; pos = { right: 0, bottom: -gap }; }
+  const rect = opts.triggerRect && opts.boundsRect
+    ? clampTooltipRect(opts.triggerRect, { w: width, h: height }, opts.boundsRect, { placement, gap, margin })
+    : null;
+  return {
+    lines: wrapped.lines,
+    text: wrapped.text,
+    truncated: wrapped.truncated,
+    width,
+    maxWidth,
+    height,
+    maxHeight,
+    fontSize,
+    lineHeight,
+    placement: rect ? rect.placement : placement,
+    anchor,
+    pos,
+    rect,
+  };
 }
