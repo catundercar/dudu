@@ -23,7 +23,7 @@ CHECK_DISPATCH = textwrap.dedent("""
     parser = cli.build_parser()
     sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
     assert set(cli.COMMANDS) == set(sub.choices), (set(cli.COMMANDS) ^ set(sub.choices))
-    assert len(cli.COMMANDS) == 59, len(cli.COMMANDS)
+    assert len(cli.COMMANDS) == 60, len(cli.COMMANDS)
     for name, (mod, fn_name) in cli.COMMANDS.items():
         fn = getattr(mod, fn_name)
         assert callable(fn), (name, mod, fn_name)
@@ -85,7 +85,7 @@ CHECK_REGISTRATIONS_PM = textwrap.dedent("""
     assert len(ctx.after_save) == 2, len(ctx.after_save)
     assert ctx.seat_alive is not None
     assert ctx.caller_projects is not None
-    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies", "agy-transcript"], ctx.deliver_watchers
+    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies", "agy-transcript", "dream"], ctx.deliver_watchers
     assert len(ctx.deliver_holds) == 1, ctx.deliver_holds
     assert not hasattr(deliver, "_WATCHERS") and not hasattr(deliver, "_HOLDS")
     assert pm.Context is context.Context
@@ -106,7 +106,7 @@ CHECK_CLI_DIRECT_IMPORT = textwrap.dedent("""
     assert len(ctx.after_save) == 2, len(ctx.after_save)
     assert ctx.seat_alive is not None
     assert ctx.caller_projects is not None
-    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies", "agy-transcript"], ctx.deliver_watchers
+    assert [w.name for w in ctx.deliver_watchers] == ["helpers", "dependencies", "agy-transcript", "dream"], ctx.deliver_watchers
     assert len(ctx.deliver_holds) == 1, ctx.deliver_holds
     assert not hasattr(deliver, "_WATCHERS") and not hasattr(deliver, "_HOLDS")
 

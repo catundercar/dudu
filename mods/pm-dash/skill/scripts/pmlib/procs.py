@@ -518,6 +518,7 @@ def build_context(
         helpers_watch_mod = _load_hook_module("pmlib.helpers.watch")
         deps_watch_mod = _load_hook_module("pmlib.events.deps_watch")
         agy_watch_mod = _load_hook_module("pmlib.events.agy_watch")
+        dream_mod = _load_hook_module("pmlib.memory.dream")
         watchers: list[Any] = []
         if helpers_watch_mod is not None:
             watchers.append(context.DeliverWatcher(
@@ -534,6 +535,11 @@ def build_context(
             watchers.append(context.DeliverWatcher(
                 name="agy-transcript",
                 look=lambda repo, stops, bases: agy_watch_mod.AgyTranscriptWatcher(ctx).look(repo, stops, bases),
+            ))
+        if dream_mod is not None:
+            watchers.append(context.DeliverWatcher(
+                name="dream",
+                look=lambda repo, stops, bases: dream_mod.DreamWatcher(ctx).look(repo, stops, bases),
             ))
         ctx.deliver_watchers = tuple(watchers)
     if deliver_holds is None and seat_mod is not None:

@@ -16,8 +16,14 @@ if str(SCRIPTS) not in sys.path:
 
 from pmlib.agents.profiles import WorkerSpec
 from pmlib.errors import NotFound, Refused
-from pmlib.helpers.config import resolve_helper_spec
-from pmlib.helpers.records import helper_entries, helper_wait_guard_for, kill_helper_terminal_for
+from pmlib.events.deliver import Delivery
+from pmlib.helpers.config import helper_placement_for, resolve_helper_spec
+from pmlib.helpers.records import (
+    finalize_helper_for,
+    helper_entries,
+    helper_wait_guard_for,
+    kill_helper_terminal_for,
+)
 from pmlib.helpers.service import HelperStartRequest, Helpers
 from pmlib.helpers.watch import HelperWatcher
 from pmlib.home import project_slug
@@ -314,6 +320,121 @@ class HelpersServiceTest(unittest.TestCase):
         cwait = wsvc.wait(["clcheck"], timeout=6, repo=str(self.repo))
         self.assertEqual(cwait.exit_code, 2)
         self.assertEqual(self.hc.terminals[cres.terminal]["state"], "live")
+
+    def test_quiet_helper_never_wakes_pm_across_done_timeout_exited_stopped_and_blocked(self) -> None:
+        svc = Helpers(self.ctx)
+        watcher = HelperWatcher(self.ctx)
+        delivery = Delivery(self.ctx, str(self.repo))
+
+        # 1. Done path (helper calls `helper done` itself)
+        r_done = svc.start(HelperStartRequest(
+            prompt="Quiet done", name="q-done", quiet=True, repo=str(self.repo),
+        ))
+        self.procs.spawned.clear()
+        hsvc = Helpers(self._ctx_for(r_done.terminal))
+        hsvc.done(text="Quietly finished.")
+        entry_done = next(h for h in helper_entries(self.ctx.store.registration(self.slug)) if h["name"] == "q-done")
+        self.assertTrue(entry_done.get("quiet"))
+        self.assertEqual(entry_done["status"], "done")
+
+        # 2. Timeout path (HelperWatcher sweeps timed-out quiet helper)
+        r_to = svc.start(HelperStartRequest(
+            prompt="Quiet timeout", name="q-to", timeout=10, quiet=True, repo=str(self.repo),
+        ))
+        self.procs.spawned.clear()
+        self.clock.advance(20)
+        watcher.look(str(self.repo), {})
+        entry_to = next(h for h in helper_entries(self.ctx.store.registration(self.slug)) if h["name"] == "q-to")
+        self.assertEqual(entry_to["status"], "timeout")
+        # Quiet timeout notification must not spawn deliver.
+        self.assertEqual([c for c in self.procs.spawned if c["args"][0] == "deliver"], [])
+
+        # 3. Exited (gone) path
+        r_exit = svc.start(HelperStartRequest(
+            prompt="Quiet exit", name="q-exit", quiet=True, repo=str(self.repo),
+        ))
+        self.procs.spawned.clear()
+        del self.hc.terminals[r_exit.terminal]
+        watcher.look(str(self.repo), {})
+        entry_exit = next(h for h in helper_entries(self.ctx.store.registration(self.slug)) if h["name"] == "q-exit")
+        self.assertEqual(entry_exit["status"], "exited")
+        self.assertEqual([c for c in self.procs.spawned if c["args"][0] == "deliver"], [])
+
+        # 4. Stopped path (both via Helpers.stop and via finalize_helper_for with notify=True)
+        r_stop = svc.start(HelperStartRequest(
+            prompt="Quiet stop", name="q-stop", quiet=True, repo=str(self.repo),
+        ))
+        svc.stop(["q-stop"], repo=str(self.repo))
+        r_stop_n = svc.start(HelperStartRequest(
+            prompt="Quiet stop notify", name="q-stop-n", quiet=True, repo=str(self.repo),
+        ))
+        finalize_helper_for(
+            self.ctx, "pm", f"pm-{self.slug}", self.slug, str(self.repo),
+            term=r_stop_n.terminal, name="q-stop-n", status="stopped", kill_term=True, notify=True,
+        )
+
+        # 5. Blocked path in HelperWatcher
+        r_blk = svc.start(HelperStartRequest(
+            prompt="Quiet blocked", name="q-blk", quiet=True, repo=str(self.repo),
+        ))
+        self.hc.terminals[r_blk.terminal]["status"] = {"state": "blocked"}
+        self.hc.terminals[r_blk.terminal]["screen"] = "Waiting for input..."
+        stops: dict = {}
+        watcher.look(str(self.repo), stops)
+        self.clock.advance(10.0)
+        watcher.look(str(self.repo), stops)
+
+        # Every recorded helper event must have wake=False, and Delivery.pending_batch() must be empty.
+        events = [e for e in Conversation(self.ctx, str(self.repo)).events() if e.get("type") == "helper"]
+        statuses = {e.get("status") for e in events}
+        self.assertTrue({"done", "timeout", "exited", "stopped", "blocked"}.issubset(statuses), statuses)
+        self.assertTrue(all(e.get("wake") is False for e in events), events)
+        _, _, pending = delivery.pending_batch()
+        self.assertEqual(pending, [])
+
+    def test_parent_pm_placement_offline_refusal_and_hc_pane_ignored(self) -> None:
+        # Direct helper_placement_for with explicit parent
+        cli_ctx = self._ctx_for("")
+        self.assertEqual(helper_placement_for(cli_ctx), ["--no-parent"])
+        self.assertEqual(helper_placement_for(cli_ctx, parent="t99"), ["--parent", "t99", "--no-notify"])
+
+        # Without parent_pm, empty ctx.pane is still refused
+        with self.assertRaises(Refused):
+            Helpers(cli_ctx).start(HelperStartRequest(prompt="No parent_pm", pm=True, repo=str(self.repo)))
+
+        # With parent_pm=True and empty ctx.pane, placement is ["--parent", pm_term, "--no-notify"]
+        placements: list[list[str]] = []
+        orig_start = self.hc.start_terminal
+
+        def _spy_start(name, cwd, argv, placement=(), labels=(), env=None):
+            placements.append(list(placement))
+            return orig_start(name, cwd, argv, placement=placement, labels=labels, env=env)
+
+        self.hc.start_terminal = _spy_start  # type: ignore[method-assign]
+        res = Helpers(cli_ctx).start(HelperStartRequest(
+            prompt="From deliverer", name="bg-job", pm=True, parent_pm=True, repo=str(self.repo),
+        ))
+        self.assertEqual(placements[-1], ["--parent", self.pm_term, "--no-notify"])
+        entry = next(h for h in helper_entries(self.ctx.store.registration(self.slug)) if h["name"] == "bg-job")
+        self.assertEqual(entry["parent"], self.pm_term)
+        self.assertEqual(self.hc.terminals[res.terminal]["parent"], self.pm_term)
+
+        # When ctx.pane is an hc terminal (e.g. worker terminal), parent_pm is ignored
+        wctx = self._ctx_for(self.worker_term)
+        wres = Helpers(wctx).start(HelperStartRequest(
+            prompt="From worker", name="w-job", parent_pm=True, repo=str(self.repo),
+        ))
+        self.assertEqual(placements[-1], ["--parent", self.worker_term, "--no-notify"])
+        wentry = next(h for h in helper_entries(self.ctx.store.task(self.task_id)) if h["name"] == "w-job")
+        self.assertEqual(wentry["parent"], self.worker_term)
+        self.assertEqual(self.hc.terminals[wres.terminal]["parent"], self.worker_term)
+
+        # When PM terminal is offline in hc, parent_pm=True raises Refused
+        self.hc.terminals[self.pm_term]["state"] = "exited"
+        with self.assertRaises(Refused):
+            Helpers(cli_ctx).start(HelperStartRequest(
+                prompt="Offline PM", name="bg-job-2", pm=True, parent_pm=True, repo=str(self.repo),
+            ))
 
 
 if __name__ == "__main__":

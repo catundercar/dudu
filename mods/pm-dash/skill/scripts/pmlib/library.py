@@ -19,6 +19,7 @@ from .context import Context, SystemClock
 from .home import project_slug
 from .ledger.ledger import slugify
 from .memory.candidates import MemoryCandidates
+from .memory.dream import Dream
 from .memory.layer import (
     FOLDED_TOPICS,
     MEMORY_TYPES,
@@ -187,6 +188,7 @@ class LibraryService:
             "files": files,
             "candidates": waiting,
             "history": {"project": len(proj_layer.history()), "personal": len(pers_layer.history())},
+            "dream": Dream(self.ctx, repo).status(),
         }
 
     def save_memory_file(

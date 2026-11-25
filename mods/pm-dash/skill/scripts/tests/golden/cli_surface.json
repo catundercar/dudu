@@ -1889,6 +1889,263 @@
     }
    ]
   },
+  "dream": {
+   "arguments": [
+    {
+     "action": "_HelpAction",
+     "choices": null,
+     "const": null,
+     "default": "==SUPPRESS==",
+     "dest": "help",
+     "nargs": 0,
+     "options": [
+      "-h",
+      "--help"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_SubParsersAction",
+     "required": true,
+     "subcommands": "dream_cmd"
+    }
+   ],
+   "subcommands": {
+    "apply": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "run",
+       "nargs": null,
+       "options": [
+        "--run"
+       ],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "stdin",
+       "nargs": 0,
+       "options": [
+        "--stdin"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "plan",
+       "nargs": null,
+       "options": [
+        "--plan"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "dry_run",
+       "nargs": 0,
+       "options": [
+        "--dry-run"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": ".",
+       "dest": "repo",
+       "nargs": null,
+       "options": [
+        "--repo"
+       ],
+       "required": false,
+       "type": null
+      }
+     ],
+     "mutually_exclusive": [
+      [
+       "stdin",
+       "plan"
+      ]
+     ]
+    },
+    "run": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": ".",
+       "dest": "repo",
+       "nargs": null,
+       "options": [
+        "--repo"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "dry_run",
+       "nargs": 0,
+       "options": [
+        "--dry-run"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "auto",
+       "nargs": 0,
+       "options": [
+        "--auto"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    },
+    "status": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": ".",
+       "dest": "repo",
+       "nargs": null,
+       "options": [
+        "--repo"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "json",
+       "nargs": 0,
+       "options": [
+        "--json"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    },
+    "undo": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "run_id",
+       "nargs": "?",
+       "options": [],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": ".",
+       "dest": "repo",
+       "nargs": null,
+       "options": [
+        "--repo"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    }
+   }
+  },
   "end-session": {
    "arguments": [
     {
@@ -4514,6 +4771,7 @@
         "user",
         "research",
         "docs",
+        "repo_docs",
         "instructions",
         "memory",
         "personal",
@@ -4768,6 +5026,100 @@
        "nargs": null,
        "options": [],
        "required": true,
+       "type": null
+      }
+     ]
+    },
+    "repo-docs": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "slug",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_AppendAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "include",
+       "nargs": null,
+       "options": [
+        "--include"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_AppendAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "exclude",
+       "nargs": null,
+       "options": [
+        "--exclude"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "on",
+       "nargs": 0,
+       "options": [
+        "--on"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "off",
+       "nargs": 0,
+       "options": [
+        "--off"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "reset",
+       "nargs": 0,
+       "options": [
+        "--reset"
+       ],
+       "required": false,
        "type": null
       }
      ]
@@ -5235,6 +5587,91 @@
        "choices": null,
        "const": null,
        "default": 200,
+       "dest": "limit",
+       "nargs": null,
+       "options": [
+        "--limit"
+       ],
+       "required": false,
+       "type": "int"
+      }
+     ]
+    },
+    "tasks": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "slug",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": [
+        "finished",
+        "open",
+        "all"
+       ],
+       "const": null,
+       "default": "finished",
+       "dest": "status",
+       "nargs": null,
+       "options": [
+        "--status"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": "",
+       "dest": "q",
+       "nargs": null,
+       "options": [
+        "--q"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": 0,
+       "dest": "offset",
+       "nargs": null,
+       "options": [
+        "--offset"
+       ],
+       "required": false,
+       "type": "int"
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": 30,
        "dest": "limit",
        "nargs": null,
        "options": [

@@ -1940,11 +1940,12 @@ class LibraryAndMemoryTests(unittest.TestCase):
         FileStore(self.root).note_research_source("proj", "evidence/gamma/README.md", "proj-gamma-1")
 
         lib = self.pm("library", "proj")
-        self.assertEqual([r["id"] for r in lib["roots"]], ["docs", "research", "instructions"])
-        self.assertEqual([r["writable"] for r in lib["roots"]], [True, False, False])
+        self.assertEqual([r["id"] for r in lib["roots"]], ["docs", "repo_docs", "research", "instructions"])
+        self.assertEqual([r["writable"] for r in lib["roots"]], [True, False, False, False])
         by = {f"{f['root']}/{f['path']}": f for f in lib["files"]}
         self.assertEqual(set(by), {
             "docs/spec.md", "docs/decisions.md",
+            "repo_docs/docs/guide.md",
             "research/docs/research/beta.md", "research/docs/research/ledger-report.md",
             "research/evidence/alpha/README.md", "research/evidence/gamma/README.md",
             "research/evidence/published/README.md",
@@ -2189,6 +2190,139 @@ class LibraryAndMemoryTests(unittest.TestCase):
         nongit = self.pm("files", "proj")
         self.assertEqual(nongit, {"project": "proj", "files": [], "truncated": False})
         self.assertNotEqual(self.pm("file", "proj", "--root", "repo", "--", "README.md", ok=False).returncode, 0)
+
+    def _init_git(self, repo: Path) -> None:
+        for cmd in (["git", "-C", str(repo), "init"],
+                    ["git", "-C", str(repo), "config", "user.email", "t@example.com"],
+                    ["git", "-C", str(repo), "config", "user.name", "Tester"],
+                    ["git", "-C", str(repo), "add", "-A"]):
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+    def test_repo_docs_discovery_filtering_superseded_and_readonly(self):
+        # Mix static site noise, media, framework dirs, i18n, boilerplate, cross-root files, and real docs.
+        self.put(self.repo, "docs/index.html", "<html></html>\n")
+        self.put(self.repo, "docs/.nojekyll", "")
+        self.put(self.repo, "docs/demo.gif", b"GIF89a")
+        self.put(self.repo, "docs/library.mp4", b"\x00\x00\x00\x18ftypmp42")
+        self.put(self.repo, "docs/.vitepress/config.js", "export default {}\n")
+        self.put(self.repo, "docs/_site/built.md", "# Built\n")
+        self.put(self.repo, "docs/i18n/zh/a.md", "# 翻译\n")
+        self.put(self.repo, "docs/CHANGELOG.md", "# Changelog\n")
+        self.put(self.repo, "docs/research/r1.md", "# Research 1\n")
+        self.put(self.repo, "CLAUDE.md", "# Claude rules\n")
+        self.put(self.repo, "docs/design/auto-dream.md",
+                 "# 后台记忆整理（autoDream）\n\n- **任务**：`proj-auto-dream`\n\n核心设计定稿摘要。\n")
+        self.put(self.repo, "docs/guide.md", "# 使用指南\n\n快速上手。\n")
+        outside = Path(self.tmp.name) / "secret.md"
+        outside.write_text("# Secret\n", encoding="utf-8")
+        (self.repo / "docs" / "escape.md").symlink_to(outside)
+        self._init_git(self.repo)
+        # Untracked file in git repo must not be listed or readable.
+        self.put(self.repo, "docs/untracked-draft.md", "# Untracked\n")
+        self.task("proj-auto-dream", title="autoDream 设计定稿")
+
+        # Ledger drafts: auto-dream-draft.md matches normalized stem; explicit frontmatter overrides; generic names do not.
+        ledger = self.root / "projects/proj"
+        self.put(ledger, "docs/auto-dream-draft.md", "# autoDream 草稿\n\n旧版本。\n")
+        self.put(ledger, "docs/custom-alias.md", "---\nsuperseded_by: docs/guide.md\n---\n# 别名草稿\n")
+        self.put(ledger, "docs/notes.md", "# 随手笔记\n")
+        self.put(ledger, "docs/README.md", "# 台账说明\n")
+
+        lib = self.pm("library", "proj")
+        roots = {r["id"]: r for r in lib["roots"]}
+        self.assertEqual(roots["repo_docs"], {"id": "repo_docs", "writable": False, "truncated": False, "total": 2})
+
+        repo_docs = {f["path"]: f for f in lib["files"] if f["root"] == "repo_docs"}
+        self.assertEqual(set(repo_docs), {"docs/design", "docs/design/auto-dream.md", "docs/guide.md"})
+        self.assertEqual(repo_docs["docs/design"]["kind"], "folder")
+        self.assertFalse(repo_docs["docs/design"]["writable"])
+        ad = repo_docs["docs/design/auto-dream.md"]
+        self.assertEqual((ad["title"], ad["summary"], ad["task"], ad["task_title"], ad["writable"]),
+                         ("后台记忆整理（autoDream）", "核心设计定稿摘要。", "proj-auto-dream", "autoDream 设计定稿", False))
+        # No cross-root duplication: research/r1.md stays in research, CLAUDE.md stays in instructions.
+        self.assertIn("published/r1.md", {f["path"] for f in lib["files"] if f["root"] == "research"})
+        self.assertIn("CLAUDE.md", {f["path"] for f in lib["files"] if f["root"] == "instructions"})
+
+        # Superseded_by annotations on ledger docs.
+        ledger_docs = {f["path"]: f for f in lib["files"] if f["root"] == "docs"}
+        self.assertEqual(ledger_docs["auto-dream-draft.md"].get("superseded_by"), "docs/design/auto-dream.md")
+        self.assertEqual(ledger_docs["custom-alias.md"].get("superseded_by"), "docs/guide.md")
+        self.assertNotIn("superseded_by", ledger_docs["notes.md"])
+        self.assertNotIn("superseded_by", ledger_docs["README.md"])
+
+        # Reading allowed repo_docs works; disallowed paths and writes are rejected.
+        got = self.pm("file", "proj", "--root", "repo_docs", "--", "docs/design/auto-dream.md")
+        self.assertIn("核心设计定稿摘要", got["text"])
+        self.assertTrue(got["version"])
+        self.assertIn("使用指南", self.pm("file", "proj", "repo_docs/docs/guide.md")["text"])
+
+        for bad in (
+            ["file", "proj", "--root", "repo_docs", "--", "docs/index.html"],
+            ["file", "proj", "--root", "repo_docs", "--", "docs/CHANGELOG.md"],
+            ["file", "proj", "--root", "repo_docs", "--", "docs/research/r1.md"],
+            ["file", "proj", "--root", "repo_docs", "--", "docs/escape.md"],
+            ["file", "proj", "--root", "repo_docs", "--", "docs/untracked-draft.md"],
+            ["file", "proj", "--root", "repo_docs", "--", ".git/config"],
+            ["file", "proj", "--root", "repo_docs", "--", "CLAUDE.md"],
+            ["save", "proj", "repo_docs/docs/guide.md", "--text", "hack"],
+            ["delete", "proj", "repo_docs/docs/guide.md"],
+            ["restore", "proj", "repo_docs/docs/guide.md"],
+        ):
+            self.assertNotEqual(self.pm(*bad, ok=False).returncode, 0, bad)
+
+    def test_repo_docs_singular_doc_rfcs_architecture_and_nongit_fallback(self):
+        # Non-git repo with singular `doc/`, root `rfcs/`, and `ARCHITECTURE.md`.
+        self.put(self.repo, "doc/manual.md", "# Manual\n")
+        self.put(self.repo, "rfcs/0001-protocol.md", "# RFC 0001\n")
+        self.put(self.repo, "ARCHITECTURE.md", "# System Architecture\n")
+        self.put(self.repo, "README.md", "# Root README not included by default\n")
+
+        lib = self.pm("library", "proj")
+        paths = {f["path"] for f in lib["files"] if f["root"] == "repo_docs" and f["kind"] != "folder"}
+        self.assertEqual(paths, {"doc/manual.md", "rfcs/0001-protocol.md", "ARCHITECTURE.md"})
+        self.assertIn("System Architecture", self.pm("file", "proj", "repo_docs/ARCHITECTURE.md")["text"])
+
+    def test_repo_docs_tier_cap_and_cli_config(self):
+        # 5 Tier-1 design docs + 205 Tier-3 guides -> total 210, truncated to 200 with all 5 Tier-1 preserved.
+        for i in range(5):
+            self.put(self.repo, f"docs/design/spec-{i}.md", f"# Design {i}\n")
+        for i in range(205):
+            self.put(self.repo, f"docs/guides/g-{i:03d}.md", f"# Guide {i}\n")
+        self.put(self.repo, "packages/core/docs/core.md", "# Core\n")
+        self.put(self.repo, "README.md", "# Root README\n")
+        self._init_git(self.repo)
+
+        lib = self.pm("library", "proj")
+        rd_root = next(r for r in lib["roots"] if r["id"] == "repo_docs")
+        self.assertTrue(rd_root["truncated"])
+        self.assertEqual(rd_root["total"], 210)
+        rd_files = [f["path"] for f in lib["files"] if f["root"] == "repo_docs" and f["kind"] != "folder"]
+        self.assertEqual(len(rd_files), 200)
+        for i in range(5):
+            self.assertIn(f"docs/design/spec-{i}.md", rd_files)
+
+        # CLI `project repo-docs`: inspect, include/exclude, off/on, reset.
+        cfg0 = self.pm("repo-docs", "proj")
+        self.assertTrue(cfg0["enabled"])
+        self.assertFalse(cfg0["custom"])
+        self.assertEqual(cfg0["entries"], ["docs"])
+
+        cfg1 = self.pm("repo-docs", "proj", "--include", "packages/core/docs", "--include", "README.md",
+                       "--exclude", "docs/guides")
+        self.assertTrue(cfg1["custom"])
+        self.assertEqual(cfg1["include"], ["packages/core/docs", "README.md"])
+        lib1 = self.pm("library", "proj")
+        paths1 = {f["path"] for f in lib1["files"] if f["root"] == "repo_docs" and f["kind"] != "folder"}
+        self.assertEqual(paths1, {"packages/core/docs/core.md", "README.md"})
+
+        cfg_off = self.pm("repo-docs", "proj", "--off")
+        self.assertFalse(cfg_off["enabled"])
+        self.assertEqual([f for f in self.pm("library", "proj")["files"] if f["root"] == "repo_docs"], [])
+
+        cfg_reset = self.pm("repo-docs", "proj", "--reset")
+        self.assertTrue(cfg_reset["enabled"])
+        self.assertFalse(cfg_reset["custom"])
+        self.assertEqual(cfg_reset["include"], [])
 
 
 if __name__ == "__main__":
