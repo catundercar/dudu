@@ -12259,3 +12259,638 @@ test('Steps card subplan rows bound long notes so titles are never squeezed or o
   assert.equal(compact.hasStyle(compactSub.kids[2], 'max_w', '40%'), true);
   assert.equal(compact.hasStyle(compactSub.kids[2].kids[0], 'truncate'), true);
 });
+
+test('parseRefLink resolves file:// repo & ledger docs, #L anchors, doc:/library:, relative .md, remote/Windows paths, and leaves https/thread intact', () => {
+  const { parseRefLink } = model;
+  const ctx = { repo: '/work/dudu', ledgerHome: '/Users/me/.dudu', slug: 'dudu' };
+
+  // (a) file:// pointing to repo text/Markdown files (with and without #L anchors, localhost, encoded chars)
+  assert.deepEqual(
+    parseRefLink('file:///work/dudu/docs/design/auto-dream.md', ctx),
+    { kind: 'file', target: 'docs/design/auto-dream.md', path: 'docs/design/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///work/dudu/docs/design/auto-dream.md#L10-L20', ctx),
+    { kind: 'file', target: 'docs/design/auto-dream.md', path: 'docs/design/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file://localhost/work/dudu/mods/pm-project/main.js#L42', ctx),
+    { kind: 'file', target: 'mods/pm-project/main.js', path: 'mods/pm-project/main.js' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///work/dudu/docs/%E8%AE%BE%E8%AE%A1/my%20doc.md?raw=1#L5', ctx),
+    { kind: 'file', target: 'docs/设计/my doc.md', path: 'docs/设计/my doc.md' },
+  );
+
+  // (b) file:// pointing to current project ledger docs/, docs/research/, decisions.md, memory/, personal memory
+  assert.deepEqual(
+    parseRefLink('file:///Users/me/.dudu/projects/dudu/docs/auto-dream.md', ctx),
+    { kind: 'library', target: 'docs/auto-dream.md', root: 'docs', path: 'auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///Users/me/.dudu/projects/dudu/docs/sub/spec.md#L1-L8', ctx),
+    { kind: 'library', target: 'docs/sub/spec.md', root: 'docs', path: 'sub/spec.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///Users/me/.dudu/projects/dudu/docs/research/auto-dream.md#L3', ctx),
+    { kind: 'library', target: 'research/docs/research/auto-dream.md', root: 'research', path: 'docs/research/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///Users/me/.dudu/projects/dudu/decisions.md', ctx),
+    { kind: 'library', target: 'docs/decisions.md', root: 'docs', path: 'decisions.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///Users/me/.dudu/projects/dudu/memory/rule.md', ctx),
+    { kind: 'library', target: 'memory/rule.md', root: 'memory', path: 'rule.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///Users/me/.dudu/memory/pref.md', ctx),
+    { kind: 'library', target: 'personal/pref.md', root: 'personal', path: 'pref.md' },
+  );
+  // Fallback ledgerHome inferred from conversation path when ledgerHome is empty
+  assert.deepEqual(
+    parseRefLink('file:///srv/.dudu/projects/dudu/docs/auto-dream.md', {
+      repo: '/srv/dudu', ledgerHome: '', slug: 'dudu', conversation: '/srv/.dudu/projects/dudu/conversation.jsonl',
+    }),
+    { kind: 'library', target: 'docs/auto-dream.md', root: 'docs', path: 'auto-dream.md' },
+  );
+
+  // (c) doc:, library:, and repo-relative .md links
+  assert.deepEqual(
+    parseRefLink('doc:auto-dream.md', ctx),
+    { kind: 'library', target: 'docs/auto-dream.md', root: 'docs', path: 'auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('doc:docs/auto-dream.md#L10', ctx),
+    { kind: 'library', target: 'docs/auto-dream.md', root: 'docs', path: 'auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('doc:docs/research/auto-dream.md', ctx),
+    { kind: 'library', target: 'research/docs/research/auto-dream.md', root: 'research', path: 'docs/research/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('doc:research/auto-dream.md', ctx),
+    { kind: 'library', target: 'research/docs/research/auto-dream.md', root: 'research', path: 'docs/research/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('library:docs/research/auto-dream.md#overview', ctx),
+    { kind: 'library', target: 'research/docs/research/auto-dream.md', root: 'research', path: 'docs/research/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('docs/design/auto-dream.md', ctx),
+    { kind: 'file', target: 'docs/design/auto-dream.md', path: 'docs/design/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('./docs/design/auto-dream.md#L10-L20', ctx),
+    { kind: 'file', target: 'docs/design/auto-dream.md', path: 'docs/design/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('README.markdown', ctx),
+    { kind: 'file', target: 'README.markdown', path: 'README.markdown' },
+  );
+
+  // Cross-machine remote & Windows paths
+  const remoteCtx = { repo: '/home/dev/dudu', ledgerHome: '/home/dev/.dudu', slug: 'dudu' };
+  assert.deepEqual(
+    parseRefLink('file:///home/dev/dudu/docs/design/auto-dream.md#L1-L15', remoteCtx),
+    { kind: 'file', target: 'docs/design/auto-dream.md', path: 'docs/design/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///home/dev/.dudu/projects/dudu/docs/auto-dream.md', remoteCtx),
+    { kind: 'library', target: 'docs/auto-dream.md', root: 'docs', path: 'auto-dream.md' },
+  );
+  const winCtx = { repo: 'c:\\work\\dudu', ledgerHome: 'C:\\Users\\dev\\.dudu', slug: 'dudu' };
+  assert.deepEqual(
+    parseRefLink('file:///C:/work/dudu/docs/design/auto-dream.md#L9', winCtx),
+    { kind: 'file', target: 'docs/design/auto-dream.md', path: 'docs/design/auto-dream.md' },
+  );
+  assert.deepEqual(
+    parseRefLink('file:///C:/Users/dev/.dudu/projects/dudu/docs/note.md', winCtx),
+    { kind: 'library', target: 'docs/note.md', root: 'docs', path: 'note.md' },
+  );
+
+  // Security boundaries & non-doc links must NOT be intercepted
+  assert.equal(parseRefLink('https://example.com/docs/auto-dream.md#L10', ctx), null);
+  assert.equal(parseRefLink('http://localhost:3000/README.md', ctx), null);
+  assert.equal(parseRefLink('file:///Users/me/.dudu/projects/other/docs/secret.md', ctx), null);
+  assert.equal(parseRefLink('file:///etc/passwd', ctx), null);
+  assert.equal(parseRefLink('file:///work/dudu/.git/HEAD', ctx), null);
+  assert.equal(parseRefLink('file:///work/dudu/../secret.md', ctx), null);
+  assert.equal(parseRefLink('doc:repo/secret.md', ctx), null);
+  assert.equal(parseRefLink('../outside.md', ctx), null);
+  assert.equal(parseRefLink('/abs/no-scheme.md', ctx), null);
+  assert.equal(parseRefLink('#heading', ctx), null);
+  assert.equal(parseRefLink('docs/not-markdown.txt', ctx), null);
+  assert.deepEqual(parseRefLink('thread:dudu-doc-link-open-in-sidebar', ctx), { kind: 'thread', target: 'dudu-doc-link-open-in-sidebar' });
+});
+
+test('PmProject followLink opens file://, doc:, and relative .md links in right sidebar Library (local & remote) without intercepting https/thread', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;\s*$/gm, '')
+    .replace(/export\s+default\s+class\s+PmProject/, 'class PmProject') + '\nreturn PmProject;';
+
+  const openedUrls = [];
+  const fileCalls = [];
+  const stubs = {
+    View: class {}, ...model,
+    div: () => ({}), h_flex: () => ({}), v_flex: () => ({}), svg: () => ({}), image: () => ({}),
+    TextView: { markdown: () => ({}), html: () => ({}) },
+    TextareaState: { new: () => ({ on() {}, value: () => '', set_value() {}, set_selected_range() {}, set_auto_grow() {}, set_soft_wrap() {}, focus() {} }) },
+    Textarea: { new: () => ({}) },
+    InputState: { new: () => ({ on() {}, value: () => '', set_value() {}, focus() {} }) },
+    Input: { new: () => ({}) },
+    ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
+    Popup: { new: () => ({}) },
+    theme: () => ({}), home: () => '/Users/me', appHome: () => '/app',
+    exec: async (_cmd, args, opts) => {
+      const a = Array.isArray(args) ? args : [];
+      fileCalls.push({ args: a, on: opts?.on || '' });
+      const idx = a.indexOf('file');
+      if (idx >= 0) return { code: 0, stdout: JSON.stringify({ text: '# Auto Dream\n', size: 13, version: 'v1' }), stderr: '' };
+      return { code: 0, stdout: '{}', stderr: '' };
+    },
+    execPython: async (_exec, argv, opts) => stubs.exec('python3', argv, opts),
+    readTextFile: async () => '', writeTextFile: async () => {}, watchFolder: () => new Promise(() => {}),
+    layout: () => ({ id: 'pm-stage', active: 'pm-project', children: [{ id: 'work' }, { id: 'pm-project' }] }),
+    run() {}, terminals: () => [], agents: () => [], panes: () => [], spaces: () => [],
+    shared: () => ({ pm: 'pm-dudu' }), setShared() {}, props: () => ({}),
+    openOverlay() {}, closeOverlay() {}, appWindow: () => ({ platform: 'macos' }),
+  };
+
+  const Mod = new Function(...Object.keys(stubs), source)(...Object.values(stubs));
+  const cx = {
+    spawn: fn => fn(cx),
+    timer: { after: () => {}, every: () => {} },
+    notify() {},
+    open_url: url => openedUrls.push(url),
+  };
+  const pmLocal = { name: 'pm-dudu', project: 'dudu', repo: '/work/dudu', pane: 'hc:tpm', runtime: 'hc', status: 'live' };
+  const view = Object.assign(Object.create(Mod.prototype), {
+    state: { pms: [pmLocal], tasks: [{ id: 't-a', pm: 'pm-dudu', title: 'Alpha', status: 'in_progress' }], events: [], lang: 'zh' },
+    events: [], pmName: 'pm-dudu', logPath: '', logSlug: 'dudu', machine: '', stateFor: '',
+    ledgerHome: '/Users/me/.dudu', remoteHome: '', remoteNoProject: '', remoteNoLibrary: '', remoteNoMemory: '', remoteNoSession: '',
+    thread: '', threadTask: null, detail: true, threadError: '', threadLog: null, threadLogKept: [],
+    threadTab: 'log', change: model.createChangeState(), sideTab: 'threads',
+    librarySlug: 'dudu', libraryRoots: [], libraryFiles: [], libraryRead: true, libraryProbed: true, libraryStale: false,
+    libraryQuery: '', memoryQuery: '',
+    activeDoc: null, docCache: new Map(), docFailed: new Map(), docLoading: '', docError: '', docShownBytes: model.DOC_INITIAL_BYTES,
+    docFindOpen: false, docFindQuery: '', docJumpQuery: '', docFindJump: false, docMatchPos: 0,
+    editingDoc: null, retopicOpen: false, retopicError: '', confirmDeleteKey: '', deleteError: '', historyView: null,
+    listShown: false, wide: true, docFindInput: { set_value() {} },
+    threadInput: stubs.TextareaState.new(), threadKey: '', threadFiles: [], threadDraft: '',
+    readThread() {}, syncThreadSession() {},
+  });
+
+  // 1) Local file:// repo doc with #L anchor expands collapsed sidebar, exits thread detail, switches to Library, opens root:'repo'
+  view.followLink('file:///work/dudu/docs/design/auto-dream.md#L10-L20', cx);
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(view.listShown, true, 'sidebar auto-expands');
+  assert.equal(view.detail, false, 'thread detail closes');
+  assert.equal(view.sideTab, 'library', 'switches to Library tab');
+  assert.deepEqual(view.activeDoc, { tab: 'library', root: 'repo', path: 'docs/design/auto-dream.md' });
+  assert.equal(view.docCache.get('repo/docs/design/auto-dream.md')?.text, '# Auto Dream\n');
+  assert.equal(openedUrls.length, 0);
+
+  // 2) Local file:// ledger docs/ and docs/research/
+  view.listShown = false;
+  view.sideTab = 'threads';
+  view.followLink('file:///Users/me/.dudu/projects/dudu/docs/auto-dream.md', cx);
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(view.listShown, true);
+  assert.equal(view.sideTab, 'library');
+  assert.deepEqual(view.activeDoc, { tab: 'library', root: 'docs', path: 'auto-dream.md' });
+
+  view.followLink('file:///Users/me/.dudu/projects/dudu/docs/research/auto-dream.md', cx);
+  await new Promise(r => setTimeout(r, 15));
+  assert.deepEqual(view.activeDoc, { tab: 'library', root: 'research', path: 'docs/research/auto-dream.md' });
+
+  // 3) doc: and repo-relative .md links
+  view.followLink('doc:notes.md', cx);
+  await new Promise(r => setTimeout(r, 15));
+  assert.deepEqual(view.activeDoc, { tab: 'library', root: 'docs', path: 'notes.md' });
+
+  view.followLink('docs/design/auto-dream.md', cx);
+  await new Promise(r => setTimeout(r, 15));
+  assert.deepEqual(view.activeDoc, { tab: 'library', root: 'repo', path: 'docs/design/auto-dream.md' });
+
+  // 4) Remote machine uses remote pm.repo and remoteHome
+  fileCalls.length = 0;
+  view.machine = 'box';
+  view.stateFor = 'box';
+  view.remoteHome = '/srv/.dudu';
+  view.state.pms = [{ ...pmLocal, machine: 'box', repo: '/srv/dudu' }];
+  view.listShown = false;
+  view.followLink('file:///srv/dudu/docs/design/remote-spec.md#L5-L12', cx);
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(view.listShown, true);
+  assert.deepEqual(view.activeDoc, { tab: 'library', root: 'repo', path: 'docs/design/remote-spec.md' });
+  assert.equal(fileCalls.some(c => c.on === 'box'), true, 'remote repo doc reads on remote machine');
+
+  view.followLink('file:///srv/.dudu/projects/dudu/docs/remote-note.md', cx);
+  await new Promise(r => setTimeout(r, 15));
+  assert.deepEqual(view.activeDoc, { tab: 'library', root: 'docs', path: 'remote-note.md' });
+
+  // 5) Normal https:// still opens in external browser; thread:<id> still opens thread detail
+  const prevDoc = view.activeDoc;
+  view.followLink('https://example.com/docs/auto-dream.md', cx);
+  assert.deepEqual(openedUrls, ['https://example.com/docs/auto-dream.md']);
+  assert.deepEqual(view.activeDoc, prevDoc);
+
+  view.followLink('thread:t-a', cx);
+  assert.equal(view.detail, true);
+  assert.equal(view.thread, 't-a');
+});
+
+test('validMemoryPayload preserves dream and returns null for legacy payloads without dream', () => {
+  const legacy = model.validMemoryPayload({ files: [], candidates: [], history: { project: 0, personal: 0 } });
+  assert.equal(legacy.dream, null);
+
+  const neverRun = model.validMemoryPayload({
+    files: [],
+    candidates: [],
+    history: { project: 0, personal: 0 },
+    dream: { auto: false, running: false, last_at: '', summary: null, failures: 0, pending: 0 },
+  });
+  assert.deepEqual(neverRun.dream, {
+    auto: false,
+    running: false,
+    last_at: '',
+    summary: null,
+    failures: 0,
+    pending: 0,
+  });
+
+  const withSummary = model.validMemoryPayload({
+    files: [],
+    candidates: [],
+    dream: {
+      auto: true,
+      running: false,
+      last_at: '2026-11-23 02:13:10',
+      summary: { merged: 2, removed: 3, forgotten: 1, adopted: 2, dropped: 1, refused: 1, flags: 2 },
+      failures: 0,
+      pending: 14,
+    },
+  });
+  assert.deepEqual(withSummary.dream, {
+    auto: true,
+    running: false,
+    last_at: '2026-11-23 02:13:10',
+    summary: { merged: 2, removed: 3, forgotten: 1, adopted: 2, dropped: 1, refused: 1, flags: 2 },
+    failures: 0,
+    pending: 14,
+  });
+});
+
+test('formatDreamStatus formats running, last-run with summary/flags, pending, and empty states in en and zh', () => {
+  assert.equal(model.formatDreamStatus(null, 'en'), '');
+  assert.equal(model.formatDreamStatus(null, 'zh'), '');
+
+  // Never consolidated and nothing pending -> hidden
+  const clean = { auto: false, running: false, last_at: '', summary: null, failures: 0, pending: 0 };
+  assert.equal(model.formatDreamStatus(clean, 'en'), '');
+  assert.equal(model.formatDreamStatus(clean, 'zh'), '');
+
+  // 1. Running
+  const running = { auto: false, running: true, last_at: '2026-11-23 02:13:10', summary: null, failures: 0, pending: 5 };
+  assert.equal(model.formatDreamStatus(running, 'en'), 'Consolidating…');
+  assert.equal(model.formatDreamStatus(running, 'zh'), '整理中…');
+
+  // 2. Last consolidated with summary & flags (3 hours ago)
+  const now3h = model.eventTime('2026-11-23 05:13:10');
+  const ran = {
+    auto: false,
+    running: false,
+    last_at: '2026-11-23 02:13:10',
+    summary: { merged: 2, removed: 3, forgotten: 1, adopted: 2, dropped: 1, refused: 1, flags: 2 },
+    failures: 0,
+    pending: 0,
+  };
+  assert.equal(
+    model.formatDreamStatus(ran, 'zh', now3h),
+    '上次整理 3 小时前 · 合并 2 · 收编 2 · 归档 1 · 2 条待你看',
+  );
+  assert.equal(
+    model.formatDreamStatus(ran, 'en', now3h),
+    'Last consolidated 3h ago · merged 2 · adopted 2 · archived 1 · 2 to review',
+  );
+
+  // Just now (<1m) and empty summary
+  const now20s = model.eventTime('2026-11-23 02:13:30');
+  const ranQuiet = {
+    auto: false,
+    running: false,
+    last_at: '2026-11-23 02:13:10',
+    summary: { merged: 0, removed: 0, forgotten: 0, adopted: 0, dropped: 0, refused: 0, flags: 0 },
+    failures: 0,
+    pending: 0,
+  };
+  assert.equal(model.formatDreamStatus(ranQuiet, 'zh', now20s), '上次整理 刚刚');
+  assert.equal(model.formatDreamStatus(ranQuiet, 'en', now20s), 'Last consolidated just now');
+
+  // 3. Never consolidated with pending > 0
+  const pending = { auto: false, running: false, last_at: '', summary: null, failures: 0, pending: 14 };
+  assert.equal(model.formatDreamStatus(pending, 'zh'), '14 条待整理');
+  assert.equal(model.formatDreamStatus(pending, 'en'), '14 pending consolidation');
+});
+
+test('memoryPanel renders #memory-dream-status only when dream line is non-empty and hides it on legacy null', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import [\s\S]*?;$/gm, '')
+    .replace('export default class PmProject extends View', 'return class');
+  const nodes = new Map();
+  const makeEl = () => {
+    const rec = { id: '', texts: [], kids: [] };
+    const allTexts = r => [...r.texts, ...r.kids.flatMap(allTexts)];
+    const proxy = new Proxy(function () {}, {
+      get: (_, key) => {
+        if (key === Symbol.toPrimitive) return () => 0;
+        if (key === '__rec') return rec;
+        return (...args) => {
+          if (key === 'id') {
+            rec.id = String(args[0]);
+            nodes.set(rec.id, rec);
+          } else if (key === 'child' && typeof args[0] === 'string') {
+            rec.texts.push(args[0]);
+          } else if (key === 'child' && args[0]?.__rec) {
+            rec.kids.push(args[0].__rec);
+          } else if (key === 'children' && Array.isArray(args[0])) {
+            for (const k of args[0]) {
+              if (typeof k === 'string') rec.texts.push(k);
+              else if (k?.__rec) rec.kids.push(k.__rec);
+            }
+          } else if (key === 'when') {
+            if (args[0]) args[1](proxy);
+          }
+          return proxy;
+        };
+      },
+      apply: () => proxy,
+    });
+    rec.allTexts = () => allTexts(rec);
+    return proxy;
+  };
+  const stubs = {
+    View: class {}, ...model, ...stepsView,
+    div: makeEl, h_flex: makeEl, v_flex: makeEl, svg: makeEl, image: makeEl,
+    Input: { new: () => makeEl() },
+    Popup: { new: (id, trigger) => makeEl().id(id).child(trigger) },
+  };
+  const scope = new Proxy(stubs, {
+    has: (target, name) => name in target || !(name in globalThis),
+    get: (target, name) => (name in target ? target[name] : name === Symbol.unscopables ? undefined : makeEl()),
+  });
+  const Mod = new Function('scope', `with (scope) { ${source} }`)(scope);
+  const themeObj = {
+    canvas: '#111111', surface: '#181818', raised: '#222222', chrome: '#161616', hover: '#2a2a2a',
+    border: '#333333', input: '#3a3a3a', foreground: '#eeeeee', background: '#111111',
+    muted: '#aaaaaa', dim: '#777777', accent: '#4f8cff', accent_foreground: '#ffffff',
+    blocked: '#ff5f56', ansi2: '#27c93f', ansi3: '#f5a623', solid: '#eeeeee', solid_foreground: '#111111',
+  };
+  const makeInput = () => ({ value: () => '', set_value() {}, set_selected_range() {}, focus() {} });
+  const cx = { notify() {}, stop_propagation() {} };
+  const pmRec = { name: 'pm-dudu', project: 'dudu', repo: '/work/dudu' };
+  const view = Object.assign(Object.create(Mod.prototype), {
+    state: { pms: [pmRec], tasks: [], lang: 'zh' },
+    lang: 'zh',
+    pmName: 'pm-dudu', sideTab: 'memory', clockOffsetMs: 0,
+    memorySlug: 'dudu', memoryRead: true, memoryStale: false, memoryLoading: false, memoryError: '',
+    memoryFoldOverrides: new Map(), memoryProjectOpen: true, memoryPersonalOpen: false, memoryCandidatesOpen: false,
+    memoryQuery: '', memoryBusy: '', memoryNoticeError: '',
+    activeDoc: null, editingDoc: null, historyView: null, deletedBanner: null, docCache: new Map(),
+    memoryInput: makeInput(), memoryScroll: { scroll_to_item() {} },
+    memoryData: model.validMemoryPayload({ files: [], candidates: [], history: { project: 0, personal: 0 } }),
+  });
+
+  // 1. Legacy payload without `dream` -> #memory-dream-status absent
+  nodes.clear();
+  view.memoryPanel(pmRec, themeObj, 340, '2026-11-24', cx);
+  assert.equal(nodes.has('memory-panel'), true);
+  assert.equal(nodes.has('memory-dream-status'), false);
+
+  // 2. Running state -> #memory-dream-status rendered
+  view.memoryData = model.validMemoryPayload({
+    files: [], candidates: [], history: { project: 0, personal: 0 },
+    dream: { auto: false, running: true, last_at: '', summary: null, failures: 0, pending: 4 },
+  });
+  nodes.clear();
+  view.memoryPanel(pmRec, themeObj, 340, '2026-11-24', cx);
+  assert.equal(nodes.has('memory-dream-status'), true);
+  assert.deepEqual(nodes.get('memory-dream-status').allTexts(), ['整理中…']);
+
+  // 3. Pending state in English -> #memory-dream-status rendered in English
+  view.state.lang = 'en';
+  view.lang = 'en';
+  view.memoryData = model.validMemoryPayload({
+    files: [], candidates: [], history: { project: 0, personal: 0 },
+    dream: { auto: false, running: false, last_at: '', summary: null, failures: 0, pending: 9 },
+  });
+  nodes.clear();
+  view.memoryPanel(pmRec, themeObj, 340, '2026-11-24', cx);
+  assert.equal(nodes.has('memory-dream-status'), true);
+  assert.deepEqual(nodes.get('memory-dream-status').allTexts(), ['9 pending consolidation']);
+});
+
+test('projectTasksArgv builds CLI args and clamps limit/offset', () => {
+  assert.deepEqual(
+    model.projectTasksArgv('dudu'),
+    ['project', 'tasks', 'dudu', '--status', 'finished', '--offset', '0', '--limit', String(model.TASKS_PAGE_LIMIT)],
+  );
+  assert.deepEqual(
+    model.projectTasksArgv('dudu', { status: 'all', q: ' #218 ', offset: 30, limit: 200 }),
+    ['project', 'tasks', 'dudu', '--status', 'all', '--q', '#218', '--offset', '30', '--limit', '100'],
+  );
+  assert.equal(model.isOldPmCommand({ code: 2, stderr: "error: argument project_cmd: invalid choice: 'tasks'" }), true);
+});
+
+test('parseProjectTasksPage, normalizeProjectTaskRow and mergeFinishedRows handle pagination and deduplication', () => {
+  assert.equal(model.parseProjectTasksPage(null), null);
+  const page = model.parseProjectTasksPage({
+    tasks: [
+      { id: 'dudu-218', number: 218, title: 'History search', status: 'merged', branch: 'dev/history', updated: '2026-11-20 10:00', commit: 'abc1234' },
+      { id: 'dudu-198', number: 198, title: 'Older task', status: 'done', branch: 'dev/older', updated: '2026-11-18 10:00' },
+    ],
+    total: 42,
+    offset: 0,
+    limit: 30,
+    more: true,
+  });
+  assert.equal(page.total, 42);
+  assert.equal(page.more, true);
+  assert.equal(page.tasks.length, 2);
+
+  const row = model.normalizeProjectTaskRow(page.tasks[0]);
+  assert.equal(row.task, 'dudu-218');
+  assert.equal(row.number, 218);
+  assert.equal(row.group, 'finished');
+  assert.equal(row.tone, 'quiet');
+  assert.equal(row.commit, 'abc1234');
+
+  const merged = model.mergeFinishedRows(
+    [{ task: 'dudu-218', number: 218, title: 'History search', status: 'merged', group: 'finished', updated: '2026-11-20 10:00' }],
+    page.tasks.map(t => model.normalizeProjectTaskRow(t)),
+  );
+  assert.deepEqual(merged.map(r => r.task), ['dudu-218', 'dudu-198']);
+});
+
+test('filterLocalThreads falls back locally by #number, title, and branch while skipping abandoned/review/question-only', () => {
+  const pm = { name: 'pm-dudu' };
+  const tasks = [
+    { id: 'dudu-218', pm: 'pm-dudu', number: 218, title: 'Threads history search', status: 'merged', branch: 'dev/threads-history', updated: '2026-11-20 10:00' },
+    { id: 'dudu-301', pm: 'pm-dudu', number: 301, title: 'Wire animation', status: 'in_progress', branch: 'dev/wires', updated: '2026-11-22 10:00' },
+    { id: 'dudu-drop', pm: 'pm-dudu', number: 205, title: 'Dropped history', status: 'abandoned', branch: 'dev/drop', updated: '2026-11-21 10:00' },
+    { id: 'dudu-218-review', pm: 'pm-dudu', number: 219, title: 'Review #218', status: 'done', review_of: 'dudu-218', updated: '2026-11-20 11:00' },
+  ];
+  const events = [
+    { type: 'thread', task: 'dudu-q', status: 'blocked', title: 'Question about history', at: '2026-11-19 10:00' },
+    { type: 'thread', task: 'dudu-q', status: 'done', title: 'Question about history', at: '2026-11-19 10:05' },
+    { type: 'thread', task: 'dudu-198', number: 198, status: 'merged', title: 'Legacy history', at: '2026-11-15 10:00' },
+  ];
+
+  assert.deepEqual(model.filterLocalThreads(pm, tasks, events, '#218').map(r => r.task), ['dudu-218']);
+  assert.deepEqual(model.filterLocalThreads(pm, tasks, events, '198').map(r => r.task), ['dudu-198']);
+  assert.deepEqual(model.filterLocalThreads(pm, tasks, events, 'dev/wires').map(r => r.task), ['dudu-301']);
+  assert.deepEqual(model.filterLocalThreads(pm, tasks, events, 'history').map(r => r.task), ['dudu-218', 'dudu-198']);
+
+  assert.equal(model.word('en', 'searchThreads'), 'Search Threads…');
+  assert.equal(model.word('zh', 'searchThreads'), '搜索线程…');
+  assert.equal(model.word('en', 'loadMoreFinished', 12), 'Show more (12 more)');
+  assert.equal(model.word('zh', 'loadMoreFinished', 12), '显示更多（还有 12 条）');
+});
+
+test('repo_docs: libraryGroups 4-section layout, single docs/ shell strip, large-tree folding, superseded_by ordering, and legacy fallback', () => {
+  const payload = {
+    roots: [
+      { id: 'docs', writable: true },
+      { id: 'repo_docs', writable: false, truncated: true, total: 210 },
+      { id: 'research', writable: false },
+      { id: 'instructions', writable: false },
+    ],
+    files: [
+      { root: 'docs', path: 'active.md', kind: 'md', size: 100, modified: '2026-11-20T10:00:00Z', writable: true, title: 'Active note' },
+      { root: 'docs', path: 'auto-dream-draft.md', kind: 'md', size: 200, modified: '2026-11-24T10:00:00Z', writable: true, title: 'Draft', superseded_by: 'docs/design/auto-dream.md' },
+      { root: 'docs', path: 'decisions.md', kind: 'md', size: 50, modified: '2026-11-25T10:00:00Z', writable: false, archive: true, entries: 3 },
+      { root: 'repo_docs', path: 'docs/design', kind: 'folder', size: 0, modified: '2026-11-24T09:00:00Z', writable: false },
+      { root: 'repo_docs', path: 'docs/design/auto-dream.md', kind: 'md', size: 1024, modified: '2026-11-24T09:00:00Z', writable: false, title: 'autoDream 定稿', task: 'dudu-auto-dream', task_title: 'autoDream 设计' },
+      { root: 'repo_docs', path: 'docs/guide.md', kind: 'md', size: 512, modified: '2026-11-20T09:00:00Z', writable: false, title: '使用指南' },
+      { root: 'research', path: 'published/library-design.md', kind: 'md', size: 800, modified: '2026-11-19T09:00:00Z', writable: false, title: 'Library Design', published: true },
+      { root: 'instructions', path: 'CLAUDE.md', kind: 'md', size: 400, modified: '2026-11-21T09:00:00Z', writable: false },
+    ],
+  };
+
+  const groups = model.libraryGroups(payload, new Set(), 'zh', '2026');
+  assert.deepEqual(groups.map(g => g.id), ['docs', 'repo_docs', 'research', 'instructions']);
+
+  // Superseded ledger draft sinks below active docs (even when newer), but stays above archive decisions.md.
+  const docsPaths = groups[0].rows.map(r => r.path);
+  assert.deepEqual(docsPaths, ['active.md', 'auto-dream-draft.md', 'decisions.md']);
+  assert.equal(groups[0].rows[1].supersededBy, 'docs/design/auto-dream.md');
+
+  // Repo docs group: read-only, truncated metadata preserved, redundant `docs/` shell stripped visually.
+  const rd = groups[1];
+  assert.equal(rd.title, '仓库文档');
+  assert.equal(rd.readOnly, true);
+  assert.equal(rd.writable, false);
+  assert.equal(rd.truncated, true);
+  assert.equal(rd.total, 210);
+  assert.equal(rd.shown, 2);
+  assert.deepEqual(rd.rows.map(r => [r.folder ? 'dir' : 'file', r.depth, r.name, r.path]), [
+    ['dir', 0, 'design', 'docs/design'],
+    ['file', 1, 'auto-dream.md', 'docs/design/auto-dream.md'],
+    ['file', 0, 'guide.md', 'docs/guide.md'],
+  ]);
+  assert.equal(rd.rows[0].open, true);
+  assert.equal(rd.rows[1].desc, 'autoDream 定稿');
+  assert.equal(rd.rows[1].task, 'dudu-auto-dream');
+  assert.equal(model.isWritableDoc(rd.rows[1].file), false);
+
+  // Large tree (> 15 files): design folder stays open by default, non-design subfolder defaults closed.
+  const manyFiles = [
+    { root: 'repo_docs', path: 'docs/design/spec.md', kind: 'md', size: 100, modified: '2026-11-24T00:00:00Z', writable: false },
+    ...Array.from({ length: 16 }, (_, i) => ({
+      root: 'repo_docs', path: `docs/guides/g-${i}.md`, kind: 'md', size: 100, modified: '2026-11-20T00:00:00Z', writable: false,
+    })),
+  ];
+  const largeGroups = model.libraryGroups(manyFiles, new Set(), 'en', '2026');
+  const rdRows = largeGroups.find(g => g.id === 'repo_docs').rows;
+  const designDir = rdRows.find(r => r.folder && r.path === 'docs/design');
+  const guidesDir = rdRows.find(r => r.folder && r.path === 'docs/guides');
+  assert.equal(designDir.open, true);
+  assert.equal(guidesDir.open, false);
+  // Toggling key in `closed` opens a defaultClosed folder.
+  const toggledRows = model.libraryGroups(manyFiles, new Set(['repo_docs/docs/guides']), 'en', '2026')
+    .find(g => g.id === 'repo_docs').rows;
+  assert.equal(toggledRows.find(r => r.folder && r.path === 'docs/guides').open, true);
+
+  // Legacy remote without repo_docs degrades gracefully (no repo_docs section).
+  const legacyGroups = model.libraryGroups({
+    roots: [{ id: 'docs', writable: true }, { id: 'instructions', writable: false }],
+    files: [{ root: 'instructions', path: 'CLAUDE.md', kind: 'md', size: 100, modified: '2026-11-20T00:00:00Z', writable: false }],
+  }, new Set(), 'en', '2026');
+  assert.deepEqual(legacyGroups.map(g => g.id), ['docs', 'instructions']);
+});
+
+test('repo_docs: @mention deduplicates repoFiles, ranks repo doc above superseded draft, and searchLibrary demotes superseded drafts', () => {
+  const libraryFiles = [
+    { root: 'docs', path: 'auto-dream-draft.md', kind: 'md', size: 200, modified: '2026-11-24T12:00:00Z', writable: true, title: 'autoDream draft', superseded_by: 'docs/design/auto-dream.md' },
+    { root: 'repo_docs', path: 'docs/design/auto-dream.md', kind: 'md', size: 800, modified: '2026-11-24T09:00:00Z', writable: false, title: 'autoDream design' },
+    { root: 'instructions', path: 'CLAUDE.md', kind: 'md', size: 300, modified: '2026-11-21T09:00:00Z', writable: false },
+  ];
+  const repoFiles = ['docs/design/auto-dream.md', 'CLAUDE.md', 'src/auto-dream-helper.py'];
+
+  // Global @ search: repo_docs ranks first, superseded draft ranks behind & dimmed, duplicate file: entry omitted.
+  const globalMenu = model.buildMentionMenu({
+    query: 'auto-dream',
+    category: 'all',
+    libraryFiles,
+    repoFiles,
+    lang: 'en',
+  });
+  const keys = globalMenu.items.map(i => i.key);
+  assert.equal(keys[0], 'library:repo_docs/docs/design/auto-dream.md');
+  assert.ok(keys.includes('library:docs/auto-dream-draft.md'));
+  assert.ok(!keys.includes('file:docs/design/auto-dream.md'));
+  assert.ok(keys.indexOf('library:repo_docs/docs/design/auto-dream.md') < keys.indexOf('library:docs/auto-dream-draft.md'));
+  const draftItem = globalMenu.items.find(i => i.key === 'library:docs/auto-dream-draft.md');
+  assert.equal(draftItem.dimmed, true);
+
+  // Explicit @ -> Files submenu keeps all repo files including docs/design/auto-dream.md.
+  const filesMenu = model.buildMentionMenu({
+    query: 'auto-dream',
+    category: 'files',
+    libraryFiles,
+    repoFiles,
+    lang: 'en',
+  });
+  assert.ok(filesMenu.items.some(i => i.key === 'file:docs/design/auto-dream.md'));
+
+  // searchLibrary ranks repo doc ahead of superseded draft and propagates supersededBy.
+  const hits = model.searchLibrary(libraryFiles, 'auto-dream', null, 'en', '2026');
+  assert.deepEqual(hits.map(h => h.key), ['repo_docs/docs/design/auto-dream.md', 'docs/auto-dream-draft.md']);
+  assert.equal(hits[1].supersededBy, 'docs/design/auto-dream.md');
+
+  // documentView exposes supersededBy.
+  const vm = model.documentView(libraryFiles[0], '# Draft\n\nBody.', { lang: 'en', today: '2026-11-24' });
+  assert.equal(vm.supersededBy, 'docs/design/auto-dream.md');
+});
+
+test('repo_docs: resolveContextLink handles intra-root, research cross-root, and repo source fallback', () => {
+  const files = [
+    { root: 'repo_docs', path: 'docs/README.md', kind: 'md', size: 100, modified: '2026-11-24T00:00:00Z' },
+    { root: 'repo_docs', path: 'docs/design/auto-dream.md', kind: 'md', size: 100, modified: '2026-11-24T00:00:00Z' },
+    { root: 'research', path: 'docs/research/library-design.md', kind: 'md', size: 100, modified: '2026-11-20T00:00:00Z', published: 'published/library-design.md' },
+    { root: 'research', path: 'published/at-mention.md', kind: 'md', size: 100, modified: '2026-11-20T00:00:00Z', published: true },
+  ];
+  const fromReadme = { root: 'repo_docs', path: 'docs/README.md' };
+  assert.deepEqual(model.resolveContextLink(fromReadme, 'design/auto-dream.md', files),
+    { root: 'repo_docs', path: 'docs/design/auto-dream.md' });
+  assert.deepEqual(model.resolveContextLink(fromReadme, 'research/library-design.md', files),
+    { root: 'research', path: 'docs/research/library-design.md' });
+  assert.deepEqual(model.resolveContextLink(fromReadme, 'research/at-mention.md', files),
+    { root: 'research', path: 'published/at-mention.md' });
+  assert.deepEqual(model.resolveContextLink(fromReadme, '../mods/pm-project/model.js', files),
+    { root: 'repo', path: 'mods/pm-project/model.js' });
+  assert.equal(model.resolveContextLink(fromReadme, '../../outside.md', files), null);
+});

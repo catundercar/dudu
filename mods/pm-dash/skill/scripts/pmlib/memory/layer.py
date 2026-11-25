@@ -301,8 +301,8 @@ class MemoryLayer:
                 if held:
                     unlock_file(f)
 
-    def keep_history(self, m: dict[str, Any], why: str) -> None:
-        """What a memory said before it was replaced or forgotten, kept beside the layer."""
+    def keep_history(self, m: dict[str, Any], why: str) -> str:
+        """What a memory said before it was replaced or forgotten, kept beside the layer. Returns the stamp used."""
         d = self.history_dir
         d.mkdir(parents=True, exist_ok=True)
         stamp = base = self.ctx.clock.datetime_now().strftime("%Y%m%d-%H%M%S")
@@ -310,6 +310,7 @@ class MemoryLayer:
         while any((d / f"{m['name']}.{stamp}.{w}.md").exists() for w in ("replaced", "forgotten", "edited")):
             stamp, n = f"{base}-{n:02d}", n + 1
         (d / f"{m['name']}.{stamp}.{why}.md").write_text(memory_text(m), encoding="utf-8")
+        return stamp
 
     def quote_said(self, quote: str, *, project_repo: str | Path | None = None) -> bool:
         """Whether the project's conversation log has the user saying this."""
@@ -725,8 +726,8 @@ def memory_lock(repo: str | Path | None = None) -> Iterator[None]:
         yield
 
 
-def keep_history(repo: str | Path | None, m: dict[str, Any], why: str) -> None:
-    MemoryLayer(Context.from_env(), repo).keep_history(m, why)
+def keep_history(repo: str | Path | None, m: dict[str, Any], why: str) -> str:
+    return MemoryLayer(Context.from_env(), repo).keep_history(m, why)
 
 
 def quote_said(repo: str | Path, quote: str) -> bool:

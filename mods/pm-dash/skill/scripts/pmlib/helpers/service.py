@@ -85,6 +85,8 @@ class HelperStartRequest:
     async_: bool = False
     for_task: str | None = None
     dry_run: bool = False
+    quiet: bool = False
+    parent_pm: bool = False
 
     @classmethod
     def from_args(cls, a: Any) -> HelperStartRequest:
@@ -500,7 +502,8 @@ class Helpers:
             ))
 
         dry = bool(req.dry_run)
-        if not dry and not self.ctx.pane.startswith("hc:"):
+        allow_parent_pm = bool(req.parent_pm) and not self.ctx.pane
+        if not dry and not self.ctx.pane.startswith("hc:") and not allow_parent_pm:
             raise Refused(self.ctx.config.tr(
                 "pm.py helper start requires a herdr-core terminal ($HC_TERMINAL_ID)",
                 "pm.py helper start 需要在 herdr-core 终端（$HC_TERMINAL_ID）里运行",
@@ -520,6 +523,22 @@ class Helpers:
         caller_role, caller_obj = self._caller.helper_caller_identity()
         if caller_role != "cli":
             self.authorize_target("start", caller_role, caller_obj, owner_kind, owner_id)
+        parent_term = self.ctx.pane[3:] if self.ctx.pane.startswith("hc:") else ""
+        if not dry and not parent_term:
+            if not (allow_parent_pm and caller_role == "cli" and owner_kind == "pm"):
+                raise Refused(self.ctx.config.tr(
+                    "pm.py helper start requires a herdr-core terminal ($HC_TERMINAL_ID)",
+                    "pm.py helper start 需要在 herdr-core 终端（$HC_TERMINAL_ID）里运行",
+                ))
+            pm_rec = self._projects.app_pm(repo)
+            pm_term = str((pm_rec or {}).get("terminal") or "")
+            pm_info = self.ctx.hc.get(pm_term) if pm_term else None
+            if not pm_term or pm_info is None or pm_info.state != "live":
+                raise Refused(self.ctx.config.tr(
+                    f"PM terminal for {slug} is not online in herdr-core",
+                    f"项目 {slug} 的协调者终端未在 herdr-core 中在线",
+                ))
+            parent_term = pm_term
         exec_mode = bool(req.exec_mode)
         if exec_mode and caller_role not in ("pm", "cli"):
             raise Refused(self.ctx.config.tr(
@@ -690,7 +709,9 @@ class Helpers:
                 if for_task:
                     labels = (*labels, f"helper.task={for_task}")
                 made = self.ctx.hc.start_terminal(
-                    term_name, cwd, argv, helper_placement_for(self.ctx), labels=labels,
+                    term_name, cwd, argv,
+                    helper_placement_for(self.ctx, parent=parent_term if allow_parent_pm else None),
+                    labels=labels,
                     env=helper_env_for(self.ctx, owner_id, name, slug),
                 )
             finally:
@@ -704,7 +725,7 @@ class Helpers:
             entry: dict[str, Any] = {
                 "name": name,
                 "terminal": made,
-                "parent": self.ctx.pane[3:],
+                "parent": parent_term,
                 "owner": owner_id,
                 "owner_kind": owner_kind,
                 "project": slug,
@@ -725,6 +746,8 @@ class Helpers:
                 "turn_base": None,
                 "summary": "",
             }
+            if req.quiet:
+                entry["quiet"] = True
             if for_task:
                 entry["for_task"] = for_task
             if spec.provider:
@@ -827,9 +850,14 @@ class Helpers:
         )
         turn_base = seen.get("turn", 0) if handed else None
 
+        is_quiet = [False]
+
         def _mark_handed(items: list[dict[str, Any]]) -> bool:
-            idx = _match_helper(items, term=term, running_only=True)
+            idx = _match_helper(items, term=term, running_only=False)
             if idx < 0:
+                return False
+            is_quiet[0] = bool(items[idx].get("quiet"))
+            if items[idx].get("status") != "running":
                 return False
             items[idx]["handed"] = bool(handed)
             items[idx]["turn_base"] = turn_base
@@ -858,9 +886,10 @@ class Helpers:
                 )
                 Conversation(self.ctx, repo).record(
                     "helper", by=f"hc:{term}", source="helper", helper=name,
-                    status="blocked", text=msg, wake=True,
+                    status="blocked", text=msg, wake=not is_quiet[0],
                 )
-                Delivery(self.ctx, repo).ensure_running()
+                if not is_quiet[0]:
+                    Delivery(self.ctx, repo).ensure_running()
         elif repo:
             Delivery(self.ctx, repo).ensure_running()
 

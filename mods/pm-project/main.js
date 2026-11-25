@@ -27,13 +27,14 @@ import {
   withAlpha, solidText, isDarkTheme, viewMarkdown, LEDGER_HOME_SH, EVENT_LIMIT, LOG_LIMIT,
   projectRef, machineView, onMachine, remotePmArgv,
   projectSlug, isOldPmCommand, isReplacedLogError, projectEventsArgv, projectLogArgv,
+  FINISHED_LIMIT, TASKS_PAGE_LIMIT, projectTasksArgv, parseProjectTasksPage, normalizeProjectTaskRow, mergeFinishedRows, filterLocalThreads,
   freshEventWindow, appendEventWindow, prependEventWindow, keepThreadLog, heldThreadLog, timelineAnchor, findAnchorBlock,
   DOC_INITIAL_BYTES, DOC_MAX_BYTES, SAVE_INLINE_BYTES, REMOTE_CHUNK_BYTES, REMOTE_MKTEMP_ARGV, remoteAppendChunkArgv, chunkUtf8Text,
   MEMORY_TOPICS, PROJECT_MEMORY_TYPES, PERSONAL_MEMORY_TYPES, LIBRARY_DROP_TEXT_EXT,
   projectLibraryArgv, projectMemoryArgv, projectFileArgv, projectSaveArgv, projectDeleteArgv,
   projectRestoreArgv, projectHistoryArgv, projectAddArgv, projectRetopicArgv, adoptCandidateArgv,
   parseVersionConflict, isLibraryRelevantChange, isMemoryRelevantChange, contextKey,
-  validLibraryPayload, validMemoryPayload, formatBytes, formatHistoryStamp, contextDay,
+  validLibraryPayload, validMemoryPayload, formatDreamStatus, formatBytes, formatHistoryStamp, contextDay,
   contextShowMode, contextFileError, isWritableDoc, libraryDocTitle, topicLabel, memoryTypeLabel,
   libraryGroups, memoryGroups, searchLibrary, searchMemory, makeDocCacheEntry, isFreshDocEntry,
   makeDocFailEntry, isFreshDocFailure, reconcileDocCache, reconcileDocFailures, keepDocCache,
@@ -164,7 +165,13 @@ export default class PmProject extends View {
     this.sessionAway = false; this.sessionCount = 0; this.sessionSettle = 0;
     this.sessionSent = []; this.lastThreadSendAt = 0; this.lastSessionReadAt = 0;
     // Library & Memory side panel tabs (editable docs/memories, read-only research/instructions).
-    this.sideTab = 'threads'; this.remoteNoLibrary = ''; this.remoteNoMemory = '';
+    this.sideTab = 'threads'; this.remoteNoLibrary = ''; this.remoteNoMemory = ''; this.remoteNoTasks = '';
+    this.threadsQuery = ''; this.threadsSearchTimer = null; this.threadsSearchSeq = 0;
+    this.threadsSearchRows = []; this.threadsSearchTotal = 0; this.threadsSearchOffset = 0;
+    this.threadsSearchMore = false; this.threadsSearchLoading = false; this.threadsSearchError = '';
+    this.threadsSearchLocal = false;
+    this.finishedExtra = []; this.finishedTotal = null; this.finishedOffset = 0;
+    this.finishedMore = true; this.finishedLoading = false; this.finishedError = ''; this.finishedSeq = 0;
     this.librarySlug = ''; this.libraryRoots = []; this.libraryFiles = [];
     this.libraryRead = false; this.libraryProbed = false; this.libraryStale = false;
     this.libraryLoading = false; this.libraryAgain = false; this.libraryError = '';
@@ -326,6 +333,13 @@ export default class PmProject extends View {
         }
       });
     });
+    this.threadsInput = InputState.new();
+    this.threadsInput.on('change', (_e, cx) => {
+      this.threadsQuery = this.threadsInput.value();
+      this.scheduleThreadsSearch(cx);
+    });
+    this.threadsInput.on('focus', () => { this.typing = 'threadsSearch'; });
+    this.threadsInput.on('blur', () => { if (this.typing === 'threadsSearch') this.typing = ''; });
     this.libraryInput = InputState.new();
     this.libraryInput.on('change', (_e, cx) => {
       this.libraryQuery = this.libraryInput.value();
@@ -431,6 +445,17 @@ export default class PmProject extends View {
         this.onLocalMemoryChange('personal', cx);
       }
     }, cx);
+    this.watchRepoDocs(cx);
+  }
+  watchRepoDocs(cx) {
+    if (this.machine || !this.ledgerHome) return;
+    const repo = String(this.pm()?.repo || '').replace(/\/+$/, '');
+    if (!repo) return;
+    for (const sub of ['docs', 'doc']) {
+      this.watch(`${repo}/${sub}`, (_paths, cx) => {
+        if (!this.machine) this.onLocalLibraryChange(cx);
+      }, cx);
+    }
   }
 
   _enterGate(prop, now, maxBusyMs) {
@@ -497,6 +522,20 @@ export default class PmProject extends View {
           this.error = '';
           if (machine) this.remoteHome = typeof state.home === 'string' ? state.home : '';
           else { this.setLedgerHome(state.home, cx); this.arm(cx); }
+          const curPm = this.pm();
+          const curSlug = projectSlug(curPm);
+          if (curSlug) {
+            const mergedSig = state.tasks
+              .filter(t => t && t.status === 'merged' && (t.project === curSlug || projectSlug({ repo: t.repo }) === curSlug))
+              .map(t => String(t.id || '')).sort().join(',');
+            if (this.mergedSigSlug === curSlug && this.mergedSig !== mergedSig) {
+              this.dropCachePrefix(['repo_docs/']);
+              this.libraryStale = true;
+              this.repoFilesRead = false;
+            }
+            this.mergedSigSlug = curSlug;
+            this.mergedSig = mergedSig;
+          }
           if (this.pending?.length) this.reconcilePending(cx);
         }
       } catch (e) { if (machine === this.machine) this.error = String(e?.message || e).trim(); }
@@ -772,6 +811,173 @@ export default class PmProject extends View {
     this.sessionCount = 0;
     this.sessionSettle = 0;
     this.lastSessionReadAt = 0;
+  }
+
+  resetThreadsHistoryState() {
+    this.threadsSearchTimer?.cancel?.();
+    this.threadsSearchTimer = null;
+    this.threadsSearchSeq = (this.threadsSearchSeq || 0) + 1;
+    this.threadsQuery = '';
+    this.threadsSearchRows = [];
+    this.threadsSearchTotal = 0;
+    this.threadsSearchOffset = 0;
+    this.threadsSearchMore = false;
+    this.threadsSearchLoading = false;
+    this.threadsSearchError = '';
+    this.threadsSearchLocal = false;
+    this.finishedSeq = (this.finishedSeq || 0) + 1;
+    this.finishedExtra = [];
+    this.finishedTotal = null;
+    this.finishedOffset = 0;
+    this.finishedMore = true;
+    this.finishedLoading = false;
+    this.finishedError = '';
+  }
+
+  tasksQuerySupported() {
+    return !(this.machine && (this.remoteNoProject === this.machine || this.remoteNoTasks === this.machine));
+  }
+
+  scheduleThreadsSearch(cx) {
+    this.threadsSearchTimer?.cancel?.();
+    this.threadsSearchTimer = null;
+    const q = String(this.threadsQuery || '').trim();
+    if (!q) {
+      this.threadsSearchSeq = (this.threadsSearchSeq || 0) + 1;
+      this.threadsSearchRows = [];
+      this.threadsSearchTotal = 0;
+      this.threadsSearchOffset = 0;
+      this.threadsSearchMore = false;
+      this.threadsSearchLoading = false;
+      this.threadsSearchError = '';
+      this.threadsSearchLocal = false;
+      cx.notify();
+      return;
+    }
+    this.threadsSearchError = '';
+    if (!this.tasksQuerySupported()) {
+      this.runThreadsSearch(cx, { append: false });
+      return;
+    }
+    this.threadsSearchLoading = true;
+    cx.notify();
+    if (typeof cx?.timer?.after === 'function') {
+      this.threadsSearchTimer = cx.timer.after(180, cx => {
+        this.threadsSearchTimer = null;
+        this.runThreadsSearch(cx, { append: false });
+      });
+    } else {
+      this.runThreadsSearch(cx, { append: false });
+    }
+  }
+
+  runThreadsSearch(cx, { append = false } = {}) {
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    const q = String(this.threadsQuery || '').trim();
+    if (!pm || !slug || !q) {
+      this.threadsSearchLoading = false;
+      cx.notify();
+      return;
+    }
+    const runLocal = () => {
+      const allTasks = this.tasks || this.state.tasks;
+      const rows = filterLocalThreads(pm, allTasks, this.events, q, {
+        retiredParts: this.state.retired_parts,
+        taskNumbers: this.state.task_numbers,
+      });
+      this.threadsSearchRows = rows;
+      this.threadsSearchTotal = rows.length;
+      this.threadsSearchOffset = rows.length;
+      this.threadsSearchMore = false;
+      this.threadsSearchLoading = false;
+      this.threadsSearchError = '';
+      this.threadsSearchLocal = true;
+      cx.notify();
+    };
+    if (!this.tasksQuerySupported()) {
+      runLocal();
+      return;
+    }
+    if (append && (this.threadsSearchLoading || !this.threadsSearchMore)) return;
+    const seq = append ? (this.threadsSearchSeq || 0) : ++this.threadsSearchSeq;
+    const offset = append ? (this.threadsSearchOffset || 0) : 0;
+    this.threadsSearchLoading = true;
+    this.threadsSearchError = '';
+    this.threadsSearchLocal = false;
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await this.runProject(projectTasksArgv(slug, { status: 'all', q, offset, limit: TASKS_PAGE_LIMIT }));
+        if (seq !== this.threadsSearchSeq || machine !== this.machine || q !== String(this.threadsQuery || '').trim()) return;
+        if (r.code !== 0) {
+          if (machine && isOldPmCommand(r)) {
+            this.remoteNoTasks = machine;
+            runLocal();
+            return;
+          }
+          throw new Error((r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop());
+        }
+        const page = parseProjectTasksPage(JSON.parse(r.stdout || '{}'));
+        if (!page) throw new Error('invalid tasks response');
+        const rows = page.tasks.map(t => normalizeProjectTaskRow(t)).filter(Boolean);
+        this.threadsSearchRows = append ? mergeFinishedRows(this.threadsSearchRows, rows) : rows;
+        this.threadsSearchTotal = page.total;
+        this.threadsSearchOffset = offset + page.tasks.length;
+        this.threadsSearchMore = page.more;
+        this.threadsSearchError = '';
+      } catch (e) {
+        if (seq === this.threadsSearchSeq && machine === this.machine) {
+          this.threadsSearchError = String(e?.message || e).trim();
+        }
+      } finally {
+        if (seq === this.threadsSearchSeq && machine === this.machine) {
+          this.threadsSearchLoading = false;
+          cx.notify();
+        }
+      }
+    });
+  }
+
+  loadMoreFinished(cx) {
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    if (!pm || !slug || this.finishedLoading || !this.finishedMore || !this.tasksQuerySupported()) return;
+    const seq = ++this.finishedSeq;
+    const offset = this.finishedTotal == null ? 0 : (this.finishedOffset || 0);
+    this.finishedLoading = true;
+    this.finishedError = '';
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await this.runProject(projectTasksArgv(slug, { status: 'finished', offset, limit: TASKS_PAGE_LIMIT }));
+        if (seq !== this.finishedSeq || machine !== this.machine || slug !== projectSlug(this.pm())) return;
+        if (r.code !== 0) {
+          if (machine && isOldPmCommand(r)) {
+            this.remoteNoTasks = machine;
+            this.finishedMore = false;
+            this.finishedError = '';
+            return;
+          }
+          throw new Error((r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop());
+        }
+        const page = parseProjectTasksPage(JSON.parse(r.stdout || '{}'));
+        if (!page) throw new Error('invalid tasks response');
+        const rows = page.tasks.map(t => normalizeProjectTaskRow(t)).filter(Boolean);
+        this.finishedExtra = mergeFinishedRows(this.finishedExtra, rows);
+        this.finishedTotal = page.total;
+        this.finishedOffset = offset + page.tasks.length;
+        this.finishedMore = page.more;
+        this.finishedError = '';
+      } catch (e) {
+        if (seq === this.finishedSeq && machine === this.machine) {
+          this.finishedError = String(e?.message || e).trim();
+        }
+      } finally {
+        if (seq === this.finishedSeq && machine === this.machine) {
+          this.finishedLoading = false;
+          cx.notify();
+        }
+      }
+    });
   }
 
   sessionSupported() {
@@ -1075,7 +1281,7 @@ export default class PmProject extends View {
 
   onLocalLibraryChange(cx) {
     if (this.machine) return;
-    this.dropCachePrefix(['docs/', 'research/']);
+    this.dropCachePrefix(['docs/', 'repo_docs/', 'research/']);
     if (this.libraryVisible()) {
       this.libraryStale = false;
       this.readLibrary(cx);
@@ -1246,21 +1452,23 @@ export default class PmProject extends View {
     });
   }
 
-  // Prefetches small editable documents (`docs`) once Library is shown so search matches their body text.
+  // Prefetches small active documents (`docs` and `repo_docs`) locally once Library is shown so search matches body text.
   prefetchLibraryDocs(cx) {
     const slug = this.librarySlug, machine = this.machine;
-    if (!slug || !this.librarySupported()) return;
-    let count = 0;
-    for (const f of this.libraryFiles || []) {
-      if (count >= 6) break;
-      if (f.root !== 'docs' || f.kind === 'folder' || f.archive || f.size > 65536 || contextShowMode(f, f.path) !== 'text') continue;
-      count++;
+    if (!slug || machine || !this.librarySupported()) return;
+    const candidates = (this.libraryFiles || [])
+      .filter(f => (f.root === 'docs' || f.root === 'repo_docs')
+        && f.kind !== 'folder' && !f.archive && !f.superseded_by
+        && f.size <= 65536 && contextShowMode(f, f.path) === 'text')
+      .sort((a, b) => String(b.modified || '').localeCompare(String(a.modified || '')))
+      .slice(0, 8);
+    for (const f of candidates) {
       const key = contextKey(f);
       if (isFreshDocEntry(this.docCache.get(key), f) || isFreshDocFailure(this.docFailed.get(key), f)) continue;
       const snapMeta = f;
       cx.spawn(async cx => {
         try {
-          const r = await this.runProject(projectFileArgv(slug, 'docs', f.path));
+          const r = await this.runProject(projectFileArgv(slug, f.root, f.path));
           if (r.code !== 0) {
             if (slug === this.librarySlug && machine === this.machine) {
               const errLine = (r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop();
@@ -1426,6 +1634,7 @@ export default class PmProject extends View {
 
   followDocLink(url, cx) {
     const rel = resolveContextLink(this.activeDoc, url, this.allKnownFiles());
+    if (rel?.root === 'repo') { this.openRepoFile(rel.path, cx); return; }
     if (rel) { this.openDoc(rel, cx); return; }
     this.followLink(url, cx);
   }
@@ -2567,6 +2776,16 @@ export default class PmProject extends View {
     cx.notify();
   }
 
+  docLinkContext() {
+    const pm = this.pm();
+    return {
+      repo: pm?.repo || '',
+      ledgerHome: this.machine ? this.remoteHome : this.ledgerHome,
+      slug: projectSlug(pm),
+      conversation: pm?.conversation || '',
+    };
+  }
+
   openMentionRef(targetOrToken, cx) {
     let ref = null;
     if (targetOrToken && typeof targetOrToken === 'object') {
@@ -2577,11 +2796,11 @@ export default class PmProject extends View {
           ref = parseMentionSpans(targetOrToken.text)[0] || null;
         }
         if (!ref && typeof targetOrToken.id === 'string') {
-          ref = parseRefLink(targetOrToken.id);
+          ref = parseRefLink(targetOrToken.id, this.docLinkContext());
         }
       }
     } else if (typeof targetOrToken === 'string') {
-      ref = parseRefLink(targetOrToken);
+      ref = parseRefLink(targetOrToken, this.docLinkContext());
     }
     if (!ref) return false;
     if (ref.kind === 'thread') {
@@ -4057,9 +4276,10 @@ export default class PmProject extends View {
     const editorFocused = ['docEditor', 'docName', 'memDesc'].includes(this.typing);
     const editorTyping = hasEdit && editorFocused && this.editorDirty();
     const inDocFind = onSide && hasDoc && !hasEdit && !hasHistory && this.docFindOpen;
-    const tabQuery = onLib ? this.libraryQuery : onMem ? this.memoryQuery : '';
-    const searchTyping = onLib ? 'librarySearch' : 'memorySearch';
-    const inTabSearch = onSide && !hasDoc && !hasEdit && !hasHistory &&
+    const onThreads = !onSide && !this.detail && this.listResting();
+    const tabQuery = onLib ? this.libraryQuery : onMem ? this.memoryQuery : onThreads ? this.threadsQuery : '';
+    const searchTyping = onLib ? 'librarySearch' : onMem ? 'memorySearch' : 'threadsSearch';
+    const inTabSearch = ((onSide && !hasDoc && !hasEdit && !hasHistory) || onThreads) &&
       (this.typing === searchTyping || Boolean(tabQuery?.trim()));
     const mentionOpen = Boolean(this.mention && this.typing === this.mention.which);
     const step = escapeStep({
@@ -4104,7 +4324,8 @@ export default class PmProject extends View {
         else { this.docFindOpen = false; this.keyFocus.focus(); }
       } else if (tabQuery?.trim()) {
         if (onLib) { this.libraryQuery = ''; this.libraryInput?.set_value(''); }
-        else { this.memoryQuery = ''; this.memoryInput?.set_value(''); }
+        else if (onMem) { this.memoryQuery = ''; this.memoryInput?.set_value(''); }
+        else { this.threadsQuery = ''; this.threadsInput?.set_value(''); this.scheduleThreadsSearch(cx); }
       } else {
         this.keyFocus.focus();
       }
@@ -4113,7 +4334,7 @@ export default class PmProject extends View {
     else if (step === 'doc') { this.closeActiveDoc(cx); return; }
     else {
       this.listShown = false;
-      if (['librarySearch', 'memorySearch', 'docFind', 'docEditor', 'docName', 'memDesc'].includes(this.typing)) {
+      if (['threadsSearch', 'librarySearch', 'memorySearch', 'docFind', 'docEditor', 'docName', 'memDesc'].includes(this.typing)) {
         this.keyFocus?.focus();
       }
     }
@@ -7032,29 +7253,116 @@ export default class PmProject extends View {
         [row.label, state, word(lang, 'openSession')].join('\n'), t, { panel: true, placement: 'above-left' });
     });
 
-    const finished = tree.finished.map(row => renderFinishedSubRow(row));
+    const mergedFinished = this.finishedExtra?.length ? mergeFinishedRows(tree.finished, this.finishedExtra) : tree.finished;
+    const finished = mergedFinished.map(row => renderFinishedSubRow(row));
+    const canLoadMoreFinished = this.tasksQuerySupported() && this.finishedMore &&
+      (this.finishedTotal != null ? mergedFinished.length < this.finishedTotal : tree.finished.length >= FINISHED_LIMIT);
+    if (this.finishedLoading) {
+      finished.push(h_flex().id('finished-load-more').h(26).px(8).gap(7).rounded(7).items_center()
+        .text_size(12).text_color(t.dim)
+        .child(lead(svg(SPINNER).size(12).flex_none().spin(900)))
+        .child(word(lang, 'loadingMoreFinished')));
+    } else if (this.finishedError) {
+      finished.push(h_flex().id('finished-load-more').min_h(26).px(8).py(3).gap(7).rounded(7).items_center().cursor_pointer()
+        .text_size(11.8).text_color(t.blocked).hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => this.loadMoreFinished(cx))
+        .child(div().flex_1().min_w(0).whitespace_normal().child(word(lang, 'finishedMoreError', this.finishedError))));
+    } else if (canLoadMoreFinished) {
+      const rest = this.finishedTotal != null ? Math.max(0, this.finishedTotal - mergedFinished.length) : 0;
+      finished.push(h_flex().id('finished-load-more').h(26).px(8).gap(7).rounded(7).items_center().cursor_pointer()
+        .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .accessibility_label(word(lang, 'loadMoreFinished', rest))
+        .on_click((_e, cx) => this.loadMoreFinished(cx))
+        .child(lead(this.icon('expand', 12).text_color(t.dim)))
+        .child(word(lang, 'loadMoreFinished', rest)));
+    }
+    const finishedCount = this.finishedTotal != null ? Math.max(this.finishedTotal, mergedFinished.length) : mergedFinished.length;
     const sections = [...openGroupEls];
     if (sessions.length) sections.push(groupEl('groupSessions', word(lang, 'groupSessions'), sessions.length, sessions));
-    if (finished.length) sections.push(groupEl('groupFinished', word(lang, 'groupFinished'), finished.length, finished));
+    if (finished.length) sections.push(groupEl('groupFinished', word(lang, 'groupFinished'), finishedCount, finished));
 
     if (this.pendingScrollThread && this.threadListScroll) {
       const hasTask = n => n && (n.task === this.pendingScrollThread ||
         (n.children || []).some(hasTask) || (n.finishedChildren || []).some(hasTask));
       let sectionIdx = tree.groups.findIndex(g => g.nodes.some(hasTask));
-      if (sectionIdx < 0 && tree.finished.some(r => r.task === this.pendingScrollThread)) {
+      if (sectionIdx < 0 && mergedFinished.some(r => r.task === this.pendingScrollThread)) {
         sectionIdx = openGroupEls.length + (sessions.length ? 1 : 0);
       }
       if (sectionIdx >= 0) this.threadListScroll.scroll_to_item(sectionIdx);
       this.pendingScrollThread = '';
     }
 
+    const q = String(this.threadsQuery || '').trim();
+    const toolbar = h_flex().flex_none().px(16).pt(8).pb(4).gap(4).items_center()
+      .child(div().flex_1().min_w(0).child(this.searchBox('threads-search', this.threadsInput, this.threadsQuery, word(lang, 'searchThreads'), cx => {
+        this.threadsQuery = '';
+        this.threadsInput?.set_value('');
+        this.scheduleThreadsSearch(cx);
+        this.threadsInput?.focus();
+      }, t)));
+
+    const renderSearchRow = row => {
+      const at = eventTime(row.updated);
+      const ageText = at > 0 ? age(Math.max(0, now - at), lang) : '';
+      const task = byId.get(row.task);
+      const numText = formatTaskNumber(taskNumber(row) || taskNumber(task) || this.taskNumberFor(row.task));
+      const muted = row.group === 'finished' || row.group === 'parked' || row.group === 'paused';
+      const litRow = this.highlightThread === row.task;
+      return h_flex().id(`threads-hit-${row.task}`).min_h(27).px(8).py(3).gap(7).rounded(7).items_center().cursor_pointer()
+        .text_size(12.5).text_color(litRow ? t.foreground : muted ? t.muted : t.foreground)
+        .when(litRow, x => x.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .45)))
+        .when(!litRow, x => x.hover(s => s.bg(t.hover).text_color(t.foreground)))
+        .accessibility_label(numText ? `${numText} ${row.title}` : row.title)
+        .on_click((_e, cx) => { this.clearHoverNow(cx); this.openThread(row.task, cx); })
+        .child(lead(row.group === 'finished'
+          ? div().size(9).rounded_full().border(1.5).border_color(t.dim)
+          : this.threadMark(row, t)))
+        .when(Boolean(numText), x => x.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
+        .child(div().flex_1().min_w(0).truncate().font_weight(muted ? 400 : 500).child(row.title))
+        .when(Boolean(ageText), x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(ageText)));
+    };
+
+    let listChildren;
+    if (q) {
+      const rows = this.threadsSearchRows || [];
+      if (this.threadsSearchLoading && !rows.length) {
+        listChildren = [h_flex().px(8).pt(4).gap(8).items_center().text_size(13).text_color(t.dim)
+          .child(svg(SPINNER).size(14).flex_none().spin(900)).child(word(lang, 'threadsSearching'))];
+      } else if (this.threadsSearchError && !rows.length) {
+        listChildren = [div().px(8).whitespace_normal().text_size(12.5).text_color(t.blocked)
+          .child(word(lang, 'threadsSearchError', this.threadsSearchError))];
+      } else if (!rows.length) {
+        listChildren = [div().px(8).text_size(13).text_color(t.dim).child(word(lang, 'threadsNoMatches'))];
+      } else {
+        const hitEls = rows.map(r => renderSearchRow(r));
+        if (this.threadsSearchLoading) {
+          hitEls.push(h_flex().id('threads-search-more').h(26).px(8).gap(7).rounded(7).items_center()
+            .text_size(12).text_color(t.dim)
+            .child(lead(svg(SPINNER).size(12).flex_none().spin(900)))
+            .child(word(lang, 'loadingMoreFinished')));
+        } else if (this.threadsSearchMore) {
+          const rest = Math.max(0, (this.threadsSearchTotal || 0) - rows.length);
+          hitEls.push(h_flex().id('threads-search-more').h(26).px(8).gap(7).rounded(7).items_center().cursor_pointer()
+            .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+            .accessibility_label(word(lang, 'loadMoreFinished', rest))
+            .on_click((_e, cx) => this.runThreadsSearch(cx, { append: true }))
+            .child(lead(this.icon('expand', 12).text_color(t.dim)))
+            .child(word(lang, 'loadMoreFinished', rest)));
+        }
+        listChildren = [v_flex().gap(2).children(hitEls)];
+      }
+    } else {
+      listChildren = sections.length ? sections : [div().px(8).text_size(13).text_color(t.dim).child(word(lang, 'noThreads'))];
+    }
+
     return v_flex().w(width).h_full().flex_none().pt(12).bg(t.chrome).border_l(1).border_color(t.border)
       .on_hover((over, cx) => { if (!over && this.hoverKey) this.leaveHover(this.hoverKey, cx); })
       .child(this.sideHeader(t, width))
-      .child(v_flex().id('thread-list').flex_1().min_h(0).px(12).pt(8).pb(16).gap(12).overflow_y_scrollbar()
+      .child(toolbar)
+      .child(v_flex().id('thread-list').flex_1().min_h(0).px(12).pt(4).pb(16).gap(12).overflow_y_scrollbar()
         .when(Boolean(this.threadListScroll), el => el.track_scroll(this.threadListScroll))
         .on_scroll_wheel((_e, cx) => { if (this.hoverKey) this.clearHoverNow(cx); })
-        .children(sections.length ? sections : [div().px(8).text_size(13).text_color(t.dim).child(word(lang, 'noThreads'))]));
+        .children(listChildren));
   }
 
   sideHeader(t, width = PANEL_WIDTH) {
@@ -7136,13 +7444,15 @@ export default class PmProject extends View {
     const srcTip = row.task ? word(lang, 'openSourceThread', row.taskTitle || row.task) : '';
     return this.withTip(`lib-doc-${row.key}`, h_flex().id(`lib-doc-${row.key}`).pl(8 + row.depth * 14).pr(6).py(6).gap(9).rounded(8).items_start()
       .cursor_pointer().hover(s => s.bg(t.hover)).accessibility_label(tip)
-      .when(row.archive, el => el.opacity(.75))
+      .when(Boolean(row.archive || row.supersededBy), el => el.opacity(.75))
       .on_click((_e, cx) => this.openDoc({ tab: 'library', root: row.root, path: row.path }, cx))
       .child(h_flex().h(19).w(16).flex_none().items_center().justify_center().child(this.icon(glyphName, 14).text_color(t.dim)))
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().gap(7).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(13).font_medium()
-            .text_color(row.readable && !row.archive ? t.foreground : t.muted).child(row.title))
+            .text_color(row.readable && !row.archive && !row.supersededBy ? t.foreground : t.muted).child(row.title))
+          .when(Boolean(row.supersededBy), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim)
+            .child(word(lang, 'supersededLabel'))))
           .when(Boolean(row.published), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim)
             .child(word(lang, 'publishedLabel'))))
           .when(row.root === 'docs', el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(row.kindLabel)))
@@ -7192,7 +7502,8 @@ export default class PmProject extends View {
     const writable = meta ? isWritableDoc(meta) : (docRef.root === 'docs' || docRef.root === 'memory' || docRef.root === 'personal');
     const backTip = word(lang, isRepo ? 'docBackRepo' : docRef.tab === 'memory' ? 'docBackMemory' : 'docBackLibrary');
     const headerTitle = vm ? vm.title : (meta ? libraryDocTitle(meta) : fileName(docRef.path));
-    const copiedPath = isRepo && this.pathCopiedAt && Date.now() - this.pathCopiedAt < 1800;
+    const showCopyPath = isRepo || docRef.root === 'repo_docs';
+    const copiedPath = showCopyPath && this.pathCopiedAt && Date.now() - this.pathCopiedAt < 1800;
 
     const matchList = vm?.matchIndices || [];
     const safeMatchPos = matchList.length ? ((this.docMatchPos % matchList.length) + matchList.length) % matchList.length : 0;
@@ -7200,7 +7511,7 @@ export default class PmProject extends View {
     const topBar = h_flex().flex_none().px(14).pt(6).pb(6).gap(3).items_center().border_b(1).border_color(t.border)
       .child(this.iconButton('doc-back', 'back', backTip, cx => this.closeActiveDoc(cx), t, 15))
       .child(div().flex_1().min_w(0).truncate().text_size(13.5).font_semibold().child(headerTitle))
-      .when(isRepo, el => el.child(this.iconButton('doc-copy-path', copiedPath ? 'check' : 'clip',
+      .when(showCopyPath, el => el.child(this.iconButton('doc-copy-path', copiedPath ? 'check' : 'clip',
         word(lang, copiedPath ? 'mentionPathCopied' : 'mentionCopyPath'), cx => {
           cx.write_to_clipboard?.(docRef.path);
           this.pathCopiedAt = Date.now();
@@ -7352,12 +7663,34 @@ export default class PmProject extends View {
           .child([vm.checked, vm.expires].filter(Boolean).join(' · '))))
       : null;
 
+    const supersededTarget = docRef.root === 'docs' ? (meta?.superseded_by || vm?.supersededBy || '') : '';
+    const supersededBar = supersededTarget ? v_flex().id('doc-superseded-bar').w_full().p(10).gap(6).rounded(10)
+      .bg(withAlpha(t.accent, .1)).border_1().border_color(withAlpha(t.accent, .28))
+      .child(div().whitespace_normal().text_size(12).text_color(t.foreground)
+        .child(word(lang, 'supersededBanner', supersededTarget)))
+      .child(h_flex().gap(8).items_center()
+        .child(h_flex().id('doc-open-superseded').h(24).px(9).gap(5).rounded(7).items_center().cursor_pointer()
+          .bg(withAlpha(t.accent, .18)).text_size(11.5).font_medium().text_color(t.accent)
+          .hover(s => s.bg(withAlpha(t.accent, .28)))
+          .on_click((_e, cx) => this.openDoc({ tab: 'library', root: 'repo_docs', path: supersededTarget }, cx))
+          .child(this.icon('hook-up', 11.5))
+          .child(word(lang, 'openSupersededTarget')))
+        .when(writable, el => el.child(this.deleteBusy === key
+          ? svg(SPINNER).size(14).flex_none().spin(900)
+          : h_flex().id('doc-archive-draft').h(24).px(9).gap(5).rounded(7).items_center().cursor_pointer()
+              .bg(t.raised).text_size(11.5).text_color(t.muted)
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_e, cx) => this.deleteActiveDoc(cx))
+              .child(this.icon('history', 11.5))
+              .child(word(lang, 'archiveDraft'))))) : null;
+
     const matchedSet = new Set(matchList);
     const highlightActive = Boolean(findQuery && String(findQuery).trim() && matchedSet.size);
     const bodyChildren = [];
     bodyChildren.push(div().font_family('monospace').text_size(11).text_color(t.dim).whitespace_normal()
-      .child(isRepo ? docRef.path : `${docRef.root} / ${docRef.path.split('/').join(' / ')}`));
+      .child(isRepo || docRef.root === 'repo_docs' ? docRef.path : `${docRef.root} / ${docRef.path.split('/').join(' / ')}`));
     bodyChildren.push(metaRow);
+    if (supersededBar) bodyChildren.push(supersededBar);
     if (retopicPicker) bodyChildren.push(retopicPicker);
     if (sourceLinkRow) bodyChildren.push(sourceLinkRow);
     if (this.deleteError) bodyChildren.push(div().text_size(12).text_color(t.blocked).whitespace_normal().child(this.deleteError));
@@ -7572,7 +7905,7 @@ export default class PmProject extends View {
     if (this.activeDoc?.tab === 'library') return wrap(this.docDetailView(t, today));
 
     const q = String(this.libraryQuery || '').trim();
-    const groups = q ? [] : libraryGroups(this.libraryFiles, this.libraryClosed, lang, currentYear);
+    const groups = q ? [] : libraryGroups({ roots: this.libraryRoots, files: this.libraryFiles }, this.libraryClosed, lang, currentYear);
     const hits = q ? searchLibrary(this.libraryFiles, q, this.docCache, lang, currentYear) : [];
     const hasAnyRows = groups.some(sec => sec.rows.length > 0);
     const groupEl = sec => v_flex().gap(1)
@@ -7583,7 +7916,10 @@ export default class PmProject extends View {
             .child(this.icon('lock', 10)).child(word(lang, 'readOnly')))))
       .children(sec.rows.length
         ? sec.rows.map(r => this.libraryRow(r, t))
-        : (sec.id === 'docs' ? [div().px(8).py(4).text_size(12).text_color(t.dim).child(word(lang, 'libraryDropHint'))] : []));
+        : (sec.id === 'docs' ? [div().px(8).py(4).text_size(12).text_color(t.dim).child(word(lang, 'libraryDropHint'))] : []))
+      .when(Boolean(sec.id === 'repo_docs' && sec.truncated), el => el.child(
+        div().px(8).py(4).text_size(11).text_color(t.dim).whitespace_normal()
+          .child(word(lang, 'repoDocsTruncated', sec.shown, sec.total))));
 
     let listChildren;
     if (this.libraryLoading && !this.libraryRead && !this.libraryFiles.length) {
@@ -7745,10 +8081,13 @@ export default class PmProject extends View {
       .child(this.iconButton('memory-history', 'history', word(lang, 'docHistory'),
         cx => this.openHistory('memory', 'memory', '', 'all', cx), t, 15));
 
+    const dreamLine = formatDreamStatus(this.memoryData?.dream, lang, Date.now(), this.clockOffsetMs || 0);
+
     return v_flex().id('memory-panel').w(width).h_full().flex_none().pt(12).bg(t.chrome).border_l(1).border_color(t.border)
       .on_drop((e, cx) => this.dropMemoryFiles(e?.paths || [], cx))
       .child(this.sideHeader(t, width))
       .child(toolbar)
+      .when(Boolean(dreamLine), el => el.child(div().id('memory-dream-status').px(20).pb(4).truncate().text_size(11.5).text_color(t.dim).child(dreamLine)))
       .when(Boolean(this.deletedBanner?.tab === 'memory'), el => el.child(this.deletedBannerBar('memory', t)))
       .when(Boolean(this.memoryBusy), el => el.child(h_flex().px(20).pb(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
         .child(svg(SPINNER).size(12).flex_none().spin(900)).child(word(lang, 'addingFiles', this.memoryBusy))))
@@ -7924,7 +8263,13 @@ export default class PmProject extends View {
     const lang = this.lang;
     const allTasks = this.tasks || this.state.tasks;
     const stateTask = allTasks.find(x => x.id === this.thread);
-    const task = { ...stateTask, ...this.threadTask };
+    const historyRow = !stateTask
+      ? (this.finishedExtra || []).find(r => r.task === this.thread) || (this.threadsSearchRows || []).find(r => r.task === this.thread)
+      : null;
+    const fallbackTask = historyRow
+      ? { id: historyRow.task, number: historyRow.number, title: historyRow.title, status: historyRow.status, branch: historyRow.branch, commit: historyRow.commit, landed: historyRow.landed, updated: historyRow.updated, parent: historyRow.parent }
+      : null;
+    const task = { ...fallbackTask, ...stateTask, ...this.threadTask };
     if (this.isThreadChangeOpen()) return this.threadChangeView(t, width, cx, task, today);
     const terminal = this.threadTerminal();
     const program = terminal?.program;
@@ -8212,7 +8557,7 @@ export default class PmProject extends View {
       this.closeAllAgentWindows(cx, { defer: true });
       this.machine = ref.machine; this.state = { pms: [], tasks: [], lang: this.state.lang }; this.stateFor = null;
       this.error = ''; this.logError = ''; this.remoteHome = ''; this.remoteNoProject = '';
-      this.remoteNoLibrary = ''; this.remoteNoMemory = ''; this.remoteNoSession = ''; this.remoteNoChange = '';
+      this.remoteNoLibrary = ''; this.remoteNoMemory = ''; this.remoteNoSession = ''; this.remoteNoChange = ''; this.remoteNoTasks = '';
       this.logSlug = ''; this.logState = null; this.logReceipts = []; this.logTurn = null; this.clockOffsetMs = 0; this.serverNowMs = 0; this.serverNowAt = 0; this.noProjectSendFor = '';
       this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
       this.threadLog = null; this.threadLogKept = []; this.threadEarlierLoading = false; this.threadEarlierError = ''; this.threadAnchor = null;
@@ -8220,6 +8565,7 @@ export default class PmProject extends View {
       this.epicOverrides = new Map(); this.expandedDone = new Set(); this.substepsToggle = {}; this.clearHoverNow(null); this.highlightThread = ''; this.pendingScrollThread = '';
       this.resetThreadSession();
       this.resetThreadChange();
+      this.resetThreadsHistoryState();
       this.librarySlug = ''; this.libraryRoots = []; this.libraryFiles = []; this.libraryRead = false; this.libraryProbed = false; this.libraryStale = false; this.libraryError = '';
       this.libraryDropBusy = ''; this.libraryDropError = '';
       this.memorySlug = ''; this.memoryData = null; this.memoryRead = false; this.memoryStale = false; this.memoryError = '';
@@ -8248,6 +8594,7 @@ export default class PmProject extends View {
       this.epicOverrides = new Map(); this.expandedDone = new Set(); this.substepsToggle = {}; this.clearHoverNow(null); this.highlightThread = ''; this.pendingScrollThread = '';
       this.resetThreadSession();
       this.resetThreadChange();
+      this.resetThreadsHistoryState();
       this.librarySlug = ''; this.libraryRoots = []; this.libraryFiles = []; this.libraryRead = false; this.libraryProbed = false; this.libraryStale = false; this.libraryError = '';
       this.libraryQuery = ''; this.libraryDropBusy = ''; this.libraryDropError = '';
       this.memorySlug = ''; this.memoryData = null; this.memoryRead = false; this.memoryStale = false; this.memoryError = '';
@@ -8267,6 +8614,7 @@ export default class PmProject extends View {
       if (!this.bringingBack) { this.bringBackOpen = false; this.bringBackProgress = null; }
       cx.timer.after(0, cx => {
         this.searchInput?.set_value('');
+        this.threadsInput?.set_value('');
         this.libraryInput?.set_value('');
         this.memoryInput?.set_value('');
         this.docFindInput?.set_value('');

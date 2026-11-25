@@ -279,6 +279,7 @@ class WindowsCommandLines(unittest.TestCase):
         self.assertTrue(payload["has_caller"], payload)
         self.assertIn("helpers", payload["watchers"], payload)
         self.assertIn("dependencies", payload["watchers"], payload)
+        self.assertIn("dream", payload["watchers"], payload)
         self.assertTrue(payload["has_seat_alive"], payload)
 
 

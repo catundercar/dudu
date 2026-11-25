@@ -153,7 +153,7 @@ class FinalReviewR4ReprosTest(unittest.TestCase):
             "assert ctx.caller is not None, 'caller is None'\n"
             "assert len(ctx.after_save) == 2, ctx.after_save\n"
             "assert ctx.seat_alive is not None, 'seat_alive is None'\n"
-            "assert [w.name for w in ctx.deliver_watchers] == ['helpers', 'dependencies', 'agy-transcript'], ctx.deliver_watchers\n"
+            "assert [w.name for w in ctx.deliver_watchers] == ['helpers', 'dependencies', 'agy-transcript', 'dream'], ctx.deliver_watchers\n"
             "assert len(ctx.deliver_holds) == 1, ctx.deliver_holds\n"
             "assert ctx.candidate_pruner is not None, 'candidate_pruner is None'\n"
         )

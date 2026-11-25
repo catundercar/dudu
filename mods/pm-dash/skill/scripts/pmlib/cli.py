@@ -8,6 +8,7 @@ import argparse
 from . import caller, context, discord, hooks
 from .commands import (
     dispatch as dispatch_cmd,
+    dream as dream_cmd,
     events as events_cmd,
     helpers as helpers_cmd,
     ledger as ledger_cmd,
@@ -76,6 +77,7 @@ COMMANDS = {
     "forget": (memory_cmd, "cmd_forget"),
     "adopt": (memory_cmd, "cmd_adopt"),
     "memory": (memory_cmd, "cmd_memory"),
+    "dream": (dream_cmd, "cmd_dream"),
     "handover": (manager_cmd, "cmd_handover"),
     "decisions": (memory_cmd, "cmd_decisions"),
     "conversation": (ledger_cmd, "cmd_conversation"),
@@ -115,6 +117,7 @@ def build_parser():
     helpers_cmd.register_helper_commands(sub)
     dash_view.register_dash_view(sub)
     memory_cmd.register_memory_commands(sub)
+    dream_cmd.register_dream_commands(sub)
     manager_cmd.register_handover_command(sub)
     memory_cmd.register_decisions_command(sub)
     ledger_cmd.register_conversation_command(sub)

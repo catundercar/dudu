@@ -163,7 +163,7 @@ class HelperWatcher:
                     if owner_kind == "pm":
                         Conversation(self.ctx, orepo).record(
                             "helper", by=f"hc:{term}", source="helper", helper=name, status=state,
-                            result=h.get("result") or "", text=msg, wake=True, key=key,
+                            result=h.get("result") or "", text=msg, wake=not bool(h.get("quiet")), key=key,
                         )
                     else:
                         def _add_note(cur: Task | None, ch: Change, m: str = msg) -> dict[str, Any] | None:

@@ -372,11 +372,13 @@ def _notify_helper_owner_for(
         )
     if owner_kind == "pm":
         if repo:
+            quiet = bool(entry.get("quiet"))
             Conversation(ctx, repo).record(
                 "helper", by=f"hc:{term}" if term else "helper", source="helper", helper=name,
-                status=status, result=result, text=text, wake=True,
+                status=status, result=result, text=text, wake=not quiet,
             )
-            Delivery(ctx, repo).ensure_running()
+            if not quiet:
+                Delivery(ctx, repo).ensure_running()
         return
     _send_to_worker_if_active_for(ctx, owner_id, entry, f"[from helper {name}] {text}")
 

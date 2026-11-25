@@ -241,6 +241,17 @@ class LibraryServiceTest(unittest.TestCase):
         self.assertEqual(page["project"], "demo-repo")
         self.assertEqual(len(page["files"]), 1)
         self.assertEqual(page["history"]["project"], 1)
+        self.assertEqual(
+            page["dream"],
+            {
+                "auto": False,
+                "running": False,
+                "last_at": "",
+                "summary": None,
+                "failures": 0,
+                "pending": 0,
+            },
+        )
 
     def test_research_migration_dry_run_and_apply(self) -> None:
         slug = "demo-repo"

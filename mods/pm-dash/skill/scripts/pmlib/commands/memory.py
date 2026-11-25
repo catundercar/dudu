@@ -82,6 +82,22 @@ def cmd_recall(a, ctx=None):
         sys.exit("name a memory, or search: recall --search <word>")
     layer, m = find_memory_in(ctx, repo, a.name, personal=a.personal)
     if not m:
+        if not a.personal:
+            slug = Path(a.name).stem
+            proj_layer = MemoryLayer(ctx, repo)
+            kept = proj_layer.history(slug)
+            if kept:
+                old = proj_layer.read(kept[0]["file"])
+                into = str((old or {}).get("extra", {}).get("merged_into") or "").strip()
+                if into:
+                    target = proj_layer.read(proj_layer.dir / f"{Path(into).stem}.md")
+                    if target:
+                        ctx.out.line(tr(
+                            f"{slug} was merged into {into}",
+                            f"{slug} 已并入 {into}",
+                        ))
+                        ctx.out.line(proj_layer.recall_text(target))
+                        return
         sys.exit(f"no memory called {a.name} (`pm.py memory` lists them)")
     ctx.out.line(MemoryLayer(ctx, layer).recall_text(m))
 

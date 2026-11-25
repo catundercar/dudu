@@ -47,8 +47,8 @@ REPO_FILES_MAX = 20_000    # maximum repository files listed for @ mentions
 # panel's (`project context`, kept for the UI until it moves); `docs`, `research` and `instructions` are the
 # Library's; `memory` (the project's) and `personal` (the user's) are the Memory page's; `repo` is read-only
 # preview of the project's repository files.
-DOCUMENT_ROOTS = ("project", "user", "research", "docs", "instructions", "memory", "personal", "repo")
-LIBRARY_ROOTS = ("docs", "research", "instructions")
+DOCUMENT_ROOTS = ("project", "user", "research", "docs", "repo_docs", "instructions", "memory", "personal", "repo")
+LIBRARY_ROOTS = ("docs", "repo_docs", "research", "instructions")
 RESEARCH_FOLDER = "evidence"
 LEDGER_RESEARCH_FOLDER = "research"
 RESEARCH_FILENAME = "README.md"
@@ -61,7 +61,7 @@ DOCS_RESEARCH = "research"         # projects/<slug>/docs/research: reports' new
 PUBLISHED_PREFIX = "published"     # research/published/<rel>: <repo>/docs/research/<rel>, the redacted public copies
 HISTORY_FOLDER = ".history"        # what a document said before it was replaced or deleted
 DECISIONS_FILE = "decisions.md"    # the decisions log, shown last in the Library as an archive
-LIBRARY_STATE_FILE = "library.json"            # {"decisions": {"hidden": true, ...}} once they are all in memory
+LIBRARY_STATE_FILE = "library.json"            # {"decisions": {"hidden": true, ...}, "repo_docs": {...}}
 RESEARCH_SOURCES_FILE = "research-sources.json"  # {"evidence/<topic>/README.md": "<task id>"}, by collect_research
 TASK_SEQ_FILE = "task-seq.json"                  # {"last": N}: per-project monotonic task number counter
 INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md",
@@ -69,6 +69,32 @@ INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md",
 INSTRUCTION_RULES = (".claude", "rules")       # .claude/rules/*.md
 ADD_MAX = 20 << 20                 # 20 MiB bound on one file dropped into the Library
 RESEARCH_DEPTH = 4                 # how deep docs/research is listed
+REPO_DOCS_DEPTH = 4                # max relative depth under each repo_docs entry directory
+REPO_DOCS_MAX = 200                # hard cap on repo_docs files returned in Library
+REPO_DOC_EXTENSIONS = frozenset({".md", ".markdown", ".mdx", ".rst", ".adoc"})
+REPO_DOCS_DEFAULT_ROOT_DIRS = ("design", "specs", "adr", "rfcs", "architecture")
+REPO_DOCS_DEFAULT_ROOT_FILES = frozenset({"architecture.md", "design.md"})
+REPO_DOCS_DESIGN_SEGMENTS = frozenset({
+    "design", "specs", "spec", "adr", "decisions", "rfcs", "rfc", "architecture",
+})
+REPO_DOCS_SKIP_DIRS = frozenset({
+    "node_modules", "vendor", "dist", "build", "out", "target",
+    "public", "static", "assets", "images", "img", "media", "videos", "fonts",
+    "styles", "stylesheets", "scripts", "theme", "themes",
+    "versioned_docs", "versioned_sidebars", "i18n", "locales", "translations",
+    "fixtures", "testdata",
+})
+REPO_DOCS_SKIP_FILES = frozenset({
+    "changelog.md", "history.md", "releases.md", "contributing.md",
+    "code_of_conduct.md", "license.md", "security.md",
+    "pull_request_template.md", "issue_template.md",
+})
+DRAFT_PREFIX_RE = re.compile(r"^(?:draft|wip|rfc|proposal)[-_]+", re.I)
+DRAFT_SUFFIX_RE = re.compile(r"[-_]+(?:draft|wip|rfc|proposal|old|bak|v\d+)$", re.I)
+GENERIC_DOC_STEMS = frozenset({
+    "readme", "index", "notes", "todo", "changelog", "history", "license",
+    "contributing", "security",
+})
 INTERNAL_PROJECT_FILES = frozenset({
     "conversation.jsonl", "receipts.json", "receipts.lock", "delivered.json", "delivered.lock", "deliver.lock",
     "turn-cause.json", "taken-in.json", "takeover.json", "pm-settings.json",
@@ -614,7 +640,7 @@ def _doc_meta_from_bytes(data: bytes) -> dict:
         if closed and (not rest or rest.startswith("\n")):
             for line in head.split("\n"):
                 key, colon, value = line.strip().partition(":")
-                if colon and line[:1] not in (" ", "\t") and key in ("title", "description", "summary", "task"):
+                if colon and line[:1] not in (" ", "\t") and key in ("title", "description", "summary", "task", "superseded_by"):
                     fm.setdefault(key, _scalar(value))
             text = rest[1:] if rest.startswith("\n") else ""
     title, paragraph, first_item, fence, para, seen_title = "", "", "", "", [], False
@@ -678,6 +704,44 @@ def _doc_meta_from_bytes(data: bytes) -> dict:
         task = found.group(1) if found else ""
     if task and valid_task_id(task):
         out["task"] = task
+    superseded = (fm.get("superseded_by") or "").strip().lstrip("/")
+    if superseded.startswith("./"):
+        superseded = superseded[2:]
+    if superseded and ".." not in superseded and "\\" not in superseded and "\x00" not in superseded:
+        out["superseded_by"] = superseded
+    return out
+
+
+def _normalize_doc_stem(name: str) -> str:
+    """Lowercase filename stem with one draft/wip/rfc/proposal/old/bak/vN affix stripped."""
+    stem = Path(name).stem.lower()
+    stem = DRAFT_PREFIX_RE.sub("", stem, count=1)
+    stem = DRAFT_SUFFIX_RE.sub("", stem, count=1)
+    return stem
+
+
+def _clean_repo_rel_list(items: object) -> list[str]:
+    """Normalize a list of repository-relative paths/prefixes from library.json."""
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in items:
+        if not isinstance(raw, str):
+            continue
+        rel = raw.strip().replace("\\", "/")
+        while rel.startswith("./"):
+            rel = rel[2:]
+        rel = rel.strip("/")
+        if not rel or "\x00" in rel:
+            continue
+        parts = tuple(p for p in rel.split("/") if p)
+        if not parts or any(p in (".", "..") for p in parts):
+            continue
+        norm = "/".join(parts)
+        if norm not in seen:
+            seen.add(norm)
+            out.append(norm)
     return out
 
 
@@ -1754,13 +1818,18 @@ class FileStore:
         return state or {}
 
     def set_library_state(self, slug: str, **changes) -> dict:
-        """Merge `changes` into projects/<slug>/library.json (e.g. decisions={"hidden": True, "at": …})."""
+        """Merge `changes` into projects/<slug>/library.json (e.g. decisions={"hidden": True, "at": …}).
+        Keys set to None are removed."""
         if not valid_slug(slug):
             raise ValueError(f"invalid project slug: {slug!r}")
         proj = self._project_folder(slug, create=True)
         with file_lock(self._locks_dir() / f"library-{slug}.lock"):
             state = _read_json_strict(proj / LIBRARY_STATE_FILE) or {}
-            state.update(changes)
+            for k, v in changes.items():
+                if v is None:
+                    state.pop(k, None)
+                else:
+                    state[k] = v
             write_atomic(proj / LIBRARY_STATE_FILE, (json.dumps(state, ensure_ascii=False, indent=1) + "\n").encode())
         return state
 
@@ -1902,8 +1971,323 @@ class FileStore:
             rows.append(row)
         return rows
 
-    def _docs_items(self, slug: str) -> list[dict]:
+    def _repo_docs_config(self, slug: str) -> dict:
+        """Per-project repo_docs settings from projects/<slug>/library.json."""
+        raw = self.library_state(slug).get("repo_docs")
+        if not isinstance(raw, dict):
+            return {"enabled": True, "include": [], "exclude": [], "custom": False}
+        enabled = raw.get("enabled") if isinstance(raw.get("enabled"), bool) else True
+        return {
+            "enabled": enabled,
+            "include": _clean_repo_rel_list(raw.get("include")),
+            "exclude": _clean_repo_rel_list(raw.get("exclude")),
+            "custom": bool(raw),
+        }
+
+    def _repo_docs_entries(self, repo: Path, cfg: dict) -> tuple[list[tuple[str, bool]], set[str]]:
+        """Stage 1: resolve scan entries as (rel, is_file) plus the set of explicitly included files."""
+        if not cfg["enabled"]:
+            return [], set()
+        entries: list[tuple[str, bool]] = []
+        explicit_files: set[str] = set()
+        if cfg["include"]:
+            for rel in cfg["include"]:
+                parts = tuple(rel.split("/"))
+                cur = repo
+                ok = True
+                st = None
+                for i, part in enumerate(parts):
+                    cur = cur / part
+                    try:
+                        st = os.lstat(cur)
+                    except OSError:
+                        ok = False
+                        break
+                    if stat.S_ISLNK(st.st_mode):
+                        ok = False
+                        break
+                    if i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode):
+                        ok = False
+                        break
+                if not ok or st is None:
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    entries.append((rel, False))
+                elif stat.S_ISREG(st.st_mode):
+                    entries.append((rel, True))
+                    explicit_files.add(rel)
+            return entries, explicit_files
+
+        if self._safe_subdir(repo, "docs") is not None:
+            entries.append(("docs", False))
+        elif self._safe_subdir(repo, "doc") is not None:
+            entries.append(("doc", False))
+        for d in REPO_DOCS_DEFAULT_ROOT_DIRS:
+            if self._safe_subdir(repo, d) is not None:
+                entries.append((d, False))
+        try:
+            with os.scandir(repo) as it:
+                names = sorted(e.name for e in it if e.name.lower() in REPO_DOCS_DEFAULT_ROOT_FILES)
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                st = os.lstat(repo / name)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+                entries.append((name, True))
+        return entries, explicit_files
+
+    @staticmethod
+    def _repo_docs_match_entry(
+        parts: tuple[str, ...],
+        entries: list[tuple[str, bool]],
+        explicit_files: set[str],
+        excludes: list[str],
+    ) -> tuple[int, int] | None:
+        """Stage 3 & tier classification: return (tier, entry_len) if `parts` passes all repo_docs filters, else None."""
+        if not parts:
+            return None
+        rel = "/".join(parts)
+        for ex in excludes:
+            if rel == ex or rel.startswith(ex + "/"):
+                return None
+        # Cross-root deduplication: research and instructions already own these.
+        if len(parts) >= 2 and parts[0].lower() == "docs" and parts[1].lower() == "research":
+            return None
+        if parts[0].lower() == "evidence":
+            return None
+        if rel in INSTRUCTION_FILES:
+            return None
+        # Reject hidden / framework segments and blacklisted directories.
+        if any(seg.startswith((".", "_")) for seg in parts):
+            return None
+        if any(seg.lower() in REPO_DOCS_SKIP_DIRS for seg in parts[:-1]):
+            return None
+        is_explicit = rel in explicit_files
+        ext = Path(parts[-1]).suffix.lower()
+        if is_explicit:
+            if ext not in TEXT_EXTENSIONS and ext not in REPO_DOC_EXTENSIONS:
+                return None
+        else:
+            if ext not in REPO_DOC_EXTENSIONS:
+                return None
+            if parts[-1].lower() in REPO_DOCS_SKIP_FILES:
+                return None
+        # Match against active entries and enforce depth cap relative to the entry directory.
+        matched_entry_len: int | None = None
+        for entry_rel, is_file in entries:
+            if is_file:
+                if rel == entry_rel:
+                    matched_entry_len = 0
+                    break
+            else:
+                e_parts = tuple(entry_rel.split("/"))
+                if len(parts) > len(e_parts) and parts[:len(e_parts)] == e_parts:
+                    rel_depth = len(parts) - len(e_parts)
+                    if rel_depth <= REPO_DOCS_DEPTH:
+                        matched_entry_len = len(e_parts)
+                        break
+        if matched_entry_len is None:
+            return None
+        # Tier 0: explicit single file from library.json
+        # Tier 1: design/specs/adr/rfcs/architecture path segment or root ARCHITECTURE.md / DESIGN.md
+        # Tier 2: direct child of a scanned entry directory
+        # Tier 3: everything else
+        if is_explicit:
+            tier = 0
+        elif (any(seg.lower() in REPO_DOCS_DESIGN_SEGMENTS for seg in parts[:-1])
+              or (len(parts) == 1 and parts[0].lower() in REPO_DOCS_DEFAULT_ROOT_FILES)):
+            tier = 1
+        elif matched_entry_len > 0 and len(parts) == matched_entry_len + 1:
+            tier = 2
+        else:
+            tier = 3
+        return tier, matched_entry_len
+
+    @staticmethod
+    def _is_git_repo(repo: Path) -> bool:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=5,
+            )
+            return proc.returncode == 0 and proc.stdout.strip() == b"true"
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _repo_docs_enumerate(self, repo: Path, entries: list[tuple[str, bool]]) -> list[tuple[str, ...]]:
+        """Stage 2: enumerate candidate paths via `git ls-files` (falling back to safe tree walk outside Git)."""
+        if not entries:
+            return []
+        entry_args = [rel for rel, _ in entries]
+        try:
+            proc = subprocess.run(
+                ["git", "--literal-pathspecs", "-C", str(repo), "ls-files", "-z", "--", *entry_args],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            found: list[tuple[str, ...]] = []
+            seen: set[str] = set()
+            for chunk in proc.stdout.split(b"\x00"):
+                if not chunk:
+                    continue
+                try:
+                    rel = chunk.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if rel.startswith("./"):
+                    rel = rel[2:]
+                rel = rel.lstrip("/")
+                if not rel or rel in seen:
+                    continue
+                seen.add(rel)
+                try:
+                    found.append(_split_rel(rel))
+                except ValueError:
+                    continue
+            return found
+        # Non-Git fallback: safe directory traversal skipping symlinks and dotfiles.
+        found = []
+        seen = set()
+        for entry_rel, is_file in entries:
+            e_parts = tuple(entry_rel.split("/"))
+            if is_file:
+                if entry_rel not in seen:
+                    seen.add(entry_rel)
+                    found.append(e_parts)
+                continue
+            sub = self._subdirs(repo, *e_parts)
+            if sub is None:
+                continue
+            for rel_parts, _st, _file in self._scan_tree(sub, max_depth=REPO_DOCS_DEPTH, files_only=True):
+                full_parts = (*e_parts, *rel_parts)
+                full_rel = "/".join(full_parts)
+                if full_rel not in seen:
+                    seen.add(full_rel)
+                    found.append(full_parts)
+        return found
+
+    def repo_docs_settings(self, slug: str) -> dict:
+        """Current effective repo_docs settings and resolved scan entries for a project."""
+        if not valid_slug(slug):
+            raise ValueError(f"invalid project slug: {slug!r}")
+        cfg = self._repo_docs_config(slug)
+        repo = self._repo_dir(slug)
+        entries = [rel for rel, _ in self._repo_docs_entries(repo, cfg)[0]] if repo is not None else []
+        return {
+            "project": slug,
+            "enabled": cfg["enabled"],
+            "include": cfg["include"],
+            "exclude": cfg["exclude"],
+            "custom": cfg["custom"],
+            "entries": entries,
+        }
+
+    def _repo_docs_items(self, slug: str) -> tuple[list[dict], dict]:
+        """Discover, filter, bucket, and annotate repository documentation under root `repo_docs`."""
+        repo = self._repo_dir(slug)
+        meta_out = {"truncated": False, "total": 0}
+        if repo is None:
+            return [], meta_out
+        cfg = self._repo_docs_config(slug)
+        entries, explicit_files = self._repo_docs_entries(repo, cfg)
+        if not entries:
+            return [], meta_out
+        raw_candidates = self._repo_docs_enumerate(repo, entries)
+        filtered: list[tuple[int, str, tuple[str, ...], os.stat_result, Path, int]] = []
+        for parts in raw_candidates:
+            matched = self._repo_docs_match_entry(parts, entries, explicit_files, cfg["exclude"])
+            if matched is None:
+                continue
+            tier, entry_len = matched
+            rel = "/".join(parts)
+            try:
+                file, st = self._walk_file(repo, parts, rel)
+            except (FileNotFoundError, DamagedFileError, UnreadableFileError):
+                continue
+            filtered.append((tier, rel.lower(), parts, st, file, entry_len))
+        filtered.sort(key=lambda item: (item[0], item[1]))
+        total = len(filtered)
+        truncated = total > REPO_DOCS_MAX
+        kept = filtered[:REPO_DOCS_MAX]
+        meta_out = {"truncated": truncated, "total": total}
+        if not kept:
+            return [], meta_out
+
+        tasks = self.tasks(slug)
+        by_id = {t.get("id"): t for t in tasks if t.get("id")}
+        folder_rows: dict[tuple[str, ...], dict] = {}
+        file_rows: list[dict] = []
+        for _tier, _key, parts, st, file, entry_len in kept:
+            # Emit folder rows for subdirectories inside each scanned entry (e.g. `docs/design`).
+            if entry_len > 0 and len(parts) > entry_len + 1:
+                for depth in range(entry_len + 1, len(parts)):
+                    fparts = parts[:depth]
+                    if fparts not in folder_rows:
+                        try:
+                            fst = os.lstat(repo.joinpath(*fparts))
+                        except OSError:
+                            fst = st
+                        frow = self._file_row("repo_docs", fparts, fst)
+                        frow["kind"] = "folder"
+                        frow["size"] = 0
+                        frow["writable"] = False
+                        folder_rows[fparts] = frow
+            row = self._file_row("repo_docs", parts, st)
+            row.update(version=_version_of(st), writable=False)
+            ext = Path(parts[-1]).suffix.lower()
+            if ext in (".md", ".markdown", ".mdx") and st.st_size <= DOCUMENT_MAX:
+                meta = _read_doc_meta(file)
+                if meta.get("title"):
+                    row["title"] = meta["title"]
+                if meta.get("summary"):
+                    row["summary"] = meta["summary"]
+                task = meta.get("task") if meta.get("task") in by_id else ""
+                if not task:
+                    stem = Path(parts[-1]).stem
+                    if len(stem) >= 3 and stem.lower() not in GENERIC_DOC_STEMS:
+                        task = self._task_for_topic(slug, stem, tasks)
+                if task:
+                    row["task"] = task
+                    title = (by_id.get(task) or {}).get("title")
+                    if title:
+                        row["task_title"] = str(title)
+            file_rows.append(row)
+        rows = [folder_rows[k] for k in sorted(folder_rows)] + file_rows
+        return rows, meta_out
+
+    def _docs_items(self, slug: str, repo_docs: list[dict] | None = None) -> list[dict]:
         rows: list[dict] = []
+        repo_paths: set[str] = set()
+        repo_by_stem: dict[str, tuple[int, str]] = {}
+        for r in (repo_docs or ()):
+            if r.get("kind") == "folder":
+                continue
+            rpath = str(r.get("path") or "")
+            if not rpath:
+                continue
+            repo_paths.add(rpath)
+            rparts = tuple(rpath.split("/"))
+            stem = Path(rparts[-1]).stem.lower()
+            if len(stem) < 3 or stem in GENERIC_DOC_STEMS:
+                continue
+            is_design = (
+                any(seg.lower() in REPO_DOCS_DESIGN_SEGMENTS for seg in rparts[:-1])
+                or (len(rparts) == 1 and rparts[0].lower() in REPO_DOCS_DEFAULT_ROOT_FILES)
+            )
+            prio = 0 if is_design else 1
+            cur_best = repo_by_stem.get(stem)
+            if cur_best is None or (prio, rpath.lower()) < (cur_best[0], cur_best[1].lower()):
+                repo_by_stem[stem] = (prio, rpath)
+
         docs = self._context_root_dir(slug, "docs")
         if docs is not None:
             for parts, st, file in self._scan_tree(docs, skip_top=frozenset({DOCS_RESEARCH})):
@@ -1911,10 +2295,18 @@ class FileStore:
                 row["writable"] = True
                 if not stat.S_ISDIR(st.st_mode):
                     row["version"] = _version_of(st)
+                    explicit_superseded = ""
                     if row["kind"] in ("md", "markdown") and st.st_size <= DOCUMENT_MAX:
                         meta = _read_doc_meta(file)
                         if meta.get("title"):
                             row["title"] = meta["title"]
+                        explicit_superseded = meta.get("superseded_by") or ""
+                    if explicit_superseded and explicit_superseded in repo_paths:
+                        row["superseded_by"] = explicit_superseded
+                    elif repo_by_stem:
+                        norm = _normalize_doc_stem(parts[-1])
+                        if len(norm) >= 3 and norm not in GENERIC_DOC_STEMS and norm in repo_by_stem:
+                            row["superseded_by"] = repo_by_stem[norm][1]
                 rows.append(row)
         proj = self._context_root_dir(slug, "project")
         if proj is not None:
@@ -1939,23 +2331,32 @@ class FileStore:
         """The Library of a project, as the UI shows it: what each root is and every document in it.
 
         docs: projects/<slug>/docs/** (editable, files can be dropped in) and decisions.md as a read-only archive
-        row (`archive: true`, `hidden` once its decisions are all in memory); research: reports, read-only: the local
-        originals, `docs/research/**.md` of the project's ledger folder and `evidence/<topic>/README.md` (a topic
-        moved to docs/research is shown there only); a redacted public copy in `<repo>/docs/research` never stands
-        in for an original: the original gets `published: "published/<rel>"`, and one with no original is listed as
-        `published/<rel>` with `published: true`; instructions: the repository's CLAUDE.md, AGENTS.md, .claude/*.md and
-        .claude/rules/*.md that exist, read-only."""
+        row (`archive: true`, `hidden` once its decisions are all in memory); repo_docs: curated read-only design
+        docs and guides from the repository; research: reports, read-only: the local originals,
+        `docs/research/**.md` of the project's ledger folder and `evidence/<topic>/README.md` (a topic moved to
+        docs/research is shown there only); a redacted public copy in `<repo>/docs/research` never stands in for
+        an original: the original gets `published: "published/<rel>"`, and one with no original is listed as
+        `published/<rel>` with `published: true`; instructions: the repository's CLAUDE.md, AGENTS.md,
+        .claude/*.md and .claude/rules/*.md that exist, read-only."""
         if not valid_slug(slug):
             raise ValueError(f"invalid project slug: {slug!r}")
+        repo_docs_rows, repo_meta = self._repo_docs_items(slug)
         return {
             "project": slug,
             "roots": [
                 {"id": "docs", "writable": True, "accepts": {
                     "extensions": sorted(ADD_EXTENSIONS), "max_bytes": ADD_MAX, "edit_max_bytes": DOCUMENT_MAX}},
+                {"id": "repo_docs", "writable": False,
+                 "truncated": repo_meta["truncated"], "total": repo_meta["total"]},
                 {"id": "research", "writable": False},
                 {"id": "instructions", "writable": False},
             ],
-            "files": self._docs_items(slug) + self._research_items(slug) + self._instruction_items(slug),
+            "files": (
+                self._docs_items(slug, repo_docs=repo_docs_rows)
+                + repo_docs_rows
+                + self._research_items(slug)
+                + self._instruction_items(slug)
+            ),
         }
 
     def _is_tracked_repo_file(self, repo: Path, rel: str) -> bool:
@@ -2099,6 +2500,18 @@ class FileStore:
         if root == "instructions":
             repo = self._repo_dir(slug)
             if repo is None or parts not in self._instruction_paths(repo):
+                raise missing
+            return self._walk_file(repo, parts, label)
+        if root == "repo_docs":
+            repo = self._repo_dir(slug)
+            if repo is None:
+                raise missing
+            cfg = self._repo_docs_config(slug)
+            entries, explicit_files = self._repo_docs_entries(repo, cfg)
+            if self._repo_docs_match_entry(parts, entries, explicit_files, cfg["exclude"]) is None:
+                raise missing
+            rel = "/".join(parts)
+            if self._is_git_repo(repo) and not self._is_tracked_repo_file(repo, rel):
                 raise missing
             return self._walk_file(repo, parts, label)
         if root == "repo":

@@ -469,6 +469,7 @@ export function searchProjectLibrary({
     kindLabel: r.kindLabel,
     modified: r.modified,
     archive: Boolean(r.archive),
+    supersededBy: r.supersededBy || '',
     row: r,
   }));
 }
@@ -787,7 +788,7 @@ export function renderProjectSearchOverlay({
     const tip = [hit.title, hit.kindLabel, hit.path, hit.desc].filter(Boolean).join(' · ');
     return h_flex().id(`project-search-row-${flatIdx}`).flex_none().w_full().px(10).py(7).gap(9).rounded(8)
       .items_start().cursor_pointer()
-      .when(hit.archive, el => el.opacity(.75))
+      .when(Boolean(hit.archive || hit.supersededBy), el => el.opacity(.75))
       .when(selected, el => el.bg(t.raised))
       .when(!selected, el => el.hover(s => s.bg(t.hover)))
       .tooltip(tip).accessibility_label(tip)
@@ -798,8 +799,10 @@ export function renderProjectSearchOverlay({
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(h_flex().w_full().gap(6).items_center()
           .child(div().flex_1().min_w(0).child(renderHighlightedText(hit.title, terms, ui, t, {
-            maxChars: 84, baseColor: t.foreground, textSize: 13, fontWeight: 500,
+            maxChars: 84, baseColor: hit.supersededBy ? t.muted : t.foreground, textSize: 13, fontWeight: 500,
           })))
+          .when(Boolean(hit.supersededBy), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim)
+            .child(word(lang, 'supersededLabel'))))
           .when(Boolean(hit.kindLabel), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(hit.kindLabel)))
           .when(Boolean(hit.modified), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(hit.modified))))
         .when(Boolean(hit.desc), el => el.child(renderHighlightedText(hit.desc, terms, ui, t, {

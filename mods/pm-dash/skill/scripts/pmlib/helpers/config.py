@@ -98,9 +98,11 @@ def resolve_helper_spec(ctx: Context, spec_or_args: Any) -> WorkerSpec:
     return spec
 
 
-def helper_placement_for(ctx: Context) -> list[str]:
+def helper_placement_for(ctx: Context, parent: str | None = None) -> list[str]:
     """How `hc run` places a helper: as a normal sub-agent of its caller's terminal (ends when its caller ends;
     no --outlive-parent), with --no-notify so results flow through the conclusion file and ledger/deliver."""
+    if parent:
+        return ["--parent", parent, "--no-notify"]
     return ["--parent", ctx.pane[3:], "--no-notify"] if ctx.pane.startswith("hc:") else ["--no-parent"]
 
 

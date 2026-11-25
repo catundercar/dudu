@@ -416,12 +416,23 @@ export const STRINGS = {
     libraryTab: 'Library',
     memoryTab: 'Memory',
     showSidePanel: 'Show side panel', hideSidePanel: 'Hide side panel',
-    searchLibrary: 'Search Library…', searchMemory: 'Search Memory…', clearSearch: 'Clear search',
+    searchLibrary: 'Search Library…', searchMemory: 'Search Memory…', searchThreads: 'Search Threads…', clearSearch: 'Clear search',
+    threadsSearching: 'Searching threads…',
+    threadsNoMatches: 'No matching threads.',
+    threadsSearchError: err => `Could not search threads: ${err}`,
+    loadMoreFinished: rest => rest > 0 ? `Show more (${rest} more)` : 'Show more',
+    loadingMoreFinished: 'Loading more…',
+    finishedMoreError: err => `Could not load more: ${err} (click to retry)`,
     findInDoc: 'Find in document', findPlaceholder: 'Find in document…',
     findMatches: n => `${n} ${n === 1 ? 'match' : 'matches'}`, noFindMatches: 'No matches',
     findPrevMatch: 'Previous match', findNextMatch: 'Next match',
     findProgress: (cur, total) => `${cur} / ${total}`,
-    libraryGroupDocs: 'Documents', libraryGroupResearch: 'Research reports', libraryGroupInstructions: 'Instructions',
+    libraryGroupDocs: 'Documents', libraryGroupRepoDocs: 'Repo docs', libraryGroupResearch: 'Research reports', libraryGroupInstructions: 'Instructions',
+    supersededLabel: 'Superseded',
+    supersededBanner: path => `Finalized in repo: ${path}`,
+    openSupersededTarget: 'Open repo doc',
+    archiveDraft: 'Archive draft (kept in history)',
+    repoDocsTruncated: (shown, total) => `Showing ${shown} of ${total} repo docs (use @Files for the rest)`,
     libraryLoading: 'Reading Library…',
     libraryEmpty: 'No Library documents yet. Drop files here or create one.',
     libraryDropHint: 'Drop files here to add to Documents',
@@ -433,6 +444,15 @@ export const STRINGS = {
     memoryNoMatches: 'No matching memories.',
     memoryReadError: error => `Could not read Memory: ${error}`,
     memoryStale: error => `Could not refresh Memory: ${error}`,
+    dreamRunning: 'Consolidating…',
+    dreamLastAgo: when => `Last consolidated ${when}`,
+    dreamJustNow: 'just now',
+    dreamAgo: dur => `${dur} ago`,
+    dreamMerged: n => `merged ${n}`,
+    dreamAdopted: n => `adopted ${n}`,
+    dreamArchived: n => `archived ${n}`,
+    dreamFlags: n => `${n} to review`,
+    dreamPending: n => `${n} pending consolidation`,
     memoryGroupProject: 'Project memory', memoryGroupPersonal: 'Personal memory', memoryGroupCandidates: 'Candidates',
     topic_architecture: 'Product & architecture',
     topic_ui: 'Interface & interaction',
@@ -534,6 +554,7 @@ export const STRINGS = {
     mentionTypeThread: 'Thread',
     mentionTypeSession: 'Session',
     mentionTypeDoc: 'Document',
+    mentionTypeRepoDoc: 'Repo doc',
     mentionTypeResearch: 'Research',
     mentionTypeInstructions: 'Instructions',
     mentionTypeMemory: 'Memory',
@@ -667,12 +688,23 @@ export const STRINGS = {
     libraryTab: 'Library',
     memoryTab: 'Memory',
     showSidePanel: '显示侧栏', hideSidePanel: '收起侧栏',
-    searchLibrary: '搜索 Library…', searchMemory: '搜索 Memory…', clearSearch: '清除搜索',
+    searchLibrary: '搜索 Library…', searchMemory: '搜索 Memory…', searchThreads: '搜索线程…', clearSearch: '清除搜索',
+    threadsSearching: '正在搜索线程…',
+    threadsNoMatches: '没有匹配的线程。',
+    threadsSearchError: err => `搜索线程失败：${err}`,
+    loadMoreFinished: rest => rest > 0 ? `显示更多（还有 ${rest} 条）` : '显示更多',
+    loadingMoreFinished: '正在加载更多…',
+    finishedMoreError: err => `加载更多失败：${err}（点击重试）`,
     findInDoc: '在文档内查找', findPlaceholder: '在当前文档里查找…',
     findMatches: n => `${n} 处匹配`, noFindMatches: '无匹配',
     findPrevMatch: '上一处匹配', findNextMatch: '下一处匹配',
     findProgress: (cur, total) => `${cur} / ${total}`,
-    libraryGroupDocs: '项目文档', libraryGroupResearch: '调研报告', libraryGroupInstructions: '仓库说明',
+    libraryGroupDocs: '项目文档', libraryGroupRepoDocs: '仓库文档', libraryGroupResearch: '调研报告', libraryGroupInstructions: '仓库说明',
+    supersededLabel: '已定稿',
+    supersededBanner: path => `已在仓库定稿：${path}`,
+    openSupersededTarget: '查看定稿',
+    archiveDraft: '归档草稿（留存历史）',
+    repoDocsTruncated: (shown, total) => `已展示 ${shown} / ${total} 篇仓库文档（其余可用 @Files 检索）`,
     libraryLoading: '正在读取 Library…',
     libraryEmpty: '还没有 Library 资料，拖文件进来或点 + 新建。',
     libraryDropHint: '拖文件到这里添加到项目文档',
@@ -684,6 +716,15 @@ export const STRINGS = {
     memoryNoMatches: '没有匹配的记忆。',
     memoryReadError: error => `读取 Memory 失败：${error}`,
     memoryStale: error => `刷新 Memory 失败：${error}`,
+    dreamRunning: '整理中…',
+    dreamLastAgo: when => `上次整理 ${when}`,
+    dreamJustNow: '刚刚',
+    dreamAgo: dur => `${dur}前`,
+    dreamMerged: n => `合并 ${n}`,
+    dreamAdopted: n => `收编 ${n}`,
+    dreamArchived: n => `归档 ${n}`,
+    dreamFlags: n => `${n} 条待你看`,
+    dreamPending: n => `${n} 条待整理`,
     memoryGroupProject: '项目记忆', memoryGroupPersonal: '个人记忆', memoryGroupCandidates: '待审候选',
     topic_architecture: '产品与架构',
     topic_ui: '界面与交互',
@@ -785,6 +826,7 @@ export const STRINGS = {
     mentionTypeThread: '线程',
     mentionTypeSession: '会话',
     mentionTypeDoc: '文档',
+    mentionTypeRepoDoc: '仓库文档',
     mentionTypeResearch: '调研',
     mentionTypeInstructions: '说明',
     mentionTypeMemory: '记忆',
@@ -3952,7 +3994,126 @@ export function projectSlug(pm) {
 export function isOldPmCommand(result) {
   if (!result || result.code === 0) return false;
   const text = `${result.stderr || ''}\n${result.stdout || ''}`;
-  return /invalid choice:\s*['"]?(?:project|events|log|context|library|memory|file|files|save|delete|restore|history|add|retopic|session|change|send|interrupt)['"]?|unknown (?:project )?command|unrecognized arguments/i.test(text);
+  return /invalid choice:\s*['"]?(?:project|events|log|tasks|context|library|memory|file|files|save|delete|restore|history|add|retopic|session|change|send|interrupt)['"]?|unknown (?:project )?command|unrecognized arguments/i.test(text);
+}
+
+export const TASKS_PAGE_LIMIT = 30;
+
+export function projectTasksArgv(slug, { status = 'finished', q = '', offset = 0, limit = TASKS_PAGE_LIMIT } = {}) {
+  const args = ['project', 'tasks', String(slug), '--status', String(status || 'finished')];
+  const query = String(q || '').trim();
+  if (query) args.push('--q', query);
+  args.push('--offset', String(Math.max(0, Number(offset) || 0)));
+  args.push('--limit', String(Math.max(1, Math.min(100, Number(limit) || TASKS_PAGE_LIMIT))));
+  return args;
+}
+
+export function parseProjectTasksPage(raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.tasks)) return null;
+  const tasks = raw.tasks.filter(t => t && typeof t === 'object' && typeof t.id === 'string' && t.id);
+  const total = Math.max(tasks.length, Number(raw.total) || 0);
+  const offset = Math.max(0, Number(raw.offset) || 0);
+  const limit = Math.max(1, Number(raw.limit) || TASKS_PAGE_LIMIT);
+  const more = Boolean(raw.more);
+  return { tasks, total, offset, limit, more };
+}
+
+export function normalizeProjectTaskRow(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = String(raw.id || raw.task || '').trim();
+  if (!id) return null;
+  const status = String(raw.status || '');
+  const isClosed = CLOSED.includes(status);
+  const group = isClosed ? 'finished' : (GROUP[status] || 'parked');
+  const num = taskNumber(raw);
+  return {
+    task: id,
+    ...(num ? { number: num } : {}),
+    title: String(raw.title || id),
+    status,
+    tone: isClosed ? 'quiet' : tone(status),
+    group,
+    cleanup: Boolean(raw.cleanup),
+    updated: String(raw.updated || ''),
+    branch: String(raw.branch || ''),
+    parent: String(raw.parent || ''),
+    ...(raw.commit ? { commit: String(raw.commit) } : {}),
+    ...(raw.landed && typeof raw.landed === 'object' ? { landed: raw.landed } : {}),
+    ...(raw.retired ? { retired: true } : {}),
+  };
+}
+
+export function mergeFinishedRows(baseRows, extraRows) {
+  const out = [];
+  const seen = new Set();
+  for (const row of [...(Array.isArray(baseRows) ? baseRows : []), ...(Array.isArray(extraRows) ? extraRows : [])]) {
+    const id = row?.task || row?.id || '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(row.task ? row : normalizeProjectTaskRow(row));
+  }
+  return out.filter(Boolean);
+}
+
+function localTaskMatchesQuery(row, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+  const tid = String(row.task || row.id || '').toLowerCase();
+  const title = String(row.title || '').toLowerCase();
+  const branch = String(row.branch || '').toLowerCase();
+  const num = taskNumber(row);
+  const hashNum = num ? `#${num}` : '';
+  const haystack = `${hashNum} ${tid} ${title} ${branch}`;
+  for (const tok of q.split(/\s+/)) {
+    if (!tok) continue;
+    if (/^#\d+$/.test(tok)) {
+      const want = Number(tok.slice(1));
+      if (num === want || title.includes(tok) || tid.includes(tok)) continue;
+      return false;
+    }
+    if (/^\d+$/.test(tok)) {
+      const want = Number(tok);
+      if (num === want || tid.includes(tok) || title.includes(tok) || branch.includes(tok)) continue;
+      return false;
+    }
+    if (!haystack.includes(tok)) return false;
+  }
+  return true;
+}
+
+export function filterLocalThreads(pm, tasks, events, query, { retiredParts = [], taskNumbers = null } = {}) {
+  const pmName = pm?.name || '';
+  const questions = questionOnly(events);
+  const byId = new Map();
+  const add = raw => {
+    if (!raw || typeof raw !== 'object') return;
+    const id = String(raw.id || raw.task || '').trim();
+    if (!id || raw.review_of || questions.has(id)) return;
+    if (String(raw.status || '') === GIVEN_UP) return;
+    if (pmName && raw.pm && raw.pm !== pmName) return;
+    const num = taskNumber(raw) || (taskNumbers && taskNumber(taskNumbers[id])) || 0;
+    const prev = byId.get(id);
+    if (!prev || String(raw.updated || '') > String(prev.updated || '')) {
+      byId.set(id, normalizeProjectTaskRow({ ...raw, id, ...(num ? { number: num } : {}) }));
+    }
+  };
+  for (const t of Array.isArray(tasks) ? tasks : []) add(t);
+  for (const t of Array.isArray(retiredParts) ? retiredParts : []) add(t);
+  const named = new Set([...byId.keys(), ...(Array.isArray(events) ? events.map(e => e?.task).filter(Boolean) : [])]);
+  for (const e of Array.isArray(events) ? events : []) {
+    if (e?.type !== 'thread' || !e.task || questions.has(e.task)) continue;
+    if (/-review$/.test(e.task) && named.has(e.task.slice(0, -'-review'.length))) continue;
+    if (String(e.status || '') === GIVEN_UP) { byId.delete(e.task); continue; }
+    if (byId.has(e.task)) continue;
+    const num = taskNumber(e) || (taskNumbers && taskNumber(taskNumbers[e.task])) || 0;
+    byId.set(e.task, normalizeProjectTaskRow({
+      id: e.task, title: e.title || e.task, status: e.status || '', updated: String(e.at || ''),
+      ...(num ? { number: num } : {}),
+    }));
+  }
+  return [...byId.values()]
+    .filter(r => r && localTaskMatchesQuery(r, query))
+    .sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')) || a.task.localeCompare(b.task));
 }
 
 // A `--before` byte anchor that no longer matches the file on disk (the log was replaced or rewritten).
@@ -4076,9 +4237,10 @@ export const DOC_MAX_BYTES = 1_000_000;
 export const DOC_INITIAL_BYTES = 64_000;
 export const DOC_CHUNK_BYTES = 6_000;
 export const DOC_CACHE_LIMIT = 32;
-export const LIBRARY_ROOTS = new Set(['docs', 'research', 'instructions']);
+export const LIBRARY_ROOTS = new Set(['docs', 'repo_docs', 'research', 'instructions']);
 export const MEMORY_ROOTS = new Set(['memory', 'personal']);
-export const ALL_DOC_ROOTS = new Set(['docs', 'research', 'instructions', 'memory', 'personal', 'project', 'user', 'repo']);
+export const ALL_DOC_ROOTS = new Set(['docs', 'repo_docs', 'research', 'instructions', 'memory', 'personal', 'project', 'user', 'repo']);
+const REPO_DOCS_DESIGN_SEGMENTS = new Set(['design', 'specs', 'spec', 'adr', 'decisions', 'rfcs', 'rfc', 'architecture']);
 export const MEMORY_TOPICS = ['architecture', 'ui', 'workflow', 'ops', 'reference', 'pitfalls'];
 export const DEFAULT_FOLDED_TOPICS = new Set(['pitfalls']);
 export const PROJECT_MEMORY_TYPES = ['project', 'feedback', 'reference', 'pitfall'];
@@ -4349,6 +4511,7 @@ function validDocItem(f) {
     ...(f.hidden ? { hidden: true } : {}),
     ...(Number.isFinite(f.entries) ? { entries: Number(f.entries) } : {}),
     ...(f.published !== undefined ? { published: f.published } : {}),
+    ...(f.superseded_by ? { superseded_by: String(f.superseded_by) } : {}),
   };
 }
 
@@ -4414,7 +4577,51 @@ export function validMemoryPayload(raw) {
     project: Math.max(0, Number(raw?.history?.project) || 0),
     personal: Math.max(0, Number(raw?.history?.personal) || 0),
   };
-  return { topics, types, layers, files, candidates, history };
+  const rawDream = raw?.dream && typeof raw.dream === 'object' ? raw.dream : null;
+  const rawSum = rawDream?.summary && typeof rawDream.summary === 'object' ? rawDream.summary : null;
+  const dream = rawDream ? {
+    auto: Boolean(rawDream.auto),
+    running: Boolean(rawDream.running),
+    last_at: String(rawDream.last_at || ''),
+    summary: rawSum ? {
+      merged: Math.max(0, Number(rawSum.merged) || 0),
+      removed: Math.max(0, Number(rawSum.removed) || 0),
+      forgotten: Math.max(0, Number(rawSum.forgotten) || 0),
+      adopted: Math.max(0, Number(rawSum.adopted) || 0),
+      dropped: Math.max(0, Number(rawSum.dropped) || 0),
+      refused: Math.max(0, Number(rawSum.refused) || 0),
+      flags: Math.max(0, Number(rawSum.flags) || 0),
+    } : null,
+    failures: Math.max(0, Number(rawDream.failures) || 0),
+    pending: Math.max(0, Number(rawDream.pending) || 0),
+  } : null;
+  return { topics, types, layers, files, candidates, history, dream };
+}
+
+export function formatDreamStatus(dream, lang = 'en', nowMs = Date.now(), clockOffsetMs = 0) {
+  if (!dream || typeof dream !== 'object') return '';
+  if (dream.running) return word(lang, 'dreamRunning');
+  const lastAt = String(dream.last_at || '').trim();
+  if (lastAt) {
+    const parsed = eventTime(lastAt);
+    let when = lastAt;
+    if (parsed > 0 && Number.isFinite(nowMs)) {
+      const elapsed = Math.max(0, nowMs - (parsed - (Number(clockOffsetMs) || 0)));
+      when = elapsed < 60_000 ? word(lang, 'dreamJustNow') : word(lang, 'dreamAgo', age(elapsed, lang));
+    }
+    const parts = [word(lang, 'dreamLastAgo', when)];
+    const sum = dream.summary && typeof dream.summary === 'object' ? dream.summary : null;
+    if (sum) {
+      if (sum.merged > 0) parts.push(word(lang, 'dreamMerged', sum.merged));
+      if (sum.adopted > 0) parts.push(word(lang, 'dreamAdopted', sum.adopted));
+      if (sum.forgotten > 0) parts.push(word(lang, 'dreamArchived', sum.forgotten));
+      if (sum.flags > 0) parts.push(word(lang, 'dreamFlags', sum.flags));
+    }
+    return parts.join(' · ');
+  }
+  const pending = Math.max(0, Number(dream.pending) || 0);
+  if (pending > 0) return word(lang, 'dreamPending', pending);
+  return '';
 }
 
 export function formatBytes(bytes) {
@@ -4511,7 +4718,7 @@ export function contextReadable(file) {
 export function isWritableDoc(file) {
   if (!file || file.kind === 'folder') return false;
   if (file.archive) return false;
-  if (file.root === 'research' || file.root === 'instructions' || file.root === 'repo') return false;
+  if (file.root === 'repo_docs' || file.root === 'research' || file.root === 'instructions' || file.root === 'repo') return false;
   if (file.writable !== undefined) return Boolean(file.writable);
   return file.root === 'docs' || file.root === 'memory' || file.root === 'personal';
 }
@@ -4697,6 +4904,7 @@ export function retopicPlan(mem, { nextTopic = '', nextType = '' } = {}) {
 function docRank(file, dir) {
   if (dir === '' && file.archive) return 99;
   if (file.kind === 'folder') return 0;
+  if (file.superseded_by) return 50;
   return 1;
 }
 
@@ -4736,6 +4944,7 @@ function buildDocsRows(items, closed, lang, currentYear) {
         writable: isWritableDoc(f),
         readOnly: !folder && !isWritableDoc(f),
         archive: Boolean(f.archive),
+        supersededBy: f.superseded_by || '',
         entries: f.entries || 0,
         root: f.root,
         path: f.path,
@@ -4749,14 +4958,147 @@ function buildDocsRows(items, closed, lang, currentYear) {
   return rows;
 }
 
+function isDesignFolderPath(path) {
+  return String(path || '').split('/').some(seg => REPO_DOCS_DESIGN_SEGMENTS.has(seg.toLowerCase()));
+}
+
+function buildRepoDocsRows(items, closed, lang, currentYear) {
+  const fileItems = items.filter(f => f.kind !== 'folder');
+  if (!fileItems.length) return [];
+  // Strip redundant leading `docs/` or `doc/` shell visually unless it collides with another file's path
+  // or the project uses multi-prefix monorepo includes (e.g. `packages/core/docs/...`).
+  const hasMultiPrefixInclude = fileItems.some(f => {
+    const segs = f.path.split('/');
+    return segs.length >= 3 && segs[0] !== 'docs' && segs[0] !== 'doc';
+  });
+  const stripShell = !hasMultiPrefixInclude && (() => {
+    const seen = new Set();
+    for (const f of fileItems) {
+      const v = f.path.replace(/^(?:docs|doc)\//, '');
+      if (!v || seen.has(v)) return false;
+      seen.add(v);
+    }
+    return true;
+  })();
+
+  const folderMap = new Map();
+  const childrenByParent = new Map();
+  const addChild = (parentKey, node) => {
+    let list = childrenByParent.get(parentKey);
+    if (!list) { list = []; childrenByParent.set(parentKey, list); }
+    list.push(node);
+  };
+
+  for (const f of fileItems) {
+    const stripped = stripShell && /^(?:docs|doc)\//.test(f.path);
+    const visualPath = stripped ? f.path.replace(/^(?:docs|doc)\//, '') : f.path;
+    const shellPrefix = stripped ? f.path.slice(0, f.path.indexOf('/') + 1) : '';
+    const vParts = visualPath.split('/');
+    let parentKey = '';
+    for (let i = 0; i < vParts.length - 1; i++) {
+      const vDir = vParts.slice(0, i + 1).join('/');
+      if (!folderMap.has(vDir)) {
+        const realPath = shellPrefix + vDir;
+        const folderNode = {
+          kind: 'folder',
+          vDir,
+          name: vParts[i],
+          realPath,
+          key: `repo_docs/${realPath}`,
+          design: isDesignFolderPath(realPath),
+        };
+        folderMap.set(vDir, folderNode);
+        addChild(parentKey, folderNode);
+      }
+      parentKey = vDir;
+    }
+    addChild(parentKey, { kind: 'file', file: f });
+  }
+
+  const largeTree = fileItems.length > 15;
+  const rows = [];
+  const walk = (parentKey, depth) => {
+    const here = childrenByParent.get(parentKey) || [];
+    here.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
+      if (a.kind === 'folder') {
+        if (a.design !== b.design) return a.design ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      }
+      return String(b.file.modified || '').localeCompare(String(a.file.modified || ''))
+        || a.file.path.localeCompare(b.file.path);
+    });
+    for (const node of here) {
+      if (node.kind === 'folder') {
+        const count = (childrenByParent.get(node.vDir) || []).length;
+        const defaultClosed = largeTree && !node.design;
+        const open = defaultClosed ? closed.has(node.key) : !closed.has(node.key);
+        const syntheticFile = { root: 'repo_docs', path: node.realPath, kind: 'folder', writable: false };
+        rows.push({
+          key: node.key,
+          depth,
+          folder: true,
+          open,
+          defaultClosed,
+          name: node.name,
+          title: node.name,
+          desc: '',
+          kindLabel: contextKindLabel(lang, syntheticFile, count),
+          modified: '',
+          size: '',
+          readable: false,
+          writable: false,
+          readOnly: true,
+          archive: false,
+          root: 'repo_docs',
+          path: node.realPath,
+          file: syntheticFile,
+          count,
+        });
+        if (open) walk(node.vDir, depth + 1);
+      } else {
+        const f = node.file;
+        const title = libraryDocTitle(f);
+        const desc = f.title && f.title !== title ? f.title : (f.summary || '');
+        rows.push({
+          key: contextKey(f),
+          depth,
+          folder: false,
+          open: false,
+          name: fileName(f.path),
+          title,
+          desc,
+          kindLabel: contextKindLabel(lang, f),
+          modified: contextDay(f.modified, currentYear),
+          size: formatBytes(f.size),
+          readable: contextReadable(f),
+          writable: false,
+          readOnly: true,
+          archive: false,
+          task: f.task || '',
+          taskTitle: f.task_title || '',
+          root: 'repo_docs',
+          path: f.path,
+          file: f,
+          count: 0,
+        });
+      }
+    }
+  };
+  walk('', 0);
+  return rows;
+}
+
 // Organizes Library items into allow-listed sections:
 // 1. Documents (`docs`, editable, with non-hidden `decisions.md` archive at the end)
-// 2. Research reports (`research`, read-only, H1 title + summary + source thread link)
-// 3. Instructions (`instructions`, read-only repo files like CLAUDE.md / AGENTS.md)
+// 2. Repo docs (`repo_docs`, read-only curated design docs and guides from the repository)
+// 3. Research reports (`research`, read-only, H1 title + summary + source thread link)
+// 4. Instructions (`instructions`, read-only repo files like CLAUDE.md / AGENTS.md)
 export function libraryGroups(rawFiles, closed = new Set(), lang = 'en', currentYear = '') {
-  const { files } = validLibraryPayload(rawFiles);
+  const { roots, files } = validLibraryPayload(rawFiles);
   const closedSet = closed instanceof Set ? closed : new Set(closed || []);
   const docsItems = files.filter(f => f.root === 'docs');
+  const repoDocsItems = files.filter(f => f.root === 'repo_docs');
   const researchItems = files.filter(f => f.root === 'research').sort((a, b) =>
     String(b.modified || '').localeCompare(String(a.modified || '')) || a.path.localeCompare(b.path));
   const instrItems = files.filter(f => f.root === 'instructions').sort((a, b) => a.path.localeCompare(b.path));
@@ -4772,6 +5114,21 @@ export function libraryGroups(rawFiles, closed = new Set(), lang = 'en', current
     readOnly: false,
     rows: docsRows,
   });
+  const repoDocsFileCount = repoDocsItems.filter(f => f.kind !== 'folder').length;
+  if (repoDocsFileCount > 0) {
+    const rdRoot = roots.find(r => r.id === 'repo_docs') || null;
+    sections.push({
+      id: 'repo_docs',
+      title: word(lang, 'libraryGroupRepoDocs'),
+      count: repoDocsFileCount,
+      shown: repoDocsFileCount,
+      total: Number(rdRoot?.total) || repoDocsFileCount,
+      truncated: Boolean(rdRoot?.truncated),
+      writable: false,
+      readOnly: true,
+      rows: buildRepoDocsRows(repoDocsItems, closedSet, lang, currentYear),
+    });
+  }
   if (researchItems.length) {
     sections.push({
       id: 'research',
@@ -5027,7 +5384,11 @@ export function searchLibrary(rawFiles, query, docCache = null, lang = 'en', cur
   for (const f of list) {
     const key = contextKey(f);
     const title = libraryDocTitle(f);
-    const kind = f.root === 'research' ? word(lang, 'libraryGroupResearch') : contextKindLabel(lang, f);
+    const kind = f.root === 'research'
+      ? word(lang, 'libraryGroupResearch')
+      : f.root === 'repo_docs'
+        ? word(lang, 'libraryGroupRepoDocs')
+        : contextKindLabel(lang, f);
     const entry = docCache instanceof Map ? docCache.get(key) : null;
     const cached = isFreshDocEntry(entry, f) ? entry.text : '';
     const body = cached ? parseFrontmatter(cached).body : '';
@@ -5039,7 +5400,7 @@ export function searchLibrary(rawFiles, query, docCache = null, lang = 'en', cur
 
     const inTitle = terms.every(term => titleHay.includes(term));
     const inDesc = terms.every(term => `${titleHay} ${descHay}`.includes(term));
-    const rank = inTitle ? 0 : inDesc ? 1 : 2;
+    const rank = (inTitle ? 0 : inDesc ? 1 : 2) + (f.superseded_by ? 1 : 0);
     let desc = metaDesc;
     if (!inDesc && body) desc = excerptAround(body, terms);
     else if (desc && terms.some(term => desc.toLowerCase().includes(term)) && desc.length > 90) desc = excerptAround(desc, terms);
@@ -5061,6 +5422,7 @@ export function searchLibrary(rawFiles, query, docCache = null, lang = 'en', cur
         writable: isWritableDoc(f),
         readOnly: !isWritableDoc(f),
         archive: Boolean(f.archive),
+        supersededBy: f.superseded_by || '',
         entries: f.entries || 0,
         task: f.task || '',
         taskTitle: f.task_title || '',
@@ -5344,6 +5706,7 @@ export function documentView(file, rawText, { lang = 'en', today = '', shownByte
     sourceTask: file?.task ? String(file.task) : '',
     sourceTaskTitle: file?.task_title ? String(file.task_title) : '',
     published: Boolean(file?.published),
+    supersededBy: file?.superseded_by ? String(file.superseded_by) : '',
     chunks,
     matchIndices,
     matchCount,
@@ -5375,7 +5738,17 @@ export function resolveContextLink(currentDoc, url, files) {
   if (!resolved) return null;
   const list = (Array.isArray(files) ? files : []).map(validDocItem).filter(Boolean);
   const hit = list.find(f => f.kind !== 'folder' && f.root === root && f.path === resolved);
-  return hit ? { root: hit.root, path: hit.path } : null;
+  if (hit) return { root: hit.root, path: hit.path };
+  if (root === 'repo_docs') {
+    if (resolved.startsWith('docs/research/')) {
+      const pubRel = `published/${resolved.slice('docs/research/'.length)}`;
+      const resHit = list.find(f => f.kind !== 'folder' && f.root === 'research'
+        && (f.published === pubRel || f.path === pubRel));
+      if (resHit) return { root: 'research', path: resHit.path };
+    }
+    return { root: 'repo', path: resolved };
+  }
+  return null;
 }
 
 // ---- context usage & worker session conversation (`pm.py state` context_tokens, `pm.py project session`) ----
@@ -5728,41 +6101,172 @@ export function formatMentionLink({ kind, target, label }) {
   return `[@${cleanLabel}](${kind}:${encodeRefTarget(target)})`;
 }
 
-export function parseRefLink(url) {
+function normalizeFsPath(p) {
+  const raw = String(p ?? '').trim();
+  if (!raw || raw.includes('\0')) return '';
+  let norm = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  if (/^\/[A-Za-z]:\//.test(norm)) norm = norm.slice(1);
+  if (/^[a-z]:\//.test(norm)) norm = norm[0].toUpperCase() + norm.slice(1);
+  if (norm.length > 1 && !/^[A-Za-z]:\/$/.test(norm)) norm = norm.replace(/\/+$/, '');
+  return norm;
+}
+
+function stripBasePrefix(filePath, baseDir) {
+  const file = normalizeFsPath(filePath);
+  const base = normalizeFsPath(baseDir);
+  if (!file || !base) return '';
+  const prefix = base.endsWith('/') ? base : `${base}/`;
+  if (!file.startsWith(prefix)) return '';
+  return file.slice(prefix.length);
+}
+
+function validRelParts(rel, { allowGit = false } = {}) {
+  if (!rel || rel.startsWith('/') || rel.endsWith('/')) return null;
+  const parts = rel.split('/');
+  if (parts.some(p => !p || p === '.' || p === '..' || (!allowGit && p === '.git'))) return null;
+  return parts;
+}
+
+function normalizeLibraryRootPath(root, path) {
+  let r = root, p = path;
+  if (r === 'project' && p.startsWith('memory/')) {
+    r = 'memory';
+    p = p.slice('memory/'.length);
+  } else if (LEGACY_LIBRARY_ROOTS[r]) {
+    r = LEGACY_LIBRARY_ROOTS[r];
+  }
+  if (!ALL_DOC_ROOTS.has(r) || r === 'repo') return null;
+  if (r === 'docs' && /^research\/.+/i.test(p)) {
+    r = 'research';
+    p = `docs/research/${p.slice('research/'.length)}`;
+  } else if (r === 'research' && !p.includes('/') && /\.(?:md|markdown)$/i.test(p)) {
+    p = `docs/research/${p}`;
+  }
+  if (!validRelParts(p, { allowGit: true })) return null;
+  return { kind: 'library', target: `${r}/${p}`, root: r, path: p };
+}
+
+function inferLedgerHome(ctx) {
+  const direct = normalizeFsPath(ctx?.ledgerHome || '');
+  if (direct) return direct;
+  const conv = normalizeFsPath(ctx?.conversation || '');
+  const slug = String(ctx?.slug || '').trim();
+  if (conv && slug) {
+    const marker = `/projects/${slug}/`;
+    const idx = conv.lastIndexOf(marker);
+    if (idx > 0) return conv.slice(0, idx);
+  }
+  return '';
+}
+
+function resolveAbsoluteFileRef(absPath, ctx) {
+  if (!ctx || typeof ctx !== 'object') return null;
+  const norm = normalizeFsPath(absPath);
+  if (!norm) return null;
+  const segs = norm.split('/');
+  if (segs.includes('..')) return null;
+
+  const ledgerHome = inferLedgerHome(ctx);
+  const slug = String(ctx.slug || '').trim();
+  if (ledgerHome && slug && !slug.includes('/') && !slug.includes('..')) {
+    const projRel = stripBasePrefix(norm, `${ledgerHome}/projects/${slug}`);
+    if (projRel) {
+      const parts = validRelParts(projRel, { allowGit: true });
+      if (!parts) return null;
+      if (parts[0] === 'docs' && parts.length >= 2) {
+        if (parts[1].toLowerCase() === 'research' && parts.length >= 3) {
+          const rPath = `docs/research/${parts.slice(2).join('/')}`;
+          return { kind: 'library', target: `research/${rPath}`, root: 'research', path: rPath };
+        }
+        const dPath = parts.slice(1).join('/');
+        return { kind: 'library', target: `docs/${dPath}`, root: 'docs', path: dPath };
+      }
+      if (parts.length === 1 && parts[0] === 'decisions.md') {
+        return { kind: 'library', target: 'docs/decisions.md', root: 'docs', path: 'decisions.md' };
+      }
+      if (parts[0] === 'research' && parts.length === 3 && parts[2] === 'README.md') {
+        const rPath = `${parts[1]}/${parts[2]}`;
+        return { kind: 'library', target: `research/${rPath}`, root: 'research', path: rPath };
+      }
+      if (parts[0] === 'memory' && parts.length === 2 && parts[1].endsWith('.md') && parts[1] !== 'MEMORY.md') {
+        return { kind: 'library', target: `memory/${parts[1]}`, root: 'memory', path: parts[1] };
+      }
+      return null;
+    }
+    const personalRel = stripBasePrefix(norm, `${ledgerHome}/memory`);
+    if (personalRel) {
+      const parts = validRelParts(personalRel, { allowGit: true });
+      if (parts && parts.length === 1 && parts[0].endsWith('.md') && parts[0] !== 'MEMORY.md') {
+        return { kind: 'library', target: `personal/${parts[0]}`, root: 'personal', path: parts[0] };
+      }
+      return null;
+    }
+  }
+
+  const repoRel = stripBasePrefix(norm, ctx.repo || '');
+  if (repoRel) {
+    if (!validRelParts(repoRel)) return null;
+    return { kind: 'file', target: repoRel, path: repoRel };
+  }
+  return null;
+}
+
+export function parseRefLink(url, ctx = null) {
   const raw = String(url || '').trim();
-  const m = /^(thread|library|file|session):(.*)$/i.exec(raw);
-  if (!m) return null;
-  const kind = m[1].toLowerCase();
+  if (!raw) return null;
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):(.*)$/i.exec(raw);
+  if (!schemeMatch) {
+    if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('?')) return null;
+    const noFrag = raw.split(/[?#]/)[0];
+    const decoded = decodeRefTarget(noFrag);
+    if (!decoded || decoded.includes('\0') || decoded.includes('\\')) return null;
+    const clean = decoded.replace(/^(?:\.\/)+/, '');
+    if (!/\.(?:md|markdown)$/i.test(clean) || !validRelParts(clean)) return null;
+    return { kind: 'file', target: clean, path: clean };
+  }
+  const kind = schemeMatch[1].toLowerCase();
   if (kind === 'thread') {
     const id = threadLink(raw);
     return id ? { kind: 'thread', target: id } : null;
   }
-  const rest = m[2].replace(/^\/\//, '');
-  const decoded = decodeRefTarget(rest);
-  if (!decoded || decoded.includes('\0') || decoded.includes('\\')) return null;
   if (kind === 'session') {
+    const rest = schemeMatch[2].replace(/^\/\//, '');
+    const decoded = decodeRefTarget(rest);
+    if (!decoded || decoded.includes('\0') || decoded.includes('\\')) return null;
     if (!/^[^\s/]+(?:\/[^\s/]+)?$/.test(decoded) || decoded.includes('..')) return null;
     return { kind: 'session', target: decoded };
   }
-  if (kind === 'library') {
+  if (kind === 'library' || kind === 'doc') {
+    const noFrag = schemeMatch[2].split(/[?#]/)[0].replace(/^\/\//, '');
+    const decoded = decodeRefTarget(noFrag);
+    if (!decoded || decoded.includes('\0') || decoded.includes('\\')) return null;
     const slash = decoded.indexOf('/');
-    if (slash <= 0) return null;
-    let root = decoded.slice(0, slash);
-    let path = decoded.slice(slash + 1);
-    if (root === 'project' && path.startsWith('memory/')) {
-      root = 'memory';
-      path = path.slice('memory/'.length);
-    } else if (LEGACY_LIBRARY_ROOTS[root]) {
-      root = LEGACY_LIBRARY_ROOTS[root];
+    if (kind === 'library') {
+      if (slash <= 0) return null;
+      return normalizeLibraryRootPath(decoded.slice(0, slash), decoded.slice(slash + 1));
     }
-    if (!ALL_DOC_ROOTS.has(root) || root === 'repo') return null;
-    const parts = path.split('/');
-    if (!path || path.startsWith('/') || path.endsWith('/') || parts.some(p => !p || p === '.' || p === '..')) return null;
-    return { kind: 'library', target: `${root}/${path}`, root, path };
+    if (slash > 0) {
+      const head = decoded.slice(0, slash);
+      const tail = decoded.slice(slash + 1);
+      if (head === 'repo') return null;
+      if (ALL_DOC_ROOTS.has(head) || LEGACY_LIBRARY_ROOTS[head]) {
+        return normalizeLibraryRootPath(head, tail);
+      }
+    }
+    return normalizeLibraryRootPath('docs', decoded);
   }
   if (kind === 'file') {
-    const parts = decoded.split('/');
-    if (decoded.startsWith('/') || decoded.endsWith('/') || parts.some(p => !p || p === '.' || p === '..' || p === '.git')) return null;
+    const noFrag = schemeMatch[2].split(/[?#]/)[0];
+    const absMatch = /^\/\/(?:localhost|127\.0\.0\.1)?(\/.*)$/i.exec(noFrag);
+    if (absMatch) {
+      const decoded = decodeRefTarget(absMatch[1]);
+      if (!decoded || decoded.includes('\0')) return null;
+      return resolveAbsoluteFileRef(decoded, ctx);
+    }
+    const rest = noFrag.replace(/^\/\//, '');
+    const decoded = decodeRefTarget(rest);
+    if (!decoded || decoded.includes('\0') || decoded.includes('\\')) return null;
+    if (!validRelParts(decoded)) return null;
     return { kind: 'file', target: decoded, path: decoded };
   }
   return null;
@@ -6054,14 +6558,23 @@ export function buildMentionMenu({
   }
 
   const libList = validLibraryPayload(libraryFiles).files.filter(f => f.kind !== 'folder' && !(f.archive && f.hidden));
+  const libraryRepoPaths = new Set();
   const libraryItems = libList.map(f => {
+    if (f.root === 'repo_docs' || f.root === 'instructions') libraryRepoPaths.add(f.path);
     const title = libraryDocTitle(f);
     const icon = f.root === 'research' ? 'report' : f.root === 'instructions' ? 'lock' : 'file';
     const typeLabel = f.root === 'research'
       ? word(lang, 'mentionTypeResearch')
-      : f.root === 'instructions'
-        ? word(lang, 'mentionTypeInstructions')
-        : word(lang, 'mentionTypeDoc');
+      : f.root === 'repo_docs'
+        ? word(lang, 'mentionTypeRepoDoc')
+        : f.root === 'instructions'
+          ? word(lang, 'mentionTypeInstructions')
+          : word(lang, 'mentionTypeDoc');
+    const subtitle = f.root === 'research'
+      ? (f.summary || f.path)
+      : f.root === 'repo_docs'
+        ? (f.title && f.title !== title ? `${f.title} · ${f.path}` : f.path)
+        : (f.path !== title ? f.path : '');
     return buildMentionCandidate({
       key: `library:${f.root}/${f.path}`,
       category: 'library',
@@ -6070,14 +6583,14 @@ export function buildMentionMenu({
       path: f.path,
       target: `${f.root}/${f.path}`,
       label: title,
-      subtitle: f.root === 'research' ? (f.summary || f.path) : (f.path !== title ? f.path : ''),
+      subtitle,
       typeLabel,
       icon,
-      dimmed: Boolean(f.archive),
+      dimmed: Boolean(f.archive || f.superseded_by),
       active: false,
-      tieRank: 1,
+      tieRank: f.superseded_by ? 3.5 : 1,
       searchPrimary: title,
-      searchSecondary: `${f.root}/${f.path} ${f.summary || f.description || ''} ${f.task_title || ''}`,
+      searchSecondary: `${f.root}/${f.path} ${f.title || ''} ${f.summary || f.description || ''} ${f.task_title || ''}`,
     });
   });
 
@@ -6205,6 +6718,7 @@ export function buildMentionMenu({
   }
   for (let i = 0; i < indexedFiles.length; i++) {
     const f = indexedFiles[i];
+    if (libraryRepoPaths.has(f.path)) continue;
     const score = scoreMentionMatch(qLow, terms, f.nameLow, f.pathLow);
     if (score > 0) scored.push({ score, tie: 2, order: i, f });
   }

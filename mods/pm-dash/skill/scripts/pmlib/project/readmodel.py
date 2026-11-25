@@ -19,6 +19,10 @@ from ..store import REPO_FILES_MAX, Store, valid_slug, valid_task_id, valid_task
 
 LOG_LIMIT_DEFAULT = 50
 LOG_LIMIT_MAX = 2000
+TASKS_LIMIT_DEFAULT = 30
+TASKS_LIMIT_MAX = 100
+TASKS_STATUSES = ("finished", "open", "all")
+_WORK_STATUSES = ("in_progress", "review")
 COMMITS_MAX = 200
 COMMITS_LIMIT_MAX = 500
 DIFF_LINES_DEFAULT = 400
@@ -431,6 +435,95 @@ def compute_counts(
     return {"by_pm": by_pm, "totals": totals}
 
 
+def question_only_tasks(events) -> set[str]:
+    """Tasks in conversation events that are only a question (first status is blocked and never entered work)."""
+    first: dict[str, str] = {}
+    worked: set[str] = set()
+    for e in events or ():
+        if not isinstance(e, Mapping) or e.get("type") != "thread":
+            continue
+        tid = e.get("task")
+        if not tid:
+            continue
+        status = str(e.get("status") or "")
+        if tid not in first:
+            first[tid] = status
+        if status in _WORK_STATUSES:
+            worked.add(tid)
+    return {tid for tid, st in first.items() if st == "blocked" and tid not in worked}
+
+
+def _task_log_question_only(task: Mapping) -> bool:
+    """Fallback question-only check from a closed task's own ledger log when conversation events are absent."""
+    if task.get("status") not in CLOSED_STATUSES:
+        return False
+    if task.get("branch") or task.get("commit") or task.get("worker") or task.get("dispatched"):
+        return False
+    raw_log = task.get("log")
+    if not isinstance(raw_log, list) or not raw_log:
+        return False
+    first_text = str((raw_log[0] if isinstance(raw_log[0], Mapping) else {}).get("text") or "")
+    if not re.search(r"(?:\bregistered\s*\(\s*blocked\s*\)|\bstatus\s*=\s*blocked\b)", first_text):
+        return False
+    for entry in raw_log:
+        text = str((entry if isinstance(entry, Mapping) else {}).get("text") or "")
+        if re.search(r"(?:\bstatus\s*=\s*(?:in_progress|review)\b|\bregistered\s*\(\s*(?:in_progress|review)\s*\))", text):
+            return False
+    return True
+
+
+def _task_matches_query(task: Mapping, query: str) -> bool:
+    """Case-insensitive match against #number / number, task id, title, and branch."""
+    q = str(query or "").strip().lower()
+    if not q:
+        return True
+    tid = str(task.get("id") or "").lower()
+    title = str(task.get("title") or "").lower()
+    branch = str(task.get("branch") or "").lower()
+    num = valid_task_number(task.get("number"))
+    num_str = str(num) if num is not None else ""
+    hash_num = f"#{num_str}" if num_str else ""
+    haystack = f"{hash_num} {tid} {title} {branch}"
+    tokens = q.split()
+    for tok in tokens:
+        if tok.startswith("#") and tok[1:].isdigit():
+            want = int(tok[1:])
+            if num == want or tok in title or tok in tid:
+                continue
+            return False
+        if tok.isdigit():
+            want = int(tok)
+            if num == want or tok in tid or tok in title or tok in branch:
+                continue
+            return False
+        if tok not in haystack:
+            return False
+    return True
+
+
+def _task_summary(task: Mapping) -> dict:
+    """Lightweight task row for paginated history and search in the Threads panel."""
+    num = valid_task_number(task.get("number"))
+    tid = str(task.get("id") or "")
+    item: dict = {
+        "id": tid,
+        "title": str(task.get("title") or tid),
+        "status": str(task.get("status") or ""),
+        "branch": str(task.get("branch") or ""),
+        "updated": str(task.get("updated") or ""),
+        "parent": str(task.get("parent") or ""),
+    }
+    if num is not None:
+        item["number"] = num
+    if task.get("commit"):
+        item["commit"] = str(task["commit"])
+    if isinstance(task.get("landed"), dict) and task["landed"]:
+        item["landed"] = task["landed"]
+    if task.get("retired"):
+        item["retired"] = True
+    return item
+
+
 def _pm_slug(pm: dict) -> str:
     repo = pm.get("repo") or ""
     if repo:
@@ -545,6 +638,62 @@ class Projects:
             if receipts:
                 out["receipts"] = receipts
         return out
+
+    def tasks(
+        self,
+        slug: str,
+        *,
+        status: str = "finished",
+        query: str = "",
+        offset: int = 0,
+        limit: int = TASKS_LIMIT_DEFAULT,
+    ) -> dict:
+        if not valid_slug(slug) or not self._project_known(slug):
+            raise NotFoundError(f"no project {slug}")
+        if status not in TASKS_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(TASKS_STATUSES)}")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > TASKS_LIMIT_MAX:
+            raise ValueError(f"limit must be between 1 and {TASKS_LIMIT_MAX}")
+
+        raw_tasks = self.store.tasks(slug)
+        q_only = question_only_tasks(self.store.all_events(slug))
+        if status == "finished":
+            allowed = set(CLOSED_STATUSES) - {"abandoned"}
+        elif status == "open":
+            allowed = set(ACTIVE_STATUSES)
+        else:
+            allowed = set(ACTIVE_STATUSES) | (set(CLOSED_STATUSES) - {"abandoned"})
+
+        matched: list[dict] = []
+        for t in raw_tasks:
+            if not isinstance(t, Mapping):
+                continue
+            tid = str(t.get("id") or "")
+            if not tid:
+                continue
+            st = str(t.get("status") or "")
+            if st == "abandoned" or st not in allowed:
+                continue
+            if t.get("review_of"):
+                continue
+            if tid in q_only or _task_log_question_only(t):
+                continue
+            if query and not _task_matches_query(t, query):
+                continue
+            matched.append(dict(t))
+
+        matched.sort(key=lambda t: (str(t.get("updated") or ""), str(t.get("id") or "")), reverse=True)
+        total = len(matched)
+        page = matched[offset : offset + limit]
+        return {
+            "tasks": [_task_summary(t) for t in page],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "more": (offset + len(page)) < total,
+        }
 
     def thread_log(self, task_id: str, before: int | None = None, limit: int = LOG_LIMIT_DEFAULT) -> dict:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0 or limit > LOG_LIMIT_MAX:

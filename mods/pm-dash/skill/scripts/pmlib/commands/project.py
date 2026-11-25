@@ -64,6 +64,29 @@ def cmd_project_edit(a, slug, ctx=None):
         return ctx.store.library(slug)
     if cmd == "memory":
         return lib.memory_page(repo)
+    if cmd == "repo-docs":
+        mutating = bool(a.include or a.exclude or a.on or a.off or a.reset)
+        if not mutating:
+            return ctx.store.repo_docs_settings(slug)
+        if a.on and a.off:
+            raise ValueError("cannot pass both --on and --off")
+        if a.reset and (a.include or a.exclude or a.on or a.off):
+            raise ValueError("--reset cannot be combined with --include, --exclude, --on, or --off")
+        lib.project_write_check(ctx.caller.memory_writer(repo))
+        if a.reset:
+            ctx.store.set_library_state(slug, repo_docs=None)
+        else:
+            cur = dict(ctx.store.library_state(slug).get("repo_docs") or {})
+            if a.on:
+                cur["enabled"] = True
+            elif a.off:
+                cur["enabled"] = False
+            if a.include is not None:
+                cur["include"] = list(a.include)
+            if a.exclude is not None:
+                cur["exclude"] = list(a.exclude)
+            ctx.store.set_library_state(slug, repo_docs=cur)
+        return ctx.store.repo_docs_settings(slug)
     if cmd == "research-migrate":
         return lib.migrate_research(slug, tuple(a.topic or ()), apply=a.apply)
     if cmd == "history":
@@ -434,6 +457,14 @@ def cmd_project(a, ctx=None):
             out = TurnTracker(ctx, slug).interrupt_pm()
         elif a.project_cmd == "log":
             out = projects.thread_log(ledger.resolve_id(a.id), before=a.before, limit=a.limit)
+        elif a.project_cmd == "tasks":
+            out = projects.tasks(
+                reg.resolve_project_slug(a.slug),
+                status=a.status,
+                query=a.q or "",
+                offset=a.offset,
+                limit=a.limit,
+            )
         elif a.project_cmd == "context":
             out = {"files": projects.context(reg.resolve_project_slug(a.slug))}
         elif a.project_cmd == "files":
@@ -485,6 +516,13 @@ def register_project_command(sub):
     pl.add_argument("id", help="task id")
     pl.add_argument("--before", type=int, help="entry index `n` the page ends before (a previous page's `earlier`)")
     pl.add_argument("--limit", type=int, default=50, help="at most this many entries (default 50)")
+    pt = within.add_parser("tasks", help="paginated and searchable list of a project's tasks as JSON")
+    pt.add_argument("slug", help="project slug, PM name or folder")
+    pt.add_argument("--status", choices=["finished", "open", "all"], default="finished",
+                    help="which tasks to list: finished (default), open, or all")
+    pt.add_argument("--q", default="", help="filter by #number, task id, title or branch (case-insensitive)")
+    pt.add_argument("--offset", type=int, default=0, help="0-based result offset (default 0)")
+    pt.add_argument("--limit", type=int, default=30, help="max tasks per page (default 30, max 100)")
     views_project.register_project_session_view(within)
     pch = within.add_parser("change", help="branch commits, changed files and paginated single-file diff as JSON")
     pch.add_argument("slug", help="project slug, PM name or folder")
@@ -501,16 +539,23 @@ def register_project_command(sub):
     pf.add_argument("slug", help="project slug, PM name or folder")
     pf.add_argument("path", help="path as <root>/<path> (project/decisions.md, user/foo.md, research/topic/README.md) "
                                  "or relative to --root")
-    pf.add_argument("--root", choices=list(DOCUMENT_ROOTS), help="document root: docs, research, instructions, "
-                                                                  "memory, personal (Library and Memory pages), repo "
-                                                                  "(repository file preview), or project, user (the "
-                                                                  "old Context panel)")
+    pf.add_argument("--root", choices=list(DOCUMENT_ROOTS), help="document root: docs, repo_docs, research, "
+                                                                  "instructions, memory, personal (Library and Memory "
+                                                                  "pages), repo (repository file preview), or project, "
+                                                                  "user (the old Context panel)")
     pfi = within.add_parser("files", help="a project's repository files (from git ls-files) as JSON")
     pfi.add_argument("slug", help="project slug, PM name or folder")
     pfi.add_argument("--limit", type=int, default=20000, help="at most this many files (default 20000)")
-    pli = within.add_parser("library", help="a project's Library as JSON: docs (editable), research and "
+    pli = within.add_parser("library", help="a project's Library as JSON: docs (editable), repo_docs, research and "
                                             "instructions (read-only)")
     pli.add_argument("slug", help="project slug, PM name or folder")
+    prd = within.add_parser("repo-docs", help="inspect or configure which repository docs appear in Library")
+    prd.add_argument("slug", help="project slug, PM name or folder")
+    prd.add_argument("--include", action="append", help="repository-relative dir or file to scan (replaces defaults; repeat for more)")
+    prd.add_argument("--exclude", action="append", help="repository-relative path prefix to exclude (repeat for more)")
+    prd.add_argument("--on", action="store_true", help="enable repository docs scanning for this project")
+    prd.add_argument("--off", action="store_true", help="disable repository docs scanning for this project")
+    prd.add_argument("--reset", action="store_true", help="clear custom repo_docs settings and restore defaults")
     pme = within.add_parser("memory", help="a project's Memory page as JSON: topics, types, both layers' memories "
                                            "and candidates")
     pme.add_argument("slug", help="project slug, PM name or folder")
