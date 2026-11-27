@@ -8,6 +8,7 @@ mutating module-level `pm.*` globals.
 from __future__ import annotations
 
 import argparse
+import re
 import contextlib
 import datetime
 import io
@@ -40,7 +41,7 @@ if "pmlib.context" not in sys.modules:
         else:
             os.environ["PM_HOME"] = _saved_pm_home
 
-from fakes import FakeChangeWaiter, FakeClock, FakeHc, FakeProcs, FakeTui, StubGit, make_ctx  # noqa: E402
+from fakes import FakeChangeWaiter, FakeClock, FakeHc, FakeProcs, FakeTui, StubGit, make_ctx, queued_sends  # noqa: E402
 from pmlib import cli, hooks  # noqa: E402
 from pmlib.caller import Caller  # noqa: E402
 from pmlib.commands import (  # noqa: E402
@@ -54,7 +55,8 @@ from pmlib.commands import (  # noqa: E402
 )
 from pmlib.context import DeliverWatcher, StdOutput  # noqa: E402
 from pmlib.errors import Refused, WaitOutcome  # noqa: E402
-from pmlib.events import inbox as inbox_mod, policy as policy_mod  # noqa: E402
+from pmlib.events import inbox as inbox_mod  # noqa: E402
+from pmlib.messaging import router as policy_mod  # noqa: E402
 from pmlib.events.deliver import (  # noqa: E402
     MAX_RECEIVED_RANGES,
     SETTLE,
@@ -67,7 +69,7 @@ from pmlib.events.deliver import (  # noqa: E402
 from pmlib.events.deliverer import Deliverer  # noqa: E402
 from pmlib.events.deps_watch import DependencyWatcher  # noqa: E402
 from pmlib.events.inbox import InboxWatcher  # noqa: E402
-from pmlib.events.policy import is_news  # noqa: E402
+from pmlib.messaging.router import is_news  # noqa: E402
 from pmlib.events.stalls import StallWatcher  # noqa: E402
 from pmlib.gitrepo import GitRepo  # noqa: E402
 from pmlib.home import project_slug  # noqa: E402
@@ -499,6 +501,7 @@ class Events(unittest.TestCase):
 
     def test_no_pm_running_and_a_second_deliverer_send_nothing(self):
         self.update(self.task("a"), status="review", note="done")
+        self.hc.hc_calls.clear()  # what the report itself looked up (who sent it); the deliverers are checked below
         lock_path = self.ctx().home.project_for(self.repo).ensure() / "deliver.lock"
         with open(lock_path, "a+") as held:
             lock_file(held)
@@ -815,12 +818,10 @@ class Events(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             ledger_cmds.cmd_update(argparse.Namespace(id=task, keep=False, status="in_progress", note="1. 补测试", send=True), ctx=self.ctx())
-        async_spawns = [s for s in self.procs.spawned if s["args"][:1] == ["_deliver-send"]]
+        async_spawns = [s for s in self.procs.spawned if s["args"][:1] == ["_drain-endpoint"]]
         self.assertEqual(len(async_spawns), 1)
-        args = async_spawns[0]["args"]
-        self.assertEqual(args[1], "t20")
-        msg_file = Path(args[args.index("--file") + 1])
-        self.assertEqual(msg_file.read_text(encoding="utf-8"), "[from hc:t7] 1. 补测试")
+        self.assertEqual(async_spawns[0]["args"][1], "t20")
+        self.assertEqual(queued_sends(self.ctx()), [("t20", "[from hc:t7] 1. 补测试")])
         self.assertEqual((self.load(task)["status"], self.load(task)["round"]["turn"]), ("in_progress", 3))
         self.assertIn("queued async send to hc:t20", out.getvalue())
         # With --wait, it delivers synchronously and updates round_handed.
@@ -829,7 +830,11 @@ class Events(unittest.TestCase):
             ledger_cmds.cmd_update(argparse.Namespace(
                 id=task, keep=False, status="in_progress", note="1b. 同步测试", send=True, wait=True,
             ), ctx=self.ctx())
-        self.assertIn(("send", "t20", "[from hc:t7] 1b. 同步测试"), self.sends())
+        # One typist per terminal: the note queued above goes in first, then this one; each carries its envelope
+        # anchor (`[from hc:t7 #env_…]`).
+        unanchored = [(k, t, re.sub(r" #env_[0-9a-f]+_[0-9a-f]+\]", "]", m)) for k, t, m in self.sends()]
+        self.assertEqual(unanchored[-2:], [("send", "t20", "[from hc:t7] 1. 补测试"),
+                                           ("send", "t20", "[from hc:t7] 1b. 同步测试")])
         self.assertIn("sent to hc:t20", out.getvalue())
         # It cannot take it now (a prompt holds it) with --wait: recorded, not sent, and how to send it by hand.
         self.hc.send_reply = lambda args: {"error": {"kind": "blocked", "message": "t20 is blocked"}}
@@ -837,7 +842,7 @@ class Events(unittest.TestCase):
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as stop:
             ledger_cmds.cmd_update(argparse.Namespace(id=task, keep=False, note="2. 再看一下", send=True, wait=True), ctx=self.ctx())
         self.assertEqual(stop.exception.code, 1)
-        self.assertIn("hc send t20", out.getvalue())
+        self.assertIn("pm.py send t20", out.getvalue())
         self.assertEqual(self.load(task)["log"][-1]["text"], "2. 再看一下")
         with self.assertRaises(SystemExit):
             ledger_cmds.cmd_update(argparse.Namespace(id=task, keep=False, note=None, status="in_progress", send=True), ctx=self.ctx())

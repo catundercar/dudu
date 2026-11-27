@@ -69,6 +69,20 @@ export function extractPiAssistantReply(event) {
   return "";
 }
 
+export function extractPiToolSummary(event) {
+  if (!event || typeof event !== "object") return "";
+  const args = event.args ?? event.input ?? event.params ?? null;
+  if (typeof args === "string") return args.replace(/\s+/g, " ").trim().slice(0, 72);
+  if (args && typeof args === "object") {
+    for (const key of ["command", "CommandLine", "file_path", "path", "Path", "pattern", "query", "description", "prompt"]) {
+      if (typeof args[key] === "string" && args[key].trim()) {
+        return args[key].replace(/\s+/g, " ").trim().slice(0, 72);
+      }
+    }
+  }
+  return "";
+}
+
 export function emitPiTurnHook(payload, spawnFn = spawn) {
   try {
     const child = spawnFn(PYTHON, [PM_SCRIPT, "hook-turn"], {
@@ -91,8 +105,69 @@ export default function pmCompactExtension(pi, deps = {}) {
   const spawnHook = deps.spawnHook ?? (deps.execFileSync ? null : spawn);
   const customInstructions = deps.instructions ?? readPreCompactInstructions(run);
   let compacting = false;
+  let promptSentForTurn = false;
+
+  pi.on("before_agent_start", (event, ctx) => {
+    if (!spawnHook) return;
+    const prompt = typeof event?.prompt === "string" ? event.prompt.trim() : "";
+    if (!prompt) return;
+    promptSentForTurn = true;
+    emitPiTurnHook(
+      {
+        hook_event_name: "UserPromptSubmit",
+        cwd: ctx?.cwd || process.cwd(),
+        session_id: String(event?.sessionId || ctx?.sessionId || ""),
+        prompt,
+      },
+      spawnHook,
+    );
+  });
+
+  pi.on("agent_start", (event, ctx) => {
+    if (!spawnHook) return;
+    if (promptSentForTurn) {
+      promptSentForTurn = false;
+      return;
+    }
+    emitPiTurnHook(
+      {
+        hook_event_name: "AgentStart",
+        cwd: ctx?.cwd || process.cwd(),
+        session_id: String(event?.sessionId || ctx?.sessionId || ""),
+      },
+      spawnHook,
+    );
+  });
+
+  pi.on("tool_execution_start", (event, ctx) => {
+    if (!spawnHook) return;
+    emitPiTurnHook(
+      {
+        hook_event_name: "ToolStart",
+        cwd: ctx?.cwd || process.cwd(),
+        tool_name: String(event?.toolName || event?.name || "tool").trim(),
+        tool_summary: extractPiToolSummary(event),
+        call_id: String(event?.toolCallId || event?.id || ""),
+      },
+      spawnHook,
+    );
+  });
+
+  pi.on("tool_execution_end", (event, ctx) => {
+    if (!spawnHook) return;
+    emitPiTurnHook(
+      {
+        hook_event_name: "ToolEnd",
+        cwd: ctx?.cwd || process.cwd(),
+        tool_name: String(event?.toolName || event?.name || "").trim(),
+        call_id: String(event?.toolCallId || event?.id || ""),
+      },
+      spawnHook,
+    );
+  });
 
   pi.on("agent_end", (event, ctx) => {
+    promptSentForTurn = false;
     if (spawnHook) {
       const reply = extractPiAssistantReply(event);
       emitPiTurnHook(

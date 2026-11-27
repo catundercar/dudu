@@ -1,0 +1,7 @@
+{"seq": 1, "t": 1795600000000, "src": "supervisor", "kind": "hc_state", "endpoint": {"runtime": "hc", "machine": null, "terminal": "t12", "workspace": "ws_1", "session_id": "sess_1", "agent_kind": "agy", "fg_pid": 48291, "epoch": 1}, "state": "live", "status": "working", "status_ms": 1795600000000, "turn": 30, "reported": true}
+{"seq": 2, "t": 1795600004000, "src": "watcher:agy", "kind": "hook_prompt", "cause": "user"}
+{"seq": 3, "t": 1795600010000, "src": "watcher:agy", "kind": "step_error", "message": "Attempt 1 failed: EOF, retrying"}
+{"seq": 4, "t": 1795600015000, "src": "watcher:agy", "kind": "step_tool_start", "tool": "grep_search", "summary": "pmActivityView"}
+{"seq": 5, "t": 1795600017000, "src": "watcher:agy", "kind": "step_tool_end"}
+{"seq": 6, "t": 1795600022000, "src": "watcher:agy", "kind": "step_reply"}
+{"seq": 7, "t": 1795600022100, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "idle", "status_ms": 1795600022050, "turn": 31, "reported": true}

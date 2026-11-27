@@ -194,7 +194,7 @@ def _start_beside_pm_impl(ctx: Context, task: Any, plan: dict[str, Any], name: s
         ) if workspace else None
         if not made:
             return "", ""
-        ctx.tui.pane_run(
+        ctx.tui.bootstrap_pane_exec(
             made.group(1),
             shell_join(
                 plan["argv"] + ([plan["prompt"]] if ctx.agents.takes_prompt(plan["kind"]) else []),

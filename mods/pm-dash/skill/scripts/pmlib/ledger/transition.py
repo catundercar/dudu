@@ -122,6 +122,8 @@ class TransitionPlan:
     auto_resume_blocked: bool = False
     pre_term: str = ""
     pre_turn: int | None = None
+    idem_key: str = ""
+    env_id: str = ""
 
 
 @dataclass(repr=False, eq=False)
@@ -157,6 +159,7 @@ class Transition:
     will_auto_review: bool = False
     resolved_sha: str = ""
     old_parent: str = ""
+    already_applied: bool = False
 
     @property
     def request(self) -> UpdateRequest:
@@ -171,9 +174,38 @@ class Transition:
         return any(c.startswith("status=") for c in self.changes)
 
 
+APPLIED_KEYS_KEPT = 64
+
+
+def record_applied_key(task: dict[str, Any], idem_key: str, *, env_id: str, now: str, **meta: Any) -> None:
+    """Keep report `idem_key` in the task record itself (C6a): written with the change it made, in the same file
+    under the same lock, so a replay of that report finds it whatever happened after the write."""
+    applied_map = dict(task.get("applied_reports") or {}) if isinstance(task.get("applied_reports"), dict) else {}
+    keys_order = [str(k) for k in (task.get("last_applied_keys") or []) if isinstance(k, str) and k != idem_key]
+    keys_order.append(idem_key)
+    while len(keys_order) > APPLIED_KEYS_KEPT:
+        applied_map.pop(keys_order.pop(0), None)
+    applied_map[idem_key] = {"env_id": env_id, "at": now, **meta}
+    task["applied_reports"] = applied_map
+    task["last_applied_keys"] = keys_order
+
+
 def apply_transition(task: dict[str, Any], plan: TransitionPlan, hooks: TransitionHooks, note: Callable[..., Any],
-                     now: str, result: Transition) -> dict[str, Any]:
+                     now: str, result: Transition) -> dict[str, Any] | None:
     """The locked change of `pm.py update` on the task record `task` (Phase B). Fills `result` and returns `task`."""
+    if plan.idem_key:
+        applied_map = task.get("applied_reports")
+        if isinstance(applied_map, dict) and plan.idem_key in applied_map:
+            rec = applied_map[plan.idem_key]
+            if isinstance(rec, dict):
+                result.after = task
+                result.already_applied = True
+                result.changes = list(rec.get("changes") or ())
+                result.entry_fields = dict(rec.get("entry_fields") or {})
+                result.will_auto_review = bool(rec.get("will_auto_review"))
+                result.resolved_sha = str(rec.get("resolved_sha") or "")
+                result.old_parent = str(rec.get("old_parent") or "")
+                return None
     req = plan.request
     changes: list[str] = []
     told: dict[str, Any] = {}
@@ -281,6 +313,10 @@ def apply_transition(task: dict[str, Any], plan: TransitionPlan, hooks: Transiti
             else {}
         )
         note(task, text, **asked, **told, **plan.review_extra, **handled_extra)
+    if plan.idem_key:
+        record_applied_key(task, plan.idem_key, env_id=plan.env_id, now=now, changes=list(changes),
+                           entry_fields=dict(told), will_auto_review=bool(will_auto_review),
+                           resolved_sha=resolved_sha, old_parent=prev_parent)
     hooks.remember_session(task)
     result.after = task
     result.changes = changes

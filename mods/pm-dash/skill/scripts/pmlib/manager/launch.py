@@ -2,6 +2,7 @@
 around it, and starting it in a terminal. Layer 3."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -15,6 +16,7 @@ from ..agents.base import ClaudeAgent, CodexAgent, PiAgent, is_seat_argv
 from ..context import Context
 from ..errors import Refused
 from ..procs import launcher
+from ..terminals.tabs import pm_tab_name
 
 
 # Target working-set compaction window for a PM session (200k by default; PM_COMPACT_TOKENS overrides,
@@ -363,22 +365,119 @@ def build_pm_seat_command(
     return s_argv, eff_prompt
 
 
-def _start_pm_terminal_impl(
+@dataclass(frozen=True)
+class StartTerminalResult:
+    """Outcome of starting a PM terminal: its address and whether it has a desktop tab."""
+
+    terminal: str | None
+    has_tab: bool = True
+    no_tab_reason: str = ""
+
+
+def _app_reply_error(out: subprocess.CompletedProcess[str]) -> str:
+    """Extract an error message from a `herdr-app do` reply, or '' when it succeeded."""
+    raw = (out.stdout or "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and data.get("error"):
+            return str(data["error"])
+    if out.returncode != 0:
+        return (out.stderr or raw or f"exit {out.returncode}").strip()
+    return ""
+
+
+def no_tab_warning(terminal: str, *, ctx: Context) -> str:
+    """Actionable notice printed when a PM terminal started without a desktop window/tab."""
+    keep_cmd = f"herdr-app do terminal.keep '{{\"terminal\":\"{terminal}\",\"place\":\"tab\"}}'"
+    return ctx.config.tr(
+        f"note: PM hc:{terminal} started without a desktop tab (herdr-app unavailable); "
+        f"to put it in a tab later, run: {keep_cmd} (or click Open PM in the project view)",
+        f"提示：PM hc:{terminal} 启动时没有桌面标签页（连不上 herdr-app）；"
+        f"要放回标签页请运行：{keep_cmd}（或在项目视图点「打开 PM」）",
+    )
+
+
+def _norm_dir(path: str | Path | None) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    norm = os.path.normpath(raw)
+    try:
+        return str(Path(norm).resolve())
+    except OSError:
+        return norm
+
+
+def _find_project_space(
+    spaces: Sequence[Mapping[str, Any]],
+    repo: str,
+    *,
+    space: str | None = None,
+    new_space: str = "",
+) -> str | None:
+    """Find an open local space belonging to `repo` (or matching explicit `space` id), else None."""
+    local = [s for s in spaces if isinstance(s, Mapping) and s.get("id") and not s.get("machine")]
+    if not local:
+        return None
+    if space:
+        hit = next((str(s["id"]) for s in local if str(s["id"]) == str(space)), None)
+        if hit:
+            return hit
+    want_repo = _norm_dir(repo)
+    if want_repo:
+        for s in local:
+            if _norm_dir(s.get("folder")) == want_repo:
+                return str(s["id"])
+    names = {n for n in (new_space.strip(), Path(repo).name) if n}
+    if names:
+        for s in local:
+            s_folder = _norm_dir(s.get("folder"))
+            if str(s.get("name") or "").strip() in names and (not s_folder or not want_repo or s_folder == want_repo):
+                return str(s["id"])
+    return None
+
+
+def _keep_terminal_in_app(ctx: Context, terminal: str) -> tuple[bool, str]:
+    """Attach a freshly started bare terminal via `terminal.keep`, retrying briefly if herdr-app has not
+    yet synced the terminal creation event from herdr-core."""
+    last_err = ""
+    for attempt in range(10):
+        try:
+            kept = ctx.hc.app_do("terminal.keep", {"terminal": terminal, "place": "tab"}, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as err:
+            return False, str(err)
+        err_msg = _app_reply_error(kept)
+        if kept.returncode == 0 and not err_msg:
+            return True, ""
+        last_err = err_msg or f"terminal.keep exited {kept.returncode}"
+        if "no running terminal" in last_err.lower() and attempt < 9:
+            ctx.clock.sleep(0.25)
+            continue
+        return False, last_err
+    return False, last_err
+
+
+def _start_pm_terminal_result(
     repo: str,
     argv: Sequence[str],
     space: str | None = None,
     new_space: str = "",
     *,
     ctx: Context,
-) -> str | None:
+) -> StartTerminalResult:
     """Start a PM's program in the desktop app: in a new space called new_space, or a tab in the given space,
-    else a bare terminal (no app).
+    else a bare terminal attached to this project's space when `herdr-app` is reachable.
 
     A space.new that times out or answers without a terminal may still have made the space: that space's
     terminal is the PM, found by its name among the spaces that were not there before. None found: stop,
     so a second PM is not started in a bare terminal."""
-    made = None
+    made: str | None = None
     seated = is_seat_argv(argv)
+    app_missing = False
+    fallback_reason = ""
     if new_space or space:
         command = ("space.new", {"name": new_space, "folder": repo, "argv": list(argv)}) if new_space else (
             "tab.new", {"space": space, "folder": repo, "argv": list(argv)})
@@ -392,10 +491,15 @@ def _start_pm_terminal_impl(
                 except (ValueError, AttributeError):
                     made = None
                 unclear = not made
+            else:
+                fallback_reason = _app_reply_error(out) or f"{command[0]} exited {out.returncode}"
         except subprocess.TimeoutExpired:
             unclear = True
-        except OSError:
+            fallback_reason = f"{command[0]} timed out"
+        except OSError as err:
             made = None  # no app here: a bare terminal below
+            app_missing = True
+            fallback_reason = str(err)
         if unclear and new_space:
             made = next((t.get("terminal") for s in ctx.hc.app_spaces() if s.get("name") == new_space
                          and s.get("id") not in before for tab in s.get("tabs") or []
@@ -411,9 +515,65 @@ def _start_pm_terminal_impl(
         if seated:
             ctx.hc.keep(made)
             ctx.hc.label(made, "pm.seat=1")
-        return made
+        return StartTerminalResult(terminal=made, has_tab=True)
     res = ctx.hc.run(argv, bg=True, keep=seated, no_parent=True, labels=("pm.seat=1",) if seated else (), cwd=repo)
-    return (res or {}).get("address")
+    made = (res or {}).get("address")
+    if not made:
+        return StartTerminalResult(terminal=None, has_tab=False, no_tab_reason=fallback_reason)
+    has_tab = False
+    no_tab_reason = fallback_reason
+    if not app_missing:
+        open_spaces = ctx.hc.app_spaces()
+        target_space = _find_project_space(open_spaces, repo, space=space, new_space=new_space)
+        if target_space:
+            # Bare terminal.keep lands in the currently active space; select this project's space first.
+            try:
+                ctx.hc.app_do("space.select", {"id": target_space}, timeout=30)
+            except (OSError, subprocess.TimeoutExpired) as err:
+                no_tab_reason = str(err)
+            else:
+                kept_ok, keep_err = _keep_terminal_in_app(ctx, made)
+                if kept_ok:
+                    has_tab = True
+                    no_tab_reason = ""
+                    ctx.hc.name_tab(made, pm_tab_name(repo), wait=5)
+                else:
+                    no_tab_reason = keep_err
+        elif open_spaces:
+            # Other projects' spaces are open, but none belongs to this project: adopt into a dedicated
+            # new space via herdr.space/herdr.tab labels instead of dropping into an unrelated active space.
+            sp_id = f"sp{os.urandom(16).hex()}"
+            tb_id = f"tb{os.urandom(16).hex()}"
+            ctx.hc.label(made, f"herdr.space={sp_id}", f"herdr.tab={tb_id}")
+            if ctx.hc.name_tab(made, pm_tab_name(repo), wait=5):
+                has_tab = True
+                no_tab_reason = ""
+                if new_space:
+                    try:
+                        ctx.hc.app_do("space.rename", {"id": sp_id, "name": new_space}, timeout=30)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+        else:
+            kept_ok, keep_err = _keep_terminal_in_app(ctx, made)
+            if kept_ok:
+                has_tab = True
+                no_tab_reason = ""
+                ctx.hc.name_tab(made, pm_tab_name(repo), wait=5)
+            else:
+                no_tab_reason = keep_err
+    return StartTerminalResult(terminal=made, has_tab=has_tab, no_tab_reason=no_tab_reason)
+
+
+def _start_pm_terminal_impl(
+    repo: str,
+    argv: Sequence[str],
+    space: str | None = None,
+    new_space: str = "",
+    *,
+    ctx: Context,
+) -> str | None:
+    """Start a PM's program in the desktop app, returning its terminal address."""
+    return _start_pm_terminal_result(repo, argv, space, new_space, ctx=ctx).terminal
 
 
 def start_pm_terminal(

@@ -16,15 +16,20 @@ from ..caller import Caller
 from ..context import Context
 from ..errors import NotFound, PmError, Refused, WaitOutcome
 from ..events.deliver import deliver_later
-from ..events.policy import wake_fields_for
+from ..messaging.router import wake_fields_for
 from ..events.stalls import REPORTED_STATUSES, StallWatcher
 from ..ledger.deps import evaluate_depends_on, format_dep_summary
 from ..ledger.family import parent_of
 from ..ledger.ledger import Change, Ledger
 from ..ledger.plan import parse_plan_steps, sync_plan_for_status
 from ..ledger.question import QUESTION_FIELDS
+from ..home import project_slug
 from ..ledger.task import ACTIVE, ATTACHED, CLOSED, Task, hc_terminal_of
 from ..memory.layer import MemoryLayer
+from ..messaging.address import Endpoint
+from ..messaging.envelope import P1_USER, P3_DIRECT
+from ..messaging.principal import Principal
+from ..messaging.typist import DRAIN_WAIT_S, drain_endpoint
 from ..osutil import file_text, shell_join, slugify, stale_lock
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
@@ -43,13 +48,16 @@ from .codex_pool import (
 from .dispatch import (
     PREAPPROVED,
     ask_rule_for,
+    assemble_thin_brief_for,
     dispatch_note_for,
     held_task_for,
     hold_exited_for,
     review_placement_for,
+    thin_brief_title,
     tui_agent_gone_for,
     worker_argv_for,
     worker_placement_for,
+    write_thin_brief_for,
 )
 from .escalate import (
     ask_escalation_for,
@@ -87,12 +95,18 @@ from .reattach import (
 from .research import collect_research_for, retire_dirty_for
 from .send import (
     SendBackResult,
+    deliver_failure_reason,
+    deliver_now_for,
+    queue_send_for,
     send_async_later_for,
     send_back_for,
     send_failure_reason,
+    send_reactions_for,
     send_ready_later_for,
-    send_succeeded,
     send_when_ready_for,
+    terminal_envelope,
+    took_in,
+    worker_endpoint,
 )
 from .sessions import (
     clear_task_session_for,
@@ -119,6 +133,9 @@ class DispatchRequest:
     label: str | None = None
     path: str | None = None
     brief: str | None = None
+    ask: str | None = None
+    attach: list[str] | None = None
+    note: str | None = None
     name: str | None = None
     task: str | None = None
     here: bool = False
@@ -769,7 +786,11 @@ class Workers:
                 )
                 if res.returncode != 0:
                     raise Refused(f"prep command failed with exit code {res.returncode}")
-        reads = self.ctx.agents.outside_reads(repo, req.brief or "")
+        reads = list(self.ctx.agents.outside_reads(repo, req.brief or ""))
+        for att in req.attach or ():
+            for extra_r in self.ctx.agents.outside_reads(repo, att):
+                if extra_r not in reads:
+                    reads.append(extra_r)
         made = self.ctx.hc.start_terminal(
             spec.name, path, self.worker_argv(spec, reads, repo, wrap=True), self.worker_placement()
         )
@@ -863,6 +884,18 @@ class Workers:
             raise Refused(f"{req.repo} is not a directory" if req.here else f"{req.repo} is not in a git repository")
         outer_steps, outer_explicit, sub_steps = _parse_new_plan(self.ctx, req.plan, req.step, req.outer_plan, req.subplan)
         stderr_lines: list[str] = []
+        explicit_brief = bool(req.brief)
+        ask_text = str(req.ask or "").strip()
+        if ask_text and explicit_brief:
+            raise Refused(self.ctx.config.tr(
+                "do not mix --brief with --ask",
+                "不要把 --brief 和 --ask 混用",
+            ))
+        if (req.attach or req.note) and not ask_text:
+            raise Refused(self.ctx.config.tr(
+                "--attach and --note require --ask",
+                "--attach 和 --note 需要配合 --ask 使用",
+            ))
         given = self._ledger.load(req.task, repo=repo).raw if req.task else None
         if given:
             req.task = given["id"]
@@ -889,7 +922,7 @@ class Workers:
             req.title = req.title or given.get("title")
             req.parent = req.parent or given.get("parent")
             req.branch = req.branch or (given.get("branch") if not req.here else None)
-            if not req.brief and given.get("brief"):
+            if not req.brief and not ask_text and given.get("brief"):
                 req.brief = given["brief"]
             if given.get("depends_on") and not req.dry_run:
                 every = self._ledger.raw_tasks()
@@ -901,12 +934,13 @@ class Workers:
                         f"warning: {given['id']} still has unmet dependencies ({dep_summary})",
                         f"警告：{given['id']} 仍有未满足的前置依赖（{dep_summary}）",
                     ))
-        if not req.brief:
+        if not req.brief and not ask_text:
             raise Refused(self.ctx.config.tr(
-                "dispatch needs --brief <file> (or a --task that already records one)",
-                "dispatch 需要 --brief <文件>（或用 --task 接手已登记任务书的任务）",
+                "dispatch needs --ask \"<request>\" or --brief <file> (or a --task that already records one)",
+                "dispatch 需要 --ask \"<需求>\" 或 --brief <文件>（或用 --task 接手已登记任务书的任务）",
             ))
-        brief = Path(req.brief).read_text(encoding="utf-8")
+        if ask_text and not req.title:
+            req.title = thin_brief_title(ask_text)
         if not req.title:
             raise Refused(self.ctx.config.tr("dispatch needs a title, or --task <id>", "dispatch 要给标题，或用 --task <id> 接手已有任务"))
         if not req.here and not req.branch:
@@ -920,6 +954,23 @@ class Workers:
         req.label = req.label or slugify((given or {}).get("id") or req.title) or "worker"
         req.name = req.name or hc_name(req.label)
         req.parent = parent_of("", req.parent, repo=repo, ledger=self._ledger, home=self.ctx.home)
+        if ask_text:
+            base_ref = req.base or (self.ctx.git.base_branch(repo) if not req.here else "")
+            brief = assemble_thin_brief_for(
+                self.ctx,
+                repo=repo,
+                title=req.title,
+                ask=ask_text,
+                attachments=req.attach or (),
+                note=req.note or "",
+                branch=req.branch,
+                base=base_ref,
+                here=req.here,
+            )
+            if not req.dry_run:
+                req.brief = str(write_thin_brief_for(self.ctx, req.label, brief))
+        else:
+            brief = Path(req.brief or "").read_text(encoding="utf-8")
         spec = self.ctx.agents.resolve_worker(WorkerSpec(
             profile=req.profile or "",
             kind=req.kind or "",
@@ -945,11 +996,21 @@ class Workers:
                     tab_title(tab_short(req.tab or req.title), req.bug, dry=True, cfg=self.ctx.config)
                     if self.ctx.hc.new_tabs(caller_pane=self.ctx.pane) else ""
                 )
+                dry_reads = list(self.ctx.agents.outside_reads(repo, req.brief)) if req.brief else []
+                for att in req.attach or ():
+                    for extra_r in self.ctx.agents.outside_reads(repo, att):
+                        if extra_r not in dry_reads:
+                            dry_reads.append(extra_r)
                 plan = self.build_dry_run_plan(
                     spec, repo, "dispatch", given and given["id"], cwd, tab,
-                    parent=req.parent or "", reads=self.ctx.agents.outside_reads(repo, req.brief),
+                    parent=req.parent or "", reads=dry_reads,
                     asks=asks, outer_steps=outer_steps, no_review=req.no_review,
                 )
+                if ask_text:
+                    plan["thin_brief"] = True
+                    plan["brief_preview"] = brief
+                    if req.attach:
+                        plan["attachments"] = list(req.attach)
                 return DispatchResult(dry_run_plan=plan, stderr_lines=tuple(stderr_lines))
             if asks:
                 return self._ask_first(
@@ -1007,7 +1068,12 @@ class Workers:
                     )
                     if res.returncode != 0:
                         raise Refused(f"prep command failed with exit code {res.returncode}")
-            argv = self.worker_argv(spec, self.ctx.agents.outside_reads(repo, req.brief), repo)
+            tui_reads = list(self.ctx.agents.outside_reads(repo, req.brief or ""))
+            for att in req.attach or ():
+                for extra_r in self.ctx.agents.outside_reads(repo, att):
+                    if extra_r not in tui_reads:
+                        tui_reads.append(extra_r)
+            argv = self.worker_argv(spec, tui_reads, repo)
             if not self.ctx.tui.agent_start(spec.name, kind=spec.kind, pane=pane, argv=argv[1:]):
                 raise Refused(f"agent start failed in {pane}")
             self.pool_started(spec, repo)
@@ -1025,7 +1091,12 @@ class Workers:
         def _gone() -> bool:
             return bool(spec.advisor and tui_agent_gone_for(self.ctx, pane))
 
-        if not self.ctx.tui.agent_prompt(spec.name, sent.read_text()):
+        # The brief goes through the agent's own mailbox and typist lease (TUI target: the agent's name, as
+        # `herdr agent prompt` takes it).
+        brief_env = terminal_envelope(self.ctx, sent.read_text(), kind="cmd.brief", task_id=task_id, repo=repo,
+                                      target=spec.name)
+        prompted = deliver_now_for(self.ctx, Endpoint(runtime="tui", terminal=spec.name), brief_env, timeout_s=70.0)
+        if prompted.status != "typed":
             if _gone():
                 hold_exited_for(
                     self.ctx, task_id, spec,
@@ -1082,9 +1153,12 @@ class Workers:
         repo: str = "",
         pre_turn: int | None = None,
         timeout: int = 180,
+        kind: str = "cmd.send",
+        idempotency_key: str = "",
     ) -> bool:
         return send_async_later_for(
-            self.ctx, term, message, task_id=task_id, repo=repo, pre_turn=pre_turn, timeout=timeout,
+            self.ctx, term, message, task_id=task_id, repo=repo, pre_turn=pre_turn, timeout=timeout, kind=kind,
+            idempotency_key=idempotency_key,
         )
 
     def send_ready_later(
@@ -1124,8 +1198,13 @@ class Workers:
         repo: str = ".",
         timeout: int = 180,
         wait: bool = False,
+        as_user: bool = False,
+        idempotency_key: str = "",
     ) -> SendResult:
-        """Send a message to a task's worker or an hc terminal asynchronously by default."""
+        """Send a message to a task's worker or an hc terminal asynchronously by default: a `cmd.send` envelope in
+        the terminal's mailbox that a detached drain types under the terminal's typist lease (`--wait`: typed here,
+        under the same lease). `as_user`: the words of the person at the app's thread box or agent window, typed as
+        they wrote them (`chat.user`, no `[from …]` line, never unblocking a blocked task as the PM's handling)."""
         resolved = self._ledger.try_resolve_id(target)
         task: dict[str, Any] | None = None
         if resolved and self.ctx.home.task(resolved).is_file():
@@ -1158,12 +1237,13 @@ class Workers:
             body = message_text
         else:
             raise Refused(self.ctx.config.tr("send needs a message or --file <path>", "send 需要提供消息正文或 --file <路径>"))
-        message = body if body.startswith("[from ") else f"[from {self.ctx.pane or 'pm.py'}] {body}"
+        message = body if (as_user or body.startswith("[from ")) else f"[from {self.ctx.pane or 'pm.py'}] {body}"
         info = self.ctx.hc.get_raw(term, errors=True) or {}
         if info.get("state") != "live":
             why = (info.get("error") or {}).get("message") or info.get("state") or "gone"
             raise Refused(self.ctx.config.tr(f"hc:{term} is not live ({why})", f"hc:{term} 未在运行（{why}）"))
-        if task and task.get("status") == "blocked" and self._caller.is_pm_caller(task) and self._caller.blocked_by_worker(task):
+        if (not as_user and task and task.get("status") == "blocked" and self._caller.is_pm_caller(task)
+                and self._caller.blocked_by_worker(task)):
             flat = " ".join(body.split())
             snippet = flat[:120] + ("…" if len(flat) > 120 else "")
             pre_turn = info.get("turn") or 0
@@ -1190,99 +1270,45 @@ class Workers:
             assert updated is not None
             task = updated.raw
         resolved_repo = (task.get("repo") if task else None) or self.ctx.git.project_root(repo or ".") or ""
+        tid = task["id"] if task else ""
+        env = terminal_envelope(
+            self.ctx, message, kind="chat.user" if as_user else "cmd.send", task_id=tid, repo=resolved_repo,
+            target=term, priority=P1_USER if as_user else P3_DIRECT, idempotency_key=idempotency_key,
+            cause={"round": bool(tid) and not as_user, "react": True, "quiet": as_user},
+            sender=Principal.user(project_slug(resolved_repo) if resolved_repo else "", actor_id="user:app")
+            if as_user else None,
+        )
         if not wait:
-            self.send_async_later(
-                term, message,
-                task_id=task["id"] if task else "",
-                repo=resolved_repo,
-                pre_turn=info.get("turn") or 0,
-                timeout=timeout,
-            )
+            queue_send_for(self.ctx, term, env, timeout=timeout)
             msg = self.ctx.config.tr(
-                f"queued async send to hc:{term}" + (f" (task {task['id']})" if task else ""),
-                f"已异步排队发送到 hc:{term}" + (f"（任务 {task['id']}）" if task else ""),
+                f"queued async send to hc:{term}" + (f" (task {tid})" if task else ""),
+                f"已异步排队发送到 hc:{term}" + (f"（任务 {tid}）" if task else ""),
             )
-            return SendResult(queued=True, terminal=term, task_id=task["id"] if task else "", message=msg)
-        sent = self.ctx.hc.send(term, message, timeout=timeout, errors=True) or {}
-        if send_succeeded(sent, info):
-            if task and (self.ctx.store.task(task["id"]) or {}).get("status") == "in_progress":
-                self._round_handed(task["id"], term, info.get("turn") or 0)
+            return SendResult(queued=True, terminal=term, task_id=tid, message=msg)
+        ep = worker_endpoint(term)
+        # --wait: at most `timeout` for another typist's lease, then at most `timeout` for the hc send itself.
+        out = deliver_now_for(self.ctx, ep, env, timeout_s=float(timeout), wait_s=min(DRAIN_WAIT_S, float(timeout)),
+                              accept=lambda it, o: took_in(self.ctx, ep, it, o)) if ep is not None else None
+        if out is not None and out.status == "typed":
+            if task and not as_user and (self.ctx.store.task(tid) or {}).get("status") == "in_progress":
+                self._round_handed(tid, term, info.get("turn") or 0)
             msg = self.ctx.config.tr(f"sent to hc:{term}", f"已发送到 hc:{term}")
-            return SendResult(queued=False, terminal=term, task_id=task["id"] if task else "", message=msg)
-        why = send_failure_reason(sent, info, term)
+            return SendResult(queued=False, terminal=term, task_id=tid, message=msg)
+        why = deliver_failure_reason(self.ctx, out, term) if out is not None else send_failure_reason({}, info, term)
         raise Refused(self.ctx.config.tr(f"failed to send to hc:{term}: {why}", f"发送到 hc:{term} 失败：{why}"))
 
-    def deliver_send(
-        self,
-        term: str,
-        file_path: str | Path,
-        *,
-        unlink: bool = False,
-        task_id: str = "",
-        repo: str = "",
-        pre_turn: int | None = None,
-        timeout: int = 180,
-    ) -> None:
-        """Internal background worker for async `hc send`: delivers message, updates round_handed, wakes PM on failure."""
-        path = Path(file_path)
-        try:
-            message = path.read_text(encoding="utf-8")
-        except OSError:
+    def drain_sends(self, term: str, env_ids: Sequence[str] = (), *, timeout: int = 180) -> None:
+        """Internal detached drain of herdr-core terminal `term`'s mailbox (`pm.py _drain-endpoint`): types what is
+        queued for it under its typist lease, returning once `env_ids` have been typed (by this or another holder of
+        the lease). Each send's own reactions run for it, whoever types it: the task's round handed when it went in;
+        when it did not, a worker-executed merge approval falls back to an exec helper, else the task (or the
+        project) records why and wakes a desktop-app PM."""
+        ep = worker_endpoint(term)
+        if ep is None:
             return
-        finally:
-            if unlink:
-                path.unlink(missing_ok=True)
-        info = self.ctx.hc.get_raw(term, errors=True) or {}
-        if info.get("state") == "live":
-            turn = info.get("turn") if info.get("turn") is not None else (pre_turn or 0)
-            sent = self.ctx.hc.send(term, message, timeout=timeout, errors=True) or {}
-            ok = send_succeeded(sent, info)
-            if not ok and not sent.get("error"):
-                after = self.ctx.hc.get_raw(term, errors=True) or {}
-                if after.get("state") == "live" and (
-                    (after.get("turn") or 0) > turn
-                    or (after.get("status") or {}).get("state") == "working"
-                ):
-                    ok = True
-            if ok:
-                if task_id:
-                    with contextlib.suppress(Exception, SystemExit):
-                        if (self.ctx.store.task(task_id) or {}).get("status") == "in_progress":
-                            self._round_handed(task_id, term, turn)
-                return
-        else:
-            sent = {}
-        why = send_failure_reason(sent, info, term)
-        resolved_repo = repo or ""
-        if task_id and (self.ctx.store.task(task_id) or {}):
-            t = self.ctx.store.task(task_id) or {}
-            resolved_repo = resolved_repo or t.get("repo") or ""
-            la = t.get("land_approved")
-            if (isinstance(la, dict) and la.get("executor") == "worker"
-                    and not t.get("landed") and t.get("status") not in REPORTED_STATUSES):
-                if StallWatcher(self.ctx).fallback_land_to_helper(
-                    t, reason=f"approve send to hc:{term} failed ({why})", term=term,
-                ):
-                    return
-            wake = bool(resolved_repo and self._projects.app_pm(resolved_repo))
-            msg = self.ctx.config.tr(
-                f"async send to hc:{term} failed ({why}); check or triage with `pm.py triage {task_id}`",
-                f"异步发送到 hc:{term} 失败（{why}）；可用 `pm.py triage {task_id}` 交给 helper 排查",
-            )
-            self._ledger.change(
-                task_id,
-                lambda cur, ch: (ch.note_on(cur.raw, msg, source="harness", **({"wake": True} if wake else {})), cur.raw)[1],
-            )
-            if wake:
-                self._deliver_later(resolved_repo)
-        elif resolved_repo:
-            wake = bool(self._projects.app_pm(resolved_repo))
-            msg = self.ctx.config.tr(f"async send to hc:{term} failed ({why})", f"异步发送到 hc:{term} 失败（{why}）")
-            Conversation(self.ctx, resolved_repo).record(
-                "event", by=f"hc:{term}", source="harness", text=msg, **({"wake": True} if wake else {}),
-            )
-            if wake:
-                self._deliver_later(resolved_repo)
+        on_typed, on_failed = send_reactions_for(self.ctx, term)
+        drain_endpoint(self.ctx, ep, wait_for=[e for e in env_ids if e], timeout_s=float(timeout),
+                       on_typed=on_typed, on_failed=on_failed, accept=lambda it, o: took_in(self.ctx, ep, it, o))
 
     def deliver_ready_for_task(
         self,

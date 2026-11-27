@@ -11,6 +11,7 @@ from typing import Any
 from ..context import Context
 from ..errors import PmError
 from ..helpers.service import HelperStartRequest, Helpers, helper_brief  # noqa: F401
+from ..reports import LocalFacts, ReportClient, helper_done_report
 from .emit import exit_with
 
 
@@ -40,19 +41,16 @@ def cmd_helper_done(a: Any, ctx: Any = None) -> None:
     text = getattr(a, "text", None)
     stdin_text = sys.stdin.read() if (from_stdin and text is None) else None
     try:
-        res = Helpers(ctx).done(
-            name=getattr(a, "name", None),
-            text=text,
-            stdin_text=stdin_text,
-            from_stdin=from_stdin,
-            summary=getattr(a, "summary", None),
-            task=getattr(a, "task", None),
+        # A `report.helper_done` envelope, applied here (`Helpers.done`: once done, a repeat only says so).
+        env = helper_done_report(
+            ctx, repo=getattr(a, "repo", None) or ".", task=getattr(a, "task", None),
+            name=getattr(a, "name", None), text=text, summary=getattr(a, "summary", None),
             pm=bool(getattr(a, "pm", False)),
-            repo=getattr(a, "repo", None) or ".",
         )
+        got = ReportClient(ctx).submit(env, local=LocalFacts(stdin_text=stdin_text, from_stdin=from_stdin))
     except PmError as err:
         _emit_helper_error(ctx, err)
-    ctx.out.line(res.line)
+    ctx.out.line(str(got.result.get("line") or ""))
 
 
 def cmd_helper_wait(a: Any, ctx: Any = None) -> None:

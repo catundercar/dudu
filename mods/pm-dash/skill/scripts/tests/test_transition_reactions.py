@@ -85,6 +85,7 @@ RULES = [
     (re.compile(r"\.\d+\.tmp\b"), ".<PID>.tmp"),
     (re.compile(r"\b\d+(?:\.\d+)? ?(?:ms|s|sec|secs|seconds|m|min|mins|minutes|h|hours?) ago\b"), "<AGO>"),
     (re.compile(r"\b\d{2}-\d{2}(?= <HH:MM>)"), "<MM-DD>"),  # the board's Updated column
+    (re.compile(r"\benv_[0-9a-f]{12}_[0-9a-f]{8}\b"), "<ENV>"),  # an envelope's id (time + random)
 ]
 
 
@@ -388,8 +389,26 @@ class TransitionReactions(unittest.TestCase):
         self.assertEqual(lines[0], f"{tid}: in_progress")
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[1], f"{tid}: sent to hc:{WORKER_TERM}")
-        self.assertEqual(got["hc"][-1], ["send", WORKER_TERM, f"[from hc:{PM_TERM}] go left"])
+        self.assertEqual(got["hc"][-1], ["send", "--", WORKER_TERM, f"[from hc:{PM_TERM} #<ENV>] go left"])
         self.golden(got)
+
+    def test_row4_send_is_queued_and_typed_by_the_real_drain_process(self):
+        """Without --wait the note is queued for the worker's terminal and `pm.py _drain-endpoint` (spawned, here
+        run as the real process it is) types it under the terminal's typist lease: once."""
+        tid = self.blocked_by_worker()
+        got = self.b.step(["update", tid, "--send", "--note", "go right"], AS_PM)
+        self.assertEqual(got["exit"], 0, got["stderr"])
+        self.assertFalse([c for c in got["hc"] if c[:1] == ["send"]])  # the PM's command typed nothing itself
+        raw = [json.loads(line) for line in self.b.spawn_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        drain = [a for a in raw if a[1:2] == ["_drain-endpoint"]]
+        self.assertEqual(len(drain), 1)
+        self.assertEqual(drain[0][2], WORKER_TERM)
+        ran = self.b.step(drain[0][1:], AS_PM)
+        self.assertEqual(ran["exit"], 0, ran["stderr"])
+        sends = [c for c in ran["hc"] if c[:1] == ["send"]]
+        self.assertEqual(sends, [["send", "--", WORKER_TERM, f"[from hc:{PM_TERM} #<ENV>] go right"]])
+        again = self.b.step(drain[0][1:], AS_PM)  # a duplicate spawn of the same drain types nothing
+        self.assertFalse([c for c in again["hc"] if c[:1] == ["send"]])
 
     def test_row4_send_wait_failure_exits_1_after_the_status_line(self):
         tid = self.blocked_by_worker()

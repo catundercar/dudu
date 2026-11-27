@@ -3,19 +3,19 @@ import { v_flex, h_flex, TextView, TextareaState, Textarea, InputState, Input, S
 import { theme, home, appHome, exec, readTextFile, writeTextFile, watchFolder, layout, run, terminals, agents, panes, spaces, shared, setShared, props, openOverlay, closeOverlay, window as appWindow } from 'herdr';
 import {
   word, timeline, parseConversation, settlePending, answeredTasks, markAnswered, bellStops, bellNext, bellCount, bellThread, detailQuestion, askKey, timelineRows, rowOf, rowOfKey, blockIndexForKey, riseAfterWheel, riseAfterJump, answerText, clock, dayLabel, shortPath,
-  sendArgv, makeClientMsgId, projectSendArgv, projectInterruptArgv, rotatePmArgs,
-  readScreenArgv, pmLiveStatus, pmTurnWorking, pmActivityView, pmSessionKey, pmCanReceive,
+  terminalSendArgv, rejectsOption, SEND_WAIT_SECONDS, makeClientMsgId, projectSendArgv, projectInterruptArgv, rotatePmArgs,
+  readScreenArgv, pmLiveStatus, pmTurnWorking, pmActivityView, recoveryStepLabel, incidentRowView, pmBusyComposerView, queuedReasonText, formatPmActionFeedback, pmSessionKey, pmCanReceive, deliveryLineView, inboxSignature,
   createAsyncGate, tryEnterAsyncGate, finishAsyncGate, computeClockOffsetMs, eventTimeUtcMs,
-  isDialogOrDraftSendError, isTargetGoneSendError, isQueueableSendError, reconcilePendingSends, classifyPmDialog, pmBlockedBannerText,
+  isDialogOrDraftSendError, isTargetGoneSendError, isQueueableSendError, reconcilePendingSends, classifyPmDialog, pmBlockedBannerText, undeliveredBannerText,
   QUEUE_KEY, readQueuedSends, keepQueuedSends, restoreQueuedPending, RESEND_VERIFY_WAIT_MS, logKey,
-  mergeReceipts, settledReceiptIndices, findReceiptMatch, findCoalescedReceiptMatches, confirmReceiptBubble,
-  withoutTerminalEnv, SEND_ENV, REATTACH_ENV, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
+  mergeReceipts, receiptsFromTurn2Inbox, settledReceiptIndices, findReceiptMatch, findCoalescedReceiptMatches, confirmReceiptBubble,
+  withoutTerminalEnv, SEND_ENV, REATTACH_ENV, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, pmKeepPlan, pmKeepFollowUp, pmTabNameFor, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
   disconnected, isClosedTask, closedDetailText, closedTip, terminalAction, reattachArgv,
   pmStartState, startPmArgs, startPmArgv, lostShown, mergeDismissedLost, lostSummary, bringBackSteps,
   engineLabel, engineTip, engineChip, wasEscalated, endedEngine, escapeStep, searchShortcutLabel,
   subThreads, parentThread, foldParts, PARTS_LIMIT, foldReviews, threadFor,
-  taskTree, taskSteps, taskDependencies, threadAgents, resolveAgentProgram, AGENT_WINDOW_MAX, normalizeAgentWindowSize, nextAgentWindowSize, agentWindowDimensions, agentWindowTerminalAddresses, agentWindowOpen, toggleAgentWindow, focusAgentWindow, closeAgentWindow, setAgentWindowOverlay, toggleAgentWindowMode, setAgentWindowSize, reconcileAgentWindows, resolveHelperResultPath,
-  age, eventTime, workingTasks, reviewWorking, taskNumber, formatTaskNumber, threadLink, resolveThreadRef, decorateThreadLinks, logText, draftKey, draftText, readDrafts, keepDraft,
+  taskTree, taskSteps, taskDependencies, threadAgents, threadAgentLayout, inlineAgentBadgeParts, inlineAgentBadgeText, agentActionLabel, resolveAgentProgram, AGENT_WINDOW_MAX, normalizeAgentWindowSize, nextAgentWindowSize, agentWindowDimensions, agentWindowTerminalAddresses, agentWindowOpen, toggleAgentWindow, focusAgentWindow, closeAgentWindow, setAgentWindowOverlay, toggleAgentWindowMode, setAgentWindowSize, reconcileAgentWindows, resolveHelperResultPath,
+  age, eventTime, workingTasks, reviewWorking, taskNumber, formatTaskNumber, threadLink, resolveThreadRef, decorateThreadLinks, logText, compactLogLine, draftKey, draftText, readDrafts, keepDraft,
   validInputTokens, draftTokens, projectFilesArgv, parseRefLink, parseMentionSpans, splitMentionSegments,
   detectMentionQuery, parseGitLsFiles, indexRepoFiles, buildMentionMenu, REPO_FILES_LIMIT, MENTION_KEY_BINDINGS, SEARCH_KEY_BINDINGS,
   plainTextToHtml, markdownToPlain, extractClipboardQuote, withQuote, withoutQuote, quotePreviewLine, quoteCardPreview,
@@ -23,13 +23,15 @@ import {
   formatQuotedMessage, splitQuotedMessage, draftQuotes, selectionToolbarState,
   draftFiles, withFiles, withoutFile, notFiles, pickedPaths, addFiles, messageText, afterSend, fileName, isImage, pasteName, pasteDir, pastesIn, uploadSteps, landedPath, sentFiles,
   heldFiles, sentLeftovers, staleArgv, staleFiles,
-  CHOOSE_FILES, SAVE_CLIPBOARD_IMAGE, PANEL_WIDTH, panelWidth, draggedWidth, readPanelWidth, keepPressHandler,
+  CHOOSE_FILES, SAVE_CLIPBOARD_IMAGE, PANEL_WIDTH, PANEL_MIN, panelWidth, draggedWidth, readPanelWidth, keepPressHandler,
+  SPLIT_WIDE_MIN, SPLIT_MEDIUM_MIN, SPLIT_CARD_MARGIN_R, SPLIT_GRIP_OVERHANG,
+  resolvePanelMode, resolveSplitLayout, readPanelSizes, updatePanelSizes, resetPanelModeSize,
   withAlpha, solidText, isDarkTheme, viewMarkdown, LEDGER_HOME_SH, EVENT_LIMIT, LOG_LIMIT,
   projectRef, machineView, onMachine, remotePmArgv,
   projectSlug, isOldPmCommand, isReplacedLogError, projectEventsArgv, projectLogArgv,
   FINISHED_LIMIT, TASKS_PAGE_LIMIT, projectTasksArgv, parseProjectTasksPage, normalizeProjectTaskRow, mergeFinishedRows, filterLocalThreads,
   freshEventWindow, appendEventWindow, prependEventWindow, keepThreadLog, heldThreadLog, timelineAnchor, findAnchorBlock,
-  DOC_INITIAL_BYTES, DOC_MAX_BYTES, SAVE_INLINE_BYTES, REMOTE_CHUNK_BYTES, REMOTE_MKTEMP_ARGV, remoteAppendChunkArgv, chunkUtf8Text,
+  DOC_INITIAL_BYTES, DOC_MAX_BYTES, SAVE_INLINE_BYTES, REMOTE_CHUNK_BYTES, REMOTE_MKTEMP_ARGV, remoteAppendChunkArgv, chunkUtf8Text, utf8ByteLength,
   MEMORY_TOPICS, PROJECT_MEMORY_TYPES, PERSONAL_MEMORY_TYPES, LIBRARY_DROP_TEXT_EXT,
   projectLibraryArgv, projectMemoryArgv, projectFileArgv, projectSaveArgv, projectDeleteArgv,
   projectRestoreArgv, projectHistoryArgv, projectAddArgv, projectRetopicArgv, adoptCandidateArgv,
@@ -39,6 +41,10 @@ import {
   libraryGroups, memoryGroups, searchLibrary, searchMemory, makeDocCacheEntry, isFreshDocEntry,
   makeDocFailEntry, isFreshDocFailure, reconcileDocCache, reconcileDocFailures, keepDocCache,
   documentView, resolveContextLink, markdownChunks, parseFrontmatter, buildMemoryMarkdown,
+  INLINE_IMAGE_CACHE_DIR, INLINE_IMAGE_MAX_BYTES, INLINE_IMAGE_REMOTE_MAX_BYTES,
+  isPreviewableImage, resolveImageTarget, extractInlineImageRefs, rewriteMarkdownImagesForDisplay,
+  fitImageBox, stageLocalImageArgv, readRemoteImageArgv, writeStagedImageArgv,
+  autoOpenEventKey, extractAutoOpenDocRefs, seedAutoOpenState, markAutoOpenHistory, pickAutoOpenTarget,
   memoryFromDroppedFile, slugifyMemoryName, uniqueMemorySlug, retopicPlan,
   SESSION_LIMIT, SESSION_POLL_LOCAL_MS, SESSION_POLL_REMOTE_MS,
   contextTokens, contextShort, contextLabel, pmContextLevel, pmContextTip, workerContextTip,
@@ -47,7 +53,12 @@ import {
   CHANGE_DIFF_LIMIT, CHANGE_TIMEOUT_LOCAL_MS, CHANGE_TIMEOUT_REMOTE_MS,
   projectChangeArgv, changeDiffKey, createChangeState, openChangeView, closeChangeView,
   enterChangeFiles, enterChangeFileDiff, stepBackChangeView, appendDiffPage, toggleDiffHunk, toggleAllDiffHunks,
-  tooltipLayout, pendingSignature, hostLiveSignature,
+  tooltipLayout, pendingSignature, hostLiveSignature, windowControlButtons,
+  SIDE_TABS_KEY, SIDE_TABS_MAX, sideTabKey, createSideTabsState,
+  openSideTab, activateSideTab, showSideIndex, toggleSideIndex,
+  closeSideTab, closeOtherSideTabs, closeRightSideTabs, closeAllSideTabs,
+  updateSideTab, upgradeDraftTab, cycleSideTab,
+  readSideTabsStore, hydrateProjectTabs, serializeProjectTabs,
 } from './model.js';
 import { execPython } from './python.js';
 import { renderThreadChangeView } from './change_view.js';
@@ -81,9 +92,52 @@ const COLUMN = 680, FADE = { duration: 180, easing: 'ease-out' };
 // The space above the first row of the conversation and after its last.
 const TAIL = 28;
 // From this width the conversation column and the side panel fit side by side, so the panel rests open.
-const WIDE = COLUMN + PANEL_WIDTH + 2 * 28;
+const WIDE = SPLIT_WIDE_MIN;
 // Where the panel's dragged width is kept, in this mod's localStorage.
 const PANEL_KEY = 'panelWidth';
+const PANEL_SIZES_KEY = 'panelSizes';
+// Retained child pane owners, keyed by scalar ownerId so cx.new(Class, { ownerId }) passes HostValue checks.
+const PANE_OWNERS = new Map();
+let paneOwnerSeq = 0;
+
+function canUseChildEntity(cx) {
+  if (!cx || typeof cx.new !== 'function') return false;
+  if (cx.__isBlankProxy === true) return false;
+  if (typeof cx.__nonExistentProbeForEntityCheck__ !== 'undefined') return false;
+  return true;
+}
+
+function isRealEntity(ent) {
+  return Boolean(
+    ent
+    && typeof ent === 'object'
+    && typeof ent.set_props === 'function'
+    && typeof ent.release === 'function'
+    && typeof ent.__nonExistentProbeForEntityCheck__ === 'undefined',
+  );
+}
+
+class ConversationPaneView extends View {
+  init(p) {
+    this.ownerId = p?.ownerId || '';
+  }
+  render(cx) {
+    const owner = PANE_OWNERS.get(this.ownerId);
+    if (!owner) return div().flex_1().min_w(0).h_full();
+    return owner.renderConversationPane(cx);
+  }
+}
+
+class SideSplitPaneView extends View {
+  init(p) {
+    this.ownerId = p?.ownerId || '';
+  }
+  render(cx) {
+    const owner = PANE_OWNERS.get(this.ownerId);
+    if (!owner) return div().w_full().h_full();
+    return owner.renderSideSplitPane(cx);
+  }
+}
 // The layout's block has window_drag: a left press that reaches it moves the window, and a double-click
 // maximizes it. So only the header's blank space and its words let presses through; its controls,
 // the conversation, the message boxes and the side panel keep theirs (Herdr's own bars do the same).
@@ -123,11 +177,11 @@ export default class PmProject extends View {
     this.lastHeaderActionSeq = 0;
     this.ringAction = null;
     this.state = { pms: [], tasks: [] };
-    this.events = []; this.logReceipts = []; this.logTurn = null; this.clockOffsetMs = 0; this.serverNowMs = 0; this.serverNowAt = 0;
+    this.events = []; this.logReceipts = []; this.logTurn = null; this.logTurn2 = null; this.logSupervised = undefined; this.clockOffsetMs = 0; this.serverNowMs = 0; this.serverNowAt = 0;
     this.pending = []; this.pendingByPm = new Map(); this.seq = 0; this.pastes = [];
     this.flushingQueue = false; this.flushingQueueAt = 0; this.queueTimer = false; this.confirmTimer = false; this.lastLogReadAt = 0; this.confirmLogProbes = new Set();
     this.refreshGate = createAsyncGate(); this.logGate = createAsyncGate();
-    this.interruptingPm = ''; this.rotatingPm = ''; this.turnTickTimer = false; this._lastPmLiveEdge = ''; this.edgeReadTimer = false;
+    this.interruptingPm = ''; this.rotatingPm = ''; this.pmActionFeedback = null; this.turnTickTimer = false; this._lastPmLiveEdge = ''; this.edgeReadTimer = false;
     this.noProjectSendFor = '';
     this.pmDialog = null; this.pmDialogLoading = false; this.pmDialogAt = 0; this.pmSendBlockError = '';
     this.error = ''; this.logError = '';
@@ -184,11 +238,22 @@ export default class PmProject extends View {
     this.memoryProjectOpen = true; this.memoryPersonalOpen = false; this.memoryCandidatesOpen = false;
     this.memoryQuery = ''; this.memoryBusy = ''; this.memoryNoticeError = '';
     this.activeDoc = null; this.docCache = new Map(); this.docFailed = new Map();
+    this.imageCache = new Map(); this.imageLoading = new Set(); this.imageFailed = new Map();
+    this._imageQueue = new Map(); this._imageFlushScheduled = false;
+    this.autoOpenSeenByLog = new Map();
     this.docLoading = ''; this.docError = ''; this.docShownBytes = DOC_INITIAL_BYTES;
     this.docFindOpen = false; this.docFindQuery = ''; this.docJumpQuery = ''; this.docFindJump = false; this.docMatchPos = 0;
     this.editingDoc = null; this.retopicOpen = false; this.retopicSaving = false; this.retopicError = '';
     this.confirmDeleteKey = ''; this.deleteBusy = ''; this.deleteError = ''; this.deletedBanner = null;
     this.historyView = null;
+    // Right sidebar unified multi-tab workspace state.
+    this.tabState = createSideTabsState();
+    this.tabHandles = new Map();
+    this.hoveredTabId = '';
+    this.confirmCloseTabId = '';
+    this.tabMenu = null;
+    this.tabLimitBanner = '';
+    this.hydratedTabProjects = new Set();
     // reattaching: the thread whose `pm.py reattach` runs; reattachError: {id, text} of the last that failed.
     this.reattaching = ''; this.reattachError = null;
     // startingPm: project key while `pm.py start` runs; bringBackOpen / bringingBack: lost-agents recovery card.
@@ -202,10 +267,38 @@ export default class PmProject extends View {
     this._renderTerms = null; this._renderTermsMachine = null;
     this._renderLive = null; this._renderLiveMachine = null;
     this._renderProjTasks = null; this._renderSpacesTabs = null;
-    // panelWant: the width the reader dragged the panel to (null: the default), kept in localStorage;
-    // panelDrag: {x, width} at the press while its edge is being dragged; viewWidth: the whole view's
-    // width; gripLit: the pointer is on the edge, which then shows.
-    this.panelWant = this.keptPanelWidth(); this.panelDrag = null; this.viewWidth = 0; this.gripLit = false;
+    // panelSizes: dual-mode persisted widths ({ compactPx, splitRatio }), migrated from legacy panelWidth;
+    // panelDrag: {x, width, mode, moved} at the press while its edge is being dragged;
+    // viewWidth: the whole view's width; gripLit: the pointer is on the edge, which then shows.
+    this._shellCx = cx;
+    this.panelSizes = this.keptPanelSizes();
+    this.panelWant = this.keptPanelWidth();
+    this.panelDrag = null; this.panelDragWidth = null; this.viewWidth = 0; this.gripLit = false;
+    this.panelTransitioning = false; this.panelTransitionTimer = null; this._panelLockWidth = null;
+    this._lastPanelTargetWidth = null; this._lastPanelOpen = false;
+    this._panelOpenedFromClosed = false; this._panelPrevTab = 'threads';
+    this._sideViewKey = ''; this._sideFading = false; this._sideFadeTimer = null;
+    this._shellOnlyRender = false; this._lastLayout = null; this._syncPanesScheduled = false;
+    this._paneOwnerId = `pm-pane-${++paneOwnerSeq}`;
+    PANE_OWNERS.set(this._paneOwnerId, this);
+    this._convEntity = null;
+    this._sideEntity = null;
+    if (canUseChildEntity(cx) === true) {
+      try {
+        const conv = cx.new(ConversationPaneView, { ownerId: this._paneOwnerId });
+        const side = cx.new(SideSplitPaneView, { ownerId: this._paneOwnerId });
+        if (isRealEntity(conv) === true && isRealEntity(side) === true) {
+          this._convEntity = conv;
+          this._sideEntity = side;
+        } else {
+          conv?.release?.();
+          side?.release?.();
+        }
+      } catch (_) {
+        this._convEntity = null;
+        this._sideEntity = null;
+      }
+    }
     this.seen = null; this.count = 0; this.settle = 0; this.away = false;
     // rise: how far above the end the reader is, in px, as the view keeps count of it (see riseAfterWheel);
     // heights: each row's measured height by its key; tall: the scroll area's height (the whole
@@ -224,6 +317,7 @@ export default class PmProject extends View {
     this.docScroll = ScrollHandle.new();
     this.historyScroll = ScrollHandle.new();
     this.changeScroll = ScrollHandle.new();
+    this.tabStripScroll = ScrollHandle.new();
     this.mentionScroll = ScrollHandle.new();
     this.searchScroll = ScrollHandle.new();
     this.searchOpen = false;
@@ -236,6 +330,11 @@ export default class PmProject extends View {
     this.mentionDismissed = null;
     this.mentionConsumedKey = false;
     this.mentionPicking = false;
+    this.mentionTasksQuery = '';
+    this.mentionTasksRows = [];
+    this.mentionTasksLoading = false;
+    this.mentionTasksSeq = 0;
+    this.mentionTasksTimer = null;
     this.repoFilesSlug = ''; this.repoFilesRepo = ''; this.repoFiles = [];
     this.repoFilesRead = false; this.repoFilesLoading = false; this.repoFilesAgain = false;
     this.repoFilesError = ''; this.repoFilesTruncated = false; this.repoFilesAt = 0;
@@ -273,7 +372,7 @@ export default class PmProject extends View {
       this.draft = content.text;
       this.typed(this.mainKey, content.text, content.tokens);
       const changedMention = this.syncMention('main', cx);
-      if (had !== Boolean(this.draft.trim()) || changedMention) cx.notify();
+      if (had !== Boolean(this.draft.trim()) || changedMention) this.notifyPanes(cx, { shell: false, conv: true });
     });
     // Enter sends (the key handler below catches it first); Shift+Enter stays a new line.
     this.input.on('submit', (e, cx) => {
@@ -296,6 +395,7 @@ export default class PmProject extends View {
       cx?.timer?.after(150, cx => {
         if (!this.mentionPicking && this.typing !== 'main' && this.mention?.which === 'main') {
           this.mention = null;
+          this.resetMentionTasks();
           cx.notify();
         }
       });
@@ -329,6 +429,7 @@ export default class PmProject extends View {
       cx?.timer?.after(150, cx => {
         if (!this.mentionPicking && this.typing !== 'thread' && this.mention?.which === 'thread') {
           this.mention = null;
+          this.resetMentionTasks();
           cx.notify();
         }
       });
@@ -359,21 +460,31 @@ export default class PmProject extends View {
       this.docFindQuery = this.docFindInput.value();
       this.docMatchPos = 0;
       this.docFindJump = true;
-      cx.notify();
+      this.syncActiveTabFind();
+      this.notifyPanes(cx, { shell: false, side: true });
     });
     this.docFindInput.on('focus', () => { this.typing = 'docFind'; });
     this.docFindInput.on('blur', () => { if (this.typing === 'docFind') this.typing = ''; });
     this.docNameInput = InputState.new();
-    this.docNameInput.on('change', (_e, cx) => { cx.notify(); });
+    this.docNameInput.on('change', (_e, cx) => {
+      this.syncActiveTabDirty();
+      this.notifyPanes(cx, { shell: false, side: true });
+    });
     this.docNameInput.on('focus', () => { this.typing = 'docName'; });
     this.docNameInput.on('blur', () => { if (this.typing === 'docName') this.typing = ''; });
     this.memDescInput = InputState.new();
-    this.memDescInput.on('change', (_e, cx) => { cx.notify(); });
+    this.memDescInput.on('change', (_e, cx) => {
+      this.syncActiveTabDirty();
+      this.notifyPanes(cx, { shell: false, side: true });
+    });
     this.memDescInput.on('focus', () => { this.typing = 'memDesc'; });
     this.memDescInput.on('blur', () => { if (this.typing === 'memDesc') this.typing = ''; });
     this.docEditorInput = TextareaState.new({ rows: 14 });
     this.docEditorInput.set_soft_wrap(true);
-    this.docEditorInput.on('change', (_e, cx) => { cx.notify(); });
+    this.docEditorInput.on('change', (_e, cx) => {
+      this.syncActiveTabDirty();
+      this.notifyPanes(cx, { shell: false, side: true });
+    });
     this.docEditorInput.on('focus', () => { this.typing = 'docEditor'; });
     this.docEditorInput.on('blur', () => { if (this.typing === 'docEditor') this.typing = ''; });
     this.searchInput = InputState.new();
@@ -578,7 +689,7 @@ export default class PmProject extends View {
     const pm = this.pm(), path = pm?.conversation || '', slug = projectSlug(pm), on = this.where();
     if (path !== this.logPath || slug !== this.logSlug) {
       this.logPath = path; this.logSlug = slug;
-      this.logState = null; this.events = []; this.logReceipts = []; this.logTurn = null; this.pastes = [];
+      this.logState = null; this.events = []; this.logReceipts = []; this.logTurn = null; this.logTurn2 = null; this.logSupervised = undefined; this.pastes = [];
       this.lastLogReadAt = 0; this.confirmLogProbes = new Set();
       this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
     }
@@ -611,6 +722,8 @@ export default class PmProject extends View {
               this.events = this.logState.events;
               this.logReceipts = Array.isArray(got.receipts) ? got.receipts : [];
               if (got.turn && typeof got.turn === 'object') this.logTurn = got.turn;
+              if (got.turn2 && typeof got.turn2 === 'object') this.logTurn2 = got.turn2;
+              if (typeof got.supervised === 'boolean') this.logSupervised = got.supervised;
               if (Number(got.server_now_ms) > 0) {
                 this.serverNowMs = Number(got.server_now_ms);
                 this.serverNowAt = gotAt;
@@ -641,6 +754,7 @@ export default class PmProject extends View {
           const log = logKey(machine, path, slug);
           this.logFresh = { log, from: Math.max(this.logFresh?.log === log ? this.logFresh.from : 0, startedAt) };
           this.reconcilePending(cx, { fromReadLog: true });
+          this.maybeAutoOpenFromEvents(log, cx);
           // The screenshots pasted into this project, for the messages the log has with image marks
           // (kept here for a project on another machine too, see pasteFolder).
           const dir = this.pasteFolder(pm);
@@ -696,6 +810,7 @@ export default class PmProject extends View {
           if (path !== this.logPath || slug !== this.logSlug || machine !== this.machine) return;
           this.logState = prependEventWindow(this.logState, askedFrom, got);
           this.events = this.logState.events;
+          this.markEarlierEventsSeen(logKey(machine, path, slug), got?.events || []);
           if (visibleCount(this.events) > beforeCount || !this.logState.earlier) break;
         }
         if (path === this.logPath && machine === this.machine) {
@@ -832,6 +947,7 @@ export default class PmProject extends View {
     this.finishedMore = true;
     this.finishedLoading = false;
     this.finishedError = '';
+    this.resetMentionTasks();
   }
 
   tasksQuerySupported() {
@@ -1019,6 +1135,11 @@ export default class PmProject extends View {
     if (tab === 'session' && !this.sessionTabAvailable(stateTask, task)) return;
     const freshForThread = !this.threadSession || this.threadSession.taskId !== this.thread;
     this.threadTab = tab === 'session' ? 'session' : 'log';
+    const active = this.activeSideTab();
+    if (active && active.kind === 'thread') {
+      this.tabState = updateSideTab(this.sideTabsState(), active.id, { threadTab: this.threadTab }).state;
+      this.persistSideTabs();
+    }
     if (this.threadTab === 'session') {
       if (freshForThread) {
         this.sessionAway = false;
@@ -1028,7 +1149,7 @@ export default class PmProject extends View {
         this.readThreadSession(cx);
       }
     }
-    cx.notify();
+    this.notifyPanes(cx, { shell: false, side: true });
   }
 
   shouldPollThreadSession() {
@@ -1362,6 +1483,7 @@ export default class PmProject extends View {
           this.libraryRead = true;
           this.libraryStale = false;
           this.libraryError = '';
+          this.reconcileMissingTabs('library');
           if (this.sideTab === 'library') {
             this.prefetchLibraryDocs(cx);
             if (this.activeDoc?.tab === 'library' && !this.editingDoc) {
@@ -1430,6 +1552,7 @@ export default class PmProject extends View {
           this.memoryRead = true;
           this.memoryStale = false;
           this.memoryError = '';
+          this.reconcileMissingTabs('memory');
           if (this.sideTab === 'memory' && this.activeDoc?.tab === 'memory' && !this.editingDoc) {
             const openKey = contextKey(this.activeDoc);
             const openMeta = this.findDocMeta(this.activeDoc.root, this.activeDoc.path);
@@ -1569,34 +1692,702 @@ export default class PmProject extends View {
     });
   }
 
-  openDoc(target, cx, opts = {}) {
-    if (!target?.root || !target?.path) return;
-    const tab = target.tab || (target.root === 'memory' || target.root === 'personal' ? 'memory' : 'library');
-    const key = `${target.root}/${target.path}`;
-    const currentKey = this.activeDoc ? `${this.activeDoc.root}/${this.activeDoc.path}` : '';
-    if (currentKey !== key) {
-      this.docShownBytes = DOC_INITIAL_BYTES;
-      this.docError = '';
-      this.docFindOpen = false;
-      this.docFindQuery = '';
-      this.docMatchPos = 0;
-      this.docFindInput?.set_value('');
+  // ---- Inline & side-tab image previews (safe local + remote staging into appHome cache) ----
+  markEarlierEventsSeen(log, earlierEvents) {
+    if (!log || !Array.isArray(earlierEvents) || !earlierEvents.length) return;
+    const byLog = (this.autoOpenSeenByLog ||= new Map());
+    const state = byLog.get(log);
+    if (state) markAutoOpenHistory(state, earlierEvents);
+  }
+
+  maybeAutoOpenFromEvents(log, cx) {
+    if (!log || !Array.isArray(this.events)) return;
+    const byLog = (this.autoOpenSeenByLog ||= new Map());
+    let state = byLog.get(log);
+    if (!state) {
+      // Seed baseline with all events already present when this project first loads so history never replays.
+      byLog.set(log, seedAutoOpenState(this.events));
+      return;
     }
+    const activeTab = typeof this.activeSideTab === 'function' ? this.activeSideTab() : null;
+    const editingDirty = Boolean((this.editingDoc && this.editorDirty?.()) || activeTab?.dirty);
+    const res = pickAutoOpenTarget(this.events, this.docLinkContext(), {
+      seenKeys: state.seen,
+      minSeq: state.minSeq,
+      minAt: state.minAt,
+      tasks: this.projectTasks(),
+      editingDirty,
+    });
+    for (const k of res.newKeys) state.seen.add(k);
+    if (!res.target) return;
+    this.openDoc({ tab: res.target.tab, root: res.target.root, path: res.target.path }, cx);
+  }
+
+  imageCacheKey(target) {
+    const slug = projectSlug(this.pm());
+    return `${this.machine || 'local'}|${slug}|${target?.key || ''}`;
+  }
+
+  imagePreviewState(target, cx) {
+    if (!target) return { status: 'error', error: 'invalid path' };
+    const cache = (this.imageCache ||= new Map());
+    const failedMap = (this.imageFailed ||= new Map());
+    const loadingSet = (this.imageLoading ||= new Set());
+    const queue = (this._imageQueue ||= new Map());
+    const cKey = this.imageCacheKey(target);
+    const meta = this.findDocMeta(target.root, target.path);
+    const version = meta?.version || '';
+    const cached = cache.get(cKey);
+    if (cached && (!version || !cached.version || cached.version === version)) {
+      return { status: 'ready', entry: cached };
+    }
+    const failed = failedMap.get(cKey);
+    if (failed && (!version || !failed.version || failed.version === version) && (Date.now() - failed.at < 30000)) {
+      return { status: 'error', error: failed.error || 'failed' };
+    }
+    if (!loadingSet.has(cKey) && cx?.timer?.after) {
+      queue.set(cKey, target);
+      if (!this._imageFlushScheduled) {
+        this._imageFlushScheduled = true;
+        cx.timer.after(0, liveCx => this.flushImageQueue(liveCx));
+      }
+    }
+    return { status: 'loading' };
+  }
+
+  flushImageQueue(cx) {
+    this._imageFlushScheduled = false;
+    const queue = (this._imageQueue ||= new Map());
+    if (!queue.size) return;
+    const batch = Array.from(queue.values());
+    queue.clear();
+    for (const target of batch) {
+      this.loadImagePreview(target, cx);
+    }
+  }
+
+  loadImagePreview(target, cx, { force = false } = {}) {
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    if (!pm || !slug || !target?.baseDir || !target?.relPath) return;
+    const cache = (this.imageCache ||= new Map());
+    const failedMap = (this.imageFailed ||= new Map());
+    const loadingSet = (this.imageLoading ||= new Set());
+    const cKey = this.imageCacheKey(target);
+    const meta = this.findDocMeta(target.root, target.path);
+    const version = meta?.version || '';
+    if (!force) {
+      const cached = cache.get(cKey);
+      if (cached && (!version || !cached.version || cached.version === version)) return;
+      if (loadingSet.has(cKey)) return;
+    } else {
+      failedMap.delete(cKey);
+    }
+    loadingSet.add(cKey);
+    if (force) cx?.notify?.();
+    const cacheDir = `${appHome()}/${INLINE_IMAGE_CACHE_DIR}`;
+    cx.spawn(async liveCx => {
+      try {
+        let parsed = null;
+        if (!machine) {
+          const r = await execPython(exec, stageLocalImageArgv(target.baseDir, target.relPath, cacheDir, {
+            relPrefix: INLINE_IMAGE_CACHE_DIR,
+            maxBytes: INLINE_IMAGE_MAX_BYTES,
+          }), { timeout: 15000 });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.code}`).trim());
+          parsed = JSON.parse(String(r.stdout || '').trim());
+        } else {
+          const [cmd, args] = readRemoteImageArgv(target.baseDir, target.relPath, {
+            maxBytes: INLINE_IMAGE_REMOTE_MAX_BYTES,
+          });
+          const r = await exec(cmd, args, { on: machine, timeout: 25000 });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.code}`).trim());
+          const remote = JSON.parse(String(r.stdout || '').trim());
+          if (!remote?.ok) {
+            parsed = remote;
+          } else {
+            const tmpB64 = `${appHome()}/.pm-img-${remote.hash}-${Date.now()}.b64.tmp`;
+            await writeTextFile(tmpB64, String(remote.b64 || ''), null);
+            const wr = await execPython(exec, writeStagedImageArgv(cacheDir, remote.hash, remote.ext, tmpB64, {
+              relPrefix: INLINE_IMAGE_CACHE_DIR,
+            }), { timeout: 15000 });
+            if (wr.code !== 0) throw new Error((wr.stderr || wr.stdout || `exit ${wr.code}`).trim());
+            parsed = JSON.parse(String(wr.stdout || '').trim());
+          }
+        }
+        if (parsed?.ok && parsed.rel) {
+          this.imageFailed.delete(cKey);
+          this.imageCache.set(cKey, {
+            rel: parsed.rel,
+            width: Number(parsed.width) || 0,
+            height: Number(parsed.height) || 0,
+            size: Number(parsed.size) || 0,
+            hash: String(parsed.hash || ''),
+            version,
+          });
+        } else {
+          this.imageFailed.set(cKey, {
+            error: String(parsed?.error || 'failed'),
+            at: Date.now(),
+            version,
+          });
+        }
+      } catch (e) {
+        this.imageFailed.set(cKey, {
+          error: String(e?.message || e || 'failed'),
+          at: Date.now(),
+          version,
+        });
+      } finally {
+        this.imageLoading.delete(cKey);
+        this.notifyPanes(liveCx, { shell: false, conv: true, side: true });
+      }
+    });
+  }
+
+  renderInlineImagePreviews(keyPrefix, rawText, t, cx, { maxWidth = 520, maxHeight = 280 } = {}) {
+    const refs = extractInlineImageRefs(rawText, this.docLinkContext());
+    if (!refs.length) return null;
+    const lang = this.lang;
+    const splitLay = this._lastLayout || this.currentSplitLayout();
+    const openInlineW = (this.isPanelOpen() && splitLay.layoutKind === 'inline') ? splitLay.slotWidth : 0;
+    const colW = this.viewWidth ? Math.min(COLUMN, Math.max(240, this.viewWidth - openInlineW - 80)) : COLUMN;
+    const effectiveMaxW = Math.max(180, Math.min(maxWidth, colW - 48));
+    const cards = refs.map((ref, idx) => {
+      const id = `img-prev-${keyPrefix}-${idx}`;
+      const st = this.imagePreviewState(ref, cx);
+      const openTarget = clickCx => this.openDoc({ tab: 'library', root: ref.root, path: ref.path }, clickCx);
+      if (st.status === 'ready') {
+        const box = fitImageBox(st.entry.width, st.entry.height, { maxWidth: effectiveMaxW, maxHeight });
+        const tip = `${word(lang, 'imageOpenPreview')} · ${ref.name}`;
+        const card = v_flex().id(id).w(box.width + 2).rounded(10).overflow_hidden()
+          .border_1().border_color(t.border).bg(t.surface).cursor_pointer()
+          .hover(s => s.border_color(withAlpha(t.accent, .55)))
+          .accessibility_label(tip)
+          .on_click((_e, clickCx) => openTarget(clickCx))
+          .child(image(st.entry.rel).w(box.width).h(box.height))
+          .child(h_flex().w_full().px(8).py(5).gap(6).items_center().justify_between()
+            .bg(withAlpha(t.raised, .75)).border_t_1().border_color(t.border)
+            .child(h_flex().min_w(0).flex_1().gap(5).items_center()
+              .child(this.icon('image', 12).flex_none().text_color(t.dim))
+              .child(div().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(ref.name)))
+            .child(div().flex_none().text_size(11).text_color(t.dim)
+              .child(word(lang, 'imageDimensions', st.entry.width, st.entry.height))));
+        return this.withTip(id, card, tip, t, { placement: 'above-left' });
+      }
+      if (st.status === 'loading') {
+        return h_flex().id(id).h(32).px(10).gap(7).rounded(8).items_center()
+          .bg(t.surface).border_1().border_color(t.border).text_size(12).text_color(t.dim)
+          .child(svg(SPINNER).size(13).flex_none().spin(900))
+          .child(div().min_w(0).truncate().child(ref.name));
+      }
+      const errTip = `${st.error === 'too large' ? word(lang, 'imageTooLarge') : word(lang, 'imageLoadFailed')} · ${ref.name}`;
+      const chip = h_flex().id(id).h(30).px(9).gap(6).rounded(8).items_center().cursor_pointer()
+        .bg(t.surface).border_1().border_color(t.border).text_size(12).text_color(t.dim)
+        .hover(s => s.bg(t.hover).text_color(t.muted))
+        .on_click((_e, clickCx) => {
+          this.loadImagePreview(ref, clickCx, { force: true });
+          openTarget(clickCx);
+        })
+        .child(this.icon('image', 13).flex_none())
+        .child(div().min_w(0).truncate().child(ref.name));
+      return this.withTip(id, chip, errTip, t, { placement: 'above-left' });
+    });
+    return v_flex().id(`img-strip-${keyPrefix}`).w_full().mt(8).gap(8).items_start().children(cards);
+  }
+
+  // ---- Right Sidebar Multi-Tab Workspace Controller -------------------------
+  sideTabsState() {
+    return (this.tabState ||= createSideTabsState());
+  }
+  hasSideTabs() {
+    return this.sideTabsState().tabs.length > 0;
+  }
+  activeSideTab() {
+    const st = this.sideTabsState();
+    return st.activeId ? (st.tabs.find(t => t.id === st.activeId) || null) : null;
+  }
+  openTabKeys() {
+    const out = new Set();
+    for (const t of this.sideTabsState().tabs) {
+      if (t?.key) out.add(t.key);
+    }
+    return out;
+  }
+  ensureTabHandles(tabId, kind) {
+    if (!tabId) return null;
+    const map = (this.tabHandles ||= new Map());
+    let h = map.get(tabId);
+    if (!h) {
+      h = kind === 'thread'
+        ? { log: ScrollHandle.new(), session: ScrollHandle.new(), change: ScrollHandle.new() }
+        : { doc: ScrollHandle.new(), history: ScrollHandle.new() };
+      map.set(tabId, h);
+    }
+    return h;
+  }
+  tabScrollHandle(slot) {
+    const tab = this.activeSideTab();
+    const h = tab ? this.tabHandles?.get(tab.id) : null;
+    if (h?.[slot]) return h[slot];
+    if (slot === 'doc') return this.docScroll;
+    if (slot === 'history') return this.historyScroll;
+    if (slot === 'log') return this.threadScroll;
+    if (slot === 'session') return this.sessionScroll;
+    if (slot === 'change') return this.changeScroll;
+    return null;
+  }
+  releaseTabHandles(tabId) {
+    if (!tabId || !this.tabHandles) return;
+    const h = this.tabHandles.get(tabId);
+    if (h) {
+      for (const sh of Object.values(h)) {
+        try { sh?.release?.(); } catch (_) { /* ignore */ }
+      }
+      this.tabHandles.delete(tabId);
+    }
+  }
+  releaseAllTabHandles() {
+    if (!this.tabHandles) return;
+    for (const h of this.tabHandles.values()) {
+      for (const sh of Object.values(h)) {
+        try { sh?.release?.(); } catch (_) { /* ignore */ }
+      }
+    }
+    this.tabHandles.clear();
+  }
+  scrollTabIntoView(tabId) {
+    const idx = this.sideTabsState().tabs.findIndex(t => t.id === tabId);
+    if (idx >= 0) this.tabStripScroll?.scroll_to_item?.(idx);
+  }
+  persistSideTabs(pmName = this.pmName) {
+    if (!pmName) return;
+    try {
+      const store = readSideTabsStore(localStorage.getItem(SIDE_TABS_KEY));
+      const serialized = serializeProjectTabs(store, pmName, this.sideTabsState());
+      localStorage.setItem(SIDE_TABS_KEY, serialized);
+    } catch (_) { /* ignore storage errors */ }
+  }
+  hydrateSideTabs(pmName, cx) {
+    this.releaseAllTabHandles();
+    this.confirmCloseTabId = '';
+    this.tabMenu = null;
+    this.tabLimitBanner = '';
+    this.hoveredTabId = '';
+    if (!pmName) {
+      this.tabState = createSideTabsState();
+      return;
+    }
+    let hydrated = createSideTabsState();
+    try {
+      const store = readSideTabsStore(localStorage.getItem(SIDE_TABS_KEY));
+      hydrated = hydrateProjectTabs(store, pmName);
+    } catch (_) { hydrated = createSideTabsState(); }
+    this.tabState = hydrated;
+    for (const t of hydrated.tabs) this.ensureTabHandles(t.id, t.kind);
+    const active = this.activeSideTab();
+    if (active) {
+      this.restoreActiveTabInputs(active, cx);
+      this.scrollTabIntoView(active.id);
+    }
+  }
+  reconcileMissingTabs(scope) {
+    const st = this.sideTabsState();
+    if (!st.tabs.length) return;
+    const known = new Set(this.allKnownFiles().map(f => contextKey(f)));
+    let changed = false;
+    const nextTabs = st.tabs.map(t => {
+      if (t.kind !== 'doc') return t;
+      const inScope = scope === 'memory'
+        ? (t.root === 'memory' || t.root === 'personal')
+        : (t.root === 'docs' || t.root === 'repo_docs' || t.root === 'research' || t.root === 'instructions');
+      if (!inScope) return t;
+      const missing = !known.has(`${t.root}/${t.path}`);
+      if (Boolean(t.missing) !== missing) {
+        changed = true;
+        return { ...t, missing };
+      }
+      return t;
+    });
+    if (changed) {
+      this.tabState = { ...st, tabs: nextTabs };
+      this.persistSideTabs();
+    }
+  }
+  syncActiveTabFind() {
+    const tab = this.activeSideTab();
+    if (!tab || (tab.kind !== 'doc' && tab.kind !== 'draft')) return;
+    this.tabState = updateSideTab(this.sideTabsState(), tab.id, {
+      find: {
+        open: Boolean(this.docFindOpen),
+        query: this.docFindQuery || '',
+        jumpQuery: this.docJumpQuery || '',
+        matchPos: this.docMatchPos || 0,
+      },
+    }).state;
+  }
+  syncActiveTabDirty() {
+    const tab = this.activeSideTab();
+    if (!tab || (tab.kind !== 'doc' && tab.kind !== 'draft')) return;
+    if (!this.editingDoc) return;
+    const dirty = this.editorDirty();
+    const draftSnap = {
+      ...this.editingDoc,
+      draftName: this.docNameInput?.value?.() ?? '',
+      draftDesc: this.memDescInput?.value?.() ?? '',
+      draftBody: this.docEditorInput?.value?.() ?? '',
+    };
+    this.editingDoc = draftSnap;
+    this.tabState = updateSideTab(this.sideTabsState(), tab.id, {
+      mode: 'edit',
+      editDraft: draftSnap,
+      dirty,
+    }).state;
+  }
+  snapshotActiveTabInputs() {
+    const tab = this.activeSideTab();
+    if (!tab) return;
+    if (tab.kind === 'thread') {
+      this.tabState = updateSideTab(this.sideTabsState(), tab.id, {
+        threadTab: this.threadTab || 'log',
+        change: this.change || createChangeState(),
+        logExpanded: Boolean(this.threadLogExpanded),
+        cachedTask: this.threadTask,
+        cachedLog: this.threadLog,
+        cachedSession: this.threadSession,
+        cachedSessionState: this.threadSessionState,
+        cachedToolsOpen: this.sessionToolsOpen ? new Set(this.sessionToolsOpen) : new Set(),
+        cachedBriefsOpen: this.sessionBriefsOpen ? new Set(this.sessionBriefsOpen) : new Set(),
+      }).state;
+      return;
+    }
+    const isEditing = Boolean(this.editingDoc);
+    const isHistory = Boolean(this.historyView && this.historyView.scope === 'item');
+    const editSnap = isEditing ? {
+      ...this.editingDoc,
+      draftName: this.docNameInput?.value?.() ?? '',
+      draftDesc: this.memDescInput?.value?.() ?? '',
+      draftBody: this.docEditorInput?.value?.() ?? '',
+    } : null;
+    if (editSnap) this.editingDoc = editSnap;
+    const dirty = isEditing ? this.editorDirty() : false;
+    this.tabState = updateSideTab(this.sideTabsState(), tab.id, {
+      mode: isEditing ? 'edit' : isHistory ? 'history' : 'read',
+      shownBytes: this.docShownBytes || DOC_INITIAL_BYTES,
+      find: {
+        open: Boolean(this.docFindOpen),
+        query: this.docFindQuery || '',
+        jumpQuery: this.docJumpQuery || '',
+        matchPos: this.docMatchPos || 0,
+      },
+      editDraft: editSnap,
+      history: isHistory ? this.historyView : null,
+      dirty,
+    }).state;
+  }
+  restoreActiveTabInputs(tab, cx) {
     this.confirmDeleteKey = '';
     this.deleteError = '';
     this.retopicOpen = false;
     this.retopicError = '';
-    this.editingDoc = null;
-    this.historyView = null;
-    this.sideTab = tab;
-    this.activeDoc = { tab, root: target.root, path: target.path };
-    const q = String((opts?.jumpQuery !== undefined ? opts.jumpQuery : (tab === 'memory' ? this.memoryQuery : this.libraryQuery)) || '').trim();
-    this.docJumpQuery = q;
-    this.docFindJump = Boolean(q);
-    this.readDoc(target.root, target.path, cx);
+    if (!tab) {
+      this.detail = false;
+      this.activeDoc = null;
+      this.editingDoc = null;
+      this.historyView = null;
+      this.docError = '';
+      this.docFindOpen = false;
+      this.docFindQuery = '';
+      this.docJumpQuery = '';
+      this.docMatchPos = 0;
+      this.docFindInput?.set_value?.('');
+      return;
+    }
+    if (tab.kind === 'thread') {
+      const changedThread = this.thread !== tab.taskId;
+      this.detail = true;
+      this.thread = tab.taskId;
+      this.activeDoc = null;
+      this.editingDoc = null;
+      this.historyView = null;
+      this.threadTab = tab.threadTab || 'log';
+      this.change = tab.change || createChangeState();
+      this.threadLogExpanded = Boolean(tab.logExpanded);
+      if (changedThread) {
+        this.threadTask = tab.cachedTask ?? null;
+        this.threadError = '';
+        this.threadLog = tab.cachedLog ?? null;
+        this.threadLogKept = [];
+        this.threadEarlierLoading = false;
+        this.threadEarlierError = '';
+        this.threadAnchor = null;
+        if (tab.cachedSession && tab.cachedSession.taskId === tab.taskId) {
+          this.threadSession = tab.cachedSession;
+          this.threadSessionState = tab.cachedSessionState || 'ready';
+          this.threadSessionTask = tab.taskId;
+          this.sessionToolsOpen = tab.cachedToolsOpen ? new Set(tab.cachedToolsOpen) : new Set();
+          this.sessionBriefsOpen = tab.cachedBriefsOpen ? new Set(tab.cachedBriefsOpen) : new Set();
+        } else {
+          this.resetThreadSession();
+        }
+        this.showThreadDraft(tab.taskId);
+      }
+      if (cx) {
+        this.readThread(cx);
+        if (this.threadTab === 'session') this.syncThreadSession(cx);
+      }
+      return;
+    }
+    this.detail = false;
+    const docTab = tab.tab || (tab.root === 'memory' || tab.root === 'personal' ? 'memory' : 'library');
+    this.sideTab = docTab;
+    this.activeDoc = tab.kind === 'doc' ? { tab: docTab, root: tab.root, path: tab.path } : null;
+    this.docShownBytes = tab.shownBytes || DOC_INITIAL_BYTES;
+    this.docError = '';
+    const f = tab.find || {};
+    this.docFindOpen = Boolean(f.open);
+    this.docFindQuery = f.query || '';
+    this.docJumpQuery = f.jumpQuery || '';
+    this.docMatchPos = f.matchPos || 0;
+    this.docFindInput?.set_value?.(this.docFindQuery);
+    if (tab.mode === 'edit' && tab.editDraft) {
+      this.editingDoc = tab.editDraft;
+      this.historyView = null;
+      this.docNameInput?.set_value?.(tab.editDraft.draftName ?? tab.editDraft.originalName ?? '');
+      this.memDescInput?.set_value?.(tab.editDraft.draftDesc ?? tab.editDraft.originalDesc ?? '');
+      this.docEditorInput?.set_value?.(tab.editDraft.draftBody ?? tab.editDraft.originalText ?? '');
+    } else if (tab.mode === 'history' && tab.history) {
+      this.editingDoc = null;
+      this.historyView = tab.history;
+    } else {
+      this.editingDoc = null;
+      this.historyView = null;
+      if (tab.kind === 'doc' && cx) this.readDoc(tab.root, tab.path, cx);
+    }
+  }
+  activateTab(tabId, cx) {
+    const st = this.sideTabsState();
+    if (!tabId) return;
+    if (st.activeId === tabId) {
+      this.tabMenu = null;
+      this.scrollTabIntoView(tabId);
+      this.notifyPanes(cx, { shell: false, side: true });
+      return;
+    }
+    this.snapshotActiveTabInputs();
+    this.confirmCloseTabId = '';
+    this.tabMenu = null;
+    const res = activateSideTab(this.sideTabsState(), tabId);
+    if (!res.activated) return;
+    this.tabState = res.state;
+    this.ensureTabHandles(res.tab.id, res.tab.kind);
+    this.restoreActiveTabInputs(res.tab, cx);
+    this.scrollTabIntoView(res.tab.id);
+    this.persistSideTabs();
+    this.notifyPanes(cx, { shell: false, side: true });
+  }
+  showIndexView(cx, { toggle = false } = {}) {
+    this.snapshotActiveTabInputs();
+    this.confirmCloseTabId = '';
+    this.tabMenu = null;
+    const res = toggle ? toggleSideIndex(this.sideTabsState()) : showSideIndex(this.sideTabsState());
+    this.tabState = res.state;
+    const active = this.activeSideTab();
+    this.restoreActiveTabInputs(active, cx);
+    if (active) this.scrollTabIntoView(active.id);
+    else this.syncVisibleSideTab(cx);
+    this.persistSideTabs();
+    this.notifyPanes(cx, { shell: false, side: true });
+  }
+  cycleTab(delta, cx) {
+    if (!this.hasSideTabs()) return;
+    this.snapshotActiveTabInputs();
+    this.confirmCloseTabId = '';
+    this.tabMenu = null;
+    const res = cycleSideTab(this.sideTabsState(), delta);
+    if (!res.activated) return;
+    this.tabState = res.state;
+    this.ensureTabHandles(res.tab.id, res.tab.kind);
+    this.restoreActiveTabInputs(res.tab, cx);
+    this.scrollTabIntoView(res.tab.id);
+    this.persistSideTabs();
+    this.notifyPanes(cx, { shell: false, side: true });
+  }
+  closeTab(tabId, cx, { force = false } = {}) {
+    if (!tabId) return;
+    this.snapshotActiveTabInputs();
+    const prevCount = this.sideTabsState().tabs.length;
+    const res = closeSideTab(this.sideTabsState(), tabId, { force });
+    if (res.needsConfirm) {
+      this.tabState = res.state;
+      this.confirmCloseTabId = tabId;
+      this.tabMenu = null;
+      this.restoreActiveTabInputs(this.activeSideTab(), cx);
+      this.scrollTabIntoView(tabId);
+      this.notifyPanes(cx, { shell: false, side: true });
+      return;
+    }
+    this.confirmCloseTabId = '';
+    this.tabMenu = null;
+    this.tabLimitBanner = '';
+    if (res.closed) this.releaseTabHandles(res.closed.id);
+    this.tabState = res.state;
+    this.persistSideTabs();
+    if (this.tabState.tabs.length === 0) {
+      if (this._panelOpenedFromClosed) {
+        this.restoreActiveTabInputs(null, cx);
+        this.closeSidePanel(cx);
+        return;
+      }
+      this.restoreActiveTabInputs(null, cx);
+      this.syncVisibleSideTab(cx);
+      this.notifyPanes(cx, { shell: true, conv: true, side: true });
+      return;
+    }
+    const nextActive = this.activeSideTab();
+    this.restoreActiveTabInputs(nextActive, cx);
+    if (nextActive) this.scrollTabIntoView(nextActive.id);
+    const crossedMode = (prevCount > 0) !== (this.tabState.tabs.length > 0);
+    this.notifyPanes(cx, crossedMode ? { shell: true, conv: true, side: true } : { shell: false, side: true });
+  }
+  closeOtherTabs(keepTabId, cx) {
+    this.snapshotActiveTabInputs();
+    this.tabMenu = null;
+    this.tabLimitBanner = '';
+    const res = closeOtherSideTabs(this.sideTabsState(), keepTabId);
+    for (const c of res.closed) this.releaseTabHandles(c.id);
+    this.tabState = res.state;
+    if (res.skippedDirtyIds.length > 0) {
+      const act = activateSideTab(this.tabState, res.skippedDirtyIds[0]);
+      this.tabState = act.state;
+      this.confirmCloseTabId = res.skippedDirtyIds[0];
+    } else {
+      this.confirmCloseTabId = '';
+    }
+    this.restoreActiveTabInputs(this.activeSideTab(), cx);
+    if (this.tabState.activeId) this.scrollTabIntoView(this.tabState.activeId);
+    this.persistSideTabs();
+    this.notifyPanes(cx, { shell: false, side: true });
+  }
+  closeRightTabs(fromTabId, cx) {
+    this.snapshotActiveTabInputs();
+    this.tabMenu = null;
+    this.tabLimitBanner = '';
+    const res = closeRightSideTabs(this.sideTabsState(), fromTabId);
+    for (const c of res.closed) this.releaseTabHandles(c.id);
+    this.tabState = res.state;
+    if (res.skippedDirtyIds.length > 0) {
+      const act = activateSideTab(this.tabState, res.skippedDirtyIds[0]);
+      this.tabState = act.state;
+      this.confirmCloseTabId = res.skippedDirtyIds[0];
+    } else {
+      this.confirmCloseTabId = '';
+    }
+    this.restoreActiveTabInputs(this.activeSideTab(), cx);
+    if (this.tabState.activeId) this.scrollTabIntoView(this.tabState.activeId);
+    this.persistSideTabs();
+    this.notifyPanes(cx, { shell: false, side: true });
+  }
+  closeAllTabs(cx) {
+    this.snapshotActiveTabInputs();
+    this.tabMenu = null;
+    this.tabLimitBanner = '';
+    const prevCount = this.sideTabsState().tabs.length;
+    const res = closeAllSideTabs(this.sideTabsState());
+    for (const c of res.closed) this.releaseTabHandles(c.id);
+    this.tabState = res.state;
+    if (res.skippedDirtyIds.length > 0) {
+      const act = activateSideTab(this.tabState, res.skippedDirtyIds[0]);
+      this.tabState = act.state;
+      this.confirmCloseTabId = res.skippedDirtyIds[0];
+    } else {
+      this.confirmCloseTabId = '';
+    }
+    const nextActive = this.activeSideTab();
+    this.restoreActiveTabInputs(nextActive, cx);
+    if (nextActive) this.scrollTabIntoView(nextActive.id);
+    else this.syncVisibleSideTab(cx);
+    this.persistSideTabs();
+    const crossedMode = (prevCount > 0) !== (this.tabState.tabs.length > 0);
+    this.notifyPanes(cx, crossedMode ? { shell: true, conv: true, side: true } : { shell: false, side: true });
   }
 
-  closeActiveDoc(cx) {
+  openDoc(target, cx, opts = {}) {
+    if (!target?.root || !target?.path) return;
+    this.panelClosing = false;
+    const wasOpen = this.isPanelOpen();
+    const prevTabCount = this.sideTabsState().tabs.length;
+    if (!wasOpen) {
+      this._panelOpenedFromClosed = true;
+      this.listShown = true;
+    } else if (!this.listResting()) {
+      this.listShown = true;
+    }
+    const tab = target.tab || (target.root === 'memory' || target.root === 'personal' ? 'memory' : 'library');
+    if (target.root === 'repo' && this.sideTab && this.sideTab !== 'library') {
+      this._panelPrevTab = this.sideTab;
+    }
+    this.snapshotActiveTabInputs();
+    this.tabMenu = null;
+    this.confirmCloseTabId = '';
+    const meta = this.findDocMeta(target.root, target.path);
+    const title = meta ? libraryDocTitle(meta) : fileName(target.path);
+    const res = openSideTab(this.sideTabsState(), {
+      kind: 'doc',
+      tab,
+      root: target.root,
+      path: target.path,
+      title,
+    }, { insertAdjacent: Boolean(opts?.insertAdjacent) });
+    if (res.blocked) {
+      this.tabLimitBanner = word(this.lang, 'sideTabLimitDirty');
+      this.notifyPanes(cx, { shell: false, side: true });
+      return;
+    }
+    this.tabLimitBanner = '';
+    if (res.evicted) this.releaseTabHandles(res.evicted.id);
+    this.tabState = res.state;
+    this.ensureTabHandles(res.tab.id, 'doc');
+    const q = String((opts?.jumpQuery !== undefined ? opts.jumpQuery : (tab === 'memory' ? this.memoryQuery : this.libraryQuery)) || '').trim();
+    if (q) {
+      this.tabState = updateSideTab(this.tabState, res.tab.id, t => ({
+        find: { ...(t.find || {}), jumpQuery: q },
+      })).state;
+    }
+    const active = this.activeSideTab();
+    this.restoreActiveTabInputs(active, cx);
+    this.docJumpQuery = q;
+    this.docFindJump = Boolean(q);
+    this.scrollTabIntoView(res.tab.id);
+    this.persistSideTabs();
+    if (isPreviewableImage(target.path)) {
+      const imgTarget = resolveImageTarget(target, this.docLinkContext());
+      if (imgTarget) this.loadImagePreview(imgTarget, cx);
+    }
+    const crossedMode = !wasOpen || prevTabCount === 0;
+    this.notifyPanes(cx, crossedMode ? { shell: true, conv: true, side: true } : { shell: false, side: true });
+  }
+
+  closeActiveDoc(cx, { fromEscape = false } = {}) {
+    const active = this.activeSideTab();
+    if (active && (active.kind === 'doc' || active.kind === 'draft')) {
+      if (fromEscape) {
+        if (this._panelOpenedFromClosed && this.sideTabsState().tabs.length === 1) {
+          if (this.typing === 'docFind') this.keyFocus?.focus();
+          this.closeSidePanel(cx);
+          return;
+        }
+        if (this.typing === 'docFind') this.keyFocus?.focus();
+        this.showIndexView(cx);
+        return;
+      }
+      this.showIndexView(cx);
+      return;
+    }
+    if (fromEscape && this._panelOpenedFromClosed) {
+      if (this.typing === 'docFind') this.keyFocus?.focus();
+      this.closeSidePanel(cx);
+      return;
+    }
     const wasRepo = this.activeDoc?.root === 'repo';
     this.activeDoc = null;
     this.docError = '';
@@ -1610,17 +2401,34 @@ export default class PmProject extends View {
     this.retopicError = '';
     this.editingDoc = null;
     this.docFindInput?.set_value('');
-    if (wasRepo && !this.librarySupported() && this.sideTab === 'library') this.sideTab = 'threads';
+    if (wasRepo) {
+      if (!this.librarySupported() && this.sideTab === 'library') this.sideTab = 'threads';
+      else if (this._panelPrevTab && this._panelPrevTab !== 'library') this.sideTab = this._panelPrevTab;
+    }
+    if (!fromEscape) {
+      this.listShown = true;
+      this._panelOpenedFromClosed = false;
+    }
     if (this.typing === 'docFind') this.keyFocus?.focus();
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
 
   selectSideTab(tab, cx) {
     if (tab === 'library' && !this.librarySupported()) return;
     if (tab === 'memory' && !this.memorySupported()) return;
+    this.panelClosing = false;
     this.sideTab = tab;
-    this.detail = false;
-    this.resetThreadChange();
+    this._panelPrevTab = tab;
+    this._panelOpenedFromClosed = false;
+    if (this.hasSideTabs() && this.sideTabsState().activeId !== null) {
+      this.snapshotActiveTabInputs();
+      this.tabState = showSideIndex(this.sideTabsState()).state;
+      this.restoreActiveTabInputs(null, cx);
+      this.persistSideTabs();
+    } else {
+      this.detail = false;
+      this.resetThreadChange();
+    }
     this.confirmDeleteKey = '';
     this.retopicOpen = false;
     if (tab === 'library') {
@@ -1629,18 +2437,18 @@ export default class PmProject extends View {
     } else if (tab === 'memory') {
       if (this.machine || !this.memoryRead || this.memoryStale) this.readMemory(cx);
     }
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
 
   followDocLink(url, cx) {
     const rel = resolveContextLink(this.activeDoc, url, this.allKnownFiles());
-    if (rel?.root === 'repo') { this.openRepoFile(rel.path, cx); return; }
-    if (rel) { this.openDoc(rel, cx); return; }
+    if (rel?.root === 'repo') { this.openDoc({ tab: 'library', root: 'repo', path: rel.path }, cx, { insertAdjacent: true }); return; }
+    if (rel) { this.openDoc(rel, cx, { insertAdjacent: true }); return; }
     this.followLink(url, cx);
   }
 
   async saveProjectText(slug, root, path, text, { ifVersion = null } = {}) {
-    const byteLen = new TextEncoder().encode(text).length;
+    const byteLen = utf8ByteLength(text);
     if (byteLen > SAVE_INLINE_BYTES) {
       if (!this.machine && this.ledgerHome) {
         const tmp = `${this.ledgerHome}/.pm-edit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`;
@@ -1677,48 +2485,73 @@ export default class PmProject extends View {
     this.retopicOpen = false;
     this.historyView = null;
     this.deletedBanner = null;
-    if (tab === 'memory') {
-      this.editingDoc = {
-        mode: 'create',
-        tab: 'memory',
-        root: 'memory',
-        path: '',
-        layer: 'project',
-        type: 'project',
-        topic: 'architecture',
-        version: '',
-        originalName: '',
-        originalDesc: '',
-        originalText: '',
-        originalType: 'project',
-        originalTopic: 'architecture',
-        existingRaw: '',
-        saving: false,
-        error: '',
-        conflict: null,
-      };
-      this.docNameInput?.set_value('');
-      this.memDescInput?.set_value('');
-      this.docEditorInput?.set_value('');
-      cx.timer?.after(0, () => this.docNameInput?.focus());
-    } else {
-      this.editingDoc = {
-        mode: 'create',
-        tab: 'library',
-        root: 'docs',
-        path: '',
-        version: '',
-        originalName: '',
-        originalText: '',
-        saving: false,
-        error: '',
-        conflict: null,
-      };
-      this.docNameInput?.set_value('');
-      this.docEditorInput?.set_value('');
-      cx.timer?.after(0, () => this.docNameInput?.focus());
+    this.confirmCloseTabId = '';
+    this.tabMenu = null;
+    this.snapshotActiveTabInputs();
+    const wasOpen = this.isPanelOpen();
+    const prevTabCount = this.sideTabsState().tabs.length;
+    if (!wasOpen) {
+      this._panelOpenedFromClosed = true;
+      this.listShown = true;
     }
-    cx.notify();
+    const isMem = tab === 'memory';
+    const ed = isMem ? {
+      mode: 'create',
+      tab: 'memory',
+      root: 'memory',
+      path: '',
+      layer: 'project',
+      type: 'project',
+      topic: 'architecture',
+      version: '',
+      originalName: '',
+      originalDesc: '',
+      originalText: '',
+      originalType: 'project',
+      originalTopic: 'architecture',
+      existingRaw: '',
+      draftName: '',
+      draftDesc: '',
+      draftBody: '',
+      saving: false,
+      error: '',
+      conflict: null,
+    } : {
+      mode: 'create',
+      tab: 'library',
+      root: 'docs',
+      path: '',
+      version: '',
+      originalName: '',
+      originalText: '',
+      draftName: '',
+      draftBody: '',
+      saving: false,
+      error: '',
+      conflict: null,
+    };
+    const res = openSideTab(this.sideTabsState(), {
+      kind: 'draft',
+      tab: isMem ? 'memory' : 'library',
+      root: ed.root,
+      title: word(this.lang, isMem ? 'newMemory' : 'newDoc'),
+      editDraft: ed,
+    });
+    if (res.blocked) {
+      this.tabLimitBanner = word(this.lang, 'sideTabLimitDirty');
+      this.notifyPanes(cx, { shell: false, side: true });
+      return;
+    }
+    this.tabLimitBanner = '';
+    if (res.evicted) this.releaseTabHandles(res.evicted.id);
+    this.tabState = res.state;
+    this.ensureTabHandles(res.tab.id, 'draft');
+    this.restoreActiveTabInputs(res.tab, cx);
+    this.scrollTabIntoView(res.tab.id);
+    cx.timer?.after(0, () => this.docNameInput?.focus());
+    this.panelClosing = false;
+    const crossedMode = !wasOpen || prevTabCount === 0;
+    this.notifyPanes(cx, crossedMode ? { shell: true, conv: true, side: true } : { shell: false, side: true });
   }
 
   startEditDoc(cx) {
@@ -1755,6 +2588,8 @@ export default class PmProject extends View {
         originalType: type,
         originalTopic: topic,
         existingRaw: cached.text,
+        draftDesc: desc,
+        draftBody: body,
         saving: false,
         error: '',
         conflict: null,
@@ -1771,6 +2606,7 @@ export default class PmProject extends View {
         version,
         originalName: docRef.path,
         originalText: cached.text,
+        draftBody: cached.text,
         saving: false,
         error: '',
         conflict: null,
@@ -1778,15 +2614,40 @@ export default class PmProject extends View {
       this.docEditorInput?.set_value(cached.text);
       cx.timer?.after(0, () => this.docEditorInput?.focus());
     }
-    cx.notify();
+    const active = this.activeSideTab();
+    if (active && active.kind === 'doc') {
+      this.tabState = updateSideTab(this.sideTabsState(), active.id, {
+        mode: 'edit',
+        editDraft: this.editingDoc,
+        dirty: false,
+      }).state;
+    }
+    this.panelClosing = false;
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
 
   cancelEditDoc(cx) {
+    const active = this.activeSideTab();
+    if (active && active.kind === 'draft') {
+      if (this.typing === 'docEditor' || this.typing === 'docName' || this.typing === 'memDesc') {
+        this.keyFocus?.focus();
+      }
+      this.closeTab(active.id, cx, { force: !this.editorDirty() });
+      return;
+    }
+    if (active && active.kind === 'doc') {
+      this.tabState = updateSideTab(this.sideTabsState(), active.id, {
+        mode: 'read',
+        editDraft: null,
+        dirty: false,
+      }).state;
+    }
     this.editingDoc = null;
+    this.confirmCloseTabId = '';
     if (this.typing === 'docEditor' || this.typing === 'docName' || this.typing === 'memDesc') {
       this.keyFocus?.focus();
     }
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
 
   editorDirty() {
@@ -1803,10 +2664,11 @@ export default class PmProject extends View {
     return bodyNow !== ed.originalText || nameNow !== ed.originalName;
   }
 
-  async saveEditingDoc(cx, { overwrite = false } = {}) {
+  async saveEditingDoc(cx, { overwrite = false, closeTabAfter = false } = {}) {
     const ed = this.editingDoc;
     const slug = projectSlug(this.pm());
     if (!ed || !slug || ed.saving) return;
+    const activeTabAtStart = this.activeSideTab();
     const lang = this.lang;
     let root = ed.root;
     let relPath = ed.path;
@@ -1853,15 +2715,14 @@ export default class PmProject extends View {
     ed.conflict = null;
     cx.notify();
     const ifVersion = overwrite ? null : (ed.mode === 'create' ? 'new' : (ed.version || null));
+    const targetTabId = activeTabAtStart?.id || null;
     try {
       const r = await this.saveProjectText(slug, root, relPath, payloadText, { ifVersion });
       const conflict = parseVersionConflict(r);
       if (conflict) {
-        if (this.editingDoc === ed) {
-          ed.conflict = conflict;
-          ed.saving = false;
-        }
-        cx.notify();
+        ed.conflict = conflict;
+        ed.saving = false;
+        this.notifyPanes(cx, { shell: false, side: true });
         return;
       }
       if (r.code !== 0) {
@@ -1870,23 +2731,55 @@ export default class PmProject extends View {
       const key = `${root}/${relPath}`;
       this.docCache.delete(key);
       this.docFailed.delete(key);
+      ed.saving = false;
+      const curState = this.sideTabsState();
+      const prevActiveId = curState.activeId;
+      const stillActive = Boolean(this.editingDoc === ed && (!targetTabId || prevActiveId === targetTabId));
+      let savedTabId = targetTabId;
+      if (targetTabId && curState.tabs.some(t => t.id === targetTabId)) {
+        if (activeTabAtStart.kind === 'draft') {
+          const up = upgradeDraftTab(curState, targetTabId, {
+            root, path: relPath, tab: ed.tab, title: fileName(relPath),
+          });
+          if (up.removedDraftId) this.releaseTabHandles(up.removedDraftId);
+          let nextState = up.state;
+          if (!stillActive && prevActiveId !== targetTabId && (prevActiveId === null || nextState.tabs.some(t => t.id === prevActiveId))) {
+            nextState = { ...nextState, activeId: prevActiveId };
+          }
+          this.tabState = nextState;
+          if (up.tab) {
+            savedTabId = up.tab.id;
+            this.ensureTabHandles(up.tab.id, 'doc');
+          }
+        } else {
+          this.tabState = updateSideTab(curState, targetTabId, {
+            mode: 'read', dirty: false, editDraft: null,
+          }).state;
+        }
+        this.persistSideTabs();
+      }
+      if (this.confirmCloseTabId && (this.confirmCloseTabId === targetTabId || this.confirmCloseTabId === savedTabId)) {
+        this.confirmCloseTabId = '';
+      }
       if (this.editingDoc === ed) {
         this.editingDoc = null;
         this.activeDoc = { tab: ed.tab, root, path: relPath };
-      }
-      if (this.typing === 'docEditor' || this.typing === 'docName' || this.typing === 'memDesc') {
-        this.keyFocus?.focus();
+        if (this.typing === 'docEditor' || this.typing === 'docName' || this.typing === 'memDesc') {
+          this.keyFocus?.focus();
+        }
       }
       if (ed.tab === 'memory') this.readMemory(cx);
       else this.readLibrary(cx);
       this.readDoc(root, relPath, cx, { force: true });
-    } catch (e) {
-      if (this.editingDoc === ed) {
-        ed.error = word(lang, 'saveFailed', String(e?.message || e).trim());
-        ed.saving = false;
+      if (closeTabAfter && savedTabId && this.sideTabsState().tabs.some(t => t.id === savedTabId)) {
+        this.closeTab(savedTabId, cx, { force: true });
+        return;
       }
+    } catch (e) {
+      ed.error = word(lang, 'saveFailed', String(e?.message || e).trim());
+      ed.saving = false;
     }
-    cx.notify();
+    this.notifyPanes(cx, { shell: false, side: true });
   }
 
   async reloadConflictDoc(cx) {
@@ -1986,14 +2879,19 @@ export default class PmProject extends View {
         path: docRef.path,
         name: meta?.name || fileName(docRef.path),
       };
-      this.activeDoc = null;
+      const deletedTab = this.sideTabsState().tabs.find(t => t.kind === 'doc' && t.root === docRef.root && t.path === docRef.path);
+      if (deletedTab) {
+        this.closeTab(deletedTab.id, cx, { force: true });
+      } else {
+        this.activeDoc = null;
+      }
       if (docRef.tab === 'memory') this.readMemory(cx);
       else this.readLibrary(cx);
     } catch (e) {
       this.deleteError = word(this.lang, 'deleteFailed', String(e?.message || e).trim());
     } finally {
       this.deleteBusy = '';
-      cx.notify();
+      this.notifyPanes(cx, { shell: true, conv: true, side: true });
     }
   }
 
@@ -2021,8 +2919,13 @@ export default class PmProject extends View {
     this.confirmDeleteKey = '';
     this.retopicOpen = false;
     const hv = { tab, scope, root, path, items: [], loading: true, error: '', restoring: '' };
+    this.panelClosing = false;
     this.historyView = hv;
-    cx.notify();
+    const active = this.activeSideTab();
+    if (scope === 'item' && active && active.kind === 'doc') {
+      this.tabState = updateSideTab(this.sideTabsState(), active.id, { mode: 'history', history: hv }).state;
+    }
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
     try {
       const roots = tab === 'memory' && scope === 'all' ? ['memory', 'personal'] : [root];
       const results = await Promise.all(roots.map(r => this.runProject(projectHistoryArgv(slug, r, scope === 'item' ? path : ''))));
@@ -2043,12 +2946,16 @@ export default class PmProject extends View {
         hv.loading = false;
       }
     }
-    cx.notify();
+    this.notifyPanes(cx, { shell: false, side: true });
   }
 
   closeHistory(cx) {
+    const active = this.activeSideTab();
+    if (active && active.mode === 'history') {
+      this.tabState = updateSideTab(this.sideTabsState(), active.id, { mode: 'read', history: null }).state;
+    }
     this.historyView = null;
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
 
   async restoreHistoryItem(item, cx) {
@@ -2076,7 +2983,7 @@ export default class PmProject extends View {
         hv.restoring = '';
       }
     }
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
 
   async handleCandidate(cand, drop, cx) {
@@ -2149,7 +3056,7 @@ export default class PmProject extends View {
             throw new Error(word(this.lang, 'remoteDropTextOnly', this.machine));
           }
           const text = await readTextFile(p);
-          if (text == null || text.includes('\0') || new TextEncoder().encode(text).length > DOC_MAX_BYTES) {
+          if (text == null || text.includes('\0') || utf8ByteLength(text) > DOC_MAX_BYTES) {
             throw new Error(word(this.lang, 'remoteDropTextOnly', this.machine));
           }
           const dest = this.uniqueDocName(name);
@@ -2406,7 +3313,7 @@ export default class PmProject extends View {
     cx.notify();
   }
 
-  // ---- the side panel's width: its left edge drags (see panelWidth) ----------
+  // ---- the side panel's dual-mode width: its left edge drags -----------------
   keptPanelWidth() {
     try { return readPanelWidth(localStorage.getItem(PANEL_KEY)); } catch (_) { return null; }
   }
@@ -2416,28 +3323,194 @@ export default class PmProject extends View {
       else localStorage.setItem(PANEL_KEY, String(width));
     } catch (_) { /* Nowhere to keep it: it holds until the view is built anew. */ }
   }
-  // A press on the edge starts a drag; a double-click puts the default width back.
-  gripDown(e, cx) {
-    if (e.click_count >= 2) {
-      this.panelDrag = null; this.panelWant = null; this.keepPanelWidth(null);
-    } else {
-      this.panelDrag = { x: e.position.x, width: panelWidth(this.panelWant, this.viewWidth) };
+  keptPanelSizes() {
+    try {
+      return readPanelSizes(localStorage.getItem(PANEL_SIZES_KEY), localStorage.getItem(PANEL_KEY));
+    } catch (_) {
+      return { compactPx: null, splitRatio: null };
     }
-    cx.notify();
+  }
+  keepPanelSizes(sizes) {
+    try {
+      if (!sizes || (sizes.compactPx == null && sizes.splitRatio == null)) {
+        localStorage.removeItem(PANEL_SIZES_KEY);
+      } else {
+        localStorage.setItem(PANEL_SIZES_KEY, JSON.stringify({
+          compactPx: sizes.compactPx ?? null,
+          splitRatio: sizes.splitRatio ?? null,
+        }));
+      }
+    } catch (_) { /* Nowhere to keep it: it holds until the view is built anew. */ }
+  }
+  currentPanelMode() {
+    const onLib = this.sideTab === 'library' && (this.librarySupported() || this.activeDoc?.root === 'repo');
+    const onMem = this.sideTab === 'memory' && this.memorySupported();
+    const curTab = onLib ? 'library' : onMem ? 'memory' : '';
+    const hasDoc = Boolean(curTab && this.activeDoc?.tab === curTab);
+    const hasEdit = Boolean(curTab && this.editingDoc?.tab === curTab);
+    const hasHistory = Boolean(curTab && this.historyView?.tab === curTab);
+    return resolvePanelMode({
+      tabCount: this.sideTabsState().tabs.length,
+      detail: Boolean(this.detail),
+      activeDoc: hasDoc,
+      editingDoc: hasEdit,
+      historyView: hasHistory,
+      changeOpen: this.isThreadChangeOpen(),
+    });
+  }
+  currentSplitLayout() {
+    const mode = this.currentPanelMode();
+    const base = resolveSplitLayout({
+      mode,
+      sizes: this.panelSizes || { compactPx: null, splitRatio: null },
+      viewWidth: this.viewWidth || 0,
+    });
+    if (this.panelDrag && this.panelDragWidth != null && base.layoutKind === 'inline') {
+      const cardWidth = this.panelDragWidth;
+      const slotWidth = cardWidth + SPLIT_CARD_MARGIN_R + SPLIT_GRIP_OVERHANG;
+      const v = this.viewWidth > 0 ? this.viewWidth : 1280;
+      const leftWidth = Math.max(0, Math.round(v - slotWidth));
+      const conversationPadX = leftWidth >= 760 ? 28 : leftWidth >= 520 ? 20 : 16;
+      return { ...base, cardWidth, slotWidth, conversationPadX };
+    }
+    return base;
+  }
+  notifyShell(cx) {
+    this._shellOnlyRender = true;
+    const hostCx = this._shellCx || cx;
+    try { hostCx?.notify?.(); } catch (_) { cx?.notify?.(); }
+  }
+  notifyPanes(cx, { shell = true, conv = false, side = false } = {}) {
+    const hostCx = this._shellCx || cx;
+    if (shell) {
+      this._shellOnlyRender = true;
+      try { hostCx?.notify?.(); } catch (_) { cx?.notify?.(); }
+    }
+    if (conv && this._convEntity) {
+      try { (cx || hostCx)?.notify?.(this._convEntity); } catch (_) { hostCx?.notify?.(this._convEntity); }
+    }
+    if (side && this._sideEntity) {
+      try { (cx || hostCx)?.notify?.(this._sideEntity); } catch (_) { hostCx?.notify?.(this._sideEntity); }
+    }
+    if (!shell && !this._convEntity && !this._sideEntity) {
+      cx?.notify?.();
+    }
+  }
+  isPanelOpen() {
+    if (this.panelClosing) return false;
+    if (this.hasSideTabs()) return Boolean(this.listResting());
+    return Boolean(this.listResting() || this.detail);
+  }
+  _clearClosedSideState() {
+    this.panelClosing = false;
+    this.detail = false;
+    this.resetThreadChange();
+    this.activeDoc = null;
+    this.editingDoc = null;
+    this.historyView = null;
+    this.docFindOpen = false;
+    this.docFindQuery = '';
+    this.docJumpQuery = '';
+    this.docMatchPos = 0;
+    this.confirmDeleteKey = '';
+    this.deleteError = '';
+    this.retopicOpen = false;
+    this.retopicError = '';
+    this._panelOpenedFromClosed = false;
+  }
+  _activeInnerLockWidth() {
+    const open = this.isPanelOpen();
+    const isSlideOpenClose = !open || this._panelSlideFromZero === true;
+    if (isSlideOpenClose || this.panelTransitioning !== true || Boolean(this.panelDrag)) return 0;
+    const lock = Number(this._panelLockWidth);
+    return lock > 0 ? Math.max(200, Math.round(lock - 2)) : 0;
+  }
+  sideScrollBody(el) {
+    const lockW = this._activeInnerLockWidth();
+    if (!lockW) return el;
+    return div().flex_1().min_h(0).w_full().overflow_hidden()
+      .child(v_flex().w(lockW).h_full().flex_none().child(el));
+  }
+  closeSidePanel(cx) {
+    this.listShown = false;
+    this._panelOpenedFromClosed = false;
+    this.tabMenu = null;
+    this.clearHoverNow(null);
+    if (['thread', 'threadsSearch', 'librarySearch', 'memorySearch', 'docFind', 'docEditor', 'docName', 'memDesc'].includes(this.typing)) {
+      this.keyFocus?.focus();
+    }
+    if (this.hasSideTabs()) {
+      // Multi-tab workspace: closing the panel hides it while preserving all open tabs & unsaved drafts.
+      this.snapshotActiveTabInputs();
+      this.persistSideTabs();
+      if (this.measured && !this.panelDrag && cx?.timer?.after) {
+        this.panelClosing = true;
+      } else {
+        this.panelClosing = false;
+      }
+      this.notifyPanes(cx, { shell: true, conv: true, side: true });
+      return;
+    }
+    const hasSplitContent = Boolean(this.detail || this.activeDoc || this.editingDoc || this.historyView || this.isThreadChangeOpen());
+    if (hasSplitContent && this.measured && !this.panelDrag && cx?.timer?.after) {
+      // Keep current detail/doc mounted while the card slides out to 0px; clear after slide finishes.
+      this.panelClosing = true;
+    } else {
+      this._clearClosedSideState();
+    }
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
+  }
+  // A press on the edge starts a drag; a double-click puts the default width for the current mode back.
+  gripDown(e, cx) {
+    cx?.stop_propagation?.();
+    const mode = this.currentPanelMode();
+    const lay = this.currentSplitLayout();
+    if (e.click_count >= 2) {
+      this.panelDrag = null;
+      this.panelDragWidth = null;
+      this.panelSizes = resetPanelModeSize(this.panelSizes, mode);
+      this.keepPanelSizes(this.panelSizes);
+      this.panelWant = null;
+      this.notifyPanes(cx, { shell: true, side: true, conv: true });
+      return;
+    }
+    this.panelDrag = { x: e.position.x, width: lay.cardWidth, mode, moved: false };
+    this.panelDragWidth = lay.cardWidth;
+    this.notifyShell(cx);
   }
   // The pointer anywhere over the view moves the edge while a drag is on.
   gripMove(e, cx) {
     if (!this.panelDrag) return;
-    const width = draggedWidth(this.panelDrag, e.position.x, this.viewWidth);
-    if (width !== this.panelWant) { this.panelWant = width; cx.notify(); }
+    const v = this.viewWidth > 0 ? this.viewWidth : 1200;
+    const maxByView = Math.max(PANEL_MIN, Math.round(v - 380));
+    const isSplit = this.panelDrag.mode === 'split';
+    const maxPx = isSplit ? Math.min(880, maxByView) : Math.min(500, maxByView);
+    const minPx = isSplit ? Math.min(360, maxPx) : PANEL_MIN;
+    const raw = this.panelDrag.width + this.panelDrag.x - e.position.x;
+    const width = Math.round(Math.max(minPx, Math.min(raw, maxPx)));
+    if (width !== this.panelDragWidth) {
+      const prev = this.panelDragWidth ?? this.panelDrag.width;
+      this.panelDragWidth = width;
+      this.panelDrag.moved = true;
+      this.panelWant = width;
+      const crossedCompact = !isSplit && ((prev < 300) !== (width < 300));
+      if (crossedCompact) this.notifyPanes(cx, { shell: true, side: true });
+      else this.notifyShell(cx);
+    }
   }
   // Released, or the pointer left the view (where a release would not be heard): the width stays.
   gripUp(cx) {
     if (!this.panelDrag) return;
-    const moved = this.panelWant !== null && this.panelWant !== this.panelDrag.width;
+    const drag = this.panelDrag;
+    const finalW = this.panelDragWidth;
     this.panelDrag = null;
-    if (moved) this.keepPanelWidth(this.panelWant);
-    cx.notify();
+    this.panelDragWidth = null;
+    if (drag.moved && finalW != null) {
+      this.panelSizes = updatePanelSizes(this.panelSizes, drag.mode, finalW, this.viewWidth);
+      this.keepPanelSizes(this.panelSizes);
+    }
+    this.notifyPanes(cx, { shell: true, side: true });
+    if (!this.away) this.resized(cx);
   }
 
   // The drafts as storage has them now. Read each time, never kept here: another view of this mod
@@ -2588,6 +3661,15 @@ export default class PmProject extends View {
     });
   }
 
+  resetMentionTasks() {
+    this.mentionTasksTimer?.cancel?.();
+    this.mentionTasksTimer = null;
+    this.mentionTasksSeq = (this.mentionTasksSeq || 0) + 1;
+    this.mentionTasksQuery = '';
+    this.mentionTasksRows = [];
+    this.mentionTasksLoading = false;
+  }
+
   ensureMentionSources(cx) {
     if (!this.libraryRead && !this.libraryLoading && this.librarySupported()) {
       this.readLibrary(cx);
@@ -2595,6 +3677,59 @@ export default class PmProject extends View {
     const staleFiles = !this.repoFilesRead || (this.repoFilesAt && Date.now() - this.repoFilesAt > 30_000);
     if (!this.repoFilesLoading && staleFiles) {
       this.readRepoFiles(cx);
+    }
+    const m = this.mention;
+    const cat = m?.category || 'all';
+    const q = String(m?.query || '').trim();
+    if (!m || (cat !== 'all' && cat !== 'threads') || !q) {
+      if (this.mentionTasksTimer || this.mentionTasksLoading || this.mentionTasksQuery || this.mentionTasksRows?.length) {
+        this.resetMentionTasks();
+      }
+      return;
+    }
+    if (q === this.mentionTasksQuery) return;
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    if (!pm || !slug || !this.tasksQuerySupported()) {
+      this.resetMentionTasks();
+      return;
+    }
+    this.mentionTasksTimer?.cancel?.();
+    this.mentionTasksTimer = null;
+    const seq = ++this.mentionTasksSeq;
+    this.mentionTasksQuery = q;
+    this.mentionTasksLoading = true;
+    const runQuery = runCx => {
+      if (seq !== this.mentionTasksSeq || machine !== this.machine || slug !== projectSlug(this.pm())) return;
+      const liveQ = String(this.mention?.query || '').trim();
+      if (!this.mention || liveQ !== q) return;
+      runCx.spawn(async spawnCx => {
+        try {
+          const r = await this.runProject(projectTasksArgv(slug, { status: 'all', q, offset: 0, limit: TASKS_PAGE_LIMIT }));
+          if (seq !== this.mentionTasksSeq || machine !== this.machine || slug !== projectSlug(this.pm())) return;
+          if (r.code !== 0) {
+            if (machine && isOldPmCommand(r)) this.remoteNoTasks = machine;
+            return;
+          }
+          const page = parseProjectTasksPage(JSON.parse(r.stdout || '{}'));
+          if (!page) return;
+          this.mentionTasksRows = page.tasks.map(t => normalizeProjectTaskRow(t)).filter(Boolean);
+        } catch (_) {
+          // Keep local matches quietly on error.
+        } finally {
+          if (seq === this.mentionTasksSeq && machine === this.machine) {
+            this.mentionTasksLoading = false;
+            this.notifyPanes(spawnCx, { shell: false, conv: true, side: this.mention?.which === 'thread' });
+          }
+        }
+      });
+    };
+    if (typeof cx?.timer?.after === 'function') {
+      this.mentionTasksTimer = cx.timer.after(150, timerCx => {
+        this.mentionTasksTimer = null;
+        runQuery(timerCx);
+      });
+    } else {
+      runQuery(cx);
     }
   }
 
@@ -2621,7 +3756,7 @@ export default class PmProject extends View {
       : { start: content.text.length, end: content.text.length };
     if (!sel || sel.start !== sel.end) {
       const had = this.mention?.which === which;
-      if (had) this.mention = null;
+      if (had) { this.mention = null; this.resetMentionTasks(); }
       return had;
     }
     const dismissedAt = this.mentionDismissed?.which === which ? this.mentionDismissed.atPos : null;
@@ -2632,7 +3767,7 @@ export default class PmProject extends View {
         if (!stillSameAt || stillSameAt.start !== this.mentionDismissed.atPos) this.mentionDismissed = null;
       }
       const had = this.mention?.which === which;
-      if (had) this.mention = null;
+      if (had) { this.mention = null; this.resetMentionTasks(); }
       return had;
     }
     const sameAnchor = this.mention?.which === which && this.mention.start === trigger.start;
@@ -2654,13 +3789,17 @@ export default class PmProject extends View {
   mentionMenuFor(which) {
     if (!this.mention || this.mention.which !== which) return null;
     const pm = this.pm();
-    const threads = pm ? threadList(pm, this.tasks || this.state.tasks, this.events, this.terms(), this.live(), spaces().flatMap(s => s.tabs || []), this.lang) : { open: [], sessions: [], finished: [] };
+    const allTasks = this.tasks || this.state.tasks || [];
+    const projectTasks = pm ? allTasks.filter(t => (t.pm || '') === (pm.name || '')) : [];
+    const threads = pm ? threadList(pm, allTasks, this.events, this.terms(), this.live(), spaces().flatMap(s => s.tabs || []), this.lang) : { open: [], sessions: [], finished: [] };
     const menu = buildMentionMenu({
       lang: this.lang,
       category: this.mention.category,
       query: this.mention.query,
       threads,
-      tasks: this.tasks || this.state.tasks,
+      tasks: projectTasks,
+      extraThreads: [...(this.finishedExtra || []), ...(this.mentionTasksRows || [])],
+      threadsLoading: Boolean(this.mentionTasksLoading),
       taskNumbers: this.state.task_numbers,
       libraryFiles: this.libraryFiles,
       repoFiles: this.repoFiles,
@@ -2708,6 +3847,7 @@ export default class PmProject extends View {
     } else {
       this.mentionDismissed = { which, atPos: this.mention.start };
       this.mention = null;
+      this.resetMentionTasks();
     }
     cx.notify();
     return true;
@@ -2750,6 +3890,7 @@ export default class PmProject extends View {
     if (!range) return;
     this.mention = null;
     this.mentionDismissed = null;
+    this.resetMentionTasks();
     if (typeof box.replace_range_with_token === 'function') {
       box.replace_range_with_token(range, row.token);
       const after = this.boxContent(box);
@@ -2808,7 +3949,11 @@ export default class PmProject extends View {
         retiredParts: this.state.retired_parts, events: this.events,
       });
       if (id && !(this.detail && this.thread === id)) this.openThread(id, cx);
-      else if (id && !this.listResting()) { this.listShown = true; cx.notify(); }
+      else if (id && !this.listResting()) {
+        this.panelClosing = false;
+        this.listShown = true;
+        this.notifyPanes(cx, { shell: true, conv: true, side: true });
+      }
       return true;
     }
     if (ref.kind === 'session') {
@@ -2816,9 +3961,6 @@ export default class PmProject extends View {
       return true;
     }
     if (ref.kind === 'library') {
-      if (!this.listResting()) this.listShown = true;
-      this.detail = false;
-      this.resetThreadChange();
       this.openDoc({ root: ref.root, path: ref.path }, cx);
       return true;
     }
@@ -2831,9 +3973,6 @@ export default class PmProject extends View {
 
   openRepoFile(relPath, cx) {
     if (!relPath) return;
-    if (!this.listResting()) this.listShown = true;
-    this.detail = false;
-    this.resetThreadChange();
     this.openDoc({ tab: 'library', root: 'repo', path: relPath }, cx);
   }
 
@@ -2929,14 +4068,53 @@ export default class PmProject extends View {
     });
   }
 
-  // `hc send` reaches a terminal on another machine by its "<machine>/<id>" address.
-  // Windows: bare `hc` (no Unix `env -u`); elsewhere: `env -u HC_TERMINAL_ID hc send …`.
-  send(address, text) {
-    return exec(...withoutTerminalEnv(sendArgv(onMachine(address, this.machine), text), {
-      platform: this.hostPlatform(), unset: SEND_ENV,
-    }), { timeout: 20000 }).then(r => {
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc send: ${r.code}`);
-    });
+  // The user's words into the terminal `address` (as the project's machine names it): `pm.py send
+  // --as-user` where the project lives, which queues them for that terminal's one typist and comes
+  // back at once (an error when the terminal is not running). A long text goes by a staged file.
+  // Nothing here types into a terminal itself.
+  // `wait`: typed before pm.py answers, so a failure comes back here as an error (the agent window
+  // with no thread: there is nowhere else it would show). A pm.py on the project's machine older than
+  // `--as-user` is asked again without it rather than leaving the box unable to send.
+  async send(address, text, { task = '', wait = false } = {}) {
+    const timeout = wait ? (2 * SEND_WAIT_SECONDS + 30) * 1000 : 45000;  // the lease wait, then the hc send
+    const go = async what => {
+      const r = await this.runProjectWrite(terminalSendArgv(address, { ...what, task, wait }), { timeout });
+      return rejectsOption(r, '--as-user')
+        ? this.runProjectWrite(terminalSendArgv(address, { ...what, task, wait, asUser: false }), { timeout })
+        : r;
+    };
+    const r = utf8ByteLength(text) > SAVE_INLINE_BYTES
+      ? await this.withStagedText(text, tmp => go({ fromFile: tmp }), 'pm.py send')
+      : await go({ text });
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `pm.py send: ${r.code}`);
+  }
+  // `run(path)` with `text` in a temporary file pm.py can read where it runs: under the ledger home
+  // here, or a mktemp file written in chunks on the project's machine; removed afterwards.
+  async withStagedText(text, run, what = 'pm.py project send') {
+    if (!this.machine && this.ledgerHome) {
+      const tmp = `${this.ledgerHome}/.pm-send-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`;
+      await writeTextFile(tmp, text, null);
+      try {
+        return await run(tmp);
+      } finally {
+        await exec('rm', ['-f', '--', tmp], { timeout: 10000 }).catch(() => {});
+      }
+    }
+    const on = this.where();
+    const mk = await exec(...REMOTE_MKTEMP_ARGV, { ...on, timeout: 15000 });
+    const tmp = String(mk.stdout || '').trim();
+    if (mk.code !== 0 || !tmp) {
+      throw new Error(mk.stderr || `mktemp failed for large ${what}`);
+    }
+    try {
+      for (const chunk of chunkUtf8Text(text, REMOTE_CHUNK_BYTES)) {
+        const w = await exec(...remoteAppendChunkArgv(tmp, chunk), { ...on, timeout: 15000 });
+        if (w.code !== 0) throw new Error((w.stderr || w.stdout || 'chunk write failed').trim());
+      }
+      return await run(tmp);
+    } finally {
+      await exec('rm', ['-f', '--', tmp], { ...on, timeout: 10000 }).catch(() => {});
+    }
   }
   // `words` and `files` to the terminal `address` (as the project's machine sees it). On another
   // machine each file is first copied beside that terminal (uploadSteps) and the message names where
@@ -2945,7 +4123,7 @@ export default class PmProject extends View {
   // A file whose name hc put would garble goes as a renamed copy (uploadName), made in a folder of
   // this send's own beside the pasted screenshots and removed once the copies went or failed. A file
   // already copied there by an earlier try of the same send (this.uploaded) is not copied again.
-  async deliver(address, words, files) {
+  async deliver(address, words, files, { task = '' } = {}) {
     const landed = new Map(), uploaded = this.uploaded ||= new Map();
     const folder = this.machine ? this.pasteFolder(this.pm()) : '';
     const stage = folder ? `${folder}/sending-${Date.now()}-${this.sending = (this.sending || 0) + 1}` : '';
@@ -2974,7 +4152,7 @@ export default class PmProject extends View {
       if (steps.some(step => step.copy)) await exec('rm', ['-rf', '--', stage], { timeout: 20000 }).catch(() => {});
     }
     const message = messageText(words, sentFiles(files, landed), word(this.lang, 'attachments'));
-    await this.send(address, message);
+    await this.send(address, message, { task });
     for (const step of steps) uploaded.delete(step.key);
     return message;
   }
@@ -3010,14 +4188,25 @@ export default class PmProject extends View {
       if (steps.some(step => step.copy)) await exec('rm', ['-rf', '--', stage], { timeout: 20000 }).catch(() => {});
     }
     const message = messageText(words, sentFiles(files, landed), word(this.lang, 'attachments'));
+    const effSlug = slug || projectSlug(this.pm());
+    const effMsgId = msgId || makeClientMsgId(this.nowMs(), (this.seq = (this.seq || 0) + 1));
     const peerKey = this.machine || '__local__';
+    // `runProjectWrite` runs `pm.py` on `this.machine`, where the terminal's own address is `address` (no `<machine>/` prefix).
+    const target = String(address || '');
     let sendReply = null;
-    const inlineOk = msgId && slug && this.noProjectSendFor !== peerKey && chunkUtf8Text(message, SAVE_INLINE_BYTES).length <= 1;
-    if (inlineOk) {
-      const r = await this.runProjectWrite(
-        projectSendArgv(slug, { msgId, target: onMachine(address, this.machine), text: message, question }),
-        { timeout: 45000 },
-      );
+    if (!effSlug || this.noProjectSendFor === peerKey) {
+      await this.send(address, message);
+    } else {
+      const byteLen = utf8ByteLength(message);
+      const r = byteLen > SAVE_INLINE_BYTES
+        ? await this.withStagedText(message, tmp => this.runProjectWrite(
+          projectSendArgv(effSlug, { msgId: effMsgId, target, fromFile: tmp, question }),
+          { timeout: 45000 },
+        ))
+        : await this.runProjectWrite(
+          projectSendArgv(effSlug, { msgId: effMsgId, target, text: message, question }),
+          { timeout: 45000 },
+        );
       if (r.code !== 0) {
         if (isOldPmCommand(r)) {
           this.noProjectSendFor = peerKey;
@@ -3030,12 +4219,7 @@ export default class PmProject extends View {
         if (outStr.startsWith('{')) {
           try { sendReply = JSON.parse(outStr); } catch (_) { sendReply = null; }
         }
-        if (sendReply && sendReply.status === 'queued') {
-          throw new Error(sendReply.reason || 'pm is blocked');
-        }
       }
-    } else {
-      await this.send(address, message);
     }
     for (const step of steps) uploaded.delete(step.key);
     return { message, reply: sendReply };
@@ -3044,15 +4228,60 @@ export default class PmProject extends View {
     const pm = this.pm();
     return this.logTurn || (pm?.turn && typeof pm.turn === 'object' ? pm.turn : null);
   }
-  interruptPm(cx) {
+  // The §3.9 line for a logged message's mailbox state, worded for the PM's agent and whether it works now.
+  deliveryLine(delivery) {
+    const pm = this.pm();
+    const term = this.pmTerminal();
+    const pmWorking = term ? this.isPmWorking(term, this.live(), this.activePmTurn()) : false;
+    return deliveryLineView(this.lang, delivery, { pmWorking, agentKind: pm?.agent || '' });
+  }
+  activePmTurn2() {
+    const pm = this.pm();
+    return this.logTurn2 || (pm?.turn2 && typeof pm.turn2 === 'object' ? pm.turn2 : null);
+  }
+  activePmSupervised() {
+    if (typeof this.logSupervised === 'boolean') return this.logSupervised;
+    const pm = this.pm();
+    if (typeof pm?.supervised === 'boolean') return pm.supervised;
+    const t2 = this.activePmTurn2();
+    return typeof t2?.supervised === 'boolean' ? t2.supervised : undefined;
+  }
+  setPmActionFeedback(pmKey, action, res, cx) {
+    const rawFb = typeof formatPmActionFeedback === 'function'
+      ? formatPmActionFeedback(this.lang, action, res)
+      : null;
+    const text = rawFb && typeof rawFb.text === 'string' ? rawFb.text : '';
+    const tone = rawFb && typeof rawFb.tone === 'string' ? rawFb.tone : 'info';
+    if (!text) return;
+    const stamp = this.nowMs();
+    this.pmActionFeedback = { pm: pmKey, action, text, tone, at: stamp };
+    const ttlMs = tone === 'info' ? 12000 : 20000;
+    if (cx?.timer?.after) {
+      cx.timer.after(ttlMs, liveCx => {
+        if (this.pmActionFeedback?.at === stamp && this.pmActionFeedback?.pm === pmKey) {
+          this.pmActionFeedback = null;
+          this.notifyPanes(liveCx, { shell: false, conv: true });
+        }
+      });
+    }
+  }
+  interruptPm(cx, { sendDraftAfter = false } = {}) {
     const pm = this.pm(), slug = projectSlug(pm), pmKey = this.pmName;
     if (!pm || !slug || this.interruptingPm === pmKey) return;
     this.interruptingPm = pmKey;
+    if (this.pmActionFeedback?.pm === pmKey) this.pmActionFeedback = null;
     this.notifySafe(cx);
     cx.spawn(async cx => {
       try {
-        await this.runProjectWrite(projectInterruptArgv(slug), { timeout: 15000 });
-      } catch (_) { /* Best-effort interrupt; user can still open terminal or rotate. */ }
+        const r = await this.runProjectWrite(projectInterruptArgv(slug), { timeout: 15000 });
+        this.setPmActionFeedback(pmKey, 'interrupt', r || {}, cx);
+        if (sendDraftAfter && this.pmName === pmKey) {
+          const hasDraft = Boolean(this.input?.value?.().trim() || this.files?.length || this.quotes?.length);
+          if (hasDraft) this.sendMain(cx);
+        }
+      } catch (e) {
+        this.setPmActionFeedback(pmKey, 'interrupt', { error: String(e?.message || e || 'interrupt failed') }, cx);
+      }
       finally {
         if (this.interruptingPm === pmKey) this.interruptingPm = '';
         this.refresh(cx);
@@ -3060,16 +4289,23 @@ export default class PmProject extends View {
       }
     });
   }
+  preemptAndSendMain(cx) {
+    this.interruptPm(cx, { sendDraftAfter: true });
+  }
   rotatePmFromStall(cx) {
     const pm = this.pm(), repo = pm?.repo || '', pmKey = this.pmName;
     if (!pm || !repo || this.rotatingPm === pmKey) return;
     this.rotatingPm = pmKey;
+    if (this.pmActionFeedback?.pm === pmKey) this.pmActionFeedback = null;
     this.notifySafe(cx);
     cx.spawn(async cx => {
       try {
         const reason = this.lang === 'zh' ? '从无响应轮次恢复' : 'Recover from unresponsive turn';
-        await this.runProjectWrite(rotatePmArgs(repo, reason), { timeout: 30000 });
-      } catch (_) { /* Rotation errors show on next refresh if offline. */ }
+        const r = await this.runProjectWrite(rotatePmArgs(repo, reason), { timeout: 30000 });
+        this.setPmActionFeedback(pmKey, 'rotate', r || {}, cx);
+      } catch (e) {
+        this.setPmActionFeedback(pmKey, 'rotate', { error: String(e?.message || e || 'rotate failed') }, cx);
+      }
       finally {
         if (this.rotatingPm === pmKey) this.rotatingPm = '';
         this.refresh(cx);
@@ -3143,7 +4379,12 @@ export default class PmProject extends View {
     return this.logFresh?.log === log ? this.logFresh.from : 0;
   }
   notifySafe(cx) {
-    if (cx?.notify && cx?.phase?.() !== 'render') cx.notify();
+    if (cx?.phase?.() === 'render') return;
+    if (this._convEntity || this._sideEntity) {
+      this.notifyPanes(cx, { shell: false, conv: true, side: true });
+    } else if (cx?.notify) {
+      cx.notify();
+    }
   }
   isPmStarting() {
     return this.startingPm === this.pmName || Boolean(
@@ -3152,13 +4393,12 @@ export default class PmProject extends View {
       this.bringBackProgress.steps?.some(s => s.kind === 'pm' && s.state === 'running'),
     );
   }
-  // Recent PM user-message receipts from both `pm.py state` and `pm.py project events`.
+  // Recent PM user-message receipts: `turn2.inbox` (`consumed`/`answered`) plus 1-version compat `receipts`.
   pmReceipts() {
+    const fromInbox = receiptsFromTurn2Inbox(this.activePmTurn2());
     const fromLog = Array.isArray(this.logReceipts) ? this.logReceipts : [];
     const fromState = Array.isArray(this.pm()?.receipts) ? this.pm().receipts : [];
-    if (!fromLog.length) return fromState;
-    if (!fromState.length) return fromLog;
-    return mergeReceipts(fromState, fromLog);
+    return mergeReceipts(fromInbox, mergeReceipts(fromState, fromLog));
   }
   reconcilePending(cx, { fromReadLog = false, forceLogReady = false } = {}) {
     if (!Array.isArray(this.pending) || !this.pending.length) return;
@@ -3180,6 +4420,7 @@ export default class PmProject extends View {
       lang: this.lang,
       logFreshFrom: this.freshLogFrom(),
       receipts: this.pmReceipts(),
+      turn2: this.activePmTurn2(),
       clockOffsetMs: this.clockOffsetMs || 0,
     });
     const changed = res.pending !== this.pending;
@@ -3284,10 +4525,12 @@ export default class PmProject extends View {
     this.queueTimer = true;
     cx.timer.after(1500, cx => {
       this.queueTimer = false;
+      const hasServerQueued = this.pending.some(p => p.queued && !p.failed && p.serverQueued);
+      if (hasServerQueued && !this.logLoading) this.readLog(cx);
       this.reconcilePending(cx, { forceLogReady: !this.logLoading && !this.logError });
       const pmTerm = this.pmTerminal();
       const status = pmLiveStatus(pmTerm, this.live());
-      if (pmTerm && pmCanReceive(status) && this.pending.some(p => p.queued && !p.failed)) {
+      if (pmTerm && pmCanReceive(status) && this.pending.some(p => p.queued && !p.failed && !p.serverQueued)) {
         this.flushQueue(cx);
       } else if (this.pending.some(p => p.queued && !p.failed)) {
         if (pmTerm && !pmCanReceive(status)) this.probePmDialog(cx);
@@ -3309,8 +4552,11 @@ export default class PmProject extends View {
       this.scheduleQueueFlush(cx);
       return;
     }
-    const nextIdx = this.pending.findIndex(p => p.queued && !p.failed);
-    if (nextIdx < 0) return;
+    const nextIdx = this.pending.findIndex(p => p.queued && !p.failed && !p.serverQueued);
+    if (nextIdx < 0) {
+      if (this.pending.some(p => p.queued && !p.failed && p.serverQueued)) this.scheduleQueueFlush(cx);
+      return;
+    }
     // Preserve strict FIFO across a PM terminal swap: if an earlier bubble was sent to the old PM
     // terminal and hasn't been confirmed or re-queued yet, reconcile it against the log first so it
     // never gets overtaken by `next`.
@@ -3350,6 +4596,7 @@ export default class PmProject extends View {
     this.flushingQueueAt = flushStamp;
     cx.spawn(async cx => {
       let requeued = false;
+      let serverQueuedReply = false;
       let targetChanged = false;
       try {
         const res = await this.deliverProject(terminal.address, bubble.said, bubble.files, {
@@ -3368,32 +4615,67 @@ export default class PmProject extends View {
         );
         const byPm = this.pendingByPm ||= new Map();
         const cur = this.pmName === pmName ? this.pending : (byPm.get(pmName) || []);
-        const serverLogged = Boolean(serverReply?.ok && serverReply.status === 'delivered' && Number(serverReply.offset) > 0);
-        const cleared = cur.map(p => p.id === bubble.id ? (p.received ? p : (serverLogged
-          ? confirmReceiptBubble(p, Number(serverReply.at_ms) || now, now)
-          : {
+        const isServerAccepted = Boolean(serverReply?.ok && serverReply.status === 'accepted');
+        const isServerQueued = Boolean(
+          serverReply?.ok && (serverReply.status === 'queued' || (isServerAccepted && String(serverReply.reason || '').trim())),
+        );
+        const serverLogged = Boolean(
+          serverReply?.ok && (serverReply.status === 'delivered' || isServerAccepted) && Number(serverReply.offset) > 0,
+        );
+        if (isServerQueued) {
+          serverQueuedReply = true;
+          requeued = true;
+          const reason = String(serverReply.reason || '');
+          const updated = cur.map(p => p.id === bubble.id ? (p.received ? p : {
             ...p,
-            queued: false,
+            queued: true,
+            serverQueued: true,
+            requeuedFromSend: true,
+            queuedReason: reason,
             inFlight: false,
             inFlightAt: 0,
-            sentTo: terminal.address,
-            sentSession,
-            deliveredAt: now,
-            idleSince: pmWorking ? 0 : now,
-            swapDetectedAt: swappedDuringSend ? now : 0,
-            swapWaitSince: 0,
             inFlightTo: '',
             inFlightSession: '',
-            unsure: false,
+            failed: '',
+            failedAt: 0,
             lastError: '',
-          })) : p);
-        byPm.set(pmName, cleared);
-        this.saveQueue(pmName, cleared);
-        if (this.pmName === pmName) {
-          this.pending = cleared;
-          this.pmSendBlockError = '';
-          this.pmDialog = null;
-          this.landed(bubble.draftKey, { text: bubble.words, files: bubble.files, quotes: bubble.quotes || [] }, true);
+          }) : p);
+          byPm.set(pmName, updated);
+          this.saveQueue(pmName, updated);
+          if (this.pmName === pmName) {
+            this.pending = updated;
+            // MSG-5: Accepted by backend outbox — keep draft cleared (do not restore) and show queued reason.
+            this.landed(bubble.draftKey, { text: bubble.words, files: bubble.files, quotes: bubble.quotes || [] }, true);
+          }
+        } else {
+          const cleared = cur.map(p => p.id === bubble.id ? (p.received ? p : (serverLogged
+            ? confirmReceiptBubble(p, Number(serverReply.at_ms) || now, now)
+            : {
+              ...p,
+              queued: false,
+              serverQueued: false,
+              queuedReason: '',
+              inFlight: false,
+              inFlightAt: 0,
+              sentTo: terminal.address,
+              sentSession,
+              deliveredAt: now,
+              idleSince: pmWorking ? 0 : now,
+              swapDetectedAt: swappedDuringSend ? now : 0,
+              swapWaitSince: 0,
+              inFlightTo: '',
+              inFlightSession: '',
+              unsure: false,
+              lastError: '',
+            })) : p);
+          byPm.set(pmName, cleared);
+          this.saveQueue(pmName, cleared);
+          if (this.pmName === pmName) {
+            this.pending = cleared;
+            this.pmSendBlockError = '';
+            this.pmDialog = null;
+            this.landed(bubble.draftKey, { text: bubble.words, files: bubble.files, quotes: bubble.quotes || [] }, true);
+          }
         }
       } catch (e) {
         const msg = String(e.message || e);
@@ -3408,7 +4690,7 @@ export default class PmProject extends View {
         const byPm = this.pendingByPm ||= new Map();
         const list = this.pmName === pmName ? this.pending : (byPm.get(pmName) || []);
         if (list.some(p => p.id === bubble.id && p.received)) {
-          // PM receipt already confirmed this message before `hc send` finished/errored: never requeue or fail.
+          // PM receipt already confirmed this message before `pm.py project send` finished/errored: never requeue or fail.
         } else if (pmSwappedOrGone) {
           requeued = true;
           targetChanged = Boolean(curTerm && curTerm.address !== terminal.address);
@@ -3466,7 +4748,9 @@ export default class PmProject extends View {
       this.notifySafe(cx);
       if (this.pmName === pmName) {
         if (requeued) {
-          if (targetChanged) {
+          if (serverQueuedReply) {
+            this.scheduleQueueFlush(cx);
+          } else if (targetChanged) {
             this.flushQueue(cx);
           } else {
             if (this.pmTerminal()) this.probePmDialog(cx, true);
@@ -3476,9 +4760,9 @@ export default class PmProject extends View {
           this.readLog(cx);
           cx.timer?.after?.(600, liveCx => { if (this.pmName === pmName) this.readLog(liveCx); });
           this.scheduleConfirmCheck(cx);
-          if (this.pending.some(p => p.queued && !p.failed)) this.flushQueue(cx);
+          if (this.pending.some(p => p.queued && !p.failed && !p.serverQueued)) this.flushQueue(cx);
         }
-      } else if (this.pending.some(p => p.queued && !p.failed)) {
+      } else if (this.pending.some(p => p.queued && !p.failed && !p.serverQueued)) {
         this.flushQueue(cx);
       }
     });
@@ -3488,7 +4772,7 @@ export default class PmProject extends View {
   // files: the box's attachments, sent as the message's last lines (see messageText).
   // to: the title of the question the box's words answer (see answering): they go out after its 【title】.
   // quotes: quoted message excerpts attached above the box; serialized with provenance for the PM.
-  say(text, cx, question, files = [], to = '', quotes = []) {
+  say(text, cx, question, files = [], to = '', quotes = [], opts = {}) {
     text = String(text || '').trim();
     files = question ? [] : withFiles([], files);
     const quoteList = question ? [] : withQuote([], ...(Array.isArray(quotes) ? quotes : []));
@@ -3501,9 +4785,10 @@ export default class PmProject extends View {
     const key = question ? '' : this.mainKey;
     const now = this.nowMs();
     const status = pmLiveStatus(terminal, this.live());
-    const mustQueue = !terminal || !pmCanReceive(status) || this.flushingQueue || this.pending.some(p => p.queued && !p.failed);
+    const mustQueue = !terminal || !pmCanReceive(status) || this.flushingQueue || this.pending.some(p => p.queued && !p.failed && !p.serverQueued);
     const id = ++this.seq;
-    const rawMsgId = makeClientMsgId(now, id);
+    const reusedMsgId = typeof opts?.msgId === 'string' && opts.msgId.trim() ? opts.msgId.trim() : '';
+    const rawMsgId = reusedMsgId || makeClientMsgId(now, id);
     const bubble = {
       id,
       msgId: typeof rawMsgId === 'string' ? rawMsgId : '',
@@ -3543,7 +4828,7 @@ export default class PmProject extends View {
   sendMain(cx) {
     if (this.say(this.input.value(), cx, undefined, this.files, this.answering?.title, this.quotes)) {
       this.input.set_value(''); this.draft = ''; this.files = []; this.quotes = []; this.selectionBar = null; this.answering = null;
-      if (this.mention?.which === 'main') this.mention = null;
+      if (this.mention?.which === 'main') { this.mention = null; this.resetMentionTasks(); }
       if (this.mentionDismissed?.which === 'main') this.mentionDismissed = null;
       this.notifySafe(cx);
     }
@@ -3552,7 +4837,7 @@ export default class PmProject extends View {
   answerInOwnWords(item, cx) {
     this.answering = { key: item.key, title: item.title, task: item.task || '', ...(taskNumber(item) ? { number: taskNumber(item) } : {}) };
     this.input.focus();
-    cx.notify();
+    this.notifyPanes(cx, { shell: false, conv: true, side: true });
   }
   // A failed bubble: clicking sends it again; never drops the bubble if the PM is still offline.
   // One that timed out may have reached the PM after all: it first checks a fresh read of the log
@@ -3609,7 +4894,7 @@ export default class PmProject extends View {
     }
     const prev = this.pending;
     this.pending = prev.filter(p => p.id !== id);
-    if (!this.say(bubble.words ?? bubble.text, cx, bubble.question, bubble.files, bubble.to, bubble.quotes || [])) {
+    if (!this.say(bubble.words ?? bubble.text, cx, bubble.question, bubble.files, bubble.to, bubble.quotes || [], { msgId: bubble.msgId || '' })) {
       this.pending = prev;
       this.notifySafe(cx);
     }
@@ -3624,11 +4909,11 @@ export default class PmProject extends View {
     this.sessionAway = false;
     this.leaving(key);
     this.threadInput.set_value(''); this.threadDraft = ''; this.threadFiles = []; this.threadError = '';
-    if (this.mention?.which === 'thread') this.mention = null;
+    if (this.mention?.which === 'thread') { this.mention = null; this.resetMentionTasks(); }
     if (this.mentionDismissed?.which === 'thread') this.mentionDismissed = null;
     cx.spawn(async cx => {
       try {
-        await this.deliver(terminal.address, text, files);
+        await this.deliver(terminal.address, text, files, { task: targetThread || '' });
         this.landed(key, { text, files }, true);
         this.cleanSent(files);
         if (this.detail && this.thread === targetThread && this.threadTab === 'session') {
@@ -3721,8 +5006,9 @@ export default class PmProject extends View {
     return num || taskNumber(this.state.task_numbers?.[id]);
   }
   formattedPmMarkdown(rawMd, projTasks = null) {
-    const src = String(rawMd ?? '');
-    if (!src) return '';
+    const raw = String(rawMd ?? '');
+    if (!raw) return '';
+    const src = raw.includes('![') ? rewriteMarkdownImagesForDisplay(raw, this.docLinkContext()) : raw;
     // Fast path: without `](thread:`, decorateThreadLinks is a no-op and viewMarkdown is pure (cached in model.js).
     if (!src.includes('](thread:')) return viewMarkdown(src);
     let map = this._renderMdLinkMap;
@@ -3792,6 +5078,9 @@ export default class PmProject extends View {
     const paLast = paLen ? pastes[paLen - 1] : null;
     const clockOffsetMs = this.clockOffsetMs || 0;
     const pendingSig = pendingSignature(pending);
+    // The mailbox rows (turn2.inbox): where each logged message is, for the line under it (§3.9).
+    const inbox = this.activePmTurn2()?.inbox;
+    const inboxSig = inboxSignature(inbox);
     const c = this._timelineCache;
     if (c
       && c.pmName === pmName && c.pmPane === pmPane && c.pmCountsWaiting === pmCountsWaiting && c.today === today && c.typing === typing
@@ -3800,12 +5089,12 @@ export default class PmProject extends View {
       && c.eventsLastText === evLastText && c.eventsLastStatus === evLastStatus
       && c.tasks === tasks && c.tasksLen === tLen && c.tasksFirst === tFirst && c.tasksLast === tLast
       && c.taskNumbers === taskNumbers
-      && c.pendingSig === pendingSig
+      && c.pendingSig === pendingSig && c.inboxSig === inboxSig
       && c.pastes === pastes && c.pastesLen === paLen && c.pastesLast === paLast) {
       return c;
     }
     const items = timeline(events, tasks, {
-      pending, today, typing, pastes, pm: pmName, pmPane, taskNumbers, clockOffsetMs,
+      pending, today, typing, pastes, pm: pmName, pmPane, taskNumbers, clockOffsetMs, inbox,
     });
     const stops = bellStops(items, tasks, pm);
     const blocks = timelineRows(turns(items, pmPane));
@@ -3831,7 +5120,7 @@ export default class PmProject extends View {
       eventsLastText: evLastText, eventsLastStatus: evLastStatus,
       tasks, tasksLen: tLen, tasksFirst: tFirst, tasksLast: tLast,
       taskNumbers,
-      pendingSig,
+      pendingSig, inboxSig,
       pastes, pastesLen: paLen, pastesLast: paLast,
       items, stops, blocks, blockKeySet, newest, keys, answered, foldedTasks, waiting,
     };
@@ -3881,24 +5170,49 @@ export default class PmProject extends View {
     return tree;
   }
   listResting() { return this.listShown ?? this.wide; }
-  openThread(id, cx, { forceOpen = false } = {}) {
+  openThread(id, cx, { forceOpen = false, insertAdjacent = false } = {}) {
     // A review thread is shown in the task it reviews (foldReviews), and `#42` resolves in project scope.
     id = resolveThreadRef(this.projectTasks(), id, this.state.task_numbers, {
       retiredParts: this.state.retired_parts, events: this.events,
     });
+    if (!id) return;
     this.clearHoverNow(cx);
-    if (!forceOpen && this.thread === id && this.detail) { this.detail = false; this.resetThreadChange(); this.syncVisibleSideTab(cx); cx.notify(); return; }
-    if (this.thread !== id) {
-      this.threadTask = null; this.threadError = ''; this.showThreadDraft(id);
-      this.threadLog = null; this.threadLogKept = []; this.threadEarlierLoading = false; this.threadEarlierError = ''; this.threadAnchor = null;
-      this.threadLogExpanded = false;
-      this.resetThreadSession();
-      this.resetThreadChange();
+    this.panelClosing = false;
+    const wasOpen = this.isPanelOpen();
+    const prevTabCount = this.sideTabsState().tabs.length;
+    if (!wasOpen) {
+      this._panelOpenedFromClosed = true;
+      this.listShown = true;
+    } else if (!this.listResting()) {
+      this.listShown = true;
     }
-    this.thread = id;
-    this.detail = true;
-    this.readThread(cx);
-    cx.notify();
+    this.snapshotActiveTabInputs();
+    this.tabMenu = null;
+    this.confirmCloseTabId = '';
+    const allTasks = this.tasks || this.state.tasks || [];
+    const foundTask = allTasks.find(x => x.id === id)
+      || (this.finishedExtra || []).find(r => r.task === id)
+      || (this.threadsSearchRows || []).find(r => r.task === id);
+    const title = foundTask?.title || id;
+    const res = openSideTab(this.sideTabsState(), {
+      kind: 'thread',
+      taskId: id,
+      title,
+    }, { insertAdjacent: Boolean(insertAdjacent) });
+    if (res.blocked) {
+      this.tabLimitBanner = word(this.lang, 'sideTabLimitDirty');
+      this.notifyPanes(cx, { shell: false, side: true });
+      return;
+    }
+    this.tabLimitBanner = '';
+    if (res.evicted) this.releaseTabHandles(res.evicted.id);
+    this.tabState = res.state;
+    this.ensureTabHandles(res.tab.id, 'thread');
+    this.restoreActiveTabInputs(this.activeSideTab(), cx);
+    this.scrollTabIntoView(res.tab.id);
+    this.persistSideTabs();
+    const crossedMode = !wasOpen || prevTabCount === 0;
+    this.notifyPanes(cx, crossedMode ? { shell: true, conv: true, side: true } : { shell: false, side: true });
   }
   jumpToThread(id, cx) {
     if (!id) return;
@@ -3959,14 +5273,24 @@ export default class PmProject extends View {
   }
   // The header's icon: shows the thread list, or puts the panel away whatever it shows.
   togglePanel(cx) {
-    this.listShown = !(this.listResting() || this.detail);
-    this.detail = false;
-    this.resetThreadChange();
-    if (!this.listShown && ['librarySearch', 'memorySearch', 'docFind', 'docEditor', 'docName', 'memDesc'].includes(this.typing)) {
-      this.keyFocus?.focus();
+    const currentlyOpen = this.isPanelOpen();
+    if (currentlyOpen) {
+      this.closeSidePanel(cx);
+      return;
     }
-    this.syncVisibleSideTab(cx);
-    cx.notify();
+    this.panelClosing = false;
+    this.listShown = true;
+    this._panelOpenedFromClosed = false;
+    if (this.hasSideTabs()) {
+      const active = this.activeSideTab();
+      if (active) this.restoreActiveTabInputs(active, cx);
+      else this.syncVisibleSideTab(cx);
+    } else {
+      this.detail = false;
+      this.resetThreadChange();
+      this.syncVisibleSideTab(cx);
+    }
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
   // ---- Unified project search (Interface I) ---------------------------------
   consumeSearchKey(cx) {
@@ -3984,6 +5308,7 @@ export default class PmProject extends View {
     if (!this.pm()) return;
     this.hoverKey = '';
     this.mention = null;
+    this.resetMentionTasks();
     this.searchOpen = true;
     if (scope) this.searchScope = scope;
     else if (!this.searchScope) this.searchScope = 'all';
@@ -3998,14 +5323,14 @@ export default class PmProject extends View {
         this.searchInput.set_selected_range({ start: 0, end: q.length });
       }
     });
-    cx?.notify?.();
+    this.notifyPanes(cx, { shell: true, conv: true, side: false });
   }
 
   closeProjectSearch(cx, { restoreFocus = true } = {}) {
     if (!this.searchOpen) return;
     this.searchOpen = false;
     if (restoreFocus || this.typing === 'projectSearch') this.keyFocus?.focus?.();
-    cx?.notify?.();
+    this.notifyPanes(cx, { shell: true, conv: true, side: false });
   }
 
   toggleProjectSearch(cx) {
@@ -4152,16 +5477,10 @@ export default class PmProject extends View {
       return;
     }
     if (hit.kind === 'memory') {
-      if (!this.listResting()) this.listShown = true;
-      this.detail = false;
-      this.resetThreadChange();
       this.openDoc({ tab: 'memory', root: hit.root, path: hit.path }, cx, { jumpQuery: q });
       return;
     }
     if (hit.kind === 'library') {
-      if (!this.listResting()) this.listShown = true;
-      this.detail = false;
-      this.resetThreadChange();
       this.openDoc({ tab: 'library', root: hit.root, path: hit.path }, cx, { jumpQuery: q });
     }
   }
@@ -4173,12 +5492,34 @@ export default class PmProject extends View {
       this.toggleProjectSearch(cx);
       return;
     }
+    if (this.isPanelOpen() && this.hasSideTabs()) {
+      if (ks === 'cmd-shift-]' || ks === 'ctrl-shift-]') {
+        cx.stop_propagation?.();
+        this.cycleTab(1, cx);
+        return;
+      }
+      if (ks === 'cmd-shift-[' || ks === 'ctrl-shift-[') {
+        cx.stop_propagation?.();
+        this.cycleTab(-1, cx);
+        return;
+      }
+      if (ks === 'cmd-shift-w' || ks === 'ctrl-shift-w') {
+        const activeId = this.sideTabsState().activeId;
+        if (activeId) {
+          cx.stop_propagation?.();
+          this.closeTab(activeId, cx);
+          return;
+        }
+      }
+    }
     if (ks === 'cmd-f' || ks === 'ctrl-f') {
+      const activeTab = this.activeSideTab();
       const onLib = this.libraryVisible() || (this.activeDoc?.root === 'repo' && this.sideTab === 'library' && this.listResting() && !this.detail);
       const onMem = this.memoryVisible();
       const onSide = onLib || onMem;
       const curTab = onLib ? 'library' : onMem ? 'memory' : '';
-      const hasDoc = onSide && this.activeDoc?.tab === curTab && !this.editingDoc && !this.historyView;
+      const hasDoc = ((activeTab?.kind === 'doc' && this.isPanelOpen()) || (onSide && this.activeDoc?.tab === curTab))
+        && !this.editingDoc && !this.historyView && !['main', 'thread'].includes(this.typing);
       if (hasDoc && !this.searchOpen) {
         cx.stop_propagation?.();
         this.docFindOpen = true;
@@ -4188,8 +5529,9 @@ export default class PmProject extends View {
         }
         this.docMatchPos = 0;
         this.docFindJump = Boolean(this.docFindQuery?.trim?.());
+        this.syncActiveTabFind();
         cx.timer?.after?.(0, () => this.docFindInput?.focus?.());
-        cx.notify?.();
+        this.notifyPanes(cx, { shell: false, side: true });
         return;
       }
       cx.stop_propagation?.();
@@ -4282,13 +5624,16 @@ export default class PmProject extends View {
     const inTabSearch = ((onSide && !hasDoc && !hasEdit && !hasHistory) || onThreads) &&
       (this.typing === searchTyping || Boolean(tabQuery?.trim()));
     const mentionOpen = Boolean(this.mention && this.typing === this.mention.which);
+    const activeTab = this.activeSideTab();
     const step = escapeStep({
       mentionSub: mentionOpen && this.mention.category !== 'all',
       mention: mentionOpen,
       projectSearch: Boolean(this.searchOpen),
+      tabMenu: Boolean(this.tabMenu),
       selectionBar: Boolean(this.selectionBar),
       answering: Boolean(this.answering) && this.typing !== 'thread',
       confirmDelete: onSide && hasDoc && Boolean(this.confirmDeleteKey),
+      confirmCloseDirty: Boolean(this.confirmCloseTabId),
       typing: composerTyping || editorTyping,
       editing: hasEdit,
       retopic: onSide && hasDoc && Boolean(this.retopicOpen),
@@ -4297,6 +5642,7 @@ export default class PmProject extends View {
       history: hasHistory,
       bringBack: Boolean(this.bringBackOpen && !this.bringingBack),
       change: this.isThreadChangeOpen(),
+      activeTab: Boolean(activeTab && this.isPanelOpen()),
       detail: this.detail,
       doc: hasDoc,
       listOpen: !this.wide && this.listResting(),
@@ -4309,9 +5655,11 @@ export default class PmProject extends View {
     this.clearHoverNow(null);
     if (step === 'mentionSub' || step === 'mention') { this.escapeMention(this.mention.which, cx); return; }
     if (step === 'projectSearch') { this.escapeProjectSearch(cx); return; }
+    if (step === 'tabMenu') { this.tabMenu = null; this.notifyPanes(cx, { shell: false, side: true }); return; }
     if (step === 'selectionBar') { this.selectionBar = null; cx.notify(); return; }
     if (step === 'answer') this.answering = null;
     else if (step === 'confirmDelete') this.confirmDeleteKey = '';
+    else if (step === 'confirmCloseDirty') { this.confirmCloseTabId = ''; this.notifyPanes(cx, { shell: false, side: true }); return; }
     else if (step === 'blur') this.keyFocus.focus();
     else if (step === 'edit') { this.cancelEditDoc(cx); return; }
     else if (step === 'retopic') this.retopicOpen = false;
@@ -4320,8 +5668,8 @@ export default class PmProject extends View {
     else if (step === 'change') { this.stepBackThreadChange(cx); return; }
     else if (step === 'search') {
       if (inDocFind) {
-        if (this.docFindQuery.trim()) { this.docFindQuery = ''; this.docFindInput?.set_value(''); }
-        else { this.docFindOpen = false; this.keyFocus.focus(); }
+        if (this.docFindQuery.trim()) { this.docFindQuery = ''; this.docFindInput?.set_value(''); this.syncActiveTabFind(); }
+        else { this.docFindOpen = false; this.syncActiveTabFind(); this.keyFocus.focus(); }
       } else if (tabQuery?.trim()) {
         if (onLib) { this.libraryQuery = ''; this.libraryInput?.set_value(''); }
         else if (onMem) { this.memoryQuery = ''; this.memoryInput?.set_value(''); }
@@ -4330,16 +5678,35 @@ export default class PmProject extends View {
         this.keyFocus.focus();
       }
     } else if (step === 'history') { this.closeHistory(cx); return; }
-    else if (step === 'detail') { this.detail = false; this.resetThreadChange(); this.syncVisibleSideTab(cx); }
-    else if (step === 'doc') { this.closeActiveDoc(cx); return; }
+    else if (step === 'activeTab') {
+      if (this.typing === 'thread' || this.typing === 'docFind') this.keyFocus?.focus();
+      if (this._panelOpenedFromClosed && this.sideTabsState().tabs.length === 1) {
+        this.closeSidePanel(cx);
+        return;
+      }
+      this.showIndexView(cx);
+      return;
+    }
+    else if (step === 'detail') {
+      if (this._panelOpenedFromClosed) {
+        if (this.typing === 'thread') this.keyFocus?.focus();
+        this.closeSidePanel(cx);
+        return;
+      }
+      this.detail = false;
+      this.resetThreadChange();
+      this.syncVisibleSideTab(cx);
+    }
+    else if (step === 'doc') { this.closeActiveDoc(cx, { fromEscape: true }); return; }
     else {
       this.listShown = false;
+      this._panelOpenedFromClosed = false;
       if (['threadsSearch', 'librarySearch', 'memorySearch', 'docFind', 'docEditor', 'docName', 'memDesc'].includes(this.typing)) {
         this.keyFocus?.focus();
       }
     }
     if (step === 'detail' && this.typing === 'thread') this.keyFocus.focus();
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
   }
 
   // ---- Thread change view (Interface H — called by detail panel) ----
@@ -4360,12 +5727,12 @@ export default class PmProject extends View {
     this.change = openChangeView(this.change, this.thread);
     this.changeScroll?.scroll_to_item?.(0);
     this.readThreadChangeSummary(cx);
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, side: true });
   }
 
   closeThreadChange(cx) {
     this.change = closeChangeView(this.change);
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, side: true });
   }
 
   toggleThreadChange(cx) {
@@ -4378,14 +5745,14 @@ export default class PmProject extends View {
     if (!res.handled) return false;
     this.change = res.state;
     this.changeScroll?.scroll_to_item?.(0);
-    cx.notify();
+    this.notifyPanes(cx, { shell: true, side: true });
     return true;
   }
 
   threadChangeButton(_task, t) {
     if (!this.threadChangeSupported()) return null;
     const open = this.isThreadChangeOpen();
-    return this.winIconBtn(
+    return this.splitIconBtn(
       'thread-diff',
       'diff',
       word(this.lang, open ? 'changeClose' : 'diff'),
@@ -4393,6 +5760,7 @@ export default class PmProject extends View {
       t,
       14,
       open,
+      { placement: 'below-right' },
     );
   }
 
@@ -4587,6 +5955,8 @@ export default class PmProject extends View {
         div, svg, v_flex, h_flex,
         icon: (name, size = 16) => this.icon(name, size),
         iconButton: (id, name, tip, action, th, size = 16, tipOpts = null) => this.iconButton(id, name, tip, action, th, size, tipOpts || { panel: true, placement: 'below-right' }),
+        splitIconBtn: (id, name, tip, action, th, size = 14, active = false, tipOpts = null) => this.splitIconBtn(id, name, tip, action, th, size, active, tipOpts || { panel: true, placement: 'below-right' }),
+        lockScrollBody: el => this.sideScrollBody(el),
         withTip: (key, el, tip, opts = null) => this.withTip(key, el, tip, t, { panel: true, ...(opts || {}) }),
         pill: (text, color) => this.pill(text, color),
         keepPress: (el, kb = null) => keepPress(el, kb),
@@ -4598,9 +5968,11 @@ export default class PmProject extends View {
       width,
       state: this.change,
       task: curTask,
-      scrollHandle: this.changeScroll,
+      scrollHandle: this.tabScrollHandle('change'),
+      inTabBar: this.hasSideTabs(),
       actions: {
         onBack: cx => this.stepBackThreadChange(cx),
+        onClose: this.hasSideTabs() ? null : (cx => this.closeSidePanel(cx)),
         onRefresh: cx => this.refreshThreadChange(cx),
         onPickAll: cx => this.pickChangeAll(cx),
         onPickCommit: (c, cx) => this.pickChangeCommit(c, cx),
@@ -4638,7 +6010,7 @@ export default class PmProject extends View {
   resized(cx) {
     if (this.away || !this.pmName) return;
     this.settle = SETTLE;
-    cx.notify();
+    cx?.notify?.();
   }
   // Where a terminal can be shown (focusPlan): over its own pane, an ancestor's, or this project's PM's.
   // `address` as the project's machine names it (see machineView); the plan's are the app's.
@@ -4647,12 +6019,47 @@ export default class PmProject extends View {
       onMachine(this.pmTerminal()?.address || '', this.machine));
   }
   // With nowhere to show it, nothing moves: showing work would reveal another project's space.
+  // When focusing this project's own live PM that has no pane, place it into a tab in this project's
+  // space first (`space.select` or `space.new`, then `terminal.keep`) so another project's space is
+  // never revealed.
   focusTerminal(address) {
     const plan = this.terminalPlace(address);
-    if (!plan.focus) return;
-    run('pane.focus', { terminal: plan.focus });
-    run('layout.select', { stack: STAGE, child: WORK });
-    if (plan.peek) run('terminal.peek', { terminal: plan.peek });
+    if (plan.focus) {
+      run('pane.focus', { terminal: plan.focus });
+      run('layout.select', { stack: STAGE, child: WORK });
+      if (plan.peek) run('terminal.peek', { terminal: plan.peek });
+      return;
+    }
+    const pm = typeof this.pm === 'function' ? this.pm() : null;
+    const pmTerm = typeof this.pmTerminal === 'function' ? this.pmTerminal() : null;
+    const curSpaces = spaces();
+    const keepSteps = pmKeepPlan(address, {
+      pm,
+      pmTerminal: pmTerm,
+      machine: this.machine || '',
+      spaces: curSpaces,
+      panes: panes(),
+    });
+    if (!Array.isArray(keepSteps) || !keepSteps.length) return;
+    const prevSpaceIds = new Set((curSpaces || []).map(s => s?.id).filter(Boolean));
+    const createdSpace = keepSteps[0]?.[0] === 'space.new';
+    for (const [cmd, args] of keepSteps) run(cmd, args);
+    const pmAddr = onMachine(pmTerm?.address || '', this.machine || '');
+    if (pmAddr) {
+      this._pendingPmKeep = { terminal: pmAddr, tabName: pmTabNameFor(pm), createdSpace, prevSpaceIds, at: Date.now() };
+    }
+  }
+  reconcilePendingPmKeep() {
+    const pending = this._pendingPmKeep;
+    if (!pending) return;
+    if (Date.now() - pending.at > 15000) {
+      this._pendingPmKeep = null;
+      return;
+    }
+    const followUp = pmKeepFollowUp(pending, spaces(), panes());
+    if (!Array.isArray(followUp)) return;
+    this._pendingPmKeep = null;
+    for (const [cmd, args] of followUp) run(cmd, args);
   }
 
   // ---- pieces ---------------------------------------------------------------
@@ -4681,10 +6088,10 @@ export default class PmProject extends View {
       const box = div().relative();
       if (opts.flex1) box.flex_1().min_w(0);
       else if (opts.full) box.w_full().min_w(0);
-      else if (opts.flexNone) box.flex_none();
+      if (opts.flexNone) box.flex_none();
       return box.child(target);
     }
-    const panelW = opts.panel ? panelWidth(this.panelWant, this.viewWidth) : 0;
+    const panelW = opts.panel ? (this._lastLayout?.cardWidth || this.currentSplitLayout().cardWidth) : 0;
     const layout = tooltipLayout(text, {
       panelWidth: panelW,
       viewWidth: this.viewWidth || 0,
@@ -4696,7 +6103,7 @@ export default class PmProject extends View {
       const box = div().relative();
       if (opts.flex1) box.flex_1().min_w(0);
       else if (opts.full) box.w_full().min_w(0);
-      else if (opts.flexNone) box.flex_none();
+      if (opts.flexNone) box.flex_none();
       return box;
     };
     if (!layout) return opts.wrap ? wrapBox().child(target) : target;
@@ -4722,6 +6129,280 @@ export default class PmProject extends View {
         .on_click((_e, cx) => { this.hoverKey = ''; action(cx); }))
       .when(!action, el => el.opacity(.4))
       .child(this.icon(name, size)), tip, t, { placement: 'below-right', ...tipOpts });
+  }
+  // Unified 28x28 icon button for the 44px split card top bar.
+  splitIconBtn(id, name, tip, action, t, size = 14, active = false, tipOpts = {}) {
+    return this.withTip(id, h_flex().id(id).size(28).flex_none().rounded(7).items_center().justify_center()
+      .text_color(active ? t.accent : t.muted)
+      .when(active, el => el.bg(withAlpha(t.accent, .14)))
+      .accessibility_label(tip)
+      .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+      .when(Boolean(action), el => el.cursor_pointer()
+        .hover(s => active ? s.bg(withAlpha(t.accent, .2)) : s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); this.hoverKey = ''; action(cx); }))
+      .when(!action, el => el.opacity(.4))
+      .child(this.icon(name, size)), tip, t, { panel: true, placement: 'below-right', ...tipOpts });
+  }
+  // Unified 44px single-row split card top bar (or 36px Row 2 contextual sub-bar when compactBar=true).
+  renderSplitTopBar({
+    id = 'split-topbar',
+    backId = 'split-back',
+    backIcon = 'back',
+    onBack,
+    backTip,
+    leading = null,
+    titleId = 'split-title',
+    title = '',
+    titleTip = '',
+    actions = null,
+    closeId = 'split-close',
+    onClose,
+    closeTip,
+    compactBar = false,
+    titleMuted = false,
+    t,
+  }) {
+    const lang = this.lang;
+    const titleEl = div().id(titleId).w_full().truncate()
+      .text_size(compactBar ? (titleMuted ? 11.5 : 12.5) : 13.5)
+      .when(!titleMuted, el => el.font_semibold())
+      .text_color(titleMuted ? t.dim : t.foreground)
+      .child(title);
+    const titleNode = titleTip
+      ? this.withTip(titleId, titleEl, titleTip, t, { panel: true, placement: 'below-left', wrap: true, flex1: true })
+      : div().flex_1().min_w(0).child(titleEl);
+    const closeBtn = onClose
+      ? this.splitIconBtn(closeId, 'close', closeTip || word(lang, 'closeSidePanel'), onClose, t, 14, false, { placement: 'below-right' })
+      : null;
+    return h_flex().id(id).h(compactBar ? 36 : 44).w_full().flex_none().px(12).gap(6).items_center()
+      .bg(t.background)
+      .border_b(1).border_color(withAlpha(t.border, compactBar ? .5 : .7))
+      .when(Boolean(onBack), el => el.child(
+        this.splitIconBtn(backId, backIcon, backTip || word(lang, 'close'), onBack, t, compactBar ? 13 : 14, false, { placement: 'below-left' }),
+      ))
+      .when(Boolean(leading), el => el.child(leading))
+      .child(titleNode)
+      .child(h_flex().flex_none().gap(2).items_center()
+        .when(Boolean(actions), el => el.child(actions))
+        .when(Boolean(actions && closeBtn), el => el.child(div().w(4).flex_none()))
+        .when(Boolean(closeBtn), el => el.child(closeBtn)));
+  }
+
+  sideTabIcon(tab) {
+    if (tab.kind === 'thread') return 'hook';
+    if (tab.root === 'memory' || tab.root === 'personal' || tab.tab === 'memory') return 'memory';
+    if (tab.root === 'research') return 'report';
+    return 'file';
+  }
+
+  sideTabLabel(tab) {
+    if (tab.kind === 'thread') {
+      const allTasks = this.tasks || this.state.tasks || [];
+      const st = allTasks.find(x => x.id === tab.taskId);
+      const num = formatTaskNumber(taskNumber(st) || this.taskNumberFor(tab.taskId));
+      const base = st?.title || tab.title || tab.taskId;
+      return num ? `${num} ${base}` : base;
+    }
+    if (tab.kind === 'draft') {
+      const draftName = tab.editDraft?.draftName?.trim?.();
+      return draftName || tab.title || word(this.lang, tab.tab === 'memory' ? 'newMemory' : 'newDoc');
+    }
+    const meta = this.findDocMeta(tab.root, tab.path);
+    return (meta ? libraryDocTitle(meta) : '') || tab.title || fileName(tab.path);
+  }
+
+  sideTabBar(t, width, cx) {
+    const lang = this.lang;
+    const dark = isDarkTheme(t);
+    const st = this.sideTabsState();
+    const tabs = st.tabs;
+    const activeId = st.activeId;
+    const narrow = width < 440;
+    const menuBg = [t.raised, t.popover, t.surface].find(c => c && c !== t.chrome) || t.raised;
+
+    const indexActive = activeId === null;
+    const indexBtn = this.withTip('side-tab-index', h_flex().id('side-tab-index').size(28).flex_none().rounded(7)
+      .items_center().justify_center().cursor_pointer()
+      .accessibility_label(word(lang, 'sideTabsIndex'))
+      .when(indexActive, el => el.bg(t.background).border_1().border_color(t.border).text_color(t.foreground))
+      .when(!indexActive, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
+      .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.showIndexView(cx, { toggle: true }); })
+      .child(this.icon('list', 14)), word(lang, 'sideTabsIndex'), t, { panel: true, placement: 'below-left' });
+
+    const menuRow = (id, label, onClick, { danger = false, disabled = false } = {}) => h_flex().id(id)
+      .w_full().h(26).px(8).gap(6).rounded(6).items_center()
+      .text_size(12).text_color(danger ? t.blocked : disabled ? t.dim : t.foreground)
+      .when(!disabled, el => el.cursor_pointer().hover(s => s.bg(t.hover))
+        .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); }))
+      .child(div().flex_1().min_w(0).truncate().child(label));
+
+    const stripItems = [];
+    for (let i = 0; i < tabs.length; i++) {
+      const tab = tabs[i];
+      const isActive = tab.id === activeId;
+      const isHovered = this.hoveredTabId === tab.id;
+      const label = this.sideTabLabel(tab);
+      const showClose = isActive || isHovered;
+      const tailEl = showClose
+        ? h_flex().id(`side-tab-close-${tab.id}`).size(16).flex_none().rounded(4).items_center().justify_center()
+            .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+            .accessibility_label(word(lang, 'sideTabClose'))
+            .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => { cx.stop_propagation(); this.closeTab(tab.id, cx); })
+            .child(this.icon('close', 10))
+        : tab.dirty
+          ? h_flex().size(16).flex_none().items_center().justify_center()
+              .child(div().id(`side-tab-dirty-${tab.id}`).size(6).rounded_full().bg(t.accent))
+          : div().size(16).flex_none();
+
+      const ctxOpen = this.tabMenu?.kind === 'context' && this.tabMenu.tabId === tab.id;
+      const hasRight = i < tabs.length - 1;
+      const hasOthers = tabs.length > 1;
+      const ctxPopup = ctxOpen ? Popup.new(`tab-ctx-menu-${tab.id}`, div().w(0).h(0)).anchor('top_left')
+        .content(keepPress(v_flex().id('tab-ctx-menu').w(188).p(4).gap(2).rounded(9)
+          .bg(menuBg).border_1().border_color(t.border).shadow_lg(), this.keyFocus)
+          .child(menuRow('tab-ctx-close', word(lang, 'sideTabClose'), cx => this.closeTab(tab.id, cx)))
+          .child(menuRow('tab-ctx-others', word(lang, 'sideTabCloseOthers'), cx => this.closeOtherTabs(tab.id, cx), { disabled: !hasOthers }))
+          .child(menuRow('tab-ctx-right', word(lang, 'sideTabCloseRight'), cx => this.closeRightTabs(tab.id, cx), { disabled: !hasRight }))
+          .child(menuRow('tab-ctx-all', word(lang, 'sideTabCloseAll'), cx => this.closeAllTabs(cx), { danger: true }))
+          .when(tab.kind === 'doc' && Boolean(tab.path), el => el
+            .child(div().w_full().h(1).my(2).bg(t.border))
+            .child(menuRow('tab-ctx-copy', word(lang, 'sideTabCopyPath'), cx => {
+              cx.write_to_clipboard?.(tab.path);
+              this.tabMenu = null;
+              this.notifyPanes(cx, { shell: false, side: true });
+            })))) : null;
+
+      const tabEl = h_flex().id(`side-tab-${tab.id}`).relative().h(28).px(8).gap(5).rounded(7)
+        .flex_none().items_center().cursor_pointer()
+        .min_w(narrow ? 72 : 88).max_w(narrow ? 128 : 168)
+        .accessibility_label(tab.dirty ? word(lang, 'sideTabDirtyHint', label) : label)
+        .when(isActive, el => el.bg(t.background).border_1().border_color(withAlpha(t.border, dark ? .9 : .85))
+          .when(!dark, e => e.shadow_xs()).text_color(t.foreground).font_medium())
+        .when(!isActive, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
+        .when(Boolean(tab.missing), el => el.opacity(.6))
+        .on_hover((over, cx) => {
+          const next = over ? tab.id : (this.hoveredTabId === tab.id ? '' : this.hoveredTabId);
+          if (next !== this.hoveredTabId) {
+            this.hoveredTabId = next;
+            this.notifyPanes(cx, { shell: false, side: true });
+          }
+        })
+        .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+        .on_mouse_down('middle', (_e, cx) => { cx.stop_propagation(); this.closeTab(tab.id, cx); })
+        .on_mouse_down('right', (_e, cx) => {
+          cx.stop_propagation();
+          this.tabMenu = ctxOpen ? null : { kind: 'context', tabId: tab.id };
+          this.notifyPanes(cx, { shell: false, side: true });
+        })
+        .on_click((_e, cx) => { cx.stop_propagation(); this.activateTab(tab.id, cx); })
+        .child(this.icon(this.sideTabIcon(tab), 12.5).text_color(isActive ? t.foreground : t.dim))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).child(label))
+        .child(tailEl)
+        .when(Boolean(ctxPopup), el => el.child(div().absolute().left(0).bottom(0).w(0).h(0).child(ctxPopup)));
+
+      stripItems.push(tabEl);
+      if (i < tabs.length - 1) {
+        const nextTab = tabs[i + 1];
+        const nextActive = nextTab.id === activeId;
+        const nextHovered = this.hoveredTabId === nextTab.id;
+        if (!isActive && !isHovered && !nextActive && !nextHovered) {
+          stripItems.push(div().w(1).h(14).flex_none().bg(withAlpha(t.border, dark ? .45 : .55)));
+        }
+      }
+    }
+
+    const overflowOpen = this.tabMenu?.kind === 'overflow';
+    const overflowPopup = overflowOpen ? Popup.new('side-tab-overflow-menu', div().w(0).h(0)).anchor('top_right')
+      .content(keepPress(v_flex().id('side-tab-overflow-popup').w(248).max_h(360).p(4).gap(2).rounded(10)
+        .bg(menuBg).border_1().border_color(t.border).shadow_lg(), this.keyFocus)
+        .child(v_flex().w_full().max_h(260).gap(1).overflow_y_scrollbar()
+          .children(tabs.map(tab => {
+            const isAct = tab.id === activeId;
+            const lbl = this.sideTabLabel(tab);
+            return h_flex().id(`overflow-tab-${tab.id}`).w_full().h(28).px(8).gap(6).rounded(7)
+              .items_center().cursor_pointer()
+              .when(isAct, el => el.bg(withAlpha(t.accent, .14)).text_color(t.foreground).font_medium())
+              .when(!isAct, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
+              .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => { cx.stop_propagation(); this.activateTab(tab.id, cx); })
+              .child(this.icon(this.sideTabIcon(tab), 12.5).text_color(isAct ? t.accent : t.dim))
+              .child(div().flex_1().min_w(0).truncate().text_size(12).child(lbl))
+              .when(Boolean(tab.dirty), el => el.child(div().size(6).flex_none().rounded_full().bg(t.accent)))
+              .child(h_flex().id(`overflow-close-${tab.id}`).size(18).flex_none().rounded(5).items_center().justify_center()
+                .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+                .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+                .on_click((_e, cx) => { cx.stop_propagation(); this.closeTab(tab.id, cx); })
+                .child(this.icon('close', 10)));
+          })))
+        .child(div().w_full().h(1).my(2).bg(t.border))
+        .when(Boolean(activeId && tabs.length > 1), el => el.child(
+          menuRow('overflow-close-others', word(lang, 'sideTabCloseOthers'), cx => this.closeOtherTabs(activeId, cx)),
+        ))
+        .child(menuRow('overflow-close-all', word(lang, 'sideTabCloseAll'), cx => this.closeAllTabs(cx), { danger: true }))) : null;
+
+    const overflowBtn = tabs.length >= 2
+      ? h_flex().id('side-tab-overflow').relative().h(26).px(6).gap(3).rounded(6).flex_none()
+          .items_center().cursor_pointer().text_size(11.5)
+          .when(overflowOpen, el => el.bg(t.raised).text_color(t.foreground))
+          .when(!overflowOpen, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
+          .accessibility_label(word(lang, 'sideTabsAll', tabs.length))
+          .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            this.tabMenu = overflowOpen ? null : { kind: 'overflow' };
+            this.notifyPanes(cx, { shell: false, side: true });
+          })
+          .child(String(tabs.length))
+          .child(this.icon('expand', 10))
+          .when(Boolean(overflowPopup), el => el.child(div().absolute().right(0).bottom(0).w(0).h(0).child(overflowPopup)))
+      : null;
+
+    const closeBtn = this.splitIconBtn('split-close', 'close', word(lang, 'closeSidePanel'), cx => this.closeSidePanel(cx), t, 14, false, { placement: 'below-right' });
+
+    return h_flex().id('side-tab-bar').h(36).w_full().flex_none().px(8).gap(4).items_center()
+      .bg(dark ? withAlpha(t.surface, .55) : t.surface)
+      .border_b(1).border_color(withAlpha(t.border, .7))
+      .child(indexBtn)
+      .child(div().w(1).h(16).flex_none().bg(withAlpha(t.border, .6)))
+      .child(h_flex().id('side-tab-strip').flex_1().min_w(0).h(36).gap(2).items_center().overflow_x_scroll()
+        .when(Boolean(this.tabStripScroll), el => el.track_scroll(this.tabStripScroll))
+        .children(stripItems))
+      .when(Boolean(overflowBtn), el => el.child(overflowBtn))
+      .child(closeBtn);
+  }
+
+  sideTabBanners(t, cx) {
+    const lang = this.lang;
+    const active = this.activeSideTab();
+    const out = [];
+    if (this.confirmCloseTabId && active && this.confirmCloseTabId === active.id) {
+      out.push(h_flex().id('side-tab-dirty-bar').flex_none().mx(12).mt(6).px(10).py(5).gap(6).rounded(8).items_center()
+        .bg(withAlpha(t.blocked, .12)).border_1().border_color(withAlpha(t.blocked, .35))
+        .child(div().flex_1().min_w(0).whitespace_normal().text_size(12).text_color(t.foreground)
+          .child(word(lang, 'sideTabDirtyWarning')))
+        .child(this.iconButton('side-tab-dirty-save', 'check', word(lang, 'sideTabSaveAndClose'),
+          cx => this.saveEditingDoc(cx, { closeTabAfter: true }), t, 14))
+        .child(this.iconButton('side-tab-dirty-discard', 'trash', word(lang, 'sideTabDiscardAndClose'),
+          cx => this.closeTab(active.id, cx, { force: true }), t, 14).text_color(t.blocked))
+        .child(this.iconButton('side-tab-dirty-cancel', 'close', word(lang, 'sideTabCancelClose'),
+          cx => { this.confirmCloseTabId = ''; this.notifyPanes(cx, { shell: false, side: true }); }, t, 13)));
+    }
+    if (this.tabLimitBanner) {
+      out.push(h_flex().id('side-tab-limit-bar').flex_none().mx(12).mt(6).px(10).py(5).gap(6).rounded(8).items_center()
+        .bg(withAlpha(t.blocked, .12)).border_1().border_color(withAlpha(t.blocked, .35))
+        .child(div().flex_1().min_w(0).whitespace_normal().text_size(12).text_color(t.foreground)
+          .child(this.tabLimitBanner))
+        .child(this.iconButton('side-tab-limit-dismiss', 'close', word(lang, 'dismissNotice'),
+          cx => { this.tabLimitBanner = ''; this.notifyPanes(cx, { shell: false, side: true }); }, t, 12)));
+    }
+    if (this.deletedBanner && active) {
+      const delBar = this.deletedBannerBar(this.deletedBanner.tab, t);
+      if (delBar) out.push(delBar);
+    }
+    return out;
   }
   avatar(t) {
     return h_flex().size(28).flex_none().rounded(9).items_center().justify_center()
@@ -4845,7 +6526,8 @@ export default class PmProject extends View {
 
   mentionPopup(id, which, menu, t) {
     const lang = this.lang;
-    const cardW = id === 'say-thread' ? Math.max(240, Math.min(360, panelWidth(this.panelWant, this.viewWidth) - 40)) : 360;
+    const sideW = this._lastLayout?.cardWidth || this.currentSplitLayout().cardWidth;
+    const cardW = id === 'say-thread' ? Math.max(240, Math.min(360, sideW - 40)) : 360;
     const children = [];
     if (menu.mode === 'category') {
       children.push(h_flex().id(`${id}-mention-header`).h(28).px(8).pb(4).gap(6).items_center().border_b(1).border_color(t.border)
@@ -4901,7 +6583,11 @@ export default class PmProject extends View {
       const msg = menu.category === 'files' ? word(lang, 'mentionFilesError', menu.error) : menu.error;
       children.push(div().id(`${id}-mention-error`).px(10).py(8).whitespace_normal().text_size(12).text_color(t.blocked).child(msg));
     } else if (menu.loading) {
-      const msg = menu.category === 'files' ? word(lang, 'mentionLoadingFiles') : word(lang, 'libraryLoading');
+      const msg = menu.loadingText || (menu.category === 'files'
+        ? word(lang, 'mentionLoadingFiles')
+        : menu.category === 'threads'
+          ? word(lang, 'threadsSearching')
+          : word(lang, 'libraryLoading'));
       children.push(h_flex().id(`${id}-mention-loading`).px(10).py(8).gap(6).items_center().text_size(12).text_color(t.dim)
         .child(svg(SPINNER).size(12).flex_none().spin(900)).child(msg));
     } else if (menu.emptyText) {
@@ -5305,7 +6991,7 @@ export default class PmProject extends View {
       .child(this.withTip(`${id}-answering-x`, h_flex().id(`${id}-answering-x`).size(18).flex_none().rounded(6).items_center().justify_center()
         .cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .accessibility_label(word(this.lang, 'stopAnswering'))
-        .on_click((_e, cx) => { cx.stop_propagation(); this.answering = null; this.input.focus(); cx.notify(); })
+        .on_click((_e, cx) => { cx.stop_propagation(); this.answering = null; this.input.focus(); this.notifyPanes(cx, { shell: false, conv: true, side: true }); })
         .child(this.icon('close', 10)), word(this.lang, 'stopAnswering'), t, { panel: inPanel, placement: 'above-right' })),
       word(this.lang, 'answeringTo', answering.title), t, { panel: inPanel, placement: 'above-left' })) : null;
     const quoteBar = quotes.length ? v_flex().id(`${id}-quotes`).w_full().pt(8).pr(10).gap(4)
@@ -5406,7 +7092,7 @@ export default class PmProject extends View {
     return this.withTip(`thread-${row.task}`, h_flex().id(`thread-${row.task}`).h(24).gap(8).items_center().cursor_pointer().text_size(13)
       .text_color(selected ? t.foreground : row.closed ? t.dim : t.muted).hover(s => s.text_color(t.foreground))
       .accessibility_label(tip)
-      .on_click((_e, cx) => this.openThread(row.task, cx))
+      .on_click((_e, cx) => this.openThread(row.task, cx, { insertAdjacent: true }))
       .child(svg(ICON('hook')).size(14).flex_none().text_color(t.dim))
       .when(Boolean(numText), el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
       .child(div().min_w(0).truncate().child(row.title))
@@ -5488,13 +7174,15 @@ export default class PmProject extends View {
               .when(paraActive, el => el.child(this.paragraphQuoteButton(qSource, seg, t))));
         }))
       : this.selectableText(`q-txt-${item.key}`, item.text, qSource).w_full().text_color(asking ? t.foreground : t.muted);
+    const qImages = this.renderInlineImagePreviews(`q-${item.key}`, item.text, t, cx, { maxWidth: 480, maxHeight: 240 });
     const card = v_flex().id(`question-msg-${item.key}`).w_full().p(6).gap(2).rounded(14).border_1()
       .when(Boolean(qSource), el => el.on_hover((h, cx) => this.setHoveredMsg(item.key, h, cx)))
       .child(v_flex().px(10).pt(6).pb(rows.length ? 6 : 4).gap(3)
         .child(h_flex().w_full().min_h(24).items_center().justify_between().gap(6)
           .child(name)
           .when(hovered, el => el.child(this.quoteButton(qSource, t, { whole: qMulti }))))
-        .child(qBody))
+        .child(qBody)
+        .when(Boolean(qImages), el => el.child(qImages)))
       .children(rows);
     // A question that waits is a lifted surface with the message box's border; one that is settled
     // is an outline on the canvas, so the two differ in a light theme too.
@@ -5608,12 +7296,14 @@ export default class PmProject extends View {
                 .when(paraActive, el => el.child(this.paragraphQuoteButton(pmSource, seg, t))));
           }));
         }
+        const pmImages = this.renderInlineImagePreviews(`pm-${item.key}`, rawText, t, cx, { maxWidth: 520, maxHeight: 280 });
+        const contentNode = pmImages ? v_flex().w_full().child(wholeNode).child(pmImages) : wholeNode;
         // A long reply shows its opening paragraph until it is opened. The newest one is open, and so
         // stays every reply that arrived while this project was on screen: history folds, the live
         // conversation does not move under the reader.
         bodyNode = (!item.long || item.key === this.newest)
-          ? wholeNode
-          : v_flex().w_full().child(wholeNode)
+          ? contentNode
+          : v_flex().w_full().child(contentNode)
             .child(h_flex().child(this.withTip(`fold-${item.key}`, keepPress(h_flex().id(`fold-${item.key}`)).pr(8).cursor_pointer()
               .text_color(t.dim).hover(s => s.text_color(t.foreground))
               .accessibility_label(word(this.lang, 'fold'))
@@ -5643,22 +7333,31 @@ export default class PmProject extends View {
     if (item.kind === 'threads') return v_flex().w_full().children(item.rows.map(row => this.threadLine(row, t, this.atWork)));
     if (item.kind === 'about') return this.aboutLine(item, t);
     if (item.kind === 'question') return this.question(item, t, cx, today);
-    // typing: the coordinator is at work (quiet live activity + stall recovery actions).
+    // typing: the coordinator is at work (quiet live activity + always-on interrupt + §3.9 mapping).
     const pmTermNow = this.pmTerminal();
     const rawActView = pmActivityView(this.lang, {
       turn: this.activePmTurn(),
+      turn2: this.activePmTurn2(),
+      supervised: this.activePmSupervised(),
       working: this.isPmWorking(pmTermNow, this.live(), this.activePmTurn()),
       pendingSending: this.pending.some(p => !p.failed && !p.queued && !p.received),
       nowMs: this.nowMs(),
       serverNowMs: this.serverNowMs || 0,
       receivedAtMs: this.serverNowAt || 0,
+      agentKind: this.pm()?.agent || '',
     });
     const actView = rawActView && typeof rawActView === 'object'
       ? rawActView
-      : { mode: 'dots', label: '', stalled: false, canInterrupt: false, canRotate: false };
+      : { mode: 'dots', label: '', preamble: '', tooltip: '', tone: 'neutral', stalled: false, canInterrupt: false, canRotate: false, canOpenTerminal: false };
+    const dotsColor = actView.stalled ? t.blocked : actView.tone === 'warn' ? (t.ansi3 || t.blocked) : actView.unknown ? t.dim : t.muted;
     const dotsEl = h_flex().gap(5).items_center().flex_none().loop('opacity', { from: .35, to: 1, period: 1400 })
-      .children([0, 1, 2].map(() => div().size(6).rounded(3).bg(actView.stalled ? t.blocked : t.muted)));
-    if (!actView.label && !actView.canInterrupt && !actView.canRotate) {
+      .children([0, 1, 2].map(() => div().size(6).rounded(3).bg(dotsColor)));
+    const hasActions = Boolean(
+      (actView.canInterrupt && pmTermNow)
+      || (actView.canRotate && this.pm()?.repo)
+      || (actView.canOpenTerminal && pmTermNow)
+    );
+    if (!actView.label && !hasActions) {
       return h_flex().id('pm-typing-line').h(28).items_center().child(dotsEl);
     }
     const interrupting = this.interruptingPm === this.pmName;
@@ -5666,12 +7365,22 @@ export default class PmProject extends View {
     const intTip = word(this.lang, interrupting ? 'interruptingPmTip' : 'interruptPmTip');
     const rotTip = word(this.lang, rotating ? 'rotatingPmTip' : 'rotatePmTip');
     const openTip = word(this.lang, 'openPm');
+    const labelTextColor = actView.stalled ? t.blocked : actView.tone === 'warn' ? (t.ansi3 || t.foreground) : t.dim;
+    const displayLabel = actView.preamble && actView.mode === 'working' && actView.label && !actView.label.includes(actView.preamble)
+      ? `${actView.preamble} · ${actView.label}`
+      : actView.label;
+    const labelNode = displayLabel
+      ? div().id('pm-typing-label').flex_1().min_w(0).truncate().text_size(12.5)
+        .text_color(labelTextColor)
+        .child(displayLabel)
+      : div().flex_1().min_w(0);
+    const labelWithTip = (displayLabel && actView.tooltip)
+      ? this.withTip('pm-typing-label', labelNode, actView.tooltip, t, { placement: 'above-left' })
+      : labelNode;
     return h_flex().id('pm-typing-line').w_full().min_h(28).gap(8).items_center()
       .child(dotsEl)
-      .child(div().id('pm-typing-label').flex_1().min_w(0).truncate().text_size(12.5)
-        .text_color(actView.stalled ? t.blocked : t.dim)
-        .child(actView.label))
-      .when(Boolean(actView.canInterrupt || actView.canRotate), el => el.child(h_flex().id('pm-typing-actions').flex_none().gap(4).items_center()
+      .child(labelWithTip)
+      .when(hasActions, el => el.child(h_flex().id('pm-typing-actions').flex_none().gap(4).items_center()
         .when(Boolean(actView.canInterrupt && pmTermNow), a => a.child(this.withTip('pm-interrupt-btn',
           h_flex().id('pm-interrupt-btn').size(24).rounded(7).items_center().justify_center()
             .text_color(actView.stalled ? t.blocked : t.muted).accessibility_label(intTip)
@@ -5686,11 +7395,11 @@ export default class PmProject extends View {
               .on_click((_e, clickCx) => this.rotatePmFromStall(clickCx)))
             .child(rotating ? svg(SPINNER).size(13).flex_none().text_color(t.muted).spin(900) : this.icon('refresh', 14)),
           rotTip, t, { placement: 'above-right' })))
-        .when(Boolean(pmTermNow), a => a.child(this.withTip('pm-open-term-btn',
+        .when(Boolean(actView.canOpenTerminal && pmTermNow), a => a.child(this.withTip('pm-open-term-btn',
           h_flex().id('pm-open-term-btn').size(24).rounded(7).items_center().justify_center()
             .text_color(t.muted).accessibility_label(openTip).cursor_pointer()
             .hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click(() => this.show(pmTermNow.address))
+            .on_click(() => this.focusTerminal(pmTermNow.address))
             .child(this.icon('terminal', 14)),
           openTip, t, { placement: 'above-right' })))));
   }
@@ -5712,6 +7421,33 @@ export default class PmProject extends View {
       const line = () => div().flex_1().h(1).bg(t.border);
       return h_flex().w_full().gap(12).items_center().text_size(12).text_color(t.dim)
         .child(line()).child(dayLabel(this.lang, b.date, today, yesterday)).child(line());
+    }
+    if (b.kind === 'incident') {
+      const iv = incidentRowView(this.lang, b);
+      const dark = isDarkTheme(t);
+      const flatLabel = String(iv.label || '').replace(/\s+/g, ' ').trim();
+      const rowId = `incident-${b.key}`;
+      if (iv.tone === 'muted' || iv.tone === 'resolved') {
+        const quietRow = h_flex().id(rowId).w_full().items_center().gap(6).px(8).py(4)
+          .text_size(12).text_color(t.dim)
+          .child(this.icon(iv.icon, 12).flex_none().text_color(t.muted))
+          .child(div().flex_1().min_w(0).truncate().child(flatLabel));
+        return iv.detail ? this.withTip(rowId, quietRow, iv.detail, t, { placement: 'above-left' }) : quietRow;
+      }
+      if (iv.tone === 'alert') {
+        const alertRow = h_flex().id(rowId).w_full().items_start().gap(8).px(12).py(9).rounded(10)
+          .bg(withAlpha(t.blocked, dark ? .14 : .09)).border_1().border_color(withAlpha(t.blocked, .45))
+          .text_size(12.5).text_color(t.foreground)
+          .child(this.icon(iv.icon, 13.5).flex_none().text_color(t.blocked))
+          .child(div().flex_1().min_w(0).whitespace_normal().child(flatLabel));
+        return iv.detail ? this.withTip(rowId, alertRow, iv.detail, t, { placement: 'above-left' }) : alertRow;
+      }
+      const recRow = h_flex().id(rowId).w_full().items_start().gap(8).px(12).py(8).rounded(10)
+        .bg(t.raised).border_1().border_color(t.border)
+        .text_size(12.5).text_color(t.muted)
+        .child(this.icon(iv.icon, 13).flex_none().text_color(t.muted))
+        .child(div().flex_1().min_w(0).whitespace_normal().child(flatLabel));
+      return iv.detail ? this.withTip(rowId, recRow, iv.detail, t, { placement: 'above-left' }) : recRow;
     }
     if (b.kind === 'user') {
       // The files it carried are cards under its words (or alone, when it was only files).
@@ -5746,9 +7482,11 @@ export default class PmProject extends View {
                 .when(paraActive, el => el.child(this.paragraphQuoteButton(userSource, seg, t))));
           }))
         : this.renderMentionText(`bubble-${b.key}`, bodyText, t, cx, userSource);
+      const splitLay = this._lastLayout || this.currentSplitLayout();
+      const openInlineW = (this.isPanelOpen() && splitLay.layoutKind === 'inline') ? splitLay.slotWidth : 0;
       const quotePreviewW = msgQuotes.length > 0
         ? Math.max(180, Math.min(410, Math.floor((this.viewWidth
-          ? Math.min(COLUMN, Math.max(260, this.viewWidth - (this.listShown && this.wide ? panelWidth(this.panelWant, this.viewWidth) : 0) - 64))
+          ? Math.min(COLUMN, Math.max(260, this.viewWidth - openInlineW - 64))
           : COLUMN) * 0.72) - 52))
         : 0;
       const el = v_flex().max_w('72%').px(14).py(10).gap(8).rounded_tl(18).rounded_tr(18).rounded_bl(18).rounded_br(6)
@@ -5784,6 +7522,15 @@ export default class PmProject extends View {
       const bubbleId = Number(b.key.split(':')[1]);
       // A timed-out bubble may have arrived: its state says so on its own, without "not sent:".
       const failedLine = b.unconfirmed ? b.failed : word(this.lang, 'failed', b.failed);
+      const rawQueuedReason = b.queued && b.queuedReason && typeof queuedReasonText === 'function'
+        ? queuedReasonText(this.lang, b.queuedReason)
+        : '';
+      const queuedReason = typeof rawQueuedReason === 'string' ? rawQueuedReason : '';
+      const isDraftReason = String(b.queuedReason || '').toLowerCase() === 'waiting_quiet_or_draft';
+      const queuedLabel = isDraftReason
+        ? queuedReason
+        : (queuedReason ? `${word(this.lang, 'queued')} · ${queuedReason}` : word(this.lang, 'queued'));
+      const queuedTip = queuedReason ? `${queuedReason} · ${word(this.lang, 'queuedTip')}` : word(this.lang, 'queuedTip');
       const row = h_flex().id(`user-msg-${b.key}`).w_full().justify_end().gap(6).items_center()
         .on_hover((h, cx) => this.setHoveredMsg(b.key, h, cx))
         .when(Boolean(b.failed), row => row.child(this.withTip(`retry-${b.key}`, h_flex().id(`retry-${b.key}`).size(24).rounded(12).items_center()
@@ -5795,13 +7542,25 @@ export default class PmProject extends View {
         .child(b.pending
           ? this.withTip(`bubble-${b.key}`, bubbleEl, word(this.lang, b.checking ? 'checkingSent' : 'sending'), t, { placement: 'above-right' })
           : b.queued
-            ? this.withTip(`bubble-${b.key}`, bubbleEl.opacity(.82), word(this.lang, 'queuedTip'), t, { placement: 'above-right' })
+            ? this.withTip(`bubble-${b.key}`, bubbleEl.opacity(.82), queuedTip, t, { placement: 'above-right' })
             : bubbleEl);
       if (b.queued) {
         return v_flex().w_full().items_end().gap(4).child(row)
           .child(this.withTip(`queued-${b.key}`, h_flex().id(`queued-${b.key}`).gap(5).items_center().text_size(11.5).text_color(t.muted)
             .child(div().size(5).rounded_full().bg(t.blocked))
-            .child(word(this.lang, 'queued')), word(this.lang, 'queuedTip'), t, { placement: 'above-right' }));
+            .child(queuedLabel), queuedTip, t, { placement: 'above-right' }));
+      }
+      // A logged message still on its way through the PM's mailbox (§3.9): sending → queued (why) → delivered,
+      // waiting → read; gone once answered. Only a failed one is red.
+      const delivery = (!b.pending && !b.failed && b.delivery) ? this.deliveryLine(b.delivery) : null;
+      if (delivery) {
+        const dot = delivery.failed ? t.blocked : delivery.queued ? t.blocked : delivery.read ? t.accent : t.muted;
+        return v_flex().w_full().items_end().gap(4).child(row)
+          .child(h_flex().id(`delivery-${b.key}`).max_w('72%').gap(5).items_center().text_size(11.5)
+            .text_color(delivery.failed ? t.blocked : t.muted)
+            .accessibility_label(delivery.label)
+            .child(div().size(5).flex_none().rounded_full().bg(dot))
+            .child(div().min_w(0).whitespace_normal().child(delivery.label)));
       }
       if (!b.failed) return row;
       const errId = b.upload ? `upload-error-${b.key}` : `failed-${b.key}`;
@@ -5891,7 +7650,9 @@ export default class PmProject extends View {
       : (pmStart === 'tui' || pmStart === 'tui_live') ? word(lang, 'pmOfflineTui')
       : pmStart === 'missing_repo' ? word(lang, 'pmOfflineMissingRepo')
       : word(lang, 'noPmTerminal');
-    const panelOpen = Boolean(this.listResting() || this.detail);
+    const panelOpen = this.isPanelOpen();
+    const bgShellsCount = Number(this.activePmTurn2()?.bg_shells?.count ?? this.activePmTurn()?.bg_shells ?? 0) || 0;
+    const pmTerminalTip = bgShellsCount > 0 ? word(lang, 'openPmBgShells', bgShellsCount) : word(lang, 'openPm');
     return {
       session: this.winSession,
       pmName: this.pmName,
@@ -5910,12 +7671,38 @@ export default class PmProject extends View {
       hasRing,
       bellTip: waiting ? word(lang, 'waitingCount', waiting) : word(lang, 'nothingWaiting'),
       pmStart,
+      pmTerminalTip,
       pmOfflineTip,
       panelOpen,
       panelTip: word(lang, panelOpen
         ? (this.librarySupported() ? 'hideSidePanel' : 'hideThreads')
         : (this.librarySupported() ? 'showSidePanel' : 'showThreads')),
     };
+  }
+
+  renderWindowControls(t, lang, { divider = true } = {}) {
+    let win = null;
+    try { win = appWindow?.(); } catch (_) { win = null; }
+    let overlay = false;
+    try { overlay = Boolean(props?.()?.overlay); } catch (_) { overlay = false; }
+    const buttons = typeof windowControlButtons === 'function'
+      ? windowControlButtons(win, { overlay })
+      : [];
+    if (!Array.isArray(buttons) || !buttons.length) return null;
+    const stop = (_e, cx) => cx.stop_propagation();
+    const row = h_flex().id('pm-window-controls').flex_none().gap(2).items_center();
+    if (divider) row.child(div().w(1).h(16).mx(4).flex_none().bg(t.border));
+    for (const b of buttons) {
+      const label = word(lang, b.labelKey);
+      const content = b.icon ? svg(b.icon).size(b.iconSize).flex_none() : b.glyph;
+      row.child(h_flex().id(b.id).w(30).h(28).flex_none().rounded(6).items_center().justify_center()
+        .cursor_pointer().text_color(t.muted).accessibility_label(label)
+        .hover(s => (b.danger ? s.bg('#e81123').text_color('#ffffff') : s.bg(t.hover).text_color(t.foreground)))
+        .on_mouse_down('left', stop)
+        .on_click((_e, cx) => { cx.stop_propagation(); run(b.command); })
+        .child(content));
+    }
+    return row;
   }
 
   renderHeaderBar(data, actions, t, { standalone = true } = {}) {
@@ -5955,7 +7742,7 @@ export default class PmProject extends View {
           .text_color(data.pmCtxLevel === 'near' ? warnColor : t.dim)
           .accessibility_label(data.pmCtxTip).child(data.pmCtxText), data.pmCtxTip, { wrap: true, flexNone: true });
     const pmControl = data.pmStart === 'online'
-      ? hdrIconBtn('pm-terminal', 'terminal', word(lang, 'openPm'), () => actions.onOpenPm())
+      ? hdrIconBtn('pm-terminal', 'terminal', data.pmTerminalTip || word(lang, 'openPm'), () => actions.onOpenPm())
       : data.pmStart === 'starting'
         ? tipWrap('pm-start', h_flex().id('pm-start').size(32).flex_none().rounded(9).items_center().justify_center().text_color(t.muted)
           .accessibility_label(word(lang, 'startingPm'))
@@ -5966,9 +7753,12 @@ export default class PmProject extends View {
     // Key the panel toggle button's element id by open/closed state so GPUI discards any cached or
     // pending WaitingForShow tooltip closure when the panel flips while the cursor stays on the button.
     const panelBtnId = data.panelOpen ? 'pm-threads-open' : 'pm-threads-closed';
+    const panelBtn = hdrIconBtn(panelBtnId, 'panel', data.panelTip, cx => actions.onTogglePanel(cx))
+      .when(Boolean(data.panelOpen), el => el.bg(t.raised).text_color(t.foreground));
     const base = h_flex().id('pm-project-header-bar');
     const bar = (standalone ? base.h(56).flex_none() : base.size_full().bg(t.canvas).text_size(14).text_color(t.foreground))
-      .px(28).gap(10).items_center().border_b(1).border_color(t.border);
+      .pl(28).pr(14).gap(10).items_center();
+    const winControls = this.renderWindowControls(t, lang, { divider: true });
     return bar
       .child(div().flex_none().text_size(15).font_semibold().child(data.title))
       .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(12).text_color(t.dim)
@@ -5981,7 +7771,8 @@ export default class PmProject extends View {
         .child(searchBtn)
         .child(bell)
         .child(pmControl)
-        .child(hdrIconBtn(panelBtnId, 'panel', data.panelTip, cx => actions.onTogglePanel(cx))));
+        .child(panelBtn))
+      .when(Boolean(winControls), el => el.child(winControls));
   }
 
   renderHeaderOnly(_cx) {
@@ -5999,7 +7790,9 @@ export default class PmProject extends View {
       }
     };
     if (!s || !s.hasPm || (activeRef?.pm && s.pmName && s.pmName !== activeRef.pm)) {
+      const winControls = this.renderWindowControls(t, this.lang || 'en', { divider: false });
       return h_flex().id('pm-project-header-bar').size_full().bg(t.canvas)
+        .when(Boolean(winControls), el => el.pr(14).items_center().justify_end().child(winControls))
         .track_focus(this.keyFocus).on_key_down(onKeyDown);
     }
     this.lang = s.lang || this.lang || 'en';
@@ -6101,7 +7894,50 @@ export default class PmProject extends View {
       .child(div().size(6).flex_none().rounded_full().bg(t.blocked))
       .child(div().flex_1().min_w(0).whitespace_normal().text_size(12.5).text_color(t.foreground).child(text))
       .when(Boolean(pmTerm), el => el.child(this.iconButton('pm-blocked-open', 'terminal', word(lang, 'openPm'),
-        cx => this.open(pmTerm, cx), t, 14)));
+        () => this.focusTerminal(pmTerm.address), t, 14)));
+  }
+
+  pmUndeliveredBar(text, t) {
+    const lang = this.lang;
+    const pmTerm = this.pmTerminal();
+    const accent = t.ansi3 || t.blocked;
+    return h_flex().id('pm-undelivered-bar').w_full().pl(14).pr(6).py(4).gap(10).rounded(12).items_center()
+      .bg(t.surface).border_1().border_color(withAlpha(accent, .45))
+      .child(div().size(6).flex_none().rounded_full().bg(accent))
+      .child(div().flex_1().min_w(0).whitespace_normal().text_size(12.5).text_color(t.foreground).child(text))
+      .when(Boolean(pmTerm), el => el.child(this.iconButton('pm-undelivered-open', 'terminal', word(lang, 'openPm'),
+        () => this.focusTerminal(pmTerm.address), t, 14)));
+  }
+
+  pmBusyBar(busyView, t, cx) {
+    const busy = Boolean(busyView.interrupting);
+    const preemptBtn = this.withTip('pm-preempt-btn',
+      h_flex().id('pm-preempt-btn').size(22).flex_none().rounded(6).items_center().justify_center()
+        .text_color(t.muted)
+        .accessibility_label(busyView.actionLabel)
+        .when(!busy, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, clickCx) => this.preemptAndSendMain(clickCx || cx)))
+        .child(busy ? svg(SPINNER).size(12).flex_none().text_color(t.muted).spin(900) : this.icon('stop', 12)),
+      busyView.actionLabel, t, { placement: 'above-right' });
+    return h_flex().id('pm-busy-bar').w_full().pl(10).pr(4).py(2).gap(6).rounded(9).items_center()
+      .bg(t.surface).border_1().border_color(t.border)
+      .child(div().size(5).flex_none().rounded_full().bg(t.dim))
+      .child(div().id('pm-busy-text').flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim)
+        .child(busyView.text))
+      .child(preemptBtn);
+  }
+
+  pmActionFeedbackBar(fb, t, cx) {
+    const lang = this.lang;
+    const isErr = fb.tone === 'error' || fb.tone === 'warn';
+    const accent = fb.tone === 'error' ? t.blocked : fb.tone === 'warn' ? (t.ansi3 || t.blocked) : t.dim;
+    return h_flex().id('pm-action-feedback-bar').w_full().pl(14).pr(6).py(4).gap(10).rounded(12).items_center()
+      .bg(t.surface).border_1().border_color(isErr ? withAlpha(accent, .45) : t.border)
+      .child(div().size(6).flex_none().rounded_full().bg(accent))
+      .child(div().flex_1().min_w(0).whitespace_normal().text_size(12.5)
+        .text_color(isErr ? t.foreground : t.dim).child(fb.text))
+      .child(this.iconButton('pm-action-feedback-close', 'close', word(lang, 'close'),
+        clickCx => { this.pmActionFeedback = null; this.notifyPanes(clickCx || cx, { shell: false, conv: true }); }, t, 12));
   }
 
   offlinePmBar(pmStart, t) {
@@ -6161,7 +7997,10 @@ export default class PmProject extends View {
         }
         return ring(t.accent).child(div().size(5.5).rounded_full().bg(t.accent));
       }
-      if (row.working) return svg(SPINNER).size(14).flex_none().text_color(t.ansi2 ?? t.working).spin(900);
+      if (row.working) {
+        const color = row.postGate ? (t.working ?? t.ansi3 ?? t.accent) : (t.ansi2 ?? t.working);
+        return svg(SPINNER).size(14).flex_none().text_color(color).spin(900);
+      }
       return svg(SPINNER).size(14).flex_none().text_color(row.postGate ? (t.working ?? t.ansi3 ?? t.accent) : t.dim);
     }
     return row.group === 'offline' ? this.icon('unplug', 14).text_color(t.dim)
@@ -6177,13 +8016,15 @@ export default class PmProject extends View {
     return treeBranchList({ div, svg, v_flex }, items, { ...opts, treeBranchIcon: ICON('tree-branch') });
   }
 
-  agentStatusMark(status, t, role = '') {
+  agentStatusMark(status, t, role = '', { compact = false } = {}) {
     if (status === 'working') {
+      if (compact) return div().size(6).flex_none().rounded_full().bg(role === 'review' ? t.accent : (t.ansi2 ?? t.working));
       return svg(SPINNER).size(10).flex_none().text_color(role === 'review' ? t.accent : (t.ansi2 ?? t.working)).spin(900);
     }
-    if (status === 'blocked') return div().size(6.5).flex_none().rounded_full().bg(t.blocked);
-    if (status === 'done') return div().size(6.5).flex_none().rounded_full().bg(t.accent);
-    return div().size(6.5).flex_none().rounded_full().border(1.4).border_color(t.dim);
+    const sz = compact ? 6 : 6.5;
+    if (status === 'blocked') return div().size(sz).flex_none().rounded_full().bg(t.blocked);
+    if (status === 'done') return div().size(sz).flex_none().rounded_full().bg(t.accent);
+    return div().size(sz).flex_none().rounded_full().border(1.4).border_color(t.dim);
   }
 
   // Render an agent's own program icon (matching Herdr's Agents list), falling back to our generic agent glyph.
@@ -6339,12 +8180,18 @@ export default class PmProject extends View {
       : word(lang, `agentState_${ag.status}`);
     // A helper serving the task says what it does (Merging · working) before its model.
     const doing = ag.purpose ? ag.nameSuffix : '';
-    const meta = [doing, state, ag.model ? `${ag.model}${ag.up ? ' ↑' : ''}` : '', ctxText].filter(Boolean).join(' · ');
+    const modelInfo = (ag.modelBadge && ag.model && !ag.modelBadge.toLowerCase().includes(ag.model.toLowerCase()))
+      ? `${ag.model} · ${ag.modelBadge}`
+      : (ag.modelBadge || ag.model);
+    const meta = [doing, state, modelInfo ? `${modelInfo}${ag.up ? ' ↑' : ''}` : '', ctxText].filter(Boolean).join(' · ');
     const summary = ag.ended && ag.summary ? ag.summary : '';
     const hint = word(lang, isOpen ? 'closeAgentWindow' : 'openAgentWindow');
+    const headTitle = ag.displayName
+      ? [ag.displayName, ag.actionLabel || ag.roleLabel, ag.role === 'helper' && ag.name && !ag.purpose ? ag.name : ''].filter(Boolean).join(' · ')
+      : `${ag.roleLabel} · ${ag.name}`;
     return v_flex().w(268).px(11).py(9).gap(4).rounded(10)
       .bg(fill).border_1().border_color(t.border).shadow_lg()
-      .child(div().truncate().font_family('monospace').text_size(11).text_color(t.accent).child(`${ag.roleLabel} · ${ag.name}`))
+      .child(div().truncate().font_family('monospace').text_size(11).text_color(t.accent).child(headTitle))
       .when(Boolean(meta), card => card.child(div().truncate().text_size(11.5).text_color(t.foreground).child(meta)))
       .when(Boolean(summary), card => card.child(div().text_size(11.5).line_height('16px').text_color(t.muted).max_h(48).overflow_hidden().child(summary)))
       .child(div().truncate().text_size(11).text_color(t.dim).child(hint));
@@ -6354,7 +8201,8 @@ export default class PmProject extends View {
 
   agentWindowSlotPos(slot, width = 520) {
     const wide = this.viewWidth || 1280;
-    const panelW = (this.listResting() || this.detail) ? panelWidth(this.panelWant, wide) : 0;
+    const lay = this.currentSplitLayout();
+    const panelW = (this.isPanelOpen() && lay.layoutKind === 'inline') ? lay.slotWidth : 0;
     const stageW = Math.max(540, wide - panelW);
     const w = Number(width) || 520;
     const baseX = Math.max(48, Math.round(stageW - w - 36));
@@ -6387,6 +8235,9 @@ export default class PmProject extends View {
       key: entry.key,
       role: entry.role,
       roleLabel: entry.roleLabel || word(this.lang, `agentRole_${entry.role || 'worker'}`),
+      displayName: entry.displayName || '',
+      action: entry.action || '',
+      actionLabel: entry.actionLabel || '',
       taskId: entry.taskId,
       threadNumber: entry.threadNumber || 0,
       targetId: entry.targetId,
@@ -6394,7 +8245,7 @@ export default class PmProject extends View {
       threadTitle: entry.threadTitle,
       address: entry.address,
       appAddress: appAddr,
-      model: entry.model || '',
+      model: entry.modelBadge || entry.model || '',
       up: Boolean(entry.up),
       contextLabel: entry.contextLabel || '',
       canSwitchMode: Boolean(entry.canSwitchMode && entry.address),
@@ -6707,7 +8558,6 @@ export default class PmProject extends View {
     const p = this.winProps;
     const text = String(this.winInput?.value?.() ?? '').trim();
     if (!text || !p?.address) return;
-    const addr = p.appAddress || onMachine(p.address, this.machine);
     this.winSent = [...(this.winSent || []).slice(-19), text];
     this.winInput.set_value('');
     this.winDraft = '';
@@ -6715,10 +8565,8 @@ export default class PmProject extends View {
     cx.notify();
     cx.spawn(async cx => {
       try {
-        const r = await exec(...withoutTerminalEnv(sendArgv(addr, text), {
-          platform: this.hostPlatform(), unset: SEND_ENV,
-        }), { timeout: 20000 });
-        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc send: ${r.code}`);
+        // The terminal's address as the project's machine names it: pm.py runs there.
+        await this.send(p.address, text, { task: p.taskId || '', wait: !p.taskId });
         cx.timer?.after?.(700, cx => this.loadAgentWindowContent(cx, { poll: true }));
       } catch (e) {
         this.winSendError = String(e?.message || e).trim();
@@ -6747,13 +8595,18 @@ export default class PmProject extends View {
     const appAddr = p.appAddress || onMachine(p.address, this.machine);
     const liveAgent = appAddr ? agents().find(a => a.address === appAddr) || null : null;
     const liveTerm = appAddr ? terminals().find(x => x.address === appAddr) || null : null;
-    const liveStatus = appAddr
-      ? (liveAgent?.status || liveTerm?.status || (p.ended ? 'done' : 'working'))
-      : (p.ended ? 'done' : 'idle');
+    const liveStatus = p.ended
+      ? 'done'
+      : (appAddr
+        ? (liveAgent?.status || (liveTerm?.state === 'live' ? liveTerm?.status : '') || 'working')
+        : 'idle');
     const winProgram = resolveAgentProgram(liveTerm, liveAgent, p.kind) || p.program || null;
     const meta = [p.model ? `${p.model}${p.up ? ' ↑' : ''}` : '', p.contextLabel || ''].filter(Boolean).join(' · ');
     const numTag = formatTaskNumber(p.threadNumber);
-    const titleLabel = p.roleLabel && p.name ? `${p.roleLabel} · ${p.name}` : (p.name || p.roleLabel || 'agent');
+    const liveAction = p.action ? agentActionLabel(lang, p.action, liveStatus, { ended: Boolean(p.ended) }) : (p.actionLabel || '');
+    const titleLabel = p.displayName
+      ? (liveAction ? `${p.displayName} · ${liveAction}` : p.displayName)
+      : (p.roleLabel && p.name ? `${p.roleLabel} · ${p.name}` : (p.name || p.roleLabel || 'agent'));
     const ov = (typeof props === 'function' ? props()?.overlay : '') || '';
     const curSize = normalizeAgentWindowSize(p.size);
     const nextSize = nextAgentWindowSize(curSize);
@@ -6802,6 +8655,56 @@ export default class PmProject extends View {
           () => { this.emitWinEvent('close'); if (ov && typeof closeOverlay === 'function') closeOverlay(ov); },
           t, 13,
         )));
+  }
+
+  renderSessionQuestionPart(part, t, lang, { prefix = 'session', compact = false } = {}) {
+    const qs = Array.isArray(part.questions) && part.questions.length ? part.questions : [];
+    const unanswered = !part.output;
+    const textSize = compact ? 12 : 12.5;
+    const optSize = compact ? 11.5 : 12;
+    const subSize = compact ? 10.5 : 11;
+    const card = v_flex().id(`${prefix}-question-${part.key}`).w_full().px(10).py(8).gap(6).rounded(8)
+      .bg(t.surface).border_1().border_color(unanswered ? t.blocked : t.border);
+    card.child(h_flex().w_full().gap(6).items_center()
+      .child(div().flex_none().size(6).rounded(3).bg(unanswered ? t.blocked : t.dim))
+      .child(div().text_size(subSize).font_semibold().text_color(unanswered ? t.blocked : t.muted)
+        .child(word(lang, 'sessionQuestionLabel')))
+      .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(subSize).text_color(t.dim)
+        .child(part.name || 'AskUserQuestion')));
+    qs.forEach((q, qi) => {
+      const qBox = v_flex().id(`${prefix}-question-${part.key}-${qi}`).w_full().gap(4);
+      if (q.header) {
+        qBox.child(div().w_full().whitespace_normal().text_size(textSize).font_semibold().text_color(t.foreground)
+          .child(q.header));
+      }
+      if (q.question && q.question !== q.header) {
+        qBox.child(div().w_full().whitespace_normal().text_size(textSize).text_color(t.foreground)
+          .child(q.question));
+      }
+      if (Array.isArray(q.options) && q.options.length > 0) {
+        const optList = v_flex().w_full().gap(3).pl(2);
+        q.options.forEach((opt, oi) => {
+          optList.child(v_flex().id(`${prefix}-question-opt-${part.key}-${qi}-${oi}`).w_full().px(8).py(4).gap(1)
+            .rounded(6).bg(t.raised)
+            .child(div().w_full().whitespace_normal().text_size(optSize).font_medium().text_color(t.foreground)
+              .child(`${oi + 1}. ${opt.label}`))
+            .when(Boolean(opt.description), el => el.child(div().w_full().whitespace_normal()
+              .text_size(subSize).text_color(t.dim).child(opt.description))));
+        });
+        qBox.child(optList);
+      }
+      card.child(qBox);
+    });
+    if (part.output) {
+      card.child(div().id(`${prefix}-question-out-${part.key}`).w_full().pt(4).border_t(1).border_color(t.border)
+        .whitespace_normal().text_size(subSize).text_color(part.error ? t.blocked : t.dim)
+        .child(`${word(lang, 'sessionQuestionAnswered')}: ${part.output}`));
+    } else {
+      card.child(div().id(`${prefix}-question-hint-${part.key}`).w_full().pt(2)
+        .whitespace_normal().text_size(subSize).text_color(t.dim)
+        .child(word(lang, 'sessionQuestionTerminalHint')));
+    }
+    return card;
   }
 
   renderAgentWindow(cx) {
@@ -6866,6 +8769,9 @@ export default class PmProject extends View {
               return v_flex().w_full().gap(5).children(markdownChunks(part.text).map((chunk, ci) =>
                 div().w_full().text_size(12.5).text_color(t.foreground)
                   .child(TextView.markdown(`win-md-${part.key}-${ci}`, chunk).selectable(true))));
+            }
+            if (part.kind === 'question') {
+              return this.renderSessionQuestionPart(part, t, lang, { prefix: 'win', compact: true });
             }
             const open = this.winToolsOpen.has(part.key);
             return v_flex().w_full().gap(4)
@@ -6941,6 +8847,19 @@ export default class PmProject extends View {
 
   close() {
     if (!this.agentWindow) this.closeAllAgentWindows();
+    if (this.panelHideTimer) { this.panelHideTimer.cancel?.(); this.panelHideTimer = null; }
+    if (this.panelTransitionTimer) { this.panelTransitionTimer.cancel?.(); this.panelTransitionTimer = null; }
+    if (this._sideFadeTimer) { this._sideFadeTimer.cancel?.(); this._sideFadeTimer = null; }
+    if (this._paneOwnerId) {
+      PANE_OWNERS.delete(this._paneOwnerId);
+      this._paneOwnerId = '';
+    }
+    try { this._convEntity?.release?.(); } catch (_) { /* already released */ }
+    try { this._sideEntity?.release?.(); } catch (_) { /* already released */ }
+    this._convEntity = null;
+    this._sideEntity = null;
+    this.releaseAllTabHandles?.();
+    try { this.tabStripScroll?.release?.(); } catch (_) { /* already released */ }
   }
 
   // The threads the open task was split into, under its status: a row each (its mark, its title,
@@ -6959,7 +8878,7 @@ export default class PmProject extends View {
       const tip = [label, gone, ctxText, numText ? `${numText} ${row.title}` : row.title].filter(Boolean).join(' · ');
       return this.withTip(`part-${row.task}`, h_flex().id(`part-${row.task}`).h(30).px(8).gap(9).rounded(8).items_center().cursor_pointer()
         .hover(s => s.bg(t.hover)).accessibility_label(tip)
-        .on_click((_e, cx) => this.openThread(row.task, cx))
+        .on_click((_e, cx) => this.openThread(row.task, cx, { insertAdjacent: true }))
         .child(h_flex().w(16).flex_none().items_center().justify_center().child(this.threadMark(row, t)))
         .when(Boolean(numText), el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
         .child(div().flex_1().min_w(0).truncate().text_size(13)
@@ -7020,11 +8939,16 @@ export default class PmProject extends View {
       const open = agentWindowOpen(this.agentWindows, ag.key);
       const hoverKey = `agent:${ag.key}`;
       const hovered = this.hoverKey === hoverKey;
-      const label = ag.nameSuffix || ag.roleLabel;
-      const row = h_flex().id(`agent-row-${ag.key}`).h(22).px(7).gap(6).rounded(6).items_center().cursor_pointer()
-        .when(open, el => el.bg(withAlpha(t.accent, .14)))
+      const primaryName = ag.displayName || ag.roleLabel;
+      const actionText = ag.actionLabel || '';
+      const hasCustomHelperSlug = ag.role === 'helper' && Boolean(ag.nameSuffix) && !ag.purpose && ag.nameSuffix !== ag.roleLabel;
+      const modelText = ag.modelBadge || ag.model || '';
+      const showSubModel = Boolean(modelText) && (!width || width >= 290);
+      const accLabel = [primaryName, actionText, hasCustomHelperSlug ? ag.nameSuffix : '', modelText].filter(Boolean).join(' · ');
+      const row = h_flex().id(`agent-row-${ag.key}`).h(21).px(7).gap(5).rounded(5).items_center().cursor_pointer()
+        .when(open, el => el.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .42)))
         .when(!open, el => el.hover(s => s.bg(t.hover)))
-        .accessibility_label(`${ag.roleLabel} · ${ag.name}`)
+        .accessibility_label(accLabel)
         .on_hover((over, cx) => {
           if (over) this.enterHover(hoverKey, cx);
           else this.leaveHover(hoverKey, cx);
@@ -7034,13 +8958,37 @@ export default class PmProject extends View {
           this.clearHoverNow(cx);
           this.toggleAgentSmallWindow(ag, cx);
         })
-        .child(h_flex().w(12).flex_none().items_center().justify_center().child(this.agentStatusMark(ag.status, t, ag.role)))
-        .child(this.agentProgramIcon(ag.program, 13, t, dimmed || ag.ended))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.8)
+        .child(h_flex().w(10).flex_none().items_center().justify_center().child(this.agentStatusMark(ag.status, t, ag.role, { compact: true })))
+        .child(this.agentProgramIcon(ag.program, 12, t, dimmed || ag.ended))
+        .child(div().flex_none().text_size(11.5)
           .text_color(open ? t.foreground : dimmed || ag.ended ? t.muted : t.foreground)
-          .when(!dimmed && !ag.ended, el => el.font_medium())
-          .child(label))
-        .when(open || hovered, el => el.child(this.icon('window-pop', 12).text_color(t.accent)));
+          .when(!dimmed && !ag.ended, x => x.font_medium())
+          .child(primaryName))
+        .when(Boolean(actionText), el => el
+          .child(div().flex_none().text_size(11).text_color(t.dim).child('·'))
+          .child(div().flex_none().text_size(11.2)
+            .text_color(open ? t.accent : dimmed || ag.ended ? t.dim : t.muted)
+            .child(actionText)))
+        .when(hasCustomHelperSlug, el => el
+          .child(div().flex_none().text_size(11).text_color(t.dim).child('·'))
+          .child(div().flex_1().min_w(0).truncate().text_size(11)
+            .text_color(open ? t.foreground : t.dim)
+            .child(ag.nameSuffix))
+          .when(showSubModel, x => x
+            .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
+            .child(div().flex_none().max_w(84).truncate()
+              .font_family('monospace').text_size(10.5)
+              .text_color(open ? t.accent : t.dim)
+              .child(modelText))))
+        .when(!hasCustomHelperSlug, el => el
+          .when(Boolean(modelText), x => x
+            .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
+            .child(div().flex_1().min_w(0).truncate()
+              .font_family('monospace').text_size(10.5)
+              .text_color(open ? t.accent : t.dim)
+              .child(modelText)))
+          .when(!modelText, x => x.child(div().flex_1().min_w(0))))
+        .when(open || hovered, el => el.child(this.icon('window-pop', 11.5).flex_none().text_color(t.accent)));
       return this.wrapHoverCard(hoverKey, row, () => this.agentHoverCard(ag, open, t, lang), t);
     };
 
@@ -7071,7 +9019,8 @@ export default class PmProject extends View {
           .child(String(it.count))));
     };
 
-    const renderSingleThread = (node, { hideEndedFold = false } = {}) => {
+    const openTabs = this.openTabKeys();
+    const renderSingleThread = (node, { hideEndedFold = false, inEpic = false } = {}) => {
       const task = byId.get(node.task);
       const at = eventTime(node.updated);
       const ageText = at > 0 ? age(Math.max(0, now - at), lang) : '';
@@ -7085,14 +9034,78 @@ export default class PmProject extends View {
       const numText = formatTaskNumber(taskNumber(node) || taskNumber(task) || this.taskNumberFor(node.task));
       const hoverKey = `task:${node.task}`;
       const litRow = this.highlightThread === node.task;
+      const isOpened = openTabs.has(sideTabKey({ kind: 'thread', taskId: node.task }));
+
+      const { inlineWorker, subAgents, ended: rawEnded } = threadAgentLayout(node.agents);
+      const endedAgents = hideEndedFold ? [] : rawEnded;
+      const inlineHoverKey = inlineWorker ? `agent:${inlineWorker.key}` : '';
+      const inlineOpen = Boolean(inlineWorker && agentWindowOpen(this.agentWindows, inlineWorker.key));
+      const inlineHovered = Boolean(inlineHoverKey && this.hoverKey === inlineHoverKey);
+      let inlineAgentEl = null;
+      if (inlineWorker) {
+        const parts = inlineAgentBadgeParts(inlineWorker, width, { inEpic });
+        const hasText = Boolean(parts.name || parts.action || parts.model);
+        const effW = (Number(width) || 360) - (inEpic ? 28 : 0);
+        const inlineTipLabel = [inlineWorker.displayName || inlineWorker.roleLabel, inlineWorker.actionLabel, inlineWorker.modelBadge || inlineWorker.model].filter(Boolean).join(' · ');
+        const needSepBeforeAction = Boolean(parts.name && parts.action);
+        const needSepBeforeModel = Boolean((parts.name || parts.action) && parts.model);
+        inlineAgentEl = h_flex()
+          .id(`agent-inline-${inlineWorker.key}`)
+          .flex_none()
+          .h(20)
+          .px(hasText ? 6 : 5)
+          .gap(4)
+          .rounded(5)
+          .items_center()
+          .cursor_pointer()
+          .border_1()
+          .when(inlineOpen, el => el.bg(withAlpha(t.accent, .18)).border_color(withAlpha(t.accent, .52)))
+          .when(!inlineOpen, el => el.bg(withAlpha(t.surface, .85)).border_color(withAlpha(t.border, .7))
+            .hover(s => s.bg(t.hover).border_color(withAlpha(t.accent, .42))))
+          .accessibility_label(inlineTipLabel)
+          .on_hover((over, cx) => {
+            if (over) this.enterHover(inlineHoverKey, cx);
+            else this.leaveHover(inlineHoverKey, cx);
+          })
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            this.clearHoverNow(cx);
+            this.toggleAgentSmallWindow(inlineWorker, cx);
+          })
+          .child(this.agentProgramIcon(inlineWorker.program, 12, t, false))
+          .when(Boolean(parts.name), el => el.child(
+            div().flex_none().text_size(11).line_height('14px')
+              .text_color(inlineOpen ? t.accent : t.foreground)
+              .font_medium()
+              .child(parts.name),
+          ))
+          .when(needSepBeforeAction, el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child('·')))
+          .when(Boolean(parts.action), el => el.child(
+            div().flex_none().text_size(10.5).line_height('14px')
+              .text_color(inlineOpen ? t.accent : inlineHovered ? t.foreground : t.muted)
+              .child(parts.action),
+          ))
+          .when(needSepBeforeModel, el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child('·')))
+          .when(Boolean(parts.model), el => el.child(
+            div().max_w(effW < 340 ? 58 : 88).truncate()
+              .font_family('monospace').text_size(10.5).line_height('14px')
+              .text_color(inlineOpen ? t.accent : inlineHovered ? t.foreground : t.dim)
+              .when(inlineOpen, x => x.font_medium())
+              .child(parts.model),
+          ))
+          .when(inlineOpen, el => el.child(this.icon('window-pop', 11).flex_none().text_color(t.accent)));
+      }
 
       const titleRow = h_flex().id(`list-${node.task}`).min_h(28).px(8).py(3).gap(7).rounded(7).items_center().cursor_pointer()
         .when(litRow, el => el.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .45)))
         .when(!litRow, el => el.hover(s => s.bg(t.hover)))
         .accessibility_label(numText ? `${numText} ${node.title}` : node.title)
         .on_hover((over, cx) => {
-          if (over) this.enterHover(hoverKey, cx);
-          else this.leaveHover(hoverKey, cx);
+          if (over) {
+            if (!inlineHoverKey || this.hoverKey !== inlineHoverKey) this.enterHover(hoverKey, cx);
+          } else {
+            this.leaveHover(hoverKey, cx);
+          }
         })
         .on_click((_e, cx) => {
           this.clearHoverNow(cx);
@@ -7104,34 +9117,38 @@ export default class PmProject extends View {
           .font_weight(mutedTitle ? 400 : 500)
           .text_color(mutedTitle ? t.muted : t.foreground)
           .child(node.title))
+        .when(isOpened, el => el.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
         .when(Boolean(pill), el => el.child(div().id(`list-steps-${node.task}`).flex_none().h(17).px(5).rounded(4)
           .bg(pillBg).text_color(pillFg).font_family('monospace').text_size(10.5).line_height('17px')
           .child(pill)))
+        .when(Boolean(inlineAgentEl), el => el.child(inlineAgentEl))
         .when(Boolean(ageText), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ageText)));
 
-      const activeAgents = node.agents?.active || [];
-      const endedAgents = hideEndedFold ? [] : (node.agents?.ended || []);
       const hasAgentFold = endedAgents.length > 0;
       const foldKey = `agents:${node.task}`;
       const foldOpen = hasAgentFold && this.expandedDone.has(foldKey);
 
-      const branchItems = [];
-      for (const ag of activeAgents) branchItems.push(agentSubRow(ag, false));
+      const subItems = [];
+      for (const ag of subAgents) subItems.push(agentSubRow(ag, false));
       if (hasAgentFold) {
-        branchItems.push(doneFoldRow(`fold-done-agents-${node.task}`, endedAgents.length, foldOpen, cx => {
+        subItems.push(doneFoldRow(`fold-done-agents-${node.task}`, endedAgents.length, foldOpen, cx => {
           if (this.expandedDone.has(foldKey)) this.expandedDone.delete(foldKey);
           else this.expandedDone.add(foldKey);
           cx.notify();
         }));
         if (foldOpen) {
-          for (const ag of endedAgents) branchItems.push(agentSubRow(ag, true));
+          for (const ag of endedAgents) subItems.push(agentSubRow(ag, true));
         }
       }
 
+      const rowWrap = (inlineWorker && this.hoverKey === inlineHoverKey)
+        ? this.wrapHoverCard(inlineHoverKey, titleRow, () => this.agentHoverCard(inlineWorker, inlineOpen, t, lang), t)
+        : this.wrapHoverCard(hoverKey, titleRow, () => buildRowHoverCard(task, node, ctxLabel), t);
+
       return v_flex().w_full().gap(1)
-        .child(this.wrapHoverCard(hoverKey, titleRow, () => buildRowHoverCard(task, node, ctxLabel), t))
-        .when(branchItems.length > 0, box => box.child(div().pl(8).pb(2)
-          .child(this.treeBranchList(branchItems, { indent: 17, stemX: 5.6, curveSize: 16, strokeW: 1.2, curveStart: 3.2, gap: 1, wireColor }))));
+        .child(rowWrap)
+        .when(subItems.length > 0, box => box.child(div().pl(24).pb(2)
+          .child(v_flex().gap(1).children(subItems))));
     };
 
     const renderFinishedSubRow = row => {
@@ -7142,6 +9159,7 @@ export default class PmProject extends View {
       const ctxLabel = row.contextTokens ? contextLabel(lang, row.contextTokens) : '';
       const numText = formatTaskNumber(taskNumber(row) || taskNumber(task) || this.taskNumberFor(row.task));
       const litRow = this.highlightThread === row.task;
+      const isOpened = openTabs.has(sideTabKey({ kind: 'thread', taskId: row.task }));
       const el = h_flex().id(`list-${row.task}`).h(25).px(8).gap(7).rounded(7).items_center().cursor_pointer()
         .text_size(12.2).text_color(litRow ? t.foreground : t.muted)
         .when(litRow, x => x.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .45)))
@@ -7155,13 +9173,14 @@ export default class PmProject extends View {
         .child(lead(div().size(9).rounded_full().border(1.5).border_color(t.dim)))
         .when(Boolean(numText), x => x.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(numText)))
         .child(div().flex_1().min_w(0).truncate().child(row.title))
+        .when(isOpened, x => x.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
         .when(Boolean(ageText), x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(ageText)));
       return this.wrapHoverCard(hoverKey, el, () => buildRowHoverCard(task, row, ctxLabel), t);
     };
 
     const renderNode = (node, inEpic = false) => {
       const isParent = node.container || node.children.length > 0 || node.finishedChildren.length > 0;
-      if (!isParent) return renderSingleThread(node, { hideEndedFold: inEpic });
+      if (!isParent) return renderSingleThread(node, { hideEndedFold: inEpic, inEpic });
 
       const defaultOpen = Boolean(node.summary && (node.summary.waiting > 0 || node.summary.review > 0 || node.summary.working > 0 || node.group === 'waiting'));
       const open = this.epicOverrides.has(node.task) ? this.epicOverrides.get(node.task) : defaultOpen;
@@ -7225,7 +9244,7 @@ export default class PmProject extends View {
             .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => toggleEpic(cx))
             .child(this.icon(open ? 'expand' : 'chevron', 12)))
-          .child(div().flex_1().min_w(0).child(renderSingleThread(ownSelf, { hideEndedFold: true }))))
+          .child(div().flex_1().min_w(0).child(renderSingleThread(ownSelf, { hideEndedFold: true, inEpic }))))
         .when(open && childItems.length > 0, box => box.child(div().pl(14)
           .child(this.treeBranchList(childItems, { indent: 20, stemX: 7, curveSize: 20, strokeW: 1.5, curveStart: 4, gap: 2, wireColor }))));
     };
@@ -7293,7 +9312,7 @@ export default class PmProject extends View {
     }
 
     const q = String(this.threadsQuery || '').trim();
-    const toolbar = h_flex().flex_none().px(16).pt(8).pb(4).gap(4).items_center()
+    const toolbar = h_flex().flex_none().px(12).pt(8).pb(4).gap(4).items_center()
       .child(div().flex_1().min_w(0).child(this.searchBox('threads-search', this.threadsInput, this.threadsQuery, word(lang, 'searchThreads'), cx => {
         this.threadsQuery = '';
         this.threadsInput?.set_value('');
@@ -7308,6 +9327,7 @@ export default class PmProject extends View {
       const numText = formatTaskNumber(taskNumber(row) || taskNumber(task) || this.taskNumberFor(row.task));
       const muted = row.group === 'finished' || row.group === 'parked' || row.group === 'paused';
       const litRow = this.highlightThread === row.task;
+      const isOpened = openTabs.has(sideTabKey({ kind: 'thread', taskId: row.task }));
       return h_flex().id(`threads-hit-${row.task}`).min_h(27).px(8).py(3).gap(7).rounded(7).items_center().cursor_pointer()
         .text_size(12.5).text_color(litRow ? t.foreground : muted ? t.muted : t.foreground)
         .when(litRow, x => x.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .45)))
@@ -7319,6 +9339,7 @@ export default class PmProject extends View {
           : this.threadMark(row, t)))
         .when(Boolean(numText), x => x.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
         .child(div().flex_1().min_w(0).truncate().font_weight(muted ? 400 : 500).child(row.title))
+        .when(isOpened, x => x.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
         .when(Boolean(ageText), x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(ageText)));
     };
 
@@ -7355,35 +9376,59 @@ export default class PmProject extends View {
       listChildren = sections.length ? sections : [div().px(8).text_size(13).text_color(t.dim).child(word(lang, 'noThreads'))];
     }
 
-    return v_flex().w(width).h_full().flex_none().pt(12).bg(t.chrome).border_l(1).border_color(t.border)
+    return v_flex().w_full().h_full().min_w(0)
       .on_hover((over, cx) => { if (!over && this.hoverKey) this.leaveHover(this.hoverKey, cx); })
-      .child(this.sideHeader(t, width))
+      .child(this.sideHeader(t, width, { inTabBar: this.hasSideTabs() }))
       .child(toolbar)
-      .child(v_flex().id('thread-list').flex_1().min_h(0).px(12).pt(4).pb(16).gap(12).overflow_y_scrollbar()
+      .child(this.sideScrollBody(v_flex().id('thread-list').flex_1().min_h(0).px(10).pt(4).pb(16).gap(12).overflow_y_scrollbar()
         .when(Boolean(this.threadListScroll), el => el.track_scroll(this.threadListScroll))
         .on_scroll_wheel((_e, cx) => { if (this.hoverKey) this.clearHoverNow(cx); })
-        .children(listChildren));
+        .children(listChildren)));
   }
 
-  sideHeader(t, width = PANEL_WIDTH) {
+  sideHeader(t, width = PANEL_WIDTH, { inTabBar = false } = {}) {
     const lang = this.lang;
+    const closeBtn = inTabBar ? null
+      : this.splitIconBtn('panel-close', 'close', word(lang, 'closeSidePanel'), cx => this.closeSidePanel(cx), t, 14, false, { placement: 'below-right' });
+    const hVal = inTabBar ? 36 : 44;
+    const borderAlpha = inTabBar ? .5 : .7;
     if (!this.librarySupported()) {
-      return h_flex().h(32).flex_none().px(20).items_center().text_size(15).font_semibold().child(word(lang, 'threads'));
+      return h_flex().id('side-header').h(hVal).w_full().flex_none().px(12).gap(6).items_center()
+        .bg(t.background)
+        .border_b(1).border_color(withAlpha(t.border, borderAlpha))
+        .child(div().flex_1().min_w(0).truncate().text_size(inTabBar ? 13 : 14).font_semibold().text_color(t.foreground).child(word(lang, 'threads')))
+        .when(Boolean(closeBtn), el => el.child(closeBtn));
     }
     const compact = width < 300;
+    const tabs = [
+      { key: 'threads', glyph: 'list', label: word(lang, 'threads') },
+      { key: 'library', glyph: 'library', label: word(lang, 'libraryTab') },
+      ...(this.memorySupported() ? [{ key: 'memory', glyph: 'memory', label: word(lang, 'memoryTab') }] : []),
+    ];
     const active = this.sideTab === 'library' ? 'library'
       : (this.sideTab === 'memory' && this.memorySupported()) ? 'memory' : 'threads';
-    const tab = (key, glyph, label) => this.withTip(`panel-tab-${key}`, h_flex().id(`panel-tab-${key}`).h(26).px(compact ? 6 : 9).gap(compact ? 3 : 5)
-      .rounded(7).items_center().text_size(compact ? 12 : 12.5).accessibility_label(label)
-      .when(key === active, el => el.bg(t.raised).text_color(t.foreground).font_medium())
-      .when(key !== active, el => el.cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
-        .on_click((_e, cx) => this.selectSideTab(key, cx)))
-      .child(this.icon(glyph, compact ? 12.5 : 13.5)).child(label), label, t, { panel: true, placement: 'below-left' });
-    return h_flex().h(34).flex_none().px(compact ? 12 : 16).items_center()
-      .child(h_flex().id('panel-tabs').h(32).p(2).gap(2).rounded(9).border_1().border_color(t.border)
-        .child(tab('threads', 'list', word(lang, 'threads')))
-        .child(tab('library', 'library', word(lang, 'libraryTab')))
-        .when(this.memorySupported(), el => el.child(tab('memory', 'memory', word(lang, 'memoryTab')))));
+    const activeIdx = Math.max(0, tabs.findIndex(x => x.key === active));
+    const slotW = compact ? 72 : 84;
+    const gap = 2;
+    const totalW = tabs.length * slotW + Math.max(0, tabs.length - 1) * gap;
+    const slider = div().id('panel-tab-slider').absolute().top(0).left(activeIdx * (slotW + gap)).w(slotW).h(28)
+      .rounded(7).bg(t.raised)
+      .when(this.measured, el => el.transition('left', { duration: 150, easing: 'ease-out' }));
+    const tab = item => this.withTip(`panel-tab-${item.key}`, h_flex().id(`panel-tab-${item.key}`).w(slotW).h(28).flex_none()
+      .gap(compact ? 3 : 5).rounded(7).items_center().justify_center().text_size(compact ? 12 : 12.5).accessibility_label(item.label)
+      .when(item.key === active, el => el.text_color(t.foreground).font_medium())
+      .when(item.key !== active, el => el.cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
+        .on_click((_e, cx) => this.selectSideTab(item.key, cx)))
+      .child(this.icon(item.glyph, compact ? 12.5 : 13.5))
+      .child(item.label), item.label, t, { panel: true, placement: 'below-left' });
+    return h_flex().id('side-header').h(hVal).w_full().flex_none().px(12).gap(6).items_center()
+      .bg(t.background)
+      .border_b(1).border_color(withAlpha(t.border, borderAlpha))
+      .child(div().id('panel-tabs').relative().w(totalW).h(28).flex_none()
+        .child(slider)
+        .child(h_flex().relative().size_full().gap(gap).items_center().children(tabs.map(tab))))
+      .child(div().flex_1())
+      .when(Boolean(closeBtn), el => el.child(closeBtn));
   }
 
   searchBox(id, state, query, placeholder, onClear, t) {
@@ -7440,17 +9485,20 @@ export default class PmProject extends View {
     }
     const isImg = /^(png|jpe?g|gif|webp|bmp|avif)$/i.test(row.file?.kind || '');
     const glyphName = row.root === 'research' ? 'report' : isImg ? 'image' : 'file';
+    const isOpened = this.openTabKeys().has(sideTabKey({ kind: 'doc', root: row.root, path: row.path }));
     const tip = [`${row.root}/${row.path}`, row.kindLabel, row.size, row.desc].filter(Boolean).join(' · ');
     const srcTip = row.task ? word(lang, 'openSourceThread', row.taskTitle || row.task) : '';
     return this.withTip(`lib-doc-${row.key}`, h_flex().id(`lib-doc-${row.key}`).pl(8 + row.depth * 14).pr(6).py(6).gap(9).rounded(8).items_start()
       .cursor_pointer().hover(s => s.bg(t.hover)).accessibility_label(tip)
+      .when(isOpened, el => el.border_l(2).border_color(t.accent))
       .when(Boolean(row.archive || row.supersededBy), el => el.opacity(.75))
       .on_click((_e, cx) => this.openDoc({ tab: 'library', root: row.root, path: row.path }, cx))
-      .child(h_flex().h(19).w(16).flex_none().items_center().justify_center().child(this.icon(glyphName, 14).text_color(t.dim)))
+      .child(h_flex().h(19).w(16).flex_none().items_center().justify_center().child(this.icon(glyphName, 14).text_color(isOpened ? t.accent : t.dim)))
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().gap(7).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(13).font_medium()
             .text_color(row.readable && !row.archive && !row.supersededBy ? t.foreground : t.muted).child(row.title))
+          .when(isOpened, el => el.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
           .when(Boolean(row.supersededBy), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim)
             .child(word(lang, 'supersededLabel'))))
           .when(Boolean(row.published), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim)
@@ -7467,9 +9515,12 @@ export default class PmProject extends View {
   }
 
   memoryRow(row, t) {
+    const lang = this.lang;
+    const isOpened = this.openTabKeys().has(sideTabKey({ kind: 'doc', root: row.root, path: row.path }));
     const tip = [`${row.root}/${row.path}`, row.typeLabel, row.topicLabel, row.desc].filter(Boolean).join(' · ');
     return this.withTip(`mem-doc-${row.key}`, h_flex().id(`mem-doc-${row.key}`).pl(8 + row.depth * 14).pr(8).py(6).gap(9).rounded(8).items_start()
       .cursor_pointer().hover(s => s.bg(t.hover)).accessibility_label(tip)
+      .when(isOpened, el => el.border_l(2).border_color(t.accent))
       .when(row.dimmed, el => el.opacity(.78))
       .on_click((_e, cx) => this.openDoc({ tab: 'memory', root: row.root, path: row.path }, cx))
       .child(h_flex().h(19).w(16).flex_none().items_center().justify_center()
@@ -7478,15 +9529,17 @@ export default class PmProject extends View {
         .child(h_flex().gap(6).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(13).font_medium()
             .text_color(row.dimmed ? t.muted : t.foreground).child(row.title))
+          .when(isOpened, el => el.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
           .child(div().flex_none().text_size(11).text_color(t.dim).child(row.typeLabel))
           .when(Boolean(row.modified), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(row.modified))))
         .when(Boolean(row.desc), el => el.child(div().truncate().text_size(12).text_color(t.dim).child(row.desc)))),
       tip, t, { panel: true, placement: 'above-left' });
   }
 
-  docDetailView(t, today) {
+  docDetailView(t, today, width = PANEL_WIDTH, cx = null) {
     const lang = this.lang;
     const docRef = this.activeDoc;
+    const inTabBar = this.hasSideTabs();
     const isRepo = docRef.root === 'repo';
     const key = `${docRef.root}/${docRef.path}`;
     const meta = this.findDocMeta(docRef.root, docRef.path);
@@ -7508,52 +9561,68 @@ export default class PmProject extends View {
     const matchList = vm?.matchIndices || [];
     const safeMatchPos = matchList.length ? ((this.docMatchPos % matchList.length) + matchList.length) % matchList.length : 0;
 
-    const topBar = h_flex().flex_none().px(14).pt(6).pb(6).gap(3).items_center().border_b(1).border_color(t.border)
-      .child(this.iconButton('doc-back', 'back', backTip, cx => this.closeActiveDoc(cx), t, 15))
-      .child(div().flex_1().min_w(0).truncate().text_size(13.5).font_semibold().child(headerTitle))
-      .when(showCopyPath, el => el.child(this.iconButton('doc-copy-path', copiedPath ? 'check' : 'clip',
+    const fullPathLabel = isRepo || docRef.root === 'repo_docs' ? docRef.path : `${docRef.root} / ${docRef.path.split('/').join(' / ')}`;
+    const titleTip = [headerTitle, fullPathLabel, vm?.modified || meta?.modified || ''].filter(Boolean).join('\n');
+    const docActions = h_flex().flex_none().gap(2).items_center()
+      .when(showCopyPath, el => el.child(this.splitIconBtn('doc-copy-path', copiedPath ? 'check' : 'clip',
         word(lang, copiedPath ? 'mentionPathCopied' : 'mentionCopyPath'), cx => {
           cx.write_to_clipboard?.(docRef.path);
           this.pathCopiedAt = Date.now();
           cx.notify();
           cx.timer?.after?.(1800, cx => { this.pathCopiedAt = 0; cx.notify(); });
         }, t, 14)))
-      .when(Boolean(meta?.task), el => el.child(this.iconButton('doc-source-thread', 'hook-up',
-        word(lang, 'openSourceThread', meta.task_title || meta.task), cx => this.openThread(meta.task, cx), t, 14)))
-      .when(Boolean(vm), el => el.child(this.withTip('doc-find-toggle', h_flex().id('doc-find-toggle').size(30).flex_none().rounded(8).items_center()
-        .justify_center().cursor_pointer()
-        .text_color(this.docFindOpen ? t.foreground : t.muted)
-        .when(this.docFindOpen, s => s.bg(t.raised))
-        .hover(s => s.bg(t.hover).text_color(t.foreground))
-        .accessibility_label(word(lang, 'findInDoc'))
-        .on_click((_e, cx) => {
-          this.docFindOpen = !this.docFindOpen;
-          if (this.docFindOpen) {
-            if (!this.docFindQuery && this.docJumpQuery) {
-              this.docFindQuery = this.docJumpQuery;
-              this.docFindInput?.set_value(this.docJumpQuery);
-            }
-            this.docMatchPos = 0;
-            this.docFindJump = Boolean(this.docFindQuery.trim());
-            cx.timer.after(0, () => this.docFindInput?.focus());
-          } else {
-            this.docFindQuery = '';
-            this.docMatchPos = 0;
-            this.docFindInput?.set_value('');
+      .when(Boolean(meta?.task), el => el.child(this.splitIconBtn('doc-source-thread', 'hook-up',
+        word(lang, 'openSourceThread', meta.task_title || meta.task), cx => this.openThread(meta.task, cx, { insertAdjacent: true }), t, 14)))
+      .when(Boolean(vm), el => el.child(this.splitIconBtn('doc-find-toggle', 'search', word(lang, 'findInDoc'), cx => {
+        this.docFindOpen = !this.docFindOpen;
+        if (this.docFindOpen) {
+          if (!this.docFindQuery && this.docJumpQuery) {
+            this.docFindQuery = this.docJumpQuery;
+            this.docFindInput?.set_value(this.docJumpQuery);
           }
-          cx.notify();
-        })
-        .child(this.icon('search', 14)), word(lang, 'findInDoc'), t, { panel: true, placement: 'below-right' })))
-      .when(Boolean(writable && vm), el => el.child(this.iconButton('doc-edit', 'pencil',
+          this.docMatchPos = 0;
+          this.docFindJump = Boolean(this.docFindQuery.trim());
+          cx.timer.after(0, () => this.docFindInput?.focus());
+        } else {
+          this.docFindQuery = '';
+          this.docMatchPos = 0;
+          this.docFindInput?.set_value('');
+        }
+        this.syncActiveTabFind();
+        this.notifyPanes(cx, { shell: false, side: true });
+      }, t, 14, this.docFindOpen)))
+      .when(Boolean(writable && vm), el => el.child(this.splitIconBtn('doc-edit', 'pencil',
         word(lang, 'editDoc'), cx => this.startEditDoc(cx), t, 14)))
-      .when(Boolean(writable), el => el.child(this.iconButton('doc-history', 'history',
+      .when(Boolean(writable), el => el.child(this.splitIconBtn('doc-history', 'history',
         word(lang, 'docHistory'), cx => this.openHistory(docRef.tab, docRef.root, docRef.path, 'item', cx), t, 14)))
-      .when(Boolean(writable), el => el.child(this.iconButton('doc-delete', 'trash',
+      .when(Boolean(writable), el => el.child(this.splitIconBtn('doc-delete', 'trash',
         word(lang, 'deleteItem'), cx => {
           this.confirmDeleteKey = this.confirmDeleteKey === key ? '' : key;
           this.deleteError = '';
           cx.notify();
         }, t, 14)));
+    const contextTitle = inTabBar
+      ? (width < 440 ? fileName(docRef.path) : fullPathLabel)
+      : headerTitle;
+    const topBar = this.renderSplitTopBar({
+      id: inTabBar ? 'side-context-bar' : 'doc-topbar',
+      backId: 'doc-back',
+      onBack: inTabBar ? null : (cx => this.closeActiveDoc(cx)),
+      backTip,
+      leading: vm?.readOnly
+        ? this.withTip('doc-readonly-lock', h_flex().id('doc-readonly-lock').size(18).flex_none().items_center().justify_center()
+            .text_color(t.dim).child(this.icon('lock', 12)), word(lang, 'readOnly'), t, { panel: true, placement: 'below-left' })
+        : null,
+      titleId: 'doc-title',
+      title: contextTitle,
+      titleTip,
+      actions: docActions,
+      closeId: 'split-close',
+      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
+      compactBar: inTabBar,
+      titleMuted: inTabBar,
+      t,
+    });
 
     const deleteBar = this.confirmDeleteKey === key ? h_flex().id('doc-delete-bar').flex_none().mx(16).mt(6).px(10).py(5)
       .gap(8).rounded(8).items_center().bg(withAlpha(t.blocked, .12)).border_1().border_color(withAlpha(t.blocked, .35))
@@ -7646,7 +9715,7 @@ export default class PmProject extends View {
     const srcNum = vm?.sourceTask ? formatTaskNumber(this.taskNumberFor(vm.sourceTask)) : '';
     const sourceLinkRow = vm?.sourceTask ? this.withTip('doc-source-row', h_flex().id('doc-source-row').gap(6).items_center().cursor_pointer()
       .text_size(12).text_color(t.muted).hover(s => s.text_color(t.foreground))
-      .on_click((_e, cx) => this.openThread(vm.sourceTask, cx))
+      .on_click((_e, cx) => this.openThread(vm.sourceTask, cx, { insertAdjacent: true }))
       .child(this.icon('hook-up', 12.5))
       .when(Boolean(srcNum), el => el.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(srcNum)))
       .child(div().min_w(0).truncate().child(vm.sourceTaskTitle || vm.sourceTask)),
@@ -7672,7 +9741,7 @@ export default class PmProject extends View {
         .child(h_flex().id('doc-open-superseded').h(24).px(9).gap(5).rounded(7).items_center().cursor_pointer()
           .bg(withAlpha(t.accent, .18)).text_size(11.5).font_medium().text_color(t.accent)
           .hover(s => s.bg(withAlpha(t.accent, .28)))
-          .on_click((_e, cx) => this.openDoc({ tab: 'library', root: 'repo_docs', path: supersededTarget }, cx))
+          .on_click((_e, cx) => this.openDoc({ tab: 'library', root: 'repo_docs', path: supersededTarget }, cx, { insertAdjacent: true }))
           .child(this.icon('hook-up', 11.5))
           .child(word(lang, 'openSupersededTarget')))
         .when(writable, el => el.child(this.deleteBusy === key
@@ -7687,8 +9756,6 @@ export default class PmProject extends View {
     const matchedSet = new Set(matchList);
     const highlightActive = Boolean(findQuery && String(findQuery).trim() && matchedSet.size);
     const bodyChildren = [];
-    bodyChildren.push(div().font_family('monospace').text_size(11).text_color(t.dim).whitespace_normal()
-      .child(isRepo || docRef.root === 'repo_docs' ? docRef.path : `${docRef.root} / ${docRef.path.split('/').join(' / ')}`));
     bodyChildren.push(metaRow);
     if (supersededBar) bodyChildren.push(supersededBar);
     if (retopicPicker) bodyChildren.push(retopicPicker);
@@ -7703,12 +9770,41 @@ export default class PmProject extends View {
     } else if (mode === 'large') {
       bodyChildren.push(div().pt(6).whitespace_normal().text_size(12.5).text_color(t.muted).child(word(lang, 'docTooLarge')));
     } else if (mode === 'binary') {
-      bodyChildren.push(div().pt(6).whitespace_normal().text_size(12.5).text_color(t.muted).child(word(lang, 'docNotText')));
+      const imgTarget = isPreviewableImage(docRef.path) ? resolveImageTarget(docRef, this.docLinkContext()) : null;
+      if (imgTarget) {
+        const imgState = this.imagePreviewState(imgTarget, cx);
+        if (imgState.status === 'ready') {
+          const box = fitImageBox(imgState.entry.width, imgState.entry.height, {
+            maxWidth: Math.max(240, Math.min(640, width - 56)),
+            maxHeight: 640,
+          });
+          bodyChildren.push(v_flex().id(`doc-img-wrap-${key}`).w_full().pt(4).gap(8).items_start()
+            .child(div().w(box.width + 2).rounded(10).overflow_hidden().border_1().border_color(t.border).bg(t.surface)
+              .child(image(imgState.entry.rel).w(box.width).h(box.height)))
+            .child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
+              .child(word(lang, 'imageDimensions', imgState.entry.width, imgState.entry.height))
+              .when(imgState.entry.size > 0, el => el.child(formatBytes(imgState.entry.size)))));
+        } else if (imgState.status === 'loading') {
+          bodyChildren.push(h_flex().pt(8).gap(8).items_center().text_size(12.5).text_color(t.dim)
+            .child(svg(SPINNER).size(14).flex_none().spin(900)).child(word(lang, 'imageLoading')));
+        } else {
+          const errMsg = imgState.error === 'too large' ? word(lang, 'imageTooLarge') : word(lang, 'imageLoadFailed');
+          bodyChildren.push(h_flex().pt(6).gap(8).items_center()
+            .child(div().flex_1().min_w(0).whitespace_normal().text_size(12.5).text_color(t.muted).child(errMsg))
+            .child(this.iconButton('doc-img-retry', 'reattach', word(lang, 'docRetry'),
+              clickCx => this.loadImagePreview(imgTarget, clickCx, { force: true }), t, 14)));
+        }
+      } else {
+        bodyChildren.push(div().pt(6).whitespace_normal().text_size(12.5).text_color(t.muted).child(word(lang, 'docNotText')));
+      }
     } else if (this.docError) {
+      const curTab = this.activeSideTab();
       bodyChildren.push(h_flex().pt(6).gap(8).items_start()
         .child(div().flex_1().min_w(0).whitespace_normal().text_size(12.5).text_color(t.blocked).child(this.docError))
         .child(this.iconButton('doc-retry', 'reattach', word(lang, 'docRetry'),
-          cx => this.readDoc(docRef.root, docRef.path, cx, { force: true }), t, 14)));
+          cx => this.readDoc(docRef.root, docRef.path, cx, { force: true }), t, 14))
+        .when(Boolean(curTab), el => el.child(this.iconButton('doc-error-close-tab', 'close', word(lang, 'sideTabClose'),
+          cx => this.closeTab(curTab.id, cx, { force: true }), t, 13))));
     } else if (vm) {
       vm.chunks.forEach((chunk, idx) => {
         const hit = highlightActive && matchedSet.has(idx);
@@ -7730,9 +9826,10 @@ export default class PmProject extends View {
       }
     }
 
+    const docScrollHandle = this.tabScrollHandle('doc');
     if (this.docFindJump && vm && matchList.length) {
       this.docFindJump = false;
-      this.docScroll.scroll_to_item(chunkStartIndex + matchList[safeMatchPos]);
+      docScrollHandle?.scroll_to_item?.(chunkStartIndex + matchList[safeMatchPos]);
     } else if (this.docFindJump && vm) {
       this.docFindJump = false;
     }
@@ -7741,9 +9838,9 @@ export default class PmProject extends View {
       .child(topBar)
       .when(Boolean(deleteBar), el => el.child(deleteBar))
       .when(Boolean(findBar), el => el.child(findBar))
-      .child(v_flex().id('doc-detail-body').flex_1().min_h(0).px(18).pt(10).pb(20).gap(10).overflow_y_scrollbar()
-        .track_scroll(this.docScroll)
-        .children(bodyChildren));
+      .child(this.sideScrollBody(v_flex().id('doc-detail-body').flex_1().min_h(0).px(24).pt(14).pb(28).items_center().overflow_y_scrollbar()
+        .when(Boolean(docScrollHandle), el => el.track_scroll(docScrollHandle))
+        .child(v_flex().w_full().max_w(680).gap(10).children(bodyChildren))));
   }
 
   docEditView(t, cx) {
@@ -7754,14 +9851,24 @@ export default class PmProject extends View {
       ? word(lang, isMem ? 'newMemory' : 'newDoc')
       : (isMem ? ed.originalName : fileName(ed.path));
     const saveControl = ed.saving
-      ? this.withTip('doc-edit-save', h_flex().id('doc-edit-save').size(32).flex_none().rounded(9).items_center().justify_center()
+      ? this.withTip('doc-edit-save', h_flex().id('doc-edit-save').size(28).flex_none().rounded(7).items_center().justify_center()
           .accessibility_label(word(lang, 'savingEdit'))
           .child(svg(SPINNER).size(14).flex_none().spin(900)), word(lang, 'savingEdit'), t, { panel: true, placement: 'below-right' })
-      : this.iconButton('doc-edit-save', 'check', word(lang, 'saveEdit'), cx => this.saveEditingDoc(cx), t, 15, { panel: true, placement: 'below-right' });
-    const topBar = h_flex().flex_none().px(14).pt(6).pb(6).gap(4).items_center().border_b(1).border_color(t.border)
-      .child(this.iconButton('doc-edit-cancel', 'close', word(lang, 'cancelEdit'), cx => this.cancelEditDoc(cx), t, 14))
-      .child(div().flex_1().min_w(0).truncate().text_size(13.5).font_semibold().child(title))
-      .child(saveControl);
+      : this.splitIconBtn('doc-edit-save', 'check', word(lang, 'saveEdit'), cx => this.saveEditingDoc(cx), t, 14, false, { placement: 'below-right' });
+    const inTabBar = this.hasSideTabs();
+    const topBar = this.renderSplitTopBar({
+      id: 'doc-edit-topbar',
+      backId: 'doc-edit-cancel',
+      onBack: cx => this.cancelEditDoc(cx),
+      backTip: word(lang, 'cancelEdit'),
+      titleId: 'doc-edit-title',
+      title,
+      actions: saveControl,
+      closeId: 'split-close',
+      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
+      compactBar: inTabBar,
+      t,
+    });
 
     const chip = (id, active, label, onClick) => h_flex().id(id).h(22).px(8).rounded(7).items_center()
       .text_size(11.5).cursor_pointer()
@@ -7797,7 +9904,7 @@ export default class PmProject extends View {
           cx => this.saveEditingDoc(cx, { overwrite: true }), t, 14).text_color(t.blocked))))
       .when(Boolean(ed.error), el => el.child(div().px(16).pt(6).whitespace_normal().text_size(12).text_color(t.blocked)
         .child(ed.error)))
-      .child(v_flex().flex_1().min_h(0).px(16).pt(10).pb(16).gap(8)
+      .child(this.sideScrollBody(v_flex().flex_1().min_h(0).px(16).pt(10).pb(16).gap(8)
         .when(!isMem && ed.mode === 'create', el => el.child(
           inputRow('doc-edit-name', this.docNameInput, this.docNameInput.value(), word(lang, 'docNamePlaceholder')),
         ))
@@ -7805,13 +9912,15 @@ export default class PmProject extends View {
           .child(chip('mem-layer-project', ed.layer !== 'personal', word(lang, 'memLayerProject'), (_e, cx) => {
             ed.layer = 'project'; ed.root = 'memory';
             if (!PROJECT_MEMORY_TYPES.includes(ed.type)) ed.type = 'project';
-            cx.notify();
+            this.syncActiveTabDirty();
+            this.notifyPanes(cx, { shell: false, side: true });
           }))
           .child(chip('mem-layer-personal', ed.layer === 'personal', word(lang, 'memLayerUser'), (_e, cx) => {
             ed.layer = 'personal'; ed.root = 'personal';
             if (!PERSONAL_MEMORY_TYPES.includes(ed.type)) ed.type = 'user';
             if (ed.topic === 'pitfalls') ed.topic = 'workflow';
-            cx.notify();
+            this.syncActiveTabDirty();
+            this.notifyPanes(cx, { shell: false, side: true });
           }))))
         .when(isMem && ed.mode === 'create', el => el.child(
           inputRow('mem-edit-name', this.docNameInput, this.docNameInput.value(), word(lang, 'memNamePlaceholder')),
@@ -7821,14 +9930,16 @@ export default class PmProject extends View {
             const next = retopicPlan({ layer: ed.layer, type: ed.type, topic: ed.topic }, { nextType: ty });
             ed.type = next.type;
             ed.topic = next.topic;
-            cx.notify();
+            this.syncActiveTabDirty();
+            this.notifyPanes(cx, { shell: false, side: true });
           })))))
         .when(isMem && ed.layer !== 'personal', el => el.child(h_flex().flex_wrap().gap(5)
           .children(MEMORY_TOPICS.map(tid => chip(`edit-topic-${tid}`, ed.topic === tid, topicLabel(lang, tid), (_e, cx) => {
             const next = retopicPlan({ layer: ed.layer, type: ed.type, topic: ed.topic }, { nextTopic: tid });
             ed.type = next.type;
             ed.topic = next.topic;
-            cx.notify();
+            this.syncActiveTabDirty();
+            this.notifyPanes(cx, { shell: false, side: true });
           })))))
         .when(isMem, el => el.child(
           inputRow('mem-edit-desc', this.memDescInput, this.memDescInput.value(), word(lang, 'memDescPlaceholder')),
@@ -7838,7 +9949,7 @@ export default class PmProject extends View {
           .child(div().relative().flex_1().min_h(0).w_full()
             .when(!this.docEditorInput.value(), el => el.child(div().absolute().left(0).top(0).right(0).truncate()
               .text_size(13).text_color(t.dim).child(word(lang, isMem ? 'memBodyPlaceholder' : 'docBodyPlaceholder'))))
-            .child(Textarea.new(this.docEditorInput).w_full().h_full().min_h(140).text_size(13).text_color(t.foreground)))));
+            .child(Textarea.new(this.docEditorInput).w_full().h_full().min_h(140).text_size(13).text_color(t.foreground))))));
   }
 
   historySubView(t, today, cx) {
@@ -7848,9 +9959,19 @@ export default class PmProject extends View {
     const title = hv.scope === 'item' && hv.path
       ? `${fileName(hv.path)} · ${word(lang, 'historyTitle')}`
       : word(lang, 'historyTitle');
-    const topBar = h_flex().flex_none().px(14).pt(6).pb(6).gap(4).items_center().border_b(1).border_color(t.border)
-      .child(this.iconButton('history-back', 'back', word(lang, 'close'), cx => this.closeHistory(cx), t, 15))
-      .child(div().flex_1().min_w(0).truncate().text_size(13.5).font_semibold().child(title));
+    const inTabBar = this.hasSideTabs();
+    const topBar = this.renderSplitTopBar({
+      id: 'history-topbar',
+      backId: 'history-back',
+      onBack: cx => this.closeHistory(cx),
+      backTip: word(lang, 'close'),
+      titleId: 'history-title',
+      title,
+      closeId: 'split-close',
+      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
+      compactBar: inTabBar,
+      t,
+    });
 
     let body;
     if (hv.loading && !hv.items.length) {
@@ -7884,25 +10005,24 @@ export default class PmProject extends View {
       });
     }
 
+    const histScrollHandle = this.tabScrollHandle('history');
     return v_flex().id('history-view').flex_1().min_h(0)
       .child(topBar)
-      .child(v_flex().id('history-list').flex_1().min_h(0).px(12).pt(8).pb(16).gap(4).overflow_y_scrollbar()
-        .track_scroll(this.historyScroll)
-        .children(body));
+      .child(this.sideScrollBody(v_flex().id('history-list').flex_1().min_h(0).px(12).pt(8).pb(16).gap(4).overflow_y_scrollbar()
+        .when(Boolean(histScrollHandle), el => el.track_scroll(histScrollHandle))
+        .children(body)));
   }
 
   libraryPanel(pm, t, width, today, cx) {
     const lang = this.lang;
     const currentYear = String(today || '').slice(0, 4);
-    const wrap = child => v_flex().id('library-panel').w(width).h_full().flex_none().pt(12).bg(t.chrome)
-      .border_l(1).border_color(t.border)
+    const wrapSub = child => v_flex().id('library-panel').w_full().h_full().min_w(0)
       .on_drop((e, cx) => this.dropLibraryFiles(e?.paths || [], cx))
-      .child(this.sideHeader(t, width))
       .child(child);
 
-    if (this.historyView?.tab === 'library') return wrap(this.historySubView(t, today, cx));
-    if (this.editingDoc?.tab === 'library') return wrap(this.docEditView(t, cx));
-    if (this.activeDoc?.tab === 'library') return wrap(this.docDetailView(t, today));
+    if (this.historyView?.tab === 'library') return wrapSub(this.historySubView(t, today, cx));
+    if (this.editingDoc?.tab === 'library') return wrapSub(this.docEditView(t, cx));
+    if (this.activeDoc?.tab === 'library') return wrapSub(this.docDetailView(t, today, width, cx));
 
     const q = String(this.libraryQuery || '').trim();
     const groups = q ? [] : libraryGroups({ roots: this.libraryRoots, files: this.libraryFiles }, this.libraryClosed, lang, currentYear);
@@ -7938,7 +10058,7 @@ export default class PmProject extends View {
         : [div().px(8).whitespace_normal().text_size(13).text_color(t.dim).child(word(lang, 'libraryEmpty'))];
     }
 
-    const toolbar = h_flex().flex_none().px(16).pt(8).pb(4).gap(4).items_center()
+    const toolbar = h_flex().flex_none().px(12).pt(8).pb(4).gap(4).items_center()
       .child(div().flex_1().min_w(0).child(this.searchBox('library-search', this.libraryInput, this.libraryQuery, word(lang, 'searchLibrary'), cx => {
         this.libraryQuery = '';
         this.libraryInput.set_value('');
@@ -7950,36 +10070,34 @@ export default class PmProject extends View {
       .child(this.iconButton('library-history', 'history', word(lang, 'docHistory'),
         cx => this.openHistory('library', 'docs', '', 'all', cx), t, 15));
 
-    return v_flex().id('library-panel').w(width).h_full().flex_none().pt(12).bg(t.chrome).border_l(1).border_color(t.border)
+    return v_flex().id('library-panel').w_full().h_full().min_w(0)
       .on_drop((e, cx) => this.dropLibraryFiles(e?.paths || [], cx))
-      .child(this.sideHeader(t, width))
+      .child(this.sideHeader(t, width, { inTabBar: this.hasSideTabs() }))
       .child(toolbar)
       .when(Boolean(this.deletedBanner?.tab === 'library'), el => el.child(this.deletedBannerBar('library', t)))
-      .when(Boolean(this.libraryDropBusy), el => el.child(h_flex().px(20).pb(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
+      .when(Boolean(this.libraryDropBusy), el => el.child(h_flex().px(16).pb(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
         .child(svg(SPINNER).size(12).flex_none().spin(900)).child(word(lang, 'addingFiles', this.libraryDropBusy))))
-      .when(Boolean(this.libraryDropError), el => el.child(h_flex().px(20).pb(4).gap(6).items_start()
+      .when(Boolean(this.libraryDropError), el => el.child(h_flex().px(16).pb(4).gap(6).items_start()
         .child(div().flex_1().min_w(0).whitespace_normal().text_size(11.5).text_color(t.blocked).child(this.libraryDropError))
         .child(this.iconButton('library-drop-err-close', 'close', word(lang, 'dismissNotice'),
           cx => { this.libraryDropError = ''; cx.notify(); }, t, 11))))
-      .when(Boolean(this.libraryError && this.libraryRead), el => el.child(div().px(20).pb(4).whitespace_normal()
+      .when(Boolean(this.libraryError && this.libraryRead), el => el.child(div().px(16).pb(4).whitespace_normal()
         .text_size(11.5).text_color(t.blocked).child(word(lang, 'libraryStale', this.libraryError))))
-      .child(v_flex().id('library-list').flex_1().min_h(0).px(12).pt(4).pb(16).gap(12).overflow_y_scrollbar()
+      .child(this.sideScrollBody(v_flex().id('library-list').flex_1().min_h(0).px(10).pt(4).pb(16).gap(12).overflow_y_scrollbar()
         .track_scroll(this.libraryScroll)
-        .children(listChildren));
+        .children(listChildren)));
   }
 
   memoryPanel(pm, t, width, today, cx) {
     const lang = this.lang;
     const currentYear = String(today || '').slice(0, 4);
-    const wrap = child => v_flex().id('memory-panel').w(width).h_full().flex_none().pt(12).bg(t.chrome)
-      .border_l(1).border_color(t.border)
+    const wrapSub = child => v_flex().id('memory-panel').w_full().h_full().min_w(0)
       .on_drop((e, cx) => this.dropMemoryFiles(e?.paths || [], cx))
-      .child(this.sideHeader(t, width))
       .child(child);
 
-    if (this.historyView?.tab === 'memory') return wrap(this.historySubView(t, today, cx));
-    if (this.editingDoc?.tab === 'memory') return wrap(this.docEditView(t, cx));
-    if (this.activeDoc?.tab === 'memory') return wrap(this.docDetailView(t, today));
+    if (this.historyView?.tab === 'memory') return wrapSub(this.historySubView(t, today, cx));
+    if (this.editingDoc?.tab === 'memory') return wrapSub(this.docEditView(t, cx));
+    if (this.activeDoc?.tab === 'memory') return wrapSub(this.docDetailView(t, today, width, cx));
 
     const q = String(this.memoryQuery || '').trim();
     const groups = !q && this.memoryData
@@ -8070,7 +10188,7 @@ export default class PmProject extends View {
       }
     }
 
-    const toolbar = h_flex().flex_none().px(16).pt(8).pb(4).gap(4).items_center()
+    const toolbar = h_flex().flex_none().px(12).pt(8).pb(4).gap(4).items_center()
       .child(div().flex_1().min_w(0).child(this.searchBox('memory-search', this.memoryInput, this.memoryQuery, word(lang, 'searchMemory'), cx => {
         this.memoryQuery = '';
         this.memoryInput.set_value('');
@@ -8083,23 +10201,23 @@ export default class PmProject extends View {
 
     const dreamLine = formatDreamStatus(this.memoryData?.dream, lang, Date.now(), this.clockOffsetMs || 0);
 
-    return v_flex().id('memory-panel').w(width).h_full().flex_none().pt(12).bg(t.chrome).border_l(1).border_color(t.border)
+    return v_flex().id('memory-panel').w_full().h_full().min_w(0)
       .on_drop((e, cx) => this.dropMemoryFiles(e?.paths || [], cx))
-      .child(this.sideHeader(t, width))
+      .child(this.sideHeader(t, width, { inTabBar: this.hasSideTabs() }))
       .child(toolbar)
-      .when(Boolean(dreamLine), el => el.child(div().id('memory-dream-status').px(20).pb(4).truncate().text_size(11.5).text_color(t.dim).child(dreamLine)))
+      .when(Boolean(dreamLine), el => el.child(div().id('memory-dream-status').px(16).pb(4).truncate().text_size(11.5).text_color(t.dim).child(dreamLine)))
       .when(Boolean(this.deletedBanner?.tab === 'memory'), el => el.child(this.deletedBannerBar('memory', t)))
-      .when(Boolean(this.memoryBusy), el => el.child(h_flex().px(20).pb(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
+      .when(Boolean(this.memoryBusy), el => el.child(h_flex().px(16).pb(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
         .child(svg(SPINNER).size(12).flex_none().spin(900)).child(word(lang, 'addingFiles', this.memoryBusy))))
-      .when(Boolean(this.memoryNoticeError), el => el.child(h_flex().px(20).pb(4).gap(6).items_start()
+      .when(Boolean(this.memoryNoticeError), el => el.child(h_flex().px(16).pb(4).gap(6).items_start()
         .child(div().flex_1().min_w(0).whitespace_normal().text_size(11.5).text_color(t.blocked).child(this.memoryNoticeError))
         .child(this.iconButton('memory-err-close', 'close', word(lang, 'dismissNotice'),
           cx => { this.memoryNoticeError = ''; cx.notify(); }, t, 11))))
-      .when(Boolean(this.memoryError && this.memoryRead), el => el.child(div().px(20).pb(4).whitespace_normal()
+      .when(Boolean(this.memoryError && this.memoryRead), el => el.child(div().px(16).pb(4).whitespace_normal()
         .text_size(11.5).text_color(t.blocked).child(word(lang, 'memoryStale', this.memoryError))))
-      .child(v_flex().id('memory-list').flex_1().min_h(0).px(12).pt(4).pb(16).gap(10).overflow_y_scrollbar()
+      .child(this.sideScrollBody(v_flex().id('memory-list').flex_1().min_h(0).px(10).pt(4).pb(16).gap(10).overflow_y_scrollbar()
         .track_scroll(this.memoryScroll)
-        .children(listChildren));
+        .children(listChildren)));
   }
 
   threadSessionView(t, today, cx) {
@@ -8161,6 +10279,9 @@ export default class PmProject extends View {
             div().w_full().text_size(13).text_color(t.foreground)
               .child(TextView.markdown(`session-md-${part.key}-${ci}`, chunk).selectable(true)
                 .on_link_click((url, cx) => this.followLink(url, cx)))));
+        }
+        if (part.kind === 'question') {
+          return this.renderSessionQuestionPart(part, t, lang, { prefix: 'session' });
         }
         const open = toolsOpen.has(part.key);
         const head = this.withTip(`session-tools-${part.key}`, h_flex().id(`session-tools-${part.key}`).min_h(26).px(8).py(4).gap(6).rounded(7).items_center()
@@ -8245,8 +10366,9 @@ export default class PmProject extends View {
       }
     }
 
+    const sessScroll = this.tabScrollHandle('session');
     return v_flex().id('thread-session').flex_1().min_h(0).py(2).gap(12).overflow_y_scrollbar()
-      .when(Boolean(this.sessionScroll), el => el.track_scroll(this.sessionScroll))
+      .when(Boolean(sessScroll), el => el.track_scroll(sessScroll))
       .on_scroll_wheel(e => {
         if (e.delta.y) {
           this.threadSessionAnchor = null;
@@ -8334,52 +10456,63 @@ export default class PmProject extends View {
     const reattachTip = closedInfo ? word(lang, 'reattachClosed', closedDetailText(lang, closedInfo)) : word(lang, 'reattach');
     const primaryOpen = Boolean(primaryAgent && agentWindowOpen(this.agentWindows, primaryAgent.key));
     const windowOrTerminalIcon = does === 'reattaching'
-      ? this.withTip('thread-terminal', h_flex().id('thread-terminal').size(28).flex_none().rounded(8).items_center().justify_center().text_color(t.muted)
+      ? this.withTip('thread-terminal', h_flex().id('thread-terminal').size(28).flex_none().rounded(7).items_center().justify_center().text_color(t.muted)
         .accessibility_label(word(lang, 'reattaching'))
         .child(svg(SPINNER).size(14).flex_none().spin(900)), word(lang, 'reattaching'), t, { panel: true, placement: 'below-right' })
       : does === 'reattach'
-        ? this.winIconBtn('thread-terminal', 'reattach', reattachTip, cx => this.reattach(cx), t)
+        ? this.splitIconBtn('thread-terminal', 'reattach', reattachTip, cx => this.reattach(cx), t)
         : primaryAgent
-          ? this.winIconBtn('thread-terminal', 'window-pop',
+          ? this.splitIconBtn('thread-terminal', 'window-pop',
             primaryOpen ? word(lang, 'closeAgentWindow') : word(lang, 'detailOpenWindow'),
             cx => this.toggleAgentSmallWindow(primaryAgent, cx), t, 14, primaryOpen)
           : terminal && !this.terminalPlace(terminal.address).focus
-            ? this.winIconBtn('thread-terminal', 'terminal', word(lang, 'terminalNowhere'), null, t)
-            : this.winIconBtn('thread-terminal', 'terminal', terminal ? word(lang, 'openTerminal') : word(lang, 'threadOffline'),
+            ? this.splitIconBtn('thread-terminal', 'terminal', word(lang, 'terminalNowhere'), null, t)
+            : this.splitIconBtn('thread-terminal', 'terminal', terminal ? word(lang, 'openTerminal') : word(lang, 'threadOffline'),
               terminal ? () => this.focusTerminal(terminal.address) : null, t);
     const showWindowAction = does !== 'hidden' || Boolean(primaryAgent);
     const diffBtn = this.threadChangeButton(task, t);
-    const actions = h_flex().gap(2).items_center().flex_none()
-      .when(showWindowAction, el => el.child(windowOrTerminalIcon))
-      .when(Boolean(diffBtn), el => el.child(diffBtn))
-      .child(this.winIconBtn('thread-close', 'close', word(lang, 'close'), cx => {
-        this.detail = false;
-        this.resetThreadChange();
-        this.syncVisibleSideTab(cx);
-        cx.notify();
-      }, t));
+    const actions = (showWindowAction || Boolean(diffBtn))
+      ? h_flex().gap(2).items_center().flex_none()
+          .when(showWindowAction, el => el.child(windowOrTerminalIcon))
+          .when(Boolean(diffBtn), el => el.child(diffBtn))
+      : null;
 
     const threadNum = formatTaskNumber(taskNumber(task) || taskNumber(stateTask) || this.taskNumberFor(this.thread));
-    const headerBar = h_flex().id('thread-topbar').gap(6).items_center()
-      .child(this.winIconBtn('thread-back', 'back', word(lang, 'backToThreads'), cx => {
-        this.detail = false;
-        this.resetThreadChange();
-        this.syncVisibleSideTab(cx);
-        cx.notify();
-      }, t, 14, false, { placement: 'below-left' }))
+    const leadingEl = h_flex().flex_none().gap(5).items_center()
       .child(this.withTip('thread-status', h_flex().id('thread-status').size(18).flex_none().items_center().justify_center()
         .accessibility_label(statusTip)
         .child(this.threadMark(markRow, t)), statusTip, t, { panel: true, placement: 'below-left' }))
-      .when(Boolean(threadNum), el => el.child(div().id('thread-number').flex_none().font_family('monospace').text_size(12.5).text_color(t.dim).child(threadNum)))
-      .child(this.withTip('thread-title', div().id('thread-title').w_full().truncate().text_size(14.5).font_semibold()
-        .text_color(t.foreground)
-        .child(task.title || this.thread), [threadNum ? `${threadNum} ${task.title || this.thread}` : (task.title || this.thread), statusTip].filter(Boolean).join(' · '),
-        t, { panel: true, placement: 'below-left', wrap: true, flex1: true }))
-      .child(actions);
+      .when(Boolean(threadNum), el => el.child(div().id('thread-number').flex_none().font_family('monospace').text_size(12.5).text_color(t.dim).child(threadNum)));
+    const inTabBar = this.hasSideTabs();
+    const headerBar = this.renderSplitTopBar({
+      id: 'thread-topbar',
+      backId: 'thread-back',
+      onBack: inTabBar ? null : (cx => {
+        this.panelClosing = false;
+        this.detail = false;
+        this.resetThreadChange();
+        this.listShown = true;
+        this.sideTab = 'threads';
+        this._panelOpenedFromClosed = false;
+        this.syncVisibleSideTab(cx);
+        this.notifyPanes(cx, { shell: true, conv: true, side: true });
+      }),
+      backTip: word(lang, 'backToThreads'),
+      leading: leadingEl,
+      titleId: 'thread-title',
+      title: task.title || this.thread,
+      titleTip: [threadNum ? `${threadNum} ${task.title || this.thread}` : (task.title || this.thread), statusTip].filter(Boolean).join(' · '),
+      actions,
+      closeId: 'thread-close',
+      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
+      closeTip: word(lang, 'closeSidePanel'),
+      compactBar: inTabBar,
+      t,
+    });
 
     const hasSubmeta = Boolean(task.branch || parent || (closedInfo && !quiet));
     const parentNum = formatTaskNumber(parent);
-    const submetaBar = hasSubmeta ? h_flex().flex_wrap().gap(8).items_center().pl(4).text_size(11.5).text_color(t.dim)
+    const submetaBar = hasSubmeta ? h_flex().flex_wrap().gap(8).items_center().text_size(11.5).text_color(t.dim)
       .when(Boolean(task.branch), el => el.child(this.withTip('thread-branch', div().id('thread-branch').font_family('monospace')
         .child(task.branch), workerCtxText || task.branch, t, { panel: true, placement: 'below-left', wrap: true, flexNone: true })))
       .when(Boolean(closedInfo && !quiet), el => el.child(this.withTip('thread-closed-pill', div().id('thread-closed-pill')
@@ -8387,23 +10520,23 @@ export default class PmProject extends View {
       .when(Boolean(parent), el => el.child(this.withTip('thread-parent', h_flex().id('thread-parent').gap(4).items_center().cursor_pointer()
         .text_color(t.dim).hover(s => s.text_color(t.foreground))
         .accessibility_label(word(lang, 'partOf', parent.title))
-        .on_click((_e, cx) => this.openThread(parent.task, cx))
+        .on_click((_e, cx) => this.openThread(parent.task, cx, { insertAdjacent: true }))
         .child(svg(ICON('hook-up')).size(11.5).flex_none())
         .when(Boolean(parentNum), el => el.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(parentNum)))
         .child(div().min_w(0).truncate().child(word(lang, 'partOf', parent.title))), word(lang, 'openThread'), t, { panel: true, placement: 'below-left' }))) : null;
     const hasSessionTab = this.sessionTabAvailable(stateTask, task);
     const activeTab = this.activeThreadTab(stateTask, task);
-    const tabItem = (key, glyph, label, dot = false) => h_flex().id(`thread-tab-${key}`).h(25).px(10).gap(6).rounded(7).items_center()
-      .text_size(12.5).accessibility_label(label)
+    const tabItem = (key, glyph, label, dot = false) => h_flex().id(`thread-tab-${key}`).h(26).px(9).gap(5).rounded(7).items_center()
+      .text_size(12.2).accessibility_label(label)
       .when(key === activeTab, el => el.bg(t.raised).text_color(t.foreground).font_medium())
       .when(key !== activeTab, el => el.cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
         .on_click((_e, cx) => this.selectThreadTab(key, cx)))
-      .child(this.icon(glyph, 13.5)).child(label)
+      .child(this.icon(glyph, 13)).child(label)
       .when(Boolean(dot), el => el.child(div().size(5).rounded_full().bg(t.blocked)));
-    const tabBar = hasSessionTab ? h_flex().flex_none().items_center()
-      .child(h_flex().id('thread-tabs').h(31).p(2).gap(2).rounded(9).border_1().border_color(t.border)
-        .child(tabItem('log', 'list', word(lang, 'threadLogTab'), activeTab === 'session' && Boolean(asks)))
-        .child(tabItem('session', 'chat', word(lang, 'threadSessionTab')))) : null;
+    const tabBar = hasSessionTab ? h_flex().id('thread-tabs').flex_none().gap(2).items_center()
+      .child(tabItem('log', 'list', word(lang, 'threadLogTab'), activeTab === 'session' && Boolean(asks)))
+      .child(tabItem('session', 'chat', word(lang, 'threadSessionTab'))) : null;
+    const mergeSubBar = width >= 440 && Boolean(tabBar) && Boolean(submetaBar);
 
     // Prerequisite dependencies card ("Waiting" / "等待"), clickable to jump to prerequisite threads.
     const deps = taskDependencies(planTask, allTasks, { terms: this.terms(), live: this.live() });
@@ -8463,9 +10596,9 @@ export default class PmProject extends View {
         const busy = this.threadEarlierLoading, err = this.threadEarlierError;
         const tip = busy ? word(lang, 'loadingEarlierLog')
           : err ? word(lang, 'earlierLogFailed', err) : word(lang, 'earlierLog', earlierLogCount);
-        return h_flex().relative().pb(8).items_center()
+        return h_flex().relative().w_full().min_w(0).flex_none().pb(8).items_center()
           .when(visibleLog.length > 0, el => el.child(div().absolute().left(3).top(12).bottom(0).w(1).bg(t.border)))
-          .child(div().absolute().left(1).top(9.5).size(5).rounded_full().border_1().border_color(t.border).bg(t.chrome))
+          .child(div().absolute().left(1).top(9.5).size(5).rounded_full().border_1().border_color(t.border).bg(t.background))
           .child(this.withTip('thread-log-earlier', h_flex().id('thread-log-earlier').ml(13).size(24).rounded(7).items_center().justify_center()
             .text_color(err ? t.blocked : t.dim).accessibility_label(tip)
             .when(!busy, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(err ? t.blocked : t.foreground))
@@ -8477,41 +10610,43 @@ export default class PmProject extends View {
         const lineAbove = !first || Boolean(earlierLogRow), lineBelow = !latest;
         const entryText = logText(lang, entry.text, true);
         if (!this.threadLogExpanded) {
-          return this.withTip(`thread-entry-${entry.n ?? i}`, h_flex().id(`thread-entry-${entry.n ?? i}`).relative().h(22).pl(16).gap(8).items_center()
+          const compactText = compactLogLine(entryText);
+          return this.withTip(`thread-entry-${entry.n ?? i}`, h_flex().id(`thread-entry-${entry.n ?? i}`).relative().w_full().min_w(0).flex_none().h(22).pl(16).gap(8).items_center().overflow_hidden()
             .when(lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(0).bottom(0).w(1).bg(t.border)))
             .when(!lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(11).bottom(0).w(1).bg(t.border)))
             .when(lineAbove && !lineBelow, el => el.child(div().absolute().left(3).top(0).h(11).w(1).bg(t.border)))
             .child(div().absolute().left(.5).top(8).size(6).rounded_full().bg(latest ? t.accent : t.border))
             .child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(clock(entry.at, today)))
-            .child(div().flex_1().min_w(0).truncate().text_size(12.2)
-              .text_color(latest ? t.foreground : t.muted).child(entryText)), entryText, t, { panel: true, placement: 'above-left' });
+            .child(div().flex_1().min_w(0).overflow_hidden().truncate().text_size(12.2)
+              .text_color(latest ? t.foreground : t.muted).child(compactText)), entryText, t, { panel: true, placement: 'above-left', wrap: true, full: true, flexNone: true });
         }
-        return v_flex().id(`thread-entry-${entry.n ?? i}`).relative().pl(16).pb(latest ? 2 : 12).gap(2)
+        return v_flex().id(`thread-entry-${entry.n ?? i}`).relative().w_full().min_w(0).flex_none().pl(16).pb(latest ? 2 : 12).gap(2)
           .when(lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(0).bottom(0).w(1).bg(t.border)))
           .when(!lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(10).bottom(0).w(1).bg(t.border)))
           .when(lineAbove && !lineBelow, el => el.child(div().absolute().left(3).top(0).h(10).w(1).bg(t.border)))
           .child(div().absolute().left(0).top(7).size(7).rounded_full().bg(latest ? t.accent : t.border))
-          .child(div().font_family('monospace').text_size(11.5).text_color(t.dim).child(clock(entry.at, today)))
-          .child(this.selectableText(`thread-log-txt-${this.thread}-${entry.n ?? i}`, entryText).w_full()
+          .child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(clock(entry.at, today)))
+          .child(this.selectableText(`thread-log-txt-${this.thread}-${entry.n ?? i}`, entryText).w_full().min_w(0)
             .text_size(12.5).text_color(latest ? t.foreground : t.muted));
       }) : [div().pl(16).text_size(12.5).text_color(t.dim).child(word(lang, 'noLog'))];
+      const logScrollHandle = this.tabScrollHandle('log');
       if (this.threadAnchor && visibleLog.length) {
         const idx = visibleLog.findIndex(e => e.n === this.threadAnchor.n);
         this.threadAnchor.left--;
-        if (idx >= 0) this.threadScroll.scroll_to_item((earlierLogRow ? 1 : 0) + idx);
+        if (idx >= 0) logScrollHandle?.scroll_to_item?.((earlierLogRow ? 1 : 0) + idx);
         if (this.threadAnchor.left <= 0 || idx < 0) this.threadAnchor = null;
         else if (cx && !this.threadTicking) {
           this.threadTicking = true;
           cx.timer.after(16, cx => { this.threadTicking = false; cx.notify(); });
         }
       }
-      const logHeader = canExpandRecent ? h_flex().pb(4).items_center().justify_end()
+      const logHeader = canExpandRecent ? h_flex().w_full().min_w(0).flex_none().pb(4).items_center().justify_end()
         .child(h_flex().id('thread-log-toggle').h(20).px(6).rounded(5).items_center().cursor_pointer()
           .text_size(11).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => { this.threadLogExpanded = !this.threadLogExpanded; cx.notify(); })
           .child(this.threadLogExpanded ? word(lang, 'collapseLog') : word(lang, 'showAllLog', log.length))) : null;
-      bodyEl = v_flex().id('thread-log').flex_1().min_h(0).py(2).overflow_y_scrollbar()
-        .track_scroll(this.threadScroll)
+      bodyEl = v_flex().id('thread-log').w_full().min_w(0).flex_1().min_h(0).py(2).overflow_y_scrollbar()
+        .when(Boolean(logScrollHandle), el => el.track_scroll(logScrollHandle))
         .on_scroll_wheel((e, cx) => {
           if (e.delta.y) this.threadAnchor = null;
           if (this.hoverKey) { this.hoverKey = ''; cx.notify(); }
@@ -8521,26 +10656,407 @@ export default class PmProject extends View {
         .children(entries);
     }
 
-    return v_flex().w(width).h_full().flex_none().px(18).pt(12).pb(16).gap(12)
-      .bg(t.chrome).border_l(1).border_color(t.border)
+    return v_flex().w_full().h_full().min_w(0)
       .child(headerBar)
-      .when(Boolean(submetaBar), el => el.child(submetaBar))
-      .when(Boolean(tabBar), el => el.child(tabBar))
-      .when(activeTab === 'log' && Boolean(asks), el => el.child(v_flex().id('thread-question').flex_none().max_h(320).overflow_y_scrollbar()
-        .mx(-10).gap(2)
-        .when(Boolean(asks.text), el => el.child(this.selectableText(`thread-ask-${this.thread}`, logText(lang, asks.text, true)).px(10).pb(6).w_full()
-          .text_size(13.5).text_color(t.foreground)))
-        .children(this.answerRows(asks, t, 'thread-'))))
-      .when(activeTab === 'log' && Boolean(depsCard), el => el.child(depsCard))
-      .when(activeTab === 'log' && Boolean(planCard), el => el.child(planCard))
-      .when(activeTab === 'log' && parts.length > 0, el => el.child(this.partsList(parts, t)))
-      .child(bodyEl)
-      .when(Boolean(this.threadError), el => el.child(div().text_size(12).text_color(t.blocked).whitespace_normal()
-        .child(word(lang, 'failed', this.threadError))))
-      .when(this.reattachError?.id === this.thread && !terminal, el => el.child(div().text_size(12).text_color(t.blocked)
-        .whitespace_normal().child(word(lang, 'reattachFailed', this.reattachError.text))))
-      .child(this.composer('say-thread', this.threadInput, this.threadDraft, Boolean(terminal), word(lang, 'sayThread'),
-        word(lang, 'threadOffline'), cx => this.sendThread(cx), t, 14, false, cx));
+      .child(this.sideScrollBody(v_flex().w_full().min_w(0).flex_1().min_h(0).px(16).pt(10).pb(14).gap(10)
+        .when(mergeSubBar, el => el.child(h_flex().id('thread-subbar').min_h(32).flex_none().gap(10).items_center().justify_between()
+          .child(tabBar)
+          .child(div().flex_1().min_w(0).child(h_flex().w_full().justify_end().child(submetaBar)))))
+        .when(!mergeSubBar && Boolean(submetaBar), el => el.child(submetaBar))
+        .when(!mergeSubBar && Boolean(tabBar), el => el.child(tabBar))
+        .when(activeTab === 'log' && Boolean(asks), el => el.child(v_flex().id('thread-question').flex_none().max_h(320).overflow_y_scrollbar()
+          .mx(-10).gap(2)
+          .when(Boolean(asks.text), el => el.child(this.selectableText(`thread-ask-${this.thread}`, logText(lang, asks.text, true)).px(10).pb(6).w_full()
+            .text_size(13.5).text_color(t.foreground)))
+          .children(this.answerRows(asks, t, 'thread-'))))
+        .when(activeTab === 'log' && Boolean(depsCard), el => el.child(depsCard))
+        .when(activeTab === 'log' && Boolean(planCard), el => el.child(planCard))
+        .when(activeTab === 'log' && parts.length > 0, el => el.child(this.partsList(parts, t)))
+        .child(bodyEl)
+        .when(Boolean(this.threadError), el => el.child(div().text_size(12).text_color(t.blocked).whitespace_normal()
+          .child(word(lang, 'failed', this.threadError))))
+        .when(this.reattachError?.id === this.thread && !terminal, el => el.child(div().text_size(12).text_color(t.blocked)
+          .whitespace_normal().child(word(lang, 'reattachFailed', this.reattachError.text))))
+        .child(this.composer('say-thread', this.threadInput, this.threadDraft, Boolean(terminal), word(lang, 'sayThread'),
+          word(lang, 'threadOffline'), cx => this.sendThread(cx), t, 14, false, cx))));
+  }
+
+  currentSideViewKey() {
+    const activeTab = this.activeSideTab();
+    const tabPrefix = activeTab ? `tab:${activeTab.id}:` : (this.hasSideTabs() ? 'tab:index:' : '');
+    if (this.detail) {
+      if (this.isThreadChangeOpen()) return `${tabPrefix}change:${this.thread}:${this.change?.level || 'commits'}:${this.change?.filePath || ''}`;
+      return `${tabPrefix}detail:${this.thread}:${this.threadTab || 'log'}`;
+    }
+    const onLib = this.sideTab === 'library' && (this.librarySupported() || this.activeDoc?.root === 'repo');
+    const onMem = this.sideTab === 'memory' && this.memorySupported();
+    const curTab = onLib ? 'library' : onMem ? 'memory' : 'threads';
+    if (this.historyView?.tab === curTab) return `${tabPrefix}history:${curTab}:${this.historyView.path || ''}`;
+    if (this.editingDoc?.tab === curTab) return `${tabPrefix}edit:${curTab}:${this.editingDoc.path || ''}`;
+    if (this.activeDoc?.tab === curTab) return `${tabPrefix}doc:${curTab}:${this.activeDoc.root}/${this.activeDoc.path}`;
+    return `${tabPrefix}list:${curTab}`;
+  }
+
+  buildPanelShell(pm, t, today, cx, { open, layout, dragging, inlineSide = null } = {}) {
+    const lang = this.lang;
+    const dark = isDarkTheme(t);
+    const cardWidth = layout.cardWidth;
+    const slotWidth = layout.slotWidth;
+    const isSheet = layout.layoutKind === 'sheet';
+    const showContent = open || this.panelMounted;
+    const sideNode = showContent ? (inlineSide || this._sideEntity) : null;
+
+    if (isSheet) {
+      if (!showContent) {
+        return h_flex().id('pm-project-panel').h_full().flex_none().w(0).overflow_hidden();
+      }
+      return h_flex().id('pm-panel-sheet-layer').absolute().inset(0).overflow_hidden()
+        .child(div().id('pm-panel-backdrop').flex_1().h_full()
+          .bg(withAlpha('#000000', dark ? .42 : .22))
+          .opacity(open ? 1 : 0)
+          .when(this.measured, el => el.transition('opacity', { duration: 180, easing: 'ease-out' }))
+          .on_click((_e, clickCx) => this.closeSidePanel(clickCx)))
+        .child(keepPress(h_flex().id('pm-project-panel').relative().h_full().flex_none().overflow_hidden().justify_start()
+          .pr(SPLIT_CARD_MARGIN_R).pb(10)
+          .w(open ? cardWidth + SPLIT_CARD_MARGIN_R : 0)
+          .when(this.measured && !dragging, el => el.transition('width', { duration: 180, easing: 'ease-out' }))
+          .when(Boolean(sideNode), el => el.child(sideNode)), this.keyFocus));
+    }
+
+    const lit = dragging || this.gripLit;
+    const grip = div().id('panel-grip').absolute().left(0).top(0).bottom(10).w(10).cursor_col_resize()
+      .accessibility_label(word(lang, 'resetPanelWidthTip'))
+      .on_hover((hovered, hoverCx) => {
+        if (hovered !== this.gripLit) {
+          this.gripLit = hovered;
+          this.notifyShell(hoverCx);
+        }
+      })
+      .on_mouse_down('left', (e, downCx) => this.gripDown(e, downCx))
+      .child(div().absolute().left(0).right(0).top(12).bottom(12)
+        .opacity(lit ? 1 : 0)
+        .when(this.measured, el => el.transition('opacity', { duration: 120, easing: 'ease-out' }))
+        .child(div().absolute().left(4).top(0).bottom(0).w(2).rounded(1)
+          .bg(withAlpha(t.accent, dragging ? .9 : .55)))
+        .child(h_flex().size_full().items_center().justify_center()
+          .child(div().w(3).h(28).rounded(2).bg(dragging ? t.accent : t.muted))));
+
+    return h_flex().id('pm-project-panel').relative().h_full().flex_none().overflow_hidden().justify_start()
+      .pl(SPLIT_GRIP_OVERHANG).pr(SPLIT_CARD_MARGIN_R).pb(10)
+      .w(open ? slotWidth : 0)
+      .when(this.measured && !dragging, el => el.transition('width', { duration: 180, easing: 'ease-out' }))
+      .when(Boolean(sideNode), el => el.child(sideNode))
+      .when(open, el => el.child(grip));
+  }
+
+  renderConversationPane(cx) {
+    const pm = this.pm();
+    const t = theme();
+    if (!pm) return v_flex().flex_1().min_w(0).h_full();
+    const lang = this.lang || this.state?.lang || 'en';
+    const now = new Date(), today = iso(now), yesterday = iso(new Date(now.getTime() - 86400000));
+    const alreadyInRender = Boolean(this._inRender);
+    if (!alreadyInRender) {
+      this._inRender = true;
+      this._renderTerms = machineView(terminals(), this.machine);
+      this._renderTermsMachine = this.machine;
+      this._renderLive = machineView(agents(), this.machine);
+      this._renderLiveMachine = this.machine;
+      this._renderProjTasks = null;
+      this._renderSpacesTabs = null;
+      this._renderTaskNumIdx = null;
+      this._renderMdLinkMap = null;
+    }
+    try {
+      const pmTerm = this.pmTerminal();
+      const pmStatus = pmLiveStatus(pmTerm, this.live());
+      const activeTurn = this.activePmTurn();
+      const working = this.isPmWorking(pmTerm, this.live(), activeTurn);
+      // FS-16: Self-sustaining 1-second tick inside conversation pane render so dual-entity mode never freezes elapsed time.
+      const needsTurnTick = working && Boolean(this.onStage) && Boolean(activeTurn && (Number(activeTurn.started_ms) > 0 || activeTurn.activity));
+      if (needsTurnTick && !this.turnTickTimer && cx?.timer?.after) {
+        this.turnTickTimer = true;
+        const scheduledAt = this.nowMs();
+        cx.timer.after(1000, liveCx => {
+          this.turnTickTimer = false;
+          if (this.nowMs() >= scheduledAt + 500 && Boolean(this.onStage) && this.isPmWorking(this.pmTerminal(), this.live(), this.activePmTurn())) {
+            this.notifyPanes(liveCx, { shell: false, conv: true });
+          }
+        });
+      }
+      const queuedCount = this.pending.filter(p => p.queued && !p.failed && !p.received).length;
+      const pendingSending = this.pending.some(p => !p.failed && !p.queued && !p.received);
+      const convActView = pmTerm
+        ? pmActivityView(lang, {
+          turn: activeTurn,
+          turn2: this.activePmTurn2(),
+          supervised: this.activePmSupervised(),
+          working,
+          pendingSending,
+          nowMs: this.nowMs(),
+          serverNowMs: this.serverNowMs || 0,
+          receivedAtMs: this.serverNowAt || 0,
+          agentKind: pm.agent || '',
+        })
+        : null;
+      const typingNow = Boolean(convActView?.active) || Boolean(working) || pendingSending;
+      const tl = this.resolveTimelineData(pm, today, typingNow);
+      const { items, stops, blocks, newest, keys, foldedTasks, waiting } = tl;
+      this.items = items;
+      this._blockKeySet = tl.blockKeySet;
+      if (this.answering && !stops.some(s => (s.thread ? askKey(s.thread) : s.key) === this.answering.key)) this.answering = null;
+      this.atWork = workingTasks(this.terms(), this.live());
+      if (this.newest && newest !== this.newest && !this.unfolded.has(this.newest)) this.unfolded.set(this.newest, true);
+      this.newest = newest;
+      this.keys = keys;
+      if (!this.seen && this.events.length) this.seen = new Set(this.keys);
+      const showEarlier = Boolean(this.logState?.earlier || this.earlierLoading || this.earlierError);
+      const topOffset = showEarlier ? 1 : 0;
+      this.lastBlocks = blocks;
+      this.lastTopOffset = topOffset;
+      if (blocks.length !== this.count) {
+        if (blocks.length > this.count && blocks.length && !this.away) this.follow();
+        this.count = blocks.length;
+      }
+      if (this.jumpTarget && blocks.length) {
+        const jumpRow = rowOfKey(blocks, this.jumpTarget.key);
+        this.jumpTarget.left--;
+        if (jumpRow >= 0) this.scroll.scroll_to_item(topOffset + jumpRow);
+        if (this.jumpTarget.left <= 0 || jumpRow < 0) this.jumpTarget = null;
+        else if (!this.ticking) { this.ticking = true; cx.timer.after(16, liveCx => { this.ticking = false; liveCx.notify(); }); }
+      } else if (this.earlierAnchor && blocks.length) {
+        const anchorRow = findAnchorBlock(blocks, this.earlierAnchor.anchor);
+        this.earlierAnchor.left--;
+        if (anchorRow >= 0) this.scroll.scroll_to_item(topOffset + anchorRow);
+        if (this.earlierAnchor.left <= 0 || anchorRow < 0) this.earlierAnchor = null;
+        else if (!this.ticking) { this.ticking = true; cx.timer.after(16, liveCx => { this.ticking = false; liveCx.notify(); }); }
+      } else if (blocks.length && this.settle > 0) {
+        this.settle--;
+        this.scroll.scroll_to_item(topOffset + blocks.length);
+        if (!this.ticking) { this.ticking = true; cx.timer.after(16, liveCx => { this.ticking = false; liveCx.notify(); }); }
+      }
+      const heights = blocks.map(b => this.heights.get(b.key) || 0), tall = this.tall || this.high;
+      this.lastBlocks = blocks;
+      this.lastTopOffset = topOffset;
+      this.lastHeights = heights;
+      this.lastTall = tall;
+      this.tasks = foldedTasks;
+      const ring = stops.length ? ringCx => {
+        const next = bellNext(stops, this.bell);
+        this.bell = { key: next.key, seen: stops.map(s => s.key) };
+        if (next.thread) {
+          const id = bellThread(next, this.tasks || foldReviews(this.state.tasks), this.detail ? this.thread : '');
+          if (id) this.openThread(id, ringCx);
+          return -1;
+        }
+        const key = next.key;
+        const seq = (this.flashSeq || 0) + 1;
+        this.flashSeq = seq;
+        this.flash = key;
+        this.flashTone = 'blocked';
+        ringCx.timer.after(1500, tCx => { if (this.flashSeq === seq && this.flash === key) { this.flash = ''; tCx.notify(); } });
+        ringCx.notify();
+        const row = rowOf(blocks, items[next.at]);
+        if (row >= 0) this.rest(riseAfterJump(this.rise, heights, row, tall, TAIL));
+        return row >= 0 ? topOffset + row : -1;
+      } : null;
+      const layout = this._lastLayout || this.currentSplitLayout();
+      const padX = layout.conversationPadX || 28;
+      const center = el => h_flex().w_full().justify_center().px(padX).child(div().w_full().min_w(0).max_w(COLUMN).child(el));
+      const above = (b, n) => (n === 0 ? 0 : b.kind === 'turn' && !b.first ? 12 : 22);
+      const room = TAIL + (showEarlier ? 34 : 0) + heights.reduce((sum, h) => sum + h, 0) + TAIL - tall;
+      const body = v_flex().id('pm-project-timeline').flex_1().min_h(0).pt(TAIL).overflow_y_scrollbar()
+        .track_scroll(this.scroll)
+        .on_size_change((size, sizeCx) => {
+          const prev = this.tall;
+          this.tall = size.height;
+          if (prev > 0 && size.height !== prev && !this.panelDrag && this.panelTransitioning !== true) {
+            this.resized(sizeCx);
+          }
+        })
+        .on_scroll_wheel(e => {
+          if (e.delta.y) {
+            this.jumpTarget = null;
+            this.earlierAnchor = null;
+            this.selectionBar = null;
+            this.rest(riseAfterWheel(this.rise, e.delta.y, room, tall));
+          }
+        })
+        .when(showEarlier, el => el.child(center(this.earlierControl(blocks, t))))
+        .children(blocks.length ? blocks.map((b, n) => center(this.block(b, t, today, yesterday, cx)).pt(above(b, n))
+          .id(`block-${b.key}`).on_size_change((size, sizeCx) => {
+            if (this.heights.get(b.key) === size.height) return;
+            this.heights.set(b.key, size.height);
+            if (Boolean(this.panelDrag) || this.panelTransitioning === true) return;
+            this.resized(sizeCx);
+          }))
+          : [center(div().text_color(t.dim).child(word(lang, 'empty')))])
+        .child(div().flex_none().h(TAIL));
+      const pmStart = pmStartState(pm, pmTerm, this.startingPm === this.pmName
+        || Boolean(this.bringingBack && this.bringBackProgress?.pmKey === this.pmName
+          && this.bringBackProgress.steps?.some(s => s.kind === 'pm' && s.state === 'running')));
+      const offlineTip = pmStart === 'archived' ? word(lang, 'pmOfflineArchived')
+        : (pmStart === 'tui' || pmStart === 'tui_live') ? word(lang, 'pmOfflineTui')
+        : pmStart === 'missing_repo' ? word(lang, 'pmOfflineMissingRepo')
+        : word(lang, 'offline');
+      if (!pm.lost && !this.bringingBack && this.bringBackOpen
+          && (!this.bringBackProgress || !this.bringBackProgress.steps?.some(s => s.state === 'failed'))) {
+        this.bringBackOpen = false;
+        this.bringBackProgress = null;
+      }
+      const showLost = Boolean(this.bringingBack || this.bringBackOpen || lostShown(pm.lost, this.keptDismissedLost()));
+      const lostEl = showLost ? this.lostNotice(pm, t) : null;
+      const showOfflinePmBar = !pmTerm && (pmStart === 'startable' || pmStart === 'starting' || this.startPmError?.pm === this.pmName);
+      const activeDialog = pmTerm
+        ? (this.pmDialog?.pm === this.pmName && this.pmDialog?.dialog
+          ? this.pmDialog.dialog
+          : classifyPmDialog('', this.pmSendBlockError, pmStatus))
+        : null;
+      const pmBlockedText = pmTerm ? pmBlockedBannerText(lang, activeDialog, queuedCount) : '';
+      const rawUndelivered = pm.undelivered && typeof undeliveredBannerText === 'function'
+        ? undeliveredBannerText(lang, pm.undelivered)
+        : '';
+      const pmUndeliveredText = typeof rawUndelivered === 'string' ? rawUndelivered : '';
+      const actionFeedback = this.pmActionFeedback?.pm === this.pmName && this.pmActionFeedback?.text
+        ? this.pmActionFeedback
+        : null;
+      const hasMainDraft = Boolean(this.draft?.trim() || this.input?.value?.()?.trim() || this.files?.length || this.quotes?.length);
+      const pmBusyView = (pmTerm && !showOfflinePmBar && !pmBlockedText)
+        ? pmBusyComposerView(lang, {
+          actView: convActView,
+          turn2: this.activePmTurn2(),
+          working,
+          interrupting: this.interruptingPm === this.pmName,
+          agentKind: pm.agent || '',
+          hasDraft: hasMainDraft,
+          queuedCount,
+        })
+        : null;
+      const selectionBar = this.selectionPopover(t);
+      const footer = v_flex().w_full().gap(6)
+        .when(Boolean(selectionBar), el => el.child(h_flex().w_full().justify_end().child(selectionBar)))
+        .when(showOfflinePmBar, el => el.child(this.offlinePmBar(pmStart, t)))
+        .when(Boolean(actionFeedback), el => el.child(this.pmActionFeedbackBar(actionFeedback, t, cx)))
+        .when(Boolean(pmUndeliveredText), el => el.child(this.pmUndeliveredBar(pmUndeliveredText, t)))
+        .when(Boolean(pmBlockedText), el => el.child(this.pmBlockedBar(pmBlockedText, t)))
+        .when(Boolean(pmBusyView), el => el.child(this.pmBusyBar(pmBusyView, t, cx)))
+        .child(this.composer('say', this.input, this.draft, Boolean(pmTerm || this.isPmStarting()), word(lang, 'say', pm.project || pm.name),
+          offlineTip, sendCx => this.sendMain(sendCx), t, 16, true, cx));
+      this.ringAction = ring;
+      if (this.bodyOnly) this.publishHeaderState(this.buildHeaderData(pm, waiting, Boolean(ring)));
+      return v_flex().flex_1().min_w(0).h_full()
+        .when(!this.bodyOnly, el => el.child(this.header(pm, waiting, ring, t)))
+        .when(Boolean(lostEl), el => el.child(center(lostEl).flex_none().pt(12)))
+        .child(body)
+        .child(keepPress(center(footer).flex_none().pb(20).pt(4), this.keyFocus));
+    } finally {
+      if (!alreadyInRender) {
+        this._inRender = false;
+        this._renderTerms = null;
+        this._renderTermsMachine = null;
+        this._renderLive = null;
+        this._renderLiveMachine = null;
+        this._renderProjTasks = null;
+        this._renderSpacesTabs = null;
+        this._renderTaskNumIdx = null;
+        this._renderMdLinkMap = null;
+      }
+    }
+  }
+
+  renderSideSplitPane(cx) {
+    const pm = this.pm();
+    const t = theme();
+    if (!pm) return v_flex().w_full().h_full();
+    const today = iso(new Date());
+    const open = this.isPanelOpen();
+    if (!open && !this.panelMounted) return v_flex().w_full().h_full();
+    const layout = this._lastLayout || this.currentSplitLayout();
+    const width = layout.cardWidth;
+    const alreadyInRender = Boolean(this._inRender);
+    if (!alreadyInRender) {
+      this._inRender = true;
+      this._renderTerms = machineView(terminals(), this.machine);
+      this._renderTermsMachine = this.machine;
+      this._renderLive = machineView(agents(), this.machine);
+      this._renderLiveMachine = this.machine;
+      this._renderProjTasks = null;
+      this._renderSpacesTabs = null;
+      this._renderTaskNumIdx = null;
+      this._renderMdLinkMap = null;
+    }
+    try {
+      const hasTabs = this.hasSideTabs();
+      const activeTab = this.activeSideTab();
+      const showLibrary = this.sideTab === 'library' && (this.librarySupported() || this.activeDoc?.root === 'repo');
+      const showMemory = this.sideTab === 'memory' && this.memorySupported();
+      const inner = (hasTabs && !activeTab)
+        ? (showLibrary ? this.libraryPanel(pm, t, width, today, cx)
+          : showMemory ? this.memoryPanel(pm, t, width, today, cx)
+          : this.threadsPanel(pm, t, width))
+        : this.detail
+          ? this.panel(t, today, width, cx)
+          : showLibrary ? this.libraryPanel(pm, t, width, today, cx)
+          : showMemory ? this.memoryPanel(pm, t, width, today, cx)
+          : this.threadsPanel(pm, t, width);
+
+      // Sub-view 120ms ease-out opacity transition when switching between List / Doc / Thread Detail / Diff.
+      const nextViewKey = this.currentSideViewKey();
+      let fadeOpacity = null;
+      if (this.measured && open && this._sideViewKey && this._sideViewKey !== nextViewKey && cx?.timer?.after) {
+        this._sideViewKey = nextViewKey;
+        this._sideFading = 'start';
+        fadeOpacity = 0;
+        this._sideFadeTimer?.cancel?.();
+        this._sideFadeTimer = cx.timer.after(16, tCx => {
+          this._sideFading = 'end';
+          this.notifyPanes(tCx, { shell: false, side: true });
+          this._sideFadeTimer = tCx.timer.after(140, doneCx => {
+            this._sideFading = false;
+            this._sideFadeTimer = null;
+            this.notifyPanes(doneCx, { shell: false, side: true });
+          }) || null;
+        }) || null;
+      } else {
+        this._sideViewKey = nextViewKey;
+        if (this._sideFading === 'start') fadeOpacity = 0;
+        else if (this._sideFading === 'end') fadeOpacity = 1;
+      }
+
+      // Outer card geometry:
+      // - Open/Close slide (0 <-> W): fixed width so left border & rounded corners stay visible from frame 1.
+      // - Same-open resize (compact <-> split): w_full() outer card keeps topbars (and right-edge close button)
+      //   flush to both edges on every frame, while each sub-view's scrollable body locks width via sideScrollBody().
+      const isSlideOpenClose = !open || this._panelSlideFromZero === true;
+      const bodyWrap = v_flex().flex_1().min_h(0).w_full().min_w(0).child(inner);
+      const styledBody = fadeOpacity !== null
+        ? bodyWrap.opacity(fadeOpacity).transition('opacity', { duration: 120, easing: 'ease-out' })
+        : bodyWrap;
+      const banners = hasTabs ? this.sideTabBanners(t, cx) : [];
+
+      const card = v_flex().id('side-split-card').h_full().rounded(12).overflow_hidden()
+        .bg(t.background).border_1().border_color(t.border)
+        .when(!isDarkTheme(t), el => el.shadow_xs())
+        .when(isSlideOpenClose, el => el.w(width).flex_none())
+        .when(!isSlideOpenClose, el => el.w_full().min_w(0))
+        .when(hasTabs, el => el.child(this.sideTabBar(t, width, cx)))
+        .when(banners.length > 0, el => el.children(banners))
+        .child(styledBody);
+
+      return keepPress(card, this.keyFocus);
+    } finally {
+      if (!alreadyInRender) {
+        this._inRender = false;
+        this._renderTerms = null;
+        this._renderTermsMachine = null;
+        this._renderLive = null;
+        this._renderLiveMachine = null;
+        this._renderProjTasks = null;
+        this._renderSpacesTabs = null;
+        this._renderTaskNumIdx = null;
+        this._renderMdLinkMap = null;
+      }
+    }
   }
 
   render(cx) {
@@ -8551,6 +11067,8 @@ export default class PmProject extends View {
     const lang = this.lang;
     const rawRef = shared(SHARED);
     const ref = projectRef(rawRef), wanted = ref.key;
+    const shellOnly = this._shellOnlyRender === true;
+    this._shellOnlyRender = false;
     if (ref.machine !== this.machine) {
       // A project on another machine (or back here): that machine's ledger, read now.
       // The language stays until that ledger gives its own.
@@ -8558,7 +11076,7 @@ export default class PmProject extends View {
       this.machine = ref.machine; this.state = { pms: [], tasks: [], lang: this.state.lang }; this.stateFor = null;
       this.error = ''; this.logError = ''; this.remoteHome = ''; this.remoteNoProject = '';
       this.remoteNoLibrary = ''; this.remoteNoMemory = ''; this.remoteNoSession = ''; this.remoteNoChange = ''; this.remoteNoTasks = '';
-      this.logSlug = ''; this.logState = null; this.logReceipts = []; this.logTurn = null; this.clockOffsetMs = 0; this.serverNowMs = 0; this.serverNowAt = 0; this.noProjectSendFor = '';
+      this.logSlug = ''; this.logState = null; this.logReceipts = []; this.logTurn = null; this.logTurn2 = null; this.logSupervised = undefined; this.pmActionFeedback = null; this.clockOffsetMs = 0; this.serverNowMs = 0; this.serverNowAt = 0; this.noProjectSendFor = '';
       this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
       this.threadLog = null; this.threadLogKept = []; this.threadEarlierLoading = false; this.threadEarlierError = ''; this.threadAnchor = null;
       this.threadLogExpanded = false;
@@ -8583,10 +11101,17 @@ export default class PmProject extends View {
     }
     if (wanted !== this.pmName) {
       // Another project: its own log, no bubbles or panel from the last one.
+      if (this.pmName) {
+        this.snapshotActiveTabInputs();
+        this.persistSideTabs(this.pmName);
+      }
+      this.releaseAllTabHandles();
+      this.tabState = createSideTabsState();
+      this.confirmCloseTabId = ''; this.tabMenu = null; this.tabLimitBanner = ''; this.hoveredTabId = '';
       this.closeAllAgentWindows(cx, { defer: true });
       const byPm = this.pendingByPm ||= new Map();
       if (this.pmName) byPm.set(this.pmName, this.pending);
-      this.pmName = wanted; this.events = []; this.logReceipts = []; this.logTurn = null; this.pending = this.hydrateQueue(wanted); this.detail = false; this.thread = ''; this.threadTask = null;
+      this.pmName = wanted; this.events = []; this.logReceipts = []; this.logTurn = null; this.logTurn2 = null; this.logSupervised = undefined; this.pmActionFeedback = null; this.pending = this.hydrateQueue(wanted); this.detail = false; this.thread = ''; this.threadTask = null;
       this.pmDialog = null; this.pmSendBlockError = ''; this.pmDialogAt = 0; this.lastLogReadAt = 0; this.confirmLogProbes = new Set();
       this.logSlug = ''; this.logState = null; this.earlierLoading = false; this.earlierError = ''; this.earlierAnchor = null;
       this.threadLog = null; this.threadLogKept = []; this.threadEarlierLoading = false; this.threadEarlierError = ''; this.threadAnchor = null;
@@ -8611,6 +11136,7 @@ export default class PmProject extends View {
       this.seen = null; this.count = 0; this.settle = 0; this.away = false; this.rise = 0; this.heights = new Map();
       this.unfolded = new Map(); this.newest = '';
       this.bell = null; this.flash = ''; this.flashPara = ''; this.flashTone = 'blocked'; this.answering = null;
+      this._panelOpenedFromClosed = false; this._sideViewKey = '';
       if (!this.bringingBack) { this.bringBackOpen = false; this.bringBackProgress = null; }
       cx.timer.after(0, cx => {
         this.searchInput?.set_value('');
@@ -8622,9 +11148,11 @@ export default class PmProject extends View {
         this.memDescInput?.set_value('');
         this.docEditorInput?.set_value('');
         this.showMainDraft();
+        this.hydrateSideTabs(wanted, cx);
         this.readLog(cx);
         if (this.machine || this.sideTab === 'library') this.readLibrary(cx);
         if (this.sideTab === 'memory') this.readMemory(cx);
+        this.notifyPanes(cx, { shell: true, conv: true, side: true });
       });
     }
     const onStage = findStage(layout())?.active === 'pm-project';
@@ -8633,8 +11161,7 @@ export default class PmProject extends View {
     this.onStage = onStage;
     if (rawRef?.thread && rawRef?.jumpSeq && rawRef.jumpSeq !== this.lastJumpSeq) {
       this.lastJumpSeq = rawRef.jumpSeq;
-      const jumpId = String(rawRef.thread);
-      cx.timer?.after?.(0, cx => this.jumpToThread(jumpId, cx));
+      this._pendingJumpThread = String(rawRef.thread);
     }
     this.syncWinEvents(cx);
     this.syncHeaderAction(cx);
@@ -8647,30 +11174,97 @@ export default class PmProject extends View {
         if (!hovered) {
           this.gripUp(cx);
           this.clearParaHoverNow(cx);
-          if (this.hoverKey) { this.hoverKey = ''; cx.notify(); }
+          if (this.hoverKey) { this.hoverKey = ''; this.notifyPanes(cx, { shell: false, conv: true, side: true }); }
         }
       })
       .on_size_change((size, cx) => {
-        const wide = size.width >= WIDE;
+        const wide = size.width >= SPLIT_WIDE_MIN;
         this.high = size.height;
-        if (wide !== this.wide) { this.wide = wide; cx.notify(); }
-        // The panel's width is fitted to the view's (see panelWidth).
-        if (size.width !== this.viewWidth) { this.viewWidth = size.width; cx.notify(); }
+        let changed = false;
+        if (wide !== this.wide) { this.wide = wide; changed = true; }
+        if (size.width !== this.viewWidth) { this.viewWidth = size.width; changed = true; }
+        if (changed) this.notifyPanes(cx, { shell: true, conv: true, side: true });
         // The first measure places the panel; only later changes slide.
-        if (!this.measuring) { this.measuring = true; cx.timer.after(60, cx => { this.measured = true; cx.notify(); }); }
+        if (!this.measuring) { this.measuring = true; cx.timer.after(60, tCx => { this.measured = true; this.notifyShell(tCx); }); }
       });
     const pm = this.pm();
     if (!pm) {
       this.ringAction = null;
       if (this.bodyOnly) this.publishHeaderState({ session: this.winSession, pmName: this.pmName, hasPm: false, lang });
-      // A project on another machine says what it waits for, or why it cannot be read: never a blank page.
       const remote = this.machine && this.stateFor !== this.machine;
       const note = remote ? (this.error ? word(lang, 'remoteError', this.machine, this.error) : word(lang, 'remoteLoading', this.machine))
         : this.pmName && this.state.pms.length ? word(lang, 'noProject') : word(lang, 'pick');
-      // No header here: nothing on the page moves the window.
+      const winControls = this.bodyOnly ? null : this.renderWindowControls(t, lang, { divider: false });
+      if (winControls) {
+        return root.child(v_flex().size_full().min_w(0).min_h(0)
+          .child(h_flex().id('pm-project-header-bar').h(56).w_full().flex_none().pr(14).items_center().justify_end().child(winControls))
+          .child(keepPress(v_flex().flex_1().min_h(0).w_full().items_center().justify_center(), this.keyFocus)
+            .child(div().max_w(360).text_color(t.dim).whitespace_normal().child(note))));
+      }
       return keepPress(root, this.keyFocus).items_center().justify_center().child(div().max_w(360).text_color(t.dim).whitespace_normal().child(note));
     }
-    const now = new Date(), today = iso(now), yesterday = iso(new Date(now.getTime() - 86400000));
+    const now = new Date(), today = iso(now);
+    const splitLayout = this.currentSplitLayout();
+    this._lastLayout = splitLayout;
+    const open = this.isPanelOpen();
+    const dragging = Boolean(this.panelDrag);
+
+    // Track open/close & compact <-> split width transitions to gate resized() and lock inner text width.
+    const targetWidth = open ? splitLayout.cardWidth : 0;
+    const prevTarget = this._lastPanelTargetWidth;
+    const prevOpen = Boolean(this._lastPanelOpen);
+    if (this.measured && !dragging && prevTarget !== null && Math.abs(targetWidth - prevTarget) > 2) {
+      this.panelTransitioning = true;
+      this._panelSlideFromZero = !prevOpen && open;
+      this._panelLockWidth = open ? splitLayout.cardWidth : prevTarget;
+      this.panelTransitionTimer?.cancel?.();
+      this.panelTransitionTimer = cx?.timer?.after?.(200, liveCx => {
+        this.panelTransitionTimer = null;
+        this.panelTransitioning = false;
+        this._panelSlideFromZero = false;
+        this._panelLockWidth = null;
+        this.notifyPanes(liveCx, { shell: true, side: true });
+        if (!this.away) this.resized(liveCx);
+      }) || null;
+    } else if (dragging) {
+      this._panelSlideFromZero = false;
+    }
+    this._lastPanelTargetWidth = targetWidth;
+    this._lastPanelOpen = open;
+
+    if (open) {
+      this.panelMounted = true;
+      if (this.panelHideTimer) { this.panelHideTimer.cancel?.(); this.panelHideTimer = null; }
+    } else if (this.panelMounted) {
+      if (!this.measured || dragging || !cx?.timer?.after) {
+        this.panelMounted = false;
+        if (this.panelClosing) {
+          if (this.hasSideTabs()) this.panelClosing = false;
+          else this._clearClosedSideState();
+        }
+      } else if (!this.panelHideTimer) {
+        this.panelHideTimer = cx.timer.after(220, liveCx => {
+          this.panelHideTimer = null;
+          if (!this.isPanelOpen()) {
+            this.panelMounted = false;
+            if (this.panelClosing) {
+              if (this.hasSideTabs()) this.panelClosing = false;
+              else this._clearClosedSideState();
+            }
+            this.notifyPanes(liveCx, { shell: true, conv: true, side: true });
+          }
+        }) || null;
+      }
+    }
+
+    // Fast path for shell-only updates (drag move, grip hover, transition timers) when retained child Entities are active:
+    // zero JS rebuild of the conversation timeline or side split content tree.
+    if (shellOnly && this._convEntity && this._sideEntity && !this.searchOpen) {
+      const mainSlot = v_flex().id('pm-main-slot').flex_1().min_w(0).h_full().child(this._convEntity);
+      const panelEl = this.buildPanelShell(pm, t, today, cx, { open, layout: splitLayout, dragging });
+      return root.child(mainSlot).child(panelEl);
+    }
+
     if (this.pmName && !(this.hydratedQueues ||= new Set()).has(this.pmName)) {
       this.hydratedQueues.add(this.pmName);
       this.pending = this.hydrateQueue(this.pmName);
@@ -8685,246 +11279,94 @@ export default class PmProject extends View {
     this._renderTaskNumIdx = null;
     this._renderMdLinkMap = null;
     try {
-    const pmTerm = this.pmTerminal();
-    const pmStatus = pmLiveStatus(pmTerm, this.live());
-    const activeTurn = this.activePmTurn();
-    const working = this.isPmWorking(pmTerm, this.live(), activeTurn);
-    // Live terminal edge trigger: when a remote or local PM transitions out of `working` or advances `turn`,
-    // immediately debounce an incremental `readLog` so the reply appears in ~150ms instead of waiting 10s.
-    const edgePrefix = `${this.machine}\0${this.pmName}\0${pmTerm?.address || ''}`;
-    const prevEdge = this._lastPmLiveEdge || '';
-    const nextEdge = `${edgePrefix}\0${pmStatus}\0${pmTerm?.turn || 0}`;
-    if (prevEdge && prevEdge !== nextEdge && prevEdge.startsWith(`${edgePrefix}\0`)) {
-      const [, , , prevStatus, prevTurnStr] = prevEdge.split('\0');
-      const turnAdvanced = (Number(pmTerm?.turn) || 0) > (Number(prevTurnStr) || 0);
-      const finishedWorking = prevStatus === 'working' && pmStatus !== 'working';
-      if ((turnAdvanced || finishedWorking) && !this.edgeReadTimer && cx?.timer?.after) {
-        this.edgeReadTimer = true;
-        const targetPm = this.pmName;
-        cx.timer.after(150, liveCx => {
-          this.edgeReadTimer = false;
-          if (this.pmName === targetPm) this.readLog(liveCx);
-        });
-      }
-    }
-    this._lastPmLiveEdge = nextEdge;
-    const needsTurnTick = working && onStage && Boolean(activeTurn && (Number(activeTurn.started_ms) > 0 || activeTurn.activity));
-    if (needsTurnTick && !this.turnTickTimer && cx?.timer?.after) {
-      this.turnTickTimer = true;
-      const scheduledAt = this.nowMs();
-      cx.timer.after(1000, liveCx => {
-        this.turnTickTimer = false;
-        if (this.nowMs() >= scheduledAt + 500 && this.onStage && this.isPmWorking(this.pmTerminal(), this.live(), this.activePmTurn())) {
-          liveCx.notify();
+      const pmTerm = this.pmTerminal();
+      const pmStatus = pmLiveStatus(pmTerm, this.live());
+      const activeTurn = this.activePmTurn();
+      const working = this.isPmWorking(pmTerm, this.live(), activeTurn);
+      const edgePrefix = `${this.machine}\0${this.pmName}\0${pmTerm?.address || ''}`;
+      const prevEdge = this._lastPmLiveEdge || '';
+      const nextEdge = `${edgePrefix}\0${pmStatus}\0${pmTerm?.turn || 0}`;
+      if (prevEdge && prevEdge !== nextEdge && prevEdge.startsWith(`${edgePrefix}\0`)) {
+        const [, , , prevStatus, prevTurnStr] = prevEdge.split('\0');
+        const turnAdvanced = (Number(pmTerm?.turn) || 0) > (Number(prevTurnStr) || 0);
+        const finishedWorking = prevStatus === 'working' && pmStatus !== 'working';
+        if ((turnAdvanced || finishedWorking) && !this.edgeReadTimer && cx?.timer?.after) {
+          this.edgeReadTimer = true;
+          const targetPm = this.pmName;
+          cx.timer.after(150, liveCx => {
+            this.edgeReadTimer = false;
+            if (this.pmName === targetPm) this.readLog(liveCx);
+          });
         }
-      });
-    }
-    const queuedCount = this.pending.filter(p => p.queued && !p.failed && !p.received).length;
-    const hasUnconfirmed = this.pending.some(p => !p.failed && !p.received && (p.verifying || (!p.queued && (p.deliveredAt > 0 || p.inFlight)) || (p.queued && p.swapWaitSince > 0)));
-    if (hasUnconfirmed) this.scheduleConfirmCheck(cx);
-    const inRenderPhase = cx?.phase?.() === 'render' && Boolean(cx?.spawn);
-    if (pmTerm && !pmCanReceive(pmStatus)) {
-      if (inRenderPhase) cx.spawn(async taskCx => this.probePmDialog(taskCx));
-      else this.probePmDialog(cx);
-    } else if (pmTerm && pmCanReceive(pmStatus)) {
-      if (this.pmDialog?.pm === this.pmName && !queuedCount && !this.pmSendBlockError) this.pmDialog = null;
-      if (queuedCount > 0 && !this.flushingQueue && !this.flushDeferred) {
+      }
+      this._lastPmLiveEdge = nextEdge;
+      const queuedCount = this.pending.filter(p => p.queued && !p.failed && !p.received).length;
+      const localQueuedCount = this.pending.filter(p => p.queued && !p.failed && !p.received && !p.serverQueued).length;
+      const hasUnconfirmed = this.pending.some(p => !p.failed && !p.received && (p.verifying || (!p.queued && (p.deliveredAt > 0 || p.inFlight)) || (p.queued && p.swapWaitSince > 0)));
+      if (hasUnconfirmed) this.scheduleConfirmCheck(cx);
+      const inRenderPhase = cx?.phase?.() === 'render' && Boolean(cx?.spawn);
+      if (this._pendingPmKeep && !this._reconcilingPmKeep) {
         if (inRenderPhase) {
-          this.flushDeferred = true;
-          cx.spawn(async taskCx => {
-            this.flushDeferred = false;
-            this.flushQueue(taskCx);
+          this._reconcilingPmKeep = true;
+          cx.spawn(async () => {
+            try { this.reconcilePendingPmKeep(); }
+            finally { this._reconcilingPmKeep = false; }
           });
         } else {
-          this.flushQueue(cx);
+          this.reconcilePendingPmKeep();
         }
       }
-    } else if (!pmTerm && queuedCount > 0) {
-      this.scheduleQueueFlush(cx);
-    }
-    const typingNow = Boolean(working) || this.pending.some(p => !p.failed && !p.queued && !p.received);
-    const tl = this.resolveTimelineData(pm, today, typingNow);
-    const { items, stops, blocks, newest, keys, foldedTasks, waiting } = tl;
-    this.items = items;
-    this._blockKeySet = tl.blockKeySet;
-    // The box answers a question only while it still waits (a card, or a thread's without one, under
-    // askKey): answered meanwhile, or asked anew, it lets go.
-    if (this.answering && !stops.some(s => (s.thread ? askKey(s.thread) : s.key) === this.answering.key)) this.answering = null;
-    this.atWork = workingTasks(this.terms(), this.live());
-    if (this.newest && newest !== this.newest && !this.unfolded.has(this.newest)) this.unfolded.set(this.newest, true);
-    this.newest = newest;
-    // Fade only what arrives after the first read of this project.
-    this.keys = keys;
-    if (!this.seen && this.events.length) this.seen = new Set(this.keys);
-    const showEarlier = Boolean(this.logState?.earlier || this.earlierLoading || this.earlierError);
-    const topOffset = showEarlier ? 1 : 0;
-    this.lastBlocks = blocks;
-    this.lastTopOffset = topOffset;
-    // Follow the end of the conversation as it grows, including the first read after opening a
-    // project, but only for a reader who is at the end: one who scrolled up, or went to a question
-    // with the bell, stays there (`away`, see leave) until they say something or scroll back down.
-    if (blocks.length !== this.count) {
-      if (blocks.length > this.count && blocks.length && !this.away) this.follow();
-      this.count = blocks.length;
-    }
-    if (this.jumpTarget && blocks.length) {
-      const jumpRow = rowOfKey(blocks, this.jumpTarget.key);
-      this.jumpTarget.left--;
-      if (jumpRow >= 0) this.scroll.scroll_to_item(topOffset + jumpRow);
-      if (this.jumpTarget.left <= 0 || jumpRow < 0) this.jumpTarget = null;
-      else if (!this.ticking) { this.ticking = true; cx.timer.after(16, cx => { this.ticking = false; cx.notify(); }); }
-    } else if (this.earlierAnchor && blocks.length) {
-      const anchorRow = findAnchorBlock(blocks, this.earlierAnchor.anchor);
-      this.earlierAnchor.left--;
-      if (anchorRow >= 0) this.scroll.scroll_to_item(topOffset + anchorRow);
-      if (this.earlierAnchor.left <= 0 || anchorRow < 0) this.earlierAnchor = null;
-      else if (!this.ticking) { this.ticking = true; cx.timer.after(16, cx => { this.ticking = false; cx.notify(); }); }
-    } else if (blocks.length && this.settle > 0) {
-      // The end marker after the last block: revealing it bottom-aligns the end of a long
-      // reply, where revealing the reply itself would rest at its top.
-      this.settle--;
-      this.scroll.scroll_to_item(topOffset + blocks.length);
-      if (!this.ticking) { this.ticking = true; cx.timer.after(16, cx => { this.ticking = false; cx.notify(); }); }
-    }
-    const heights = blocks.map(b => this.heights.get(b.key) || 0), tall = this.tall || this.high;
-    this.lastBlocks = blocks;
-    this.lastTopOffset = topOffset;
-    this.lastHeights = heights;
-    this.lastTall = tall;
-    // The bell's number is the tasks that wait (see bellCount); a click steps through the places they show.
-    // What the user answered no longer waits (see answeredTasks): not on the bell, nor in the side panel.
-    // A review thread is no row of its own: it rides on the task it reviews (foldReviews).
-    this.tasks = foldedTasks;
-    // The card it goes to is marked for a moment: it may already be on screen, where nothing would move.
-    // A task without a card: its thread's detail opens, which asks it (threadQuestion).
-    const ring = stops.length ? cx => {
-      const next = bellNext(stops, this.bell);
-      this.bell = { key: next.key, seen: stops.map(s => s.key) };
-      if (next.thread) {
-        const id = bellThread(next, this.tasks || foldReviews(this.state.tasks), this.detail ? this.thread : '');
-        if (id) this.openThread(id, cx);
-        return -1;
-      }
-      const key = next.key;
-      const seq = (this.flashSeq || 0) + 1;
-      this.flashSeq = seq;
-      this.flash = key;
-      this.flashTone = 'blocked';
-      cx.timer.after(1500, cx => { if (this.flashSeq === seq && this.flash === key) { this.flash = ''; cx.notify(); } });
-      cx.notify();
-      // Where the jump leaves the reader, by the rows' heights: none of it when the row is in view.
-      const row = rowOf(blocks, items[next.at]);
-      if (row >= 0) this.rest(riseAfterJump(this.rise, heights, row, tall, TAIL));
-      return row >= 0 ? topOffset + row : -1;
-    } : null;
-    const center = el => h_flex().w_full().justify_center().px(28).child(div().w_full().min_w(0).max_w(COLUMN).child(el));
-    // Rows carry their own space above (22 px between blocks, 12 px between the rows of one turn).
-    const above = (b, n) => (n === 0 ? 0 : b.kind === 'turn' && !b.first ? 12 : 22);
-    // Scrolling up lets go of the end, scrolling down comes back to it (wheel y > 0 moves toward the
-    // top): see riseAfterWheel. The area's content is its top padding, the rows and the end marker.
-    const room = TAIL + (showEarlier ? 34 : 0) + heights.reduce((sum, h) => sum + h, 0) + TAIL - tall;
-    const body = v_flex().id('pm-project-timeline').flex_1().min_h(0).pt(TAIL).overflow_y_scrollbar()
-      .track_scroll(this.scroll)
-      .on_size_change(size => { this.tall = size.height; })
-      .on_scroll_wheel(e => {
-        if (e.delta.y) {
-          this.jumpTarget = null;
-          this.earlierAnchor = null;
-          this.selectionBar = null;
-          this.rest(riseAfterWheel(this.rise, e.delta.y, room, tall));
-        }
-      })
-      .when(showEarlier, el => el.child(center(this.earlierControl(blocks, t))))
-      .children(blocks.length ? blocks.map((b, n) => center(this.block(b, t, today, yesterday, cx)).pt(above(b, n))
-        .id(`block-${b.key}`).on_size_change((size, cx) => {
-          if (this.heights.get(b.key) === size.height) return;
-          this.heights.set(b.key, size.height);
-          this.resized(cx);
-        }))
-        : [center(div().text_color(t.dim).child(word(lang, 'empty')))])
-      // The end marker is the column's bottom padding.
-      .child(div().flex_none().h(TAIL));
-    const pmStart = pmStartState(pm, pmTerm, this.startingPm === this.pmName
-      || Boolean(this.bringingBack && this.bringBackProgress?.pmKey === this.pmName
-        && this.bringBackProgress.steps?.some(s => s.kind === 'pm' && s.state === 'running')));
-    const offlineTip = pmStart === 'archived' ? word(lang, 'pmOfflineArchived')
-      : (pmStart === 'tui' || pmStart === 'tui_live') ? word(lang, 'pmOfflineTui')
-      : pmStart === 'missing_repo' ? word(lang, 'pmOfflineMissingRepo')
-      : word(lang, 'offline');
-    if (!pm.lost && !this.bringingBack && this.bringBackOpen
-        && (!this.bringBackProgress || !this.bringBackProgress.steps?.some(s => s.state === 'failed'))) {
-      this.bringBackOpen = false;
-      this.bringBackProgress = null;
-    }
-    const showLost = Boolean(this.bringingBack || this.bringBackOpen || lostShown(pm.lost, this.keptDismissedLost()));
-    const lostEl = showLost ? this.lostNotice(pm, t) : null;
-    const showOfflinePmBar = !pmTerm && (pmStart === 'startable' || pmStart === 'starting' || this.startPmError?.pm === this.pmName);
-    const activeDialog = pmTerm
-      ? (this.pmDialog?.pm === this.pmName && this.pmDialog?.dialog
-        ? this.pmDialog.dialog
-        : classifyPmDialog('', this.pmSendBlockError, pmStatus))
-      : null;
-    const pmBlockedText = pmTerm ? pmBlockedBannerText(lang, activeDialog, queuedCount) : '';
-    const selectionBar = this.selectionPopover(t);
-    const footer = v_flex().w_full().gap(8)
-      .when(Boolean(selectionBar), el => el.child(h_flex().w_full().justify_end().child(selectionBar)))
-      .when(showOfflinePmBar, el => el.child(this.offlinePmBar(pmStart, t)))
-      .when(Boolean(pmBlockedText), el => el.child(this.pmBlockedBar(pmBlockedText, t)))
-      .child(this.composer('say', this.input, this.draft, Boolean(pmTerm || this.isPmStarting()), word(lang, 'say', pm.project || pm.name),
-        offlineTip, cx => this.sendMain(cx), t, 16, true, cx));
-    this.ringAction = ring;
-    if (this.bodyOnly) this.publishHeaderState(this.buildHeaderData(pm, waiting, Boolean(ring)));
-    const main = v_flex().flex_1().min_w(0).h_full()
-      .when(!this.bodyOnly, el => el.child(this.header(pm, waiting, ring, t)))
-      .when(Boolean(lostEl), el => el.child(center(lostEl).pt(12)))
-      .child(body)
-      .child(keepPress(center(footer).pb(20).pt(4), this.keyFocus));
-    // The side panel slides from the right edge. At rest it is the thread list (when the window is
-    // wide, or the header's icon asked for it); a thread's detail takes its place while one is open,
-    // and stays drawn while a panel that rests closed slides shut, then unmounts once closed so
-    // hidden panels don't rebuild task trees or thread rows on every render.
-    // Its left edge drags to set its width (kept for later, see panelWidth); the edge shows as a thin
-    // line under the pointer, and a drag follows the pointer without the slide.
-    const resting = this.listResting(), open = resting || this.detail;
-    const width = panelWidth(this.panelWant, this.viewWidth), dragging = Boolean(this.panelDrag);
-    if (open) {
-      this.panelMounted = true;
-      if (this.panelHideTimer) { this.panelHideTimer.cancel?.(); this.panelHideTimer = null; }
-    } else if (this.panelMounted) {
-      if (!this.measured || dragging || !cx?.timer?.after) {
-        this.panelMounted = false;
-      } else if (!this.panelHideTimer) {
-        this.panelHideTimer = cx.timer.after(220, cx => {
-          this.panelHideTimer = null;
-          if (!(this.listResting() || this.detail)) {
-            this.panelMounted = false;
-            cx.notify();
+      if (pmTerm && !pmCanReceive(pmStatus)) {
+        if (inRenderPhase) cx.spawn(async taskCx => this.probePmDialog(taskCx));
+        else this.probePmDialog(cx);
+      } else if (pmTerm && pmCanReceive(pmStatus)) {
+        if (this.pmDialog?.pm === this.pmName && !queuedCount && !this.pmSendBlockError) this.pmDialog = null;
+        if (localQueuedCount > 0 && !this.flushingQueue && !this.flushDeferred) {
+          if (inRenderPhase) {
+            this.flushDeferred = true;
+            cx.spawn(async taskCx => {
+              this.flushDeferred = false;
+              this.flushQueue(taskCx);
+            });
+          } else {
+            this.flushQueue(cx);
           }
-        }) || null;
+        } else if (queuedCount > 0) {
+          this.scheduleQueueFlush(cx);
+        }
+      } else if (!pmTerm && queuedCount > 0) {
+        this.scheduleQueueFlush(cx);
       }
-    }
-    const showLibrary = this.sideTab === 'library' && (this.librarySupported() || this.activeDoc?.root === 'repo');
-    const showMemory = this.sideTab === 'memory' && this.memorySupported();
-    const content = (open || this.panelMounted)
-      ? (this.detail || (!resting && this.thread && !showLibrary && !showMemory)
-        ? this.panel(t, today, width, cx)
-        : showLibrary ? this.libraryPanel(pm, t, width, today, cx)
-        : showMemory ? this.memoryPanel(pm, t, width, today, cx)
-        : this.threadsPanel(pm, t, width))
-      : null;
-    const lit = dragging || this.gripLit;
-    const grip = h_flex().id('panel-grip').absolute().left(0).top(0).h_full().w(6).cursor_col_resize()
-      .accessibility_label(word(lang, 'resizePanel'))
-      .on_hover((hovered, cx) => { if (hovered !== this.gripLit) { this.gripLit = hovered; cx.notify(); } })
-      .on_mouse_down('left', (e, cx) => this.gripDown(e, cx))
-      .child(div().w(2).h_full().bg(lit ? withAlpha(t.accent, dragging ? .9 : .6) : withAlpha(t.accent, 0)));
-    const panel = h_flex().id('pm-project-panel').relative().h_full().flex_none().overflow_hidden().justify_end()
-      .w(open ? width : 0)
-      .when(this.measured && !dragging, el => el.transition('width', { duration: 200, easing: 'ease-out' }))
-      .when(Boolean(content), el => el.child(content))
-      .when(open, el => el.child(grip));
-    return root.child(main).child(panel)
-      .when(Boolean(this.searchOpen), el => el.child(this.projectSearchOverlay(pm, items, t, today, cx)));
+
+      if (this._convEntity && this._sideEntity) {
+        if (!shellOnly && !dragging && !this._syncPanesScheduled && cx?.timer?.after) {
+          this._syncPanesScheduled = true;
+          cx.timer.after(0, liveCx => {
+            this._syncPanesScheduled = false;
+            this.notifyPanes(liveCx, { shell: false, conv: true, side: true });
+          });
+        }
+        const mainSlot = v_flex().id('pm-main-slot').flex_1().min_w(0).h_full().child(this._convEntity);
+        const panelEl = this.buildPanelShell(pm, t, today, cx, { open, layout: splitLayout, dragging });
+        if (this._pendingJumpThread) {
+          const jumpId = this._pendingJumpThread;
+          this._pendingJumpThread = '';
+          cx.timer?.after?.(0, liveCx => this.jumpToThread(jumpId, liveCx));
+        }
+        return root.child(mainSlot).child(panelEl)
+          .when(Boolean(this.searchOpen), el => el.child(this.projectSearchOverlay(pm, this.items || [], t, today, cx)));
+      }
+
+      const mainEl = this.renderConversationPane(cx);
+      const inlineSide = (open || this.panelMounted) ? this.renderSideSplitPane(cx) : null;
+      const panelEl = this.buildPanelShell(pm, t, today, cx, { open, layout: splitLayout, dragging, inlineSide });
+      if (this._pendingJumpThread) {
+        const jumpId = this._pendingJumpThread;
+        this._pendingJumpThread = '';
+        cx.timer?.after?.(0, liveCx => this.jumpToThread(jumpId, liveCx));
+      }
+      return root.child(mainEl).child(panelEl)
+        .when(Boolean(this.searchOpen), el => el.child(this.projectSearchOverlay(pm, this.items || [], t, today, cx)));
     } finally {
       this._inRender = false;
       this._renderTerms = null;

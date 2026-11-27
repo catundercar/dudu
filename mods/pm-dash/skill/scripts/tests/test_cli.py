@@ -23,7 +23,7 @@ CHECK_DISPATCH = textwrap.dedent("""
     parser = cli.build_parser()
     sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
     assert set(cli.COMMANDS) == set(sub.choices), (set(cli.COMMANDS) ^ set(sub.choices))
-    assert len(cli.COMMANDS) == 60, len(cli.COMMANDS)
+    assert len(cli.COMMANDS) == 62, len(cli.COMMANDS)  # +turns (P2)
     for name, (mod, fn_name) in cli.COMMANDS.items():
         fn = getattr(mod, fn_name)
         assert callable(fn), (name, mod, fn_name)

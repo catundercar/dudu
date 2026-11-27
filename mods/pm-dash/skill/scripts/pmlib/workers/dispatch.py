@@ -11,8 +11,186 @@ from ..errors import Refused
 from ..ledger.ledger import Change, Ledger
 from ..ledger.task import Task, hc_terminal_of
 from ..memory.layer import native_memory
+from ..osutil import clip
+from ..project.conversation import Conversation, conversation_events
 from ..project.project import ProjectRegistry
 from .codex_pool import codex_pool_for
+
+
+THIN_BRIEF_REFERENCES = Path(__file__).resolve().parents[3] / "references"
+THIN_BRIEF_CONV_LIMIT = 5
+THIN_BRIEF_SNIPPET_CHARS = 160
+
+_THIN_FALLBACK_EN = """[Task: {title}. From the PM ({pane})]
+
+Where: {where}
+
+What the user asked (verbatim):
+{ask}
+
+Attachments:
+{attachments}
+
+Recent conversation pointers ({conversation_path}):
+{conversation_pointers}
+
+PM note:
+{note}
+
+Investigation & working rules:
+- Investigate the codebase and facts from first principles before making changes; do not guess.
+- If a product decision or user confirmation is needed, stop and report `blocked` with clear options rather than assuming.
+- Stay within the requested scope; do not add unnecessary scripts, frameworks, or abstractions.
+- Run targeted checks for what you changed and summarize them concisely.
+
+Red lines:
+- Do not touch the user's running apps or system settings; test only in isolated directories.
+- No `git add -A`, no push, no merge.
+
+Commits: 1–3, conventional style. Write a brief evidence note in `evidence/<topic>/README.md` if applicable. When done, report as the appended section says, then stop.
+"""
+
+_THIN_FALLBACK_ZH = """【任务：{title}。来自 PM（{pane}）】
+
+工作位置：{where}
+
+用户原话：
+{ask}
+
+附件：
+{attachments}
+
+最近对话出处（{conversation_path}）：
+{conversation_pointers}
+
+PM 补充：
+{note}
+
+调查与开工要求：
+- 先从第一性原理查清代码与现场再动手，不要猜测。
+- 需要产品拍板或用户确认时，立即报 `blocked` 并给出清晰选项，不要自行臆断。
+- 严格控制在需求范围内，不加不需要的脚本、框架或抽象层。
+- 跑完与改动相关的针对性检查并简明汇报。
+
+红线：
+- 不碰用户正在运行的应用或系统设置，测试一律用隔离目录。
+- 不用 `git add -A`，不 push，不合并。
+
+提交：1–3 个，conventional 风格。必要时在 `evidence/<topic>/README.md` 写简短证据说明。完成后按末尾追加的「汇报」一段写进台账，然后停下。
+"""
+
+
+def thin_brief_title(ask: str) -> str:
+    """Derive a concise default task title from a `--ask` prompt when no positional title is given."""
+    flat = " ".join(str(ask or "").split()).strip()
+    if not flat:
+        return "Task"
+    return clip(flat, 56)
+
+
+def _load_thin_brief_template(ctx: Context) -> str:
+    zh = ctx.config.lang() == "zh"
+    fname = "thin-brief-template.zh.md" if zh else "thin-brief-template.md"
+    path = THIN_BRIEF_REFERENCES / fname
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return _THIN_FALLBACK_ZH if zh else _THIN_FALLBACK_EN
+
+
+def recent_conversation_pointers_for(
+    ctx: Context,
+    repo: str | Path,
+    *,
+    limit: int = THIN_BRIEF_CONV_LIMIT,
+) -> tuple[str, list[str]]:
+    """Return `(conversation_path, pointer_lines)` for the most recent user/PM exchanges in this project."""
+    conv = Conversation(ctx, repo)
+    conv_path = conv.path
+    events = conversation_events(conv_path) if conv_path.is_file() else []
+    turns = [
+        e for e in events
+        if isinstance(e, dict) and e.get("type") in ("user", "pm") and str(e.get("text") or "").strip()
+    ]
+    recent = turns[-max(1, int(limit)):]
+    lines: list[str] = []
+    for e in recent:
+        role = ctx.config.tr("User", "用户") if e.get("type") == "user" else "PM"
+        seq_part = f"seq #{e['seq']}" if isinstance(e.get("seq"), int) else ""
+        at_part = str(e.get("at") or "").strip()
+        meta = " / ".join(x for x in (seq_part, at_part) if x)
+        snippet = clip(" ".join(str(e.get("text") or "").split()), THIN_BRIEF_SNIPPET_CHARS)
+        lines.append(f"- [{meta}] {role}: {snippet}" if meta else f"- {role}: {snippet}")
+    return str(conv_path), lines
+
+
+def assemble_thin_brief_for(
+    ctx: Context,
+    *,
+    repo: str | Path,
+    title: str,
+    ask: str,
+    attachments: Sequence[str] = (),
+    note: str = "",
+    branch: str | None = None,
+    base: str | None = None,
+    here: bool = False,
+) -> str:
+    """Assemble a thin-dispatch worker brief from the bundled template, verbatim `--ask`, attachments,
+    recent conversation pointers, and optional PM `--note` (`pm-stuck-root-fix.md` §3.8 O-b, D4)."""
+    tr = ctx.config.tr
+    template = _load_thin_brief_template(ctx)
+    if here:
+        where = tr(f"in-place project directory `{repo}`", f"项目主目录 `{repo}`（就地工作）")
+    else:
+        base_str = f", based on `{base}`" if base else ""
+        base_zh = f"，基于 `{base}`" if base else ""
+        where = tr(
+            f"the worktree and branch `{branch or ''}`{base_str} created by `pm.py dispatch`",
+            f"`pm.py dispatch` 创建的工作树与分支 `{branch or ''}`{base_zh}",
+        )
+    pane = ctx.pane or "pm.py"
+    clean_attachments = [str(p).strip() for p in attachments if str(p or "").strip()]
+    if clean_attachments:
+        att_lines = []
+        for raw in clean_attachments:
+            p = Path(raw).expanduser()
+            resolved = str(p.resolve()) if p.exists() else raw
+            att_lines.append(f"- `{resolved}`")
+        att_block = "\n".join(att_lines)
+    else:
+        att_block = tr("- (none)", "- （无）")
+
+    conv_path, pointer_lines = recent_conversation_pointers_for(ctx, repo)
+    pointers_block = "\n".join(pointer_lines) if pointer_lines else tr("- (no prior conversation)", "- （暂无历史对话）")
+    note_clean = str(note or "").strip()
+    note_block = note_clean if note_clean else tr("(none)", "（无）")
+
+    out = template
+    for key, val in (
+        ("{title}", str(title or "").strip() or thin_brief_title(ask)),
+        ("{pane}", pane),
+        ("{where}", where),
+        ("{ask}", str(ask or "").strip()),
+        ("{attachments}", att_block),
+        ("{conversation_path}", conv_path),
+        ("{conversation_pointers}", pointers_block),
+        ("{note}", note_block),
+    ):
+        out = out.replace(key, val)
+    return out
+
+
+def write_thin_brief_for(ctx: Context, label: str, content: str) -> Path:
+    """Persist an assembled thin brief under `<ledger>/sent/` so review/escalate can read `task['brief']`."""
+    ctx.home.sent_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(ctx.clock.time() * 1000)
+    safe_label = "".join(c if c.isalnum() or c in "-_" else "-" for c in (label or "task")).strip("-")[:40] or "task"
+    path = ctx.home.sent_dir / f"thin-{safe_label}-{stamp}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 PREAPPROVED = (

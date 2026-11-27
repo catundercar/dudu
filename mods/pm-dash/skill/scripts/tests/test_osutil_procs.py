@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -28,7 +29,15 @@ from pmlib import osutil  # noqa: E402
 from pmlib.home import Home  # noqa: E402
 from pmlib.manager import rotate  # noqa: E402
 from pmlib.manager.service import ManagerSessions  # noqa: E402
-from pmlib.procs import Processes  # noqa: E402
+from pmlib import procs as procs_mod  # noqa: E402
+from pmlib.procs import (  # noqa: E402
+    Processes,
+    interrupt_foreground_tool,
+    is_descendant_of,
+    process_descendants,
+    signal_foreground_tool,
+    terminate_pid,
+)
 from pmlib.review import land  # noqa: E402
 
 SPACED = "/Users/Jo Doe/.claude/skills/pm/scripts/pm.py"  # a user name with a space, as on many Windows machines
@@ -281,6 +290,118 @@ class WindowsCommandLines(unittest.TestCase):
         self.assertIn("dependencies", payload["watchers"], payload)
         self.assertIn("dream", payload["watchers"], payload)
         self.assertTrue(payload["has_seat_alive"], payload)
+
+    def test_descendant_only_tool_signaling_never_uses_killpg_or_agent_pid(self) -> None:
+        ps_table = "\n".join([
+            "4100    1 4100 claude --dangerously-skip-permissions",
+            "4200 4100 4100 zsh -c sleep 60 && sleep 30",
+            "4201 4200 4100 sleep 60",
+            "4202 4201 4100 sleep 30",
+            "9999    1 9999 unrelated-daemon",
+        ]) + "\n"
+
+        def fake_ps(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, stdout=ps_table, stderr="")
+
+        killed: list[tuple[int, int]] = []
+
+        with mock.patch.object(osutil, "WINDOWS", False), \
+                mock.patch("pmlib.procs.subprocess.run", side_effect=fake_ps), \
+                mock.patch("pmlib.procs.os.kill", side_effect=lambda pid, sig: killed.append((pid, sig))):
+            rows, _children = procs_mod._process_table()
+            self.assertTrue(is_descendant_of(4202, 4100, rows))
+            self.assertFalse(is_descendant_of(9999, 4100, rows))
+            desc = process_descendants(4200, exclude_pids={4100})
+            self.assertEqual(desc, [4202, 4201, 4200])
+            res = signal_foreground_tool(4200, 15, agent_pid=4100)
+            self.assertEqual(res["signaled"], [4202, 4201, 4200])
+            # Never signal negative PGID, agent_pid (4100), init (1), or unrelated pid (9999)
+            for pid, _sig in killed:
+                self.assertGreater(pid, 1)
+                self.assertNotEqual(pid, 4100)
+                self.assertNotEqual(pid, 9999)
+            # Refuses to signal if tool_pid is not a descendant of agent_pid
+            killed.clear()
+            bad = signal_foreground_tool(9999, 15, agent_pid=4100)
+            self.assertEqual(bad["signaled"], [])
+            self.assertEqual(killed, [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX shared-PGID subprocess test")
+    def test_interrupt_foreground_tool_kills_child_and_grandchild_while_agent_stays_alive(self) -> None:
+        if sys.platform.startswith("win"):
+            return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = Path(tmp)
+            pid_file = tdir / "pids.json"
+            grand_py = tdir / "grand.py"
+            child_py = tdir / "child.py"
+            parent_py = tdir / "parent.py"
+            grand_py.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+            child_py.write_text(
+                "import json, os, subprocess, sys\n"
+                "g = subprocess.Popen([sys.executable, sys.argv[1]], stderr=subprocess.DEVNULL)\n"
+                "open(sys.argv[2], 'w').write(json.dumps({'child': os.getpid(), 'grand': g.pid}))\n"
+                "g.wait()\n",
+                encoding="utf-8",
+            )
+            parent_py.write_text(
+                "import subprocess, sys, time\n"
+                "c = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2], sys.argv[3]], stderr=subprocess.DEVNULL)\n"
+                "for _ in range(600):\n"
+                "    c.poll()\n"
+                "    time.sleep(0.1)\n",
+                encoding="utf-8",
+            )
+            # Launch isolated dummy "agent" in its own session, spawning tool child + grandchild in the SAME PGID.
+            parent = subprocess.Popen(
+                [sys.executable, str(parent_py), str(child_py), str(grand_py), str(pid_file)],
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 5.0
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(pid_file.exists(), "child did not write pid file")
+                info = json.loads(pid_file.read_text(encoding="utf-8"))
+                child_pid = int(info["child"])
+                grand_pid = int(info["grand"])
+
+                # Both child and grandchild share PGID with parent; interrupt_foreground_tool must NOT kill parent!
+                res = interrupt_foreground_tool(child_pid, agent_pid=parent.pid, sigterm_after_s=0.3, sigkill_after_s=0.3)
+                self.assertFalse(res["alive"], res)
+                self.assertIsNone(parent.poll(), "dummy agent parent should stay alive!")
+                rows, _ = procs_mod._process_table()
+                self.assertNotIn(grand_pid, rows)
+                self.assertNotIn(child_pid, rows)
+            finally:
+                parent.kill()
+                parent.wait(timeout=5)
+
+    def test_terminate_pid_checks_expected_command_substrings(self) -> None:
+        ps_table = "\n".join([
+            "7101 1 7101 python3 /opt/pm/pm.py deliver /tmp/alpha",
+            "7102 1 7102 vim /tmp/notes.md",
+        ]) + "\n"
+        killed: list[tuple[int, int]] = []
+
+        with mock.patch.object(osutil, "WINDOWS", False), \
+                mock.patch(
+                    "pmlib.procs.subprocess.run",
+                    side_effect=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=ps_table, stderr=""),
+                ), \
+                mock.patch("pmlib.procs.os.kill", side_effect=lambda pid, sig: killed.append((pid, sig))):
+            # Matching command line -> sends SIGTERM
+            self.assertTrue(terminate_pid(7101, expected_substrings=("pm.py", "deliver", "alpha")))
+            self.assertEqual(len(killed), 1)
+            self.assertEqual(killed[0][0], 7101)
+            # Reused PID with unrelated command -> refuses to signal
+            killed.clear()
+            self.assertFalse(terminate_pid(7102, expected_substrings=("pm.py", "deliver", "alpha")))
+            self.assertEqual(killed, [])
+            # Missing PID -> refuses to signal
+            self.assertFalse(terminate_pid(7999, expected_substrings=("pm.py", "deliver")))
+            self.assertEqual(killed, [])
 
 
 if __name__ == "__main__":

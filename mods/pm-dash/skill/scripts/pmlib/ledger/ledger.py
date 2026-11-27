@@ -436,7 +436,7 @@ class Ledger:
         follow once the file is saved and unlocked."""
         result = Transition(plan=plan)
 
-        def _apply(cur: Task | None, ch: Change) -> dict[str, Any]:
+        def _apply(cur: Task | None, ch: Change) -> dict[str, Any] | None:
             assert cur is not None
             return apply_transition(cur.raw, plan, hooks, ch.note_on, self.ctx.clock.now(), result)
 

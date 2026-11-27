@@ -86,11 +86,11 @@ export function renderStepsCard({
       ? { text: word(lang, 'planNoReview'), tip: word(lang, 'planNoReviewTip'), color: t.dim }
       : null;
 
-  const header = h_flex().w_full().min_w(0).gap(px(compact ? 5 : 6)).items_center()
+  const header = h_flex().w_full().min_w(0).pl(compact ? px(2) : 2).pr(compact ? px(2) : 6).gap(px(compact ? 5 : 6)).items_center()
     .child(div().flex_none().text_size(compact ? font(11) : 11.5).font_semibold().text_color(t.muted).child(word(lang, 'planTitle')))
     .when(Boolean(headerMeta), el => el.child(div().flex_1().min_w(0).truncate()
       .font_family('monospace').text_size(font(10)).text_color(t.dim).child(headerMeta)))
-    .when(!headerMeta, el => el.child(div().flex_1()))
+    .when(!headerMeta, el => el.child(div().flex_1().min_w(0)))
     .when(steps.foldedRounds > 0, el => el.child(div().flex_none().px(px(compact ? 4 : 5)).py(px(1)).rounded(px(4)).bg(t.raised)
       .font_family('monospace').text_size(compact ? font(10) : 10.5).text_color(t.dim).child(steps.foldedLabel)))
     .when(Boolean(planPolicy), el => {
@@ -249,11 +249,11 @@ export function renderDepsCard({
       .border_color(item.isBroken ? t.blocked : t.border);
   };
 
-  const header = h_flex().w_full().min_w(0).gap(px(compact ? 5 : 6)).items_center()
+  const header = h_flex().w_full().min_w(0).pl(compact ? px(2) : 2).pr(compact ? px(2) : 6).gap(px(compact ? 5 : 6)).items_center()
     .child(div().flex_none().text_size(compact ? font(11) : 11.5).font_semibold().text_color(t.muted).child(word(lang, 'depsTitle')))
     .when(Boolean(headerMeta), el => el.child(div().flex_1().min_w(0).truncate()
       .font_family('monospace').text_size(font(10)).text_color(t.dim).child(headerMeta)))
-    .when(!headerMeta, el => el.child(div().flex_1()))
+    .when(!headerMeta, el => el.child(div().flex_1().min_w(0)))
     .when(deps.ready, el => el.child(div().flex_none().px(px(compact ? 5 : 6)).py(px(1)).rounded(px(4))
       .bg(withAlpha(doneColor, .14)).text_size(compact ? font(10) : 10.5).font_medium().text_color(doneColor)
       .child(word(lang, 'depsReady'))))
@@ -291,8 +291,8 @@ export function renderDepsCard({
 
   return v_flex()
     .when(Boolean(cardId), el => el.id(cardId))
-    .flex_none().gap(compact ? px(4) : 6)
+    .w_full().min_w(0).flex_none().gap(compact ? px(4) : 6)
     .when(framed, el => el.rounded(10).p(10).bg(t.surface).border_1().border_color(t.border))
     .child(header)
-    .child(v_flex().gap(compact ? px(2) : 3).children(rowEls));
+    .child(v_flex().w_full().min_w(0).gap(compact ? px(2) : 3).children(rowEls));
 }

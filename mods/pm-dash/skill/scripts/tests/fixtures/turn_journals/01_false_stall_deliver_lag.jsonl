@@ -1,0 +1,8 @@
+{"seq": 1, "t": 1795600000000, "src": "supervisor", "kind": "hc_state", "endpoint": {"runtime": "hc", "machine": null, "terminal": "t12", "workspace": "ws_1", "session_id": "sess_1", "agent_kind": "agy", "fg_pid": 48291, "epoch": 1}, "state": "live", "status": "idle", "status_ms": 1795599400000, "turn": 10, "reported": true}
+{"seq": 2, "t": 1795600600000, "src": "deliverer", "kind": "send_submitted", "cause": "deliver", "batch": [0, 180], "hc_turn": 10, "started": true}
+{"seq": 3, "t": 1795600600200, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "working", "status_ms": 1795600600100, "turn": 10, "reported": true}
+{"seq": 4, "t": 1795600605000, "src": "watcher:agy", "kind": "hook_prompt", "cause": "deliver", "batch": [0, 180], "hc_turn": 10}
+{"seq": 5, "t": 1795600612000, "src": "watcher:agy", "kind": "step_tool_start", "tool": "read_file", "summary": "model.js"}
+{"seq": 6, "t": 1795600614000, "src": "watcher:agy", "kind": "step_tool_end"}
+{"seq": 7, "t": 1795600618000, "src": "watcher:agy", "kind": "step_reply"}
+{"seq": 8, "t": 1795600618100, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "idle", "status_ms": 1795600618050, "turn": 11, "reported": true}

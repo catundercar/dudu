@@ -554,12 +554,37 @@ class FakeHc:
             return {"error": {"kind": "not_found", "message": f"no terminal {term}"}} if errors else None
         if row.get("state") != "live":
             return {"error": {"kind": "not_live", "message": f"terminal {key} is not live"}} if errors else None
-        cur_status = (row.get("status") or {}).get("state")
+        raw_status = row.get("status")
+        cur_status = str(raw_status.get("state") or "") if isinstance(raw_status, Mapping) else str(raw_status or "")
         if if_state is not None and cur_status != if_state:
             return {"ok": True, "started": False}
         row.setdefault("received", []).append(text)
         self.sent.append((key, text))
-        return {"ok": True, "started": True}
+        if "send_started" in row:
+            started = row["send_started"]
+        elif cur_status == "error":
+            started = False
+        else:
+            started = True
+        return {"ok": True, "started": started}
+
+    def bootstrap_shell_exec(
+        self,
+        term: str,
+        cmd: str,
+        *,
+        timeout: float = 60,
+    ) -> dict[str, Any] | None:
+        return self.send(term, cmd, timeout=timeout)
+
+    def init_session_flag(
+        self,
+        term: str,
+        flag_cmd: str,
+        *,
+        timeout: float = 60,
+    ) -> dict[str, Any] | None:
+        return self.send(term, flag_cmd, timeout=timeout)
 
     def label(self, term: str, *pairs: str, errors: bool = False) -> dict[str, Any] | None:
         if not self.server_running:
@@ -633,6 +658,39 @@ class FakeHc:
         self._queue_started.pop(key, None)
         return {"ok": True}
 
+    def set_status(
+        self,
+        term: str,
+        state: str,
+        *,
+        msg: str = "",
+        status_ms: int | None = None,
+        app: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Transition a terminal's reported OSC 7501 status, updating `status_ms` and incrementing `turn` when leaving `working`."""
+        row = self._mutable_dict(term)
+        if row is None:
+            return None
+        prev_status = row.get("status")
+        prev_state = str(prev_status.get("state") or "") if isinstance(prev_status, Mapping) else str(prev_status or "")
+        prev_app = str(prev_status.get("app") or "") if isinstance(prev_status, Mapping) else ""
+        if prev_state == "working" and state != "working":
+            row["turn"] = int(row.get("turn") or 0) + 1
+        new_status: dict[str, Any] = {"state": state}
+        if msg:
+            new_status["msg"] = msg
+        if app is not None:
+            if app:
+                new_status["app"] = app
+        elif prev_app:
+            new_status["app"] = prev_app
+        row["status"] = new_status
+        if status_ms is not None:
+            row["status_ms"] = int(status_ms)
+        elif self._clock is not None:
+            row["status_ms"] = int(self._clock.time() * 1000)
+        return copy.deepcopy(row)
+
     def interrupt(self, term: str, *, timeout: float | None = None, errors: bool = False) -> dict[str, Any] | None:
         if not self.server_running:
             return None
@@ -642,7 +700,8 @@ class FakeHc:
         row["interrupted"] = True
         if timeout is not None:
             row["interrupt_timeout"] = timeout
-        return {"ok": True}
+        outcome = str(row.get("interrupt_outcome") or "stopped")
+        return {"ok": True, "outcome": outcome}
 
     def rpc(self, method: str, params: Any = None) -> Any:
         self.rpc_calls.append((method, params))
@@ -1107,6 +1166,9 @@ class FakeTui:
     def pane_run(self, pane_id: str, cmd: str, *, session: str | None = None) -> Any:
         return self.herdr("pane", "run", pane_id, cmd, session=session)
 
+    def bootstrap_pane_exec(self, pane_id: str, cmd: str, *, session: str | None = None) -> Any:
+        return self.pane_run(pane_id, cmd, session=session)
+
     def pane_close(self, pane_id: str, *, session: str | None = None) -> Any:
         return self.herdr("pane", "close", pane_id, session=session)
 
@@ -1192,6 +1254,7 @@ class FakeProcs:
         runner: Callable[[dict[str, Any]], Any] | None = None,
         spawn_ok: bool = True,
         background_work: Mapping[int, Iterable[str]] | Callable[[Any], Iterable[str]] | None = None,
+        foreground_tool_stat: Callable[[Any], dict[str, Any]] | None = None,
     ) -> None:
         self.home = home
         self.env: dict[str, str] = dict(env or {})
@@ -1200,8 +1263,15 @@ class FakeProcs:
         self._runner = runner
         self.spawn_ok = bool(spawn_ok)
         self._background_work = background_work
+        self._foreground_tool_stat = foreground_tool_stat
         self.spawned: list[dict[str, Any]] = []
         self.ran: list[dict[str, Any]] = []
+        self.signaled_tools: list[dict[str, Any]] = []
+        self.terminated_pids: list[int] = []
+        self.terminated_calls: list[dict[str, Any]] = []
+        self.pid_commands: dict[int, str] = {}
+        self._tool_alive_fn: Callable[[int, int | None], bool] | None = None
+        self._signal_tool_fn: Callable[[int, int, int | None], dict[str, Any]] | None = None
         self._next_pid = 10_000
 
     def launcher(self) -> Path:
@@ -1237,6 +1307,40 @@ class FakeProcs:
             if pid is not None and pid in self._background_work:
                 return list(self._background_work[pid])
         return []
+
+    def foreground_tool_stat(self, info: Any) -> dict[str, Any]:
+        if callable(self._foreground_tool_stat):
+            return dict(self._foreground_tool_stat(info))
+        return {"tool_pid": 0, "cmd": "", "cpu_ms": 0}
+
+    def signal_foreground_tool(
+        self,
+        tool_pid: int,
+        sig: int,
+        *,
+        agent_pid: int | None = None,
+    ) -> dict[str, Any]:
+        self.signaled_tools.append({"tool_pid": int(tool_pid), "sig": int(sig), "agent_pid": agent_pid})
+        if callable(self._signal_tool_fn):
+            return dict(self._signal_tool_fn(int(tool_pid), int(sig), agent_pid))
+        return {"signaled": [int(tool_pid)] if tool_pid > 1 else [], "root_alive": tool_pid > 1}
+
+    def is_tool_alive(self, tool_pid: int, *, agent_pid: int | None = None) -> bool:
+        if callable(self._tool_alive_fn):
+            return bool(self._tool_alive_fn(int(tool_pid), agent_pid))
+        return False
+
+    def terminate_pid(self, pid: int, *, expected_substrings: Sequence[str] = ()) -> bool:
+        tokens = [str(t).lower() for t in expected_substrings if str(t).strip()]
+        self.terminated_calls.append({"pid": int(pid), "expected_substrings": tuple(tokens)})
+        if pid <= 1:
+            return False
+        if tokens and (self.pid_commands or int(pid) in self.pid_commands):
+            cmd_low = str(self.pid_commands.get(int(pid), "")).lower()
+            if not cmd_low or any(tok not in cmd_low for tok in tokens):
+                return False
+        self.terminated_pids.append(int(pid))
+        return True
 
     def spawn_pm(
         self,
@@ -1606,6 +1710,16 @@ def make_ctx(
     ctx.caller = caller if caller is not None else Caller(ctx)
     if ctx.caller_projects is None and hasattr(ctx.caller, "caller_projects"):
         ctx.caller_projects = ctx.caller.caller_projects
+
+    def _land_handoff(task_id: str, approval: Any, principal: Any) -> Any:
+        # As build_context wires it: the supervisor's own context, with no terminal identity of this one.
+        from pmlib.landing import Landing  # late: fakes is imported before the services
+
+        sup = make_ctx(tmp_dir, hc=hc_port, tui=tui_port, git=git_port, procs=procs_port, clock=clk, out=output,
+                       env=procs_mod.supervisor_env(env_map), agy_dir=agy_dir)
+        return Landing(sup).handoff_to_helper(task_id, approval, principal=principal)
+
+    ctx.land_handoff = _land_handoff
     return ctx
 
 
@@ -1639,3 +1753,44 @@ def run_main(ctx: Any, *argv: str, stdin: str | None = None) -> tuple[Any, str, 
         stdout_text = ctx.out.stdout[prev_out:] + stdout_text
         stderr_text = ctx.out.stderr[prev_err:] + stderr_text
     return code, stdout_text, stderr_text
+
+
+def run_spawned_drains(ctx: Any) -> int:
+    """Run, in-process and in order, the detached `pm.py _drain-endpoint <term> --env <id> --timeout <s>` processes
+    the code under test spawned since the last call (each queued send is typed by such a drain under the terminal's
+    typist lease). Returns how many ran."""
+    from pmlib.workers.service import Workers  # late: fakes is imported before the services in many tests
+
+    start = int(getattr(ctx.procs, "_drains_run", 0))
+    spawned = list(ctx.procs.spawned)
+    ran = 0
+    for entry in spawned[start:]:
+        args = list(entry.get("args") or [])
+        if args[:1] != ["_drain-endpoint"] or len(args) < 2:
+            continue
+        envs = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--env"]
+        timeout = int(args[args.index("--timeout") + 1]) if "--timeout" in args else 180
+        Workers(ctx).drain_sends(args[1], envs, timeout=timeout)
+        ran += 1
+    ctx.procs._drains_run = len(spawned)
+    return ran
+
+
+def queued_sends(ctx: Any) -> list[tuple[str, str]]:
+    """`(terminal, text)` of each send the code under test queued for a detached `_drain-endpoint`, in order (the
+    envelope's text as queued, before the drain types it)."""
+    from pmlib.messaging.typist import endpoint_mailbox  # late, as above
+    from pmlib.workers.send import worker_endpoint
+
+    out: list[tuple[str, str]] = []
+    for entry in ctx.procs.spawned:
+        args = list(entry.get("args") or [])
+        if args[:1] != ["_drain-endpoint"] or len(args) < 2:
+            continue
+        ep = worker_endpoint(args[1])
+        mailbox = endpoint_mailbox(ctx, ep)
+        for i, a in enumerate(args[:-1]):
+            if a == "--env":
+                item = mailbox.get(args[i + 1])
+                out.append((args[1], str((item.envelope.body or {}).get("text") or "") if item else ""))
+    return out

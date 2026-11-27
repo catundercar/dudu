@@ -154,7 +154,7 @@ class WorkersServiceTest(unittest.TestCase):
         res = svc.send("demo-1", "go ahead", wait=False)
         self.assertTrue(res.queued)
         self.assertEqual(Ledger(ctx).load("demo-1")["status"], "in_progress")
-        self.assertEqual(ctx.procs.spawned[-1]["args"][0], "_deliver-send")
+        self.assertEqual(ctx.procs.spawned[-1]["args"][0], "_drain-endpoint")
 
         back = svc.send_back(Ledger(ctx).load("demo-1"), "sync note", wait=True)
         self.assertFalse(back.queued)

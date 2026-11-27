@@ -1,0 +1,4 @@
+{"seq": 1, "t": 1795600000000, "src": "supervisor", "kind": "hc_state", "endpoint": {"runtime": "hc", "machine": null, "terminal": "t12", "workspace": "ws_1", "session_id": "sess_1", "agent_kind": "claude", "fg_pid": 48291, "epoch": 1}, "state": "live", "status": "working", "status_ms": 1795600000000, "turn": 70, "reported": true}
+{"seq": 2, "t": 1795600004000, "src": "ui", "kind": "interrupt_sent", "outcome": "stopped"}
+{"seq": 3, "t": 1795600004100, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "idle", "status_ms": 1795600004050, "turn": 71, "reported": true}
+{"seq": 4, "t": 1795600010000, "src": "supervisor", "kind": "hc_state", "endpoint": {"runtime": "hc", "machine": null, "terminal": "t12", "workspace": "ws_1", "session_id": "sess_2", "agent_kind": "claude", "fg_pid": 59900, "epoch": 2}, "state": "live", "status": "working", "status_ms": 1795600010000, "turn": 1, "reported": true}

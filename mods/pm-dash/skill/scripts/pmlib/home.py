@@ -102,6 +102,45 @@ class ProjectFiles:
         return self.root / "pm-turn.lock"
 
     @property
+    def pm_turn_journal(self) -> Path:
+        return self.root / "pm-turn-journal.jsonl"
+
+    @property
+    def pm_turn_journal_prev(self) -> Path:
+        return self.root / "pm-turn-journal.1.jsonl"
+
+    @property
+    def pm_turn_beat(self) -> Path:
+        return self.root / "pm-turn.beat"
+
+    @property
+    def mailboxes(self) -> Path:
+        return self.root / "mailboxes"
+
+    @property
+    def pm_mailbox(self) -> Path:
+        return self.mailboxes / "pm"
+
+    @property
+    def inbound_reports_mailbox(self) -> Path:
+        return self.mailboxes / "inbound-reports"
+
+    def endpoint_mailbox(self, safe_uid: str) -> Path:
+        return self.mailboxes / "endpoints" / safe_uid
+
+    @property
+    def applied_reports_json(self) -> Path:
+        return self.root / "applied-reports.json"
+
+    @property
+    def applied_reports_jsonl(self) -> Path:
+        return self.root / "applied-reports.0001.jsonl"
+
+    @property
+    def applied_reports_lock(self) -> Path:
+        return self.root / "applied-reports.lock"
+
+    @property
     def task_seq(self) -> Path:
         return self.root / "task-seq.json"
 
@@ -243,6 +282,10 @@ class Home:
         return self.root / "turns.log"
 
     @property
+    def pm_stall_log(self) -> Path:
+        return self.root / "pm-stall.log"
+
+    @property
     def pm_settings(self) -> Path:
         return self.root / "pm-settings.json"
 
@@ -257,6 +300,19 @@ class Home:
     @property
     def mcp(self) -> Path:
         return self.root / "mcp"
+
+    @property
+    def tokens(self) -> Path:
+        return self.root / "tokens"
+
+    @property
+    def typists(self) -> Path:
+        """Per-endpoint `typist.lock` leases, shared by every mailbox that types into a terminal (single typist)."""
+        return self.root / "mailboxes" / "typists"
+
+    def endpoint_mailbox(self, safe_uid: str) -> Path:
+        """Mailbox of an endpoint that no project's PM mailbox owns (no repo known)."""
+        return self.root / "mailboxes" / "endpoints" / safe_uid
 
     def task(self, task_id: str) -> Path:
         """The task file of task_id: tasks/<id>.json."""

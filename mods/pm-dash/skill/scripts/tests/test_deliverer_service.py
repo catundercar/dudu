@@ -74,7 +74,7 @@ class DelivererServiceTests(unittest.TestCase):
         w2 = DeliverWatcher(
             name="custom-2",
             terminals=lambda r: {"t-h2"},
-            look=lambda r, s, b: (calls.append(("w2", r)), 4.0)[1],
+            look=lambda r, s, b: (calls.append(("w2", r)), 2.0)[1],
         )
         held = [True]
         d_held = Deliverer(ctx, self.repo, watchers=(w1, w2), holds=(lambda r: held[0],), settle=0)
@@ -90,7 +90,7 @@ class DelivererServiceTests(unittest.TestCase):
         due = d_held.look(changes, {}, {})
         self.assertEqual(changes.terminals, {"t7", "t-h1", "t-h2"})
         self.assertEqual(calls, [("w1", self.repo), ("w2", self.repo)])
-        self.assertEqual(due, 4.0)
+        self.assertEqual(due, 2.0)
         # Held back: nothing sent yet, cursor stays at 0.
         self.assertEqual(hc.sent, [])
         self.assertEqual(d_held.delivered_offset(), 0)

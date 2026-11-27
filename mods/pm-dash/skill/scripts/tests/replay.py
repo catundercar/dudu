@@ -27,7 +27,7 @@ Commands not covered, and why:
 - start, restore, launch, rotate, seat, end-session, name-agent, codex-cmd: start or swap agent sessions and
   terminals (exec, process groups, a seat that outlives the step); not replayable without a real agent.
 - dispatch (real), review, escalate, reattach, approve, triage, retire, retab, wait, close-worker,
-  _deliver-send, _deliver-ready, send: start workers or long-running background deliveries and waits; dispatch is
+  _drain-endpoint, _deliver-ready, send: start workers or long-running background deliveries and waits; dispatch is
   covered as --dry-run, and land is covered for a passing merge, a failed check (exit 1) and a merge conflict (exit 4).
   retire needs a worker worktree from a real dispatch.
 - deliver (real), watch: long-running loops by design (see the deliver.lock note above); deliver --dry-run is in.
@@ -213,6 +213,7 @@ def normalizer(side):
         (re.compile(r"(send|msg|brief|tmp)-\d+-\d+"), r"\1-<PID>-<N>"),
         (re.compile(r"\.\d+\.tmp\b"), ".<PID>.tmp"),
         (re.compile(r"reads/[0-9a-f]{12}\.json"), "reads/<HASH>.json"),
+        (re.compile(r"\benv_[0-9a-f]{12}_[0-9a-f]{8}\b"), "<ENV>"),  # an envelope's id (time + random)
         (re.compile(r"\b\d+(?:\.\d+)? ?(?:ms|s|sec|secs|seconds|m|min|mins|minutes|h|hours?) ago\b"), "<AGO>"),
     ]
 

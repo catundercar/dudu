@@ -17,6 +17,10 @@ from ..events.inbox import (
     output_nowhere,
 )
 from ..events.notify import Notifier
+from ..events.supervisor import deliver_under_typist_lock
+from ..messaging.address import LogicalAddress, parse_legacy_endpoint
+from ..messaging.envelope import P4_BATCH, Envelope, new_env_id
+from ..messaging.principal import Principal
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
 from ..store import lock_file, unlock_file
@@ -58,17 +62,51 @@ def cmd_notify(a, ctx=None):
         ctx.out.line(f"{name} has a watcher; not typing into its pane")
         return
     text = f"[from {me}] {a.text}"
+    now_ms = int(float(ctx.clock.time()) * 1000)
+    proj_slug = rec.get("name", "")[3:] if isinstance(rec.get("name"), str) and rec["name"].startswith("pm-") else "project"
+    env = Envelope(
+        env_id=new_env_id(now_ms),
+        idempotency_key="",
+        schema_version=1,
+        created_ms=now_ms,
+        kind="event.notify",
+        sender=Principal.supervisor(proj_slug),
+        recipient=LogicalAddress.pm(proj_slug),
+        project=proj_slug,
+        cause={"kind": "notify", "by": me},
+        priority=P4_BATCH,
+        body={"text": text},
+    )
+    repo_hint = str(rec.get("repo") or (pm or {}).get("repo") or "")
+    out = None
     if pm:
         target = pm["pane_id"]
-        result = ctx.hc.send(target[3:], text) if target.startswith("hc:") else ctx.tui.agent_prompt(target, text)
+        ep = parse_legacy_endpoint(target, runtime_hint="hc" if target.startswith("hc:") else "tui")
+        if ep is not None:
+            out = deliver_under_typist_lock(ctx, ep, env, repo=repo_hint, if_idle=False)
+            result = bool(out is not None and out.status == "typed")
+        else:
+            result = False
     elif rec.get("session") and rec.get("pane") and tui_registration(rec):
         # The PM runs in another herdr session than this one: its registration says which.
         target = f"{rec['session']}/{rec['pane']}"
-        result = ctx.tui.agent_prompt(rec["pane"], text, session=rec["session"])
+        ep = parse_legacy_endpoint(rec["pane"], str(rec["session"]), runtime_hint="tui")
+        if ep is not None:
+            out = deliver_under_typist_lock(ctx, ep, env, repo=repo_hint, if_idle=False)
+            result = bool(out is not None and out.status == "typed")
+        else:
+            result = False
     else:
         ctx.out.line(f"{name} is not running here; the inbox line still records it")
         return
-    ctx.out.line(f"notified PM at {target}" if result else "notify failed; the inbox line still records it")
+    if result:
+        ctx.out.line(f"notified PM at {target}")
+    elif out is None and repo_hint and ep is not None:
+        ctx.out.line(f"queued notify for PM at {target}")
+    elif out is not None and out.detail == "typist_busy":
+        ctx.out.line(f"notify failed: another sender kept typing into {target}; the inbox line still records it")
+    else:
+        ctx.out.line("notify failed; the inbox line still records it")
 
 
 def cmd_watch(a, ctx=None):

@@ -15,6 +15,7 @@ from typing import Mapping
 
 from ..errors import NotFound
 from ..home import project_slug
+from ..messaging.mailbox import MailboxStore, merge_receipts_compat
 from ..store import REPO_FILES_MAX, Store, valid_slug, valid_task_id, valid_task_number
 
 LOG_LIMIT_DEFAULT = 50
@@ -634,9 +635,17 @@ class Projects:
             raise NotFoundError(f"no project {slug}")
         out = self.store.events(slug, before=before, after=after, limit=limit)
         if before is None:
-            receipts = self.store.receipts(slug)
-            if receipts:
-                out["receipts"] = receipts
+            primary: list[dict] = []
+            dirs_fn = getattr(self.store, "_dirs", None)
+            if callable(dirs_fn):
+                _, _, _, projects_dir = dirs_fn()
+                mb_dir = Path(projects_dir) / slug / "mailboxes" / "pm"
+                if mb_dir.is_dir():
+                    primary = MailboxStore(mb_dir).receipts_projection(limit=20)
+            legacy = self.store.receipts(slug)[-20:]
+            merged = merge_receipts_compat(primary, legacy, limit=20)
+            if merged:
+                out["receipts"] = merged
         return out
 
     def tasks(

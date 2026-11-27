@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 from ..context import Context
 from ..home import project_slug
 from ..store import SLUG_RE, StoreError
+from .turn_reducer import Endpoint, record_endpoint
 
 
 def _every_seat_alive(repo: Any, rec: Any, term: Any = None) -> bool:
@@ -97,6 +98,10 @@ class Coordinator:
     @property
     def is_app_pm(self) -> bool:
         return bool(self.runtime == "hc" and self.terminal and not self.archived)
+
+    @property
+    def endpoint(self) -> Endpoint | None:
+        return record_endpoint(self._data)
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Coordinator):

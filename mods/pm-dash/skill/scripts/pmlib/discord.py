@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any, Callable, Sequence
 
 from .context import Context
@@ -286,6 +287,29 @@ class DiscordMirror:
             return list(json.loads((self.discord_home / "access.json").read_text()).get("allowFrom", []))
         except (OSError, ValueError, AttributeError):
             return []
+
+    def alert_undelivered(self, slug: str, repo: str, alert: dict[str, Any], *, background: bool = True) -> bool:
+        """An `alert.undelivered` (a message to the PM queued past its SLA) to the project's Discord channel: only
+        when Discord is on, the route names it and the PM's registration has a channel. Posted on a thread of its
+        own, so a slow Discord never holds the deliverer's loop. Returns whether a post was started."""
+        if self.ctx.env.get("PM_NO_DISCORD") or not self.is_on():
+            return False
+        if not any(str(t).startswith("discord://") for t in alert.get("targets") or ()):
+            return False
+        rec = (self.ctx.store.registration(slug) if slug else None) or ProjectRegistry(self.ctx).pm_record(repo)
+        if not ((rec or {}).get("discord") or {}).get("channel_id"):
+            return False
+        mins = max(1, int(alert.get("wait_seconds") or 0) // 60)
+        why = str(alert.get("reason") or "queued")
+        text = self.ctx.config.tr(
+            f"⚠ A message for the PM has waited {mins} min without being delivered ({why}).",
+            f"⚠ 有一条发给 PM 的消息已 {mins} 分钟未送达（{why}）。",
+        )
+        if background:
+            threading.Thread(target=self.mirror, args=(rec, text), daemon=True).start()
+        else:
+            self.mirror(rec, text)
+        return True
 
     def mirror(self, rec: dict[str, Any] | None, text: str) -> None:
         """Post a PM's chat turn into its Discord channel, when its registration has one."""

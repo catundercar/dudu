@@ -397,6 +397,7 @@ def checks(root):
     def files(label, *paths):
         return TestGroup(f"unittest {label}", {"kind": "files", "files": list(paths)})
     found.append(files("tests/test_install.py", "tests/test_install.py"))
+    found.append(files("tests/test_render_check_win.py", "tests/test_render_check_win.py"))
     if (root / SAFETY_NET).is_dir():
         found.append(TestGroup("unittest scripts/tests (discover)",
                                {"kind": "discover", "start": SAFETY_NET, "pattern": "test_*.py"}))

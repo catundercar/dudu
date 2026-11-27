@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import * as model from './model.js';
 import * as changeView from './change_view.js';
 import * as searchMod from './search.js';
@@ -734,13 +738,24 @@ test('the log is read as its last 200 events, skipping lines that are not events
 });
 
 test('commands, clocks and paths', () => {
-  assert.deepEqual(model.sendArgv('t2h', 'hi'), ['hc', 'send', '--', 't2h', 'hi']);
-  assert.deepEqual(model.sendArgv('t2h', '- item'), ['hc', 'send', '--', 't2h', '- item']);
-  // Unix keeps env -u so the PM hook records the person; Windows has no env and runs hc bare.
-  assert.deepEqual(model.withoutTerminalEnv(model.sendArgv('t2h', 'hi')),
-    ['env', ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 't2h', 'hi']]);
-  assert.deepEqual(model.withoutTerminalEnv(model.sendArgv('t2h', 'hi'), { platform: 'windows' }),
-    ['hc', ['send', '--', 't2h', 'hi']]);
+  // The thread box / agent window send: pm.py's `send --as-user` (that terminal's one typist types it).
+  assert.deepEqual(model.terminalSendArgv('t2h', { text: 'hi' }), ['send', '--as-user', '--', 't2h', 'hi']);
+  assert.deepEqual(model.terminalSendArgv('t2h', { text: '- item', task: 'dudu-a' }),
+    ['send', '--as-user', '--task', 'dudu-a', '--', 't2h', '- item']);
+  assert.deepEqual(model.terminalSendArgv('t2h', { fromFile: '/tmp/m.txt' }),
+    ['send', '--as-user', '--file', '/tmp/m.txt', '--', 't2h']);
+  // For a pm.py older than --as-user, and a send typed before pm.py answers (its failure comes back).
+  assert.deepEqual(model.terminalSendArgv('t2h', { text: 'hi', asUser: false }), ['send', '--', 't2h', 'hi']);
+  assert.deepEqual(model.terminalSendArgv('t2h', { text: 'hi', wait: true }),
+    ['send', '--as-user', '--wait', '--timeout', String(model.SEND_WAIT_SECONDS), '--', 't2h', 'hi']);
+  const old = { code: 2, stdout: '', stderr: 'usage: pm.py [-h] ...\npm.py: error: unrecognized arguments: --as-user\n' };
+  assert.equal(model.rejectsOption(old, '--as-user'), true);
+  assert.equal(model.rejectsOption({ ...old, stderr: 'pm.py: error: unrecognized arguments: --x' }, '--as-user'), false);
+  assert.equal(model.rejectsOption({ code: 1, stdout: '', stderr: 'hc:t2h is not live (gone)' }, '--as-user'), false);
+  assert.equal(model.rejectsOption({ code: 0, stdout: '', stderr: '' }, '--as-user'), false);
+  // Unix keeps env -u so a command is not attributed to this app's terminal; Windows has no env.
+  assert.deepEqual(model.withoutTerminalEnv(['python3', 'pm.py', ...model.terminalSendArgv('t2h', { text: 'hi' })]),
+    ['env', ['-u', 'HC_TERMINAL_ID', 'python3', 'pm.py', 'send', '--as-user', '--', 't2h', 'hi']]);
   assert.deepEqual(model.withoutTerminalEnv(model.putArgv('dev/t1', 'a.png'), { platform: 'windows' }),
     ['hc', ['put', '--json', '--', 'dev/t1', 'a.png']]);
   assert.deepEqual(model.withoutTerminalEnv(model.reattachArgv('/app/pm.py', 'x'), { unset: model.REATTACH_ENV }),
@@ -834,8 +849,10 @@ test('the thread\'s terminal icon runs pane.focus on its PM, shows work, then pe
     .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmProject extends View', 'return class');
   const calls = [];
   const View = class {};
-  const stubs = { focusPlan: model.focusPlan, onMachine: model.onMachine, terminals: () => terms, panes: () => panes, agents: () => agents,
-    run: (name, args) => calls.push([name, args]) };
+  const spaces = [];
+  const stubs = { focusPlan: model.focusPlan, pmKeepPlan: model.pmKeepPlan, pmKeepFollowUp: model.pmKeepFollowUp,
+    pmTabNameFor: model.pmTabNameFor, onMachine: model.onMachine, terminals: () => terms, panes: () => panes,
+    agents: () => agents, spaces: () => spaces, run: (name, args) => calls.push([name, args]) };
   // Every other import is a do-nothing stand-in: only the click's own commands matter here.
   const blank = new Proxy(function () {}, { get: (_, key) => (key === Symbol.toPrimitive ? () => 0 : blank), apply: () => blank });
   const scope = new Proxy({ View, ...stubs }, {
@@ -843,7 +860,11 @@ test('the thread\'s terminal icon runs pane.focus on its PM, shows work, then pe
     get: (target, name) => (name in target ? target[name] : name === Symbol.unscopables ? undefined : blank),
   });
   const Mod = new Function('scope', `with (scope) { ${source} }`)(scope);
-  const view = pm => Object.assign(Object.create(Mod.prototype), { pmTerminal: () => (pm ? { address: pm } : null) });
+  const view = (pm, pmObj = null, machine = '') => Object.assign(Object.create(Mod.prototype), {
+    machine,
+    pm: () => pmObj,
+    pmTerminal: () => (pm ? { address: pm } : null),
+  });
   view('t52').focusTerminal(model.terminalFor(model.taskRow(task), terms).address);
   assert.deepEqual(calls, [['pane.focus', { terminal: 't52' }], ['layout.select', { stack: 'pm-stage', child: 'work' }],
     ['terminal.peek', { terminal: 't5h' }]]);
@@ -856,10 +877,120 @@ test('the thread\'s terminal icon runs pane.focus on its PM, shows work, then pe
   view('t5p').focusTerminal('t5h');
   assert.deepEqual(calls.map(([name, args]) => [name, args.terminal || args.child]),
     [['pane.focus', 't5p'], ['layout.select', 'work'], ['terminal.peek', 't5h']]);
-  // No PM with a pane either: nothing runs, the stage stays.
+  // No PM with a pane either: nothing runs for a worker, the stage stays.
   calls.length = 0;
   view('').focusTerminal('t5h');
   assert.deepEqual(calls, []);
+  // Paneless live PM: select this project's own space (never another project's), keep as tab, switch to work,
+  // and wait for pane to land before renaming/focusing (no premature pane.focus that fails with "no such pane").
+  calls.length = 0;
+  spaces.push(
+    { id: 'sp-other', name: 'OldName', folder: '/r/other', machine: null, active: true, tabs: [{ id: 'tb-other', name: '1', named: false, panes: 1 }] },
+    { id: 'sp-dudu', name: 'dudu', folder: '/r/dudu', machine: null, active: false, tabs: [{ id: 'tb-shell', name: '1', named: false, panes: 1 }] },
+  );
+  const pmView = view('t1k6', { project: 'dudu', repo: '/r/dudu', worktrees: '/w/dudu' });
+  pmView.focusTerminal('t1k6');
+  assert.deepEqual(calls, [
+    ['space.select', { id: 'sp-dudu' }],
+    ['terminal.keep', { terminal: 't1k6', place: 'tab' }],
+    ['layout.select', { stack: 'pm-stage', child: 'work' }],
+  ]);
+  // Once terminal.keep finishes asynchronously and the pane appears, reconcile renames the unnamed tab to PM-dudu and focuses it
+  // (existing space: does NOT close the existing tab tb-shell).
+  calls.length = 0;
+  spaces[1].tabs.push({ id: 'tb-pm', name: '2', named: false, panes: 1 });
+  panes.push({ pane: 'p-pm', terminal: 't1k6', tab: 'tb-pm' });
+  pmView.reconcilePendingPmKeep();
+  assert.deepEqual(calls, [
+    ['tab.rename', { id: 'tb-pm', name: 'PM-dudu' }],
+    ['pane.focus', { terminal: 't1k6' }],
+  ]);
+  // Calling reconcile again is a no-op.
+  calls.length = 0;
+  pmView.reconcilePendingPmKeep();
+  assert.deepEqual(calls, []);
+  // When no space existed and space.new was issued, reconcile also closes the empty default shell tab space.new spawned.
+  calls.length = 0;
+  const gammaView = view('t2g', { project: 'gamma', repo: '/r/gamma' });
+  gammaView.focusTerminal('t2g');
+  assert.deepEqual(calls, [
+    ['space.new', { machine: '', name: 'gamma', folder: '/r/gamma' }],
+    ['terminal.keep', { terminal: 't2g', place: 'tab' }],
+    ['layout.select', { stack: 'pm-stage', child: 'work' }],
+  ]);
+  calls.length = 0;
+  spaces.push({
+    id: 'sp-gamma-new', name: 'gamma', folder: '/r/gamma', machine: null, active: true,
+    tabs: [
+      { id: 'tb-default-sh', name: '1', named: false, panes: 1 },
+      { id: 'tb-gamma-pm', name: '2', named: false, panes: 1 },
+    ],
+  });
+  panes.push(
+    { pane: 'p-default-sh', terminal: 't-sh', tab: 'tb-default-sh', program: { shell: true } },
+    { pane: 'p-gamma-pm', terminal: 't2g', tab: 'tb-gamma-pm', program: { agent: true, shell: false } },
+  );
+  gammaView.reconcilePendingPmKeep();
+  assert.deepEqual(calls, [
+    ['tab.rename', { id: 'tb-gamma-pm', name: 'PM-gamma' }],
+    ['pane.focus', { terminal: 't2g' }],
+    ['tab.close', { id: 'tb-default-sh' }],
+  ]);
+  // Main view has no stale calls to non-existent this.show() or this.open() on PM open buttons.
+  assert.equal(/\bthis\.(show|open)\s*\(/.test(source), false);
+});
+
+test('projectSpaceFor, pmKeepPlan, and pmKeepFollowUp keep a paneless PM inside its own project space without stray shell tabs', () => {
+  const dudu = { project: 'dudu', repo: '/r/dudu', worktrees: '/w/dudu' };
+  const otherSpace = { id: 'sp-other', name: 'other', folder: '/r/other', machine: null, active: true, tabs: [{ id: 'tb-o' }] };
+  const duduSpace = { id: 'sp-dudu', name: 'dudu', folder: '/r/dudu', machine: null, active: false, tabs: [{ id: 'tb-d' }] };
+  const remoteSpace = { id: 'vps/sp-dudu', name: 'dudu', folder: '/r/dudu', machine: 'vps', active: false, tabs: [{ id: 'vps/tb-d' }] };
+
+  // Matches by folder even when another project's space is active.
+  assert.equal(model.projectSpaceFor(dudu, [otherSpace, duduSpace], [], '')?.id, 'sp-dudu');
+  // Matches by pane cwd inside repo or worktrees when space.folder is empty.
+  const unnamedSpace = { id: 'sp-wt', name: 'work', folder: '', machine: null, active: false, tabs: [{ id: 'tb-wt' }] };
+  assert.equal(model.projectSpaceFor(dudu, [otherSpace, unnamedSpace], [{ pane: 'p1', tab: 'tb-wt', cwd: '/w/dudu/fix-1' }], '')?.id, 'sp-wt');
+  // Matches by explicit herdr.space label on the PM terminal.
+  assert.equal(model.projectSpaceFor(dudu, [otherSpace, unnamedSpace], [], '', { address: 't1', labels: { 'herdr.space': 'sp-wt' } })?.id, 'sp-wt');
+  // Never matches a space on another machine, nor a same-named space pointing at a different folder.
+  const wrongFolder = { id: 'sp-fake', name: 'dudu', folder: '/r/someone-else', machine: null, active: true, tabs: [] };
+  assert.equal(model.projectSpaceFor(dudu, [otherSpace, remoteSpace, wrongFolder], [], ''), null);
+  assert.equal(model.projectSpaceFor(dudu, [otherSpace, remoteSpace], [], 'vps')?.id, 'vps/sp-dudu');
+
+  // When no space exists for this project yet, space.new creates one for THIS project before terminal.keep (never exposing otherSpace).
+  assert.deepEqual(model.pmKeepPlan('t1k6', { pm: dudu, pmTerminal: { address: 't1k6' }, machine: '', spaces: [otherSpace], panes: [] }), [
+    ['space.new', { machine: '', name: 'dudu', folder: '/r/dudu' }],
+    ['terminal.keep', { terminal: 't1k6', place: 'tab' }],
+    ['layout.select', { stack: 'pm-stage', child: 'work' }],
+  ]);
+  // Remote PM qualifies address and keeps machine on space.new when no remote space exists.
+  assert.deepEqual(model.pmKeepPlan('t1k6', { pm: dudu, pmTerminal: { address: 't1k6' }, machine: 'vps', spaces: [duduSpace], panes: [] }), [
+    ['space.new', { machine: 'vps', name: 'dudu', folder: '/r/dudu' }],
+    ['terminal.keep', { terminal: 'vps/t1k6', place: 'tab' }],
+    ['layout.select', { stack: 'pm-stage', child: 'work' }],
+  ]);
+  // Non-PM terminal or missing project identity: returns [] so nothing moves.
+  assert.deepEqual(model.pmKeepPlan('t5h', { pm: dudu, pmTerminal: { address: 't1k6' }, machine: '', spaces: [duduSpace], panes: [] }), []);
+  assert.deepEqual(model.pmKeepPlan('t1k6', { pm: null, pmTerminal: { address: 't1k6' }, machine: '', spaces: [otherSpace], panes: [] }), []);
+
+  // pmKeepFollowUp guards against closing non-shell or named tabs even in a newly created space.
+  const pendingNew = { terminal: 't1k6', tabName: 'PM-dudu', createdSpace: true, prevSpaceIds: new Set(['sp-other']) };
+  const spNamedOther = {
+    id: 'sp-new', tabs: [
+      { id: 'tb-user', name: 'notes', named: true, panes: 1 },
+      { id: 'tb-pm', name: '2', named: false, panes: 1 },
+    ],
+  };
+  assert.deepEqual(
+    model.pmKeepFollowUp(pendingNew, [spNamedOther], [
+      { pane: 'p1', tab: 'tb-user', terminal: 't-u', program: { shell: true } },
+      { pane: 'p2', tab: 'tb-pm', terminal: 't1k6', program: { agent: true } },
+    ]),
+    [['tab.rename', { id: 'tb-pm', name: 'PM-dudu' }], ['pane.focus', { terminal: 't1k6' }]],
+  );
+  // While the PM pane has not yet landed, pmKeepFollowUp returns null.
+  assert.equal(model.pmKeepFollowUp(pendingNew, [spNamedOther], [{ pane: 'p1', tab: 'tb-user', terminal: 't-u' }]), null);
 });
 
 test('sessions list excludes PM terminals and exited terminals, while keeping unlabelled project sessions', () => {
@@ -1581,7 +1712,6 @@ test("a project on another machine: its key, its terminals as that machine names
   assert.equal(model.onMachine('t73', 'box'), 'box/t73');
   assert.equal(model.onMachine('t73', ''), 't73');
   assert.equal(model.onMachine('', 'box'), '');
-  assert.deepEqual(model.sendArgv(model.onMachine('t73', 'box'), 'hi'), ['hc', 'send', '--', 'box/t73', 'hi']);
 
   // remotePmArgv: the first pm.py found under that machine's home, with the arguments as given.
   assert.deepEqual(model.PM_SCRIPTS, dash.PM_SCRIPTS);
@@ -1602,15 +1732,21 @@ test("a project on another machine: its key, its terminals as that machine names
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a remote project's view reads that machine's ledger and sends to its terminals by their app address", async () => {
+test("a remote project's view reads that machine's ledger and sends to its terminals through pm.py there", async () => {
   const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
     .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmProject extends View', 'return class');
   const calls = [];
-  let drafts = null, failSend = false;
+  let drafts = null, failSend = false, oldPeer = false;
   const blank = new Proxy(function () {}, { get: (_, key) => (key === Symbol.toPrimitive ? () => 0 : blank), apply: () => blank });
   const stubs = { View: class {}, projectRef: model.projectRef, machineView: model.machineView, onMachine: model.onMachine,
-    remotePmArgv: model.remotePmArgv, sendArgv: model.sendArgv, withoutTerminalEnv: model.withoutTerminalEnv,
+    remotePmArgv: model.remotePmArgv, terminalSendArgv: model.terminalSendArgv, withoutTerminalEnv: model.withoutTerminalEnv,
+    SAVE_INLINE_BYTES: model.SAVE_INLINE_BYTES, REMOTE_CHUNK_BYTES: model.REMOTE_CHUNK_BYTES,
+    REMOTE_MKTEMP_ARGV: model.REMOTE_MKTEMP_ARGV, remoteAppendChunkArgv: model.remoteAppendChunkArgv,
+    chunkUtf8Text: model.chunkUtf8Text, utf8ByteLength: model.utf8ByteLength, appHome: () => '/app',
+    rejectsOption: model.rejectsOption, SEND_WAIT_SECONDS: model.SEND_WAIT_SECONDS,
+    // The mod runtime has no TextEncoder / TextDecoder: main.js must not reach for Node's here either.
+    TextEncoder: undefined, TextDecoder: undefined,
     SEND_ENV: model.SEND_ENV, REATTACH_ENV: model.REATTACH_ENV, pmRow: model.pmRow, terminalFor: model.terminalFor,
     pasteDir: model.pasteDir, uploadSteps: model.uploadSteps, landedPath: model.landedPath, sentFiles: model.sentFiles,
     heldFiles: model.heldFiles, sentLeftovers: model.sentLeftovers, staleArgv: model.staleArgv, staleFiles: model.staleFiles,
@@ -1623,6 +1759,10 @@ test("a remote project's view reads that machine's ledger and sends to its termi
       calls.push([command, args, options]);
       const put = args?.indexOf('put') ?? -1;
       if (failSend && args?.includes('send')) return { code: 1, stdout: '', stderr: 'no terminal' };
+      if (oldPeer && args?.includes('--as-user')) {
+        return { code: 2, stdout: '', stderr: 'usage: pm.py [-h]\npm.py: error: unrecognized arguments: --as-user\n' };
+      }
+      if (command === 'sh' && String(args?.[1] || '').includes('mktemp')) return { code: 0, stdout: '/tmp/pm-edit.abc\n', stderr: '' };
       if (command === 'find') return { code: 0, stdout: '/here/attachments/box/pm-dudu/paste-20261101-101500.png\n/here/attachments/box/pm-dudu/paste-20261116-101500.png\n', stderr: '' };
       if (put < 0) return { code: 0, stdout: '', stderr: '' };
       const name = model.fileName(args[args.length - 1]);
@@ -1644,7 +1784,9 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   await view.send(view.pmTerminal().address, 'hi');
   view.readLog(cx); view.readThread(cx);
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.deepEqual(calls[0], ['env', ['-u', 'HC_TERMINAL_ID', 'hc', 'send', '--', 'box/t73', 'hi'], { timeout: 20000 }]);
+  // pm.py on that machine queues it for the terminal by the name it has there (never a raw `hc send` here).
+  const pmThere = argv => model.remotePmArgv(argv)[1];
+  assert.deepEqual(calls[0], ['sh', pmThere(['send', '--as-user', '--', 't73', 'hi']), { on: 'box', timeout: 45000 }]);
   // The log's tail and the thread's file come from that machine (exec / readTextFile `on`); the
   // screenshots pasted for it are kept here, in this computer's ledger home.
   assert.deepEqual(calls.slice(1).map(c => [c[0], c[2]?.on]).sort(), [['read', 'box'], ['sh', undefined], ['sh', 'box']]);
@@ -1656,19 +1798,55 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   const went = await view.deliver('t73', '看图', [shot, doc]);
   const there = name => `/home/x/.local/state/herdr-core/default/files/t73/${name}`;
   const envHc = argv => model.withoutTerminalEnv(argv)[1];
+  const sendThere = (text, task = '') => pmThere(model.terminalSendArgv('t73', { text, task }));
   assert.deepEqual(calls.map(c => c[1]), [envHc(model.putArgv('box/t73', shot)), envHc(model.putArgv('box/t73', doc)),
-    envHc(model.sendArgv('box/t73', `看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`))]);
+    sendThere(`看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`)]);
   assert.equal(went, `看图\n\n${there('paste-20261116-101500.png')}\n${there('a b.txt')}`);
-  // Windows Desktop: bare hc, never `env -u` (no usable env there).
+  // The thread it belongs to goes along (a send that does not go in is noted on it).
+  calls.length = 0;
+  await view.deliver('t73', 'go', [], { task: 'dudu-a' });
+  assert.deepEqual(calls.map(c => c[1]), [sendThere('go', 'dudu-a')]);
+  // A long text goes by a file written there in chunks, removed after.
+  calls.length = 0;
+  const long = 'x'.repeat(model.SAVE_INLINE_BYTES + 10);
+  await view.send('t73', long);
+  // mktemp, two chunks, pm.py send --file, rm
+  assert.deepEqual(calls.map(c => [c[0], c[2]?.on]), [['sh', 'box'], ['sh', 'box'], ['sh', 'box'], ['sh', 'box'], ['rm', 'box']]);
+  assert.deepEqual(calls[3][1], pmThere(model.terminalSendArgv('t73', { fromFile: '/tmp/pm-edit.abc' })));
+  // That machine's pm.py is older than --as-user: asked again without it, the send still goes.
+  calls.length = 0;
+  oldPeer = true;
+  await view.send('t73', 'hi');
+  oldPeer = false;
+  assert.deepEqual(calls.map(c => c[1]), [sendThere('hi'), pmThere(model.terminalSendArgv('t73', { text: 'hi', asUser: false }))]);
+  // The agent window: with a thread, queued as the thread box does; with none, typed before pm.py answers, and a
+  // failure shows in the window instead of vanishing.
+  const winCx = { spawn: f => (winCx.last = f(winCx)), notify() {}, timer: null };
+  const win1 = Object.assign(Object.create(Mod.prototype), view, {
+    winProps: { address: 't73', taskId: 'dudu-a' }, winInput: { value: () => 'go on', set_value() {} } });
+  calls.length = 0;
+  win1.sendAgentWindowMessage(winCx);
+  await winCx.last;
+  assert.deepEqual(calls.map(c => c[1]), [sendThere('go on', 'dudu-a')]);
+  const win2 = Object.assign(Object.create(Mod.prototype), view, {
+    winProps: { address: 't73' }, winInput: { value: () => 'are you there?', set_value() {} } });
+  calls.length = 0;
+  win2.sendAgentWindowMessage(winCx);
+  await winCx.last;
+  assert.deepEqual(calls.map(c => c[1]), [pmThere(model.terminalSendArgv('t73', { text: 'are you there?', wait: true }))]);
+  assert.equal(calls[0][2].timeout, (2 * model.SEND_WAIT_SECONDS + 30) * 1000);
+  failSend = true;
+  win2.sendAgentWindowMessage(winCx);
+  await winCx.last;
+  failSend = false;
+  assert.equal(win2.winSendError, 'no terminal');
+  // Windows Desktop: hc put bare (no usable env there); the send is pm.py on that machine all the same.
   calls.length = 0;
   const win = Object.assign(Object.create(Mod.prototype), view, { hostPlatform: () => 'windows' });
-  await win.send('t73', 'hi');
-  assert.deepEqual(calls[0], ['hc', ['send', '--', 'box/t73', 'hi'], { timeout: 20000 }]);
-  calls.length = 0;
   await win.deliver('t73', '看图', [shot]);
   assert.deepEqual(calls.map(c => [c[0], c[1]]), [
     ['hc', ['put', '--json', '--', 'box/t73', shot]],
-    ['hc', ['send', '--', 'box/t73', `看图\n\n${there('paste-20261116-101500.png')}`]],
+    ['sh', sendThere(`看图\n\n${there('paste-20261116-101500.png')}`)],
   ]);
   // A file that does not go stops the send: nothing reaches the terminal, and the error names the file and machine.
   calls.length = 0;
@@ -1698,7 +1876,7 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   calls.length = 0;
   const retried = await view.deliver('t73', 'x', [shot, '/Users/me/ok.png']);
   assert.deepEqual(calls.map(c => c[1]), [envHc(model.putArgv('box/t73', '/Users/me/ok.png')),
-    envHc(model.sendArgv('box/t73', `x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`))]);
+    sendThere(`x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`)]);
   assert.equal(retried, `x\n\n${there('paste-20261116-101500.png')}\n${there('ok.png')}`);
   // The same when the files all went and the message itself did not: sent again, only the message goes.
   failSend = true;
@@ -1706,7 +1884,7 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   failSend = false;
   calls.length = 0;
   await view.deliver('t73', 'y', [shot]);
-  assert.deepEqual(calls.map(c => c[1]), [envHc(model.sendArgv('box/t73', `y\n\n${there('paste-20261116-101500.png')}`))]);
+  assert.deepEqual(calls.map(c => c[1]), [sendThere(`y\n\n${there('paste-20261116-101500.png')}`)]);
   // Once it went, the next send of that file copies it again (nothing is remembered past a send).
   calls.length = 0;
   await view.deliver('t73', 'y', [shot]);
@@ -1730,7 +1908,9 @@ test("a remote project's view reads that machine's ledger and sends to its termi
   // A local project's files go as they are: no copy, the message names them here.
   calls.length = 0;
   await Object.assign(Object.create(Mod.prototype), { machine: '' }).deliver('t73', '看图', [shot]);
-  assert.deepEqual(calls.map(c => c[1]), [envHc(model.sendArgv('t73', `看图\n\n${shot}`))]);
+  assert.deepEqual(calls.map(c => c[1]), [model.withoutTerminalEnv(
+    ['python3', '/app/mods/pm-dash/skill/scripts/pm.py', ...model.terminalSendArgv('t73', { text: `看图\n\n${shot}` })],
+    { unset: model.REATTACH_ENV })[1]]);
   // Before that machine's ledger is read, the view has no project from another one's state.
   assert.equal(Object.assign(view, { stateFor: '' }).pm(), null);
 });
@@ -2061,6 +2241,10 @@ test('PmProject view pages conversation and thread logs to the start, and hides 
   stubs.layout = () => ({ id: 'pm-stage', active: 'pm-project' });
   view.scroll = { scroll_to_item: i => scrolled.push(i) };
   view.threadScroll = { scroll_to_item: i => threadScrolled.push(i) };
+  const activeTabForScroll = view.activeSideTab?.();
+  if (activeTabForScroll && view.tabHandles?.has(activeTabForScroll.id)) {
+    view.tabHandles.get(activeTabForScroll.id).log = view.threadScroll;
+  }
   view.keyFocus = { focus() {} };
   view.heights = new Map();
   view.unfolded = new Map();
@@ -2967,6 +3151,10 @@ test('PmProject Library & Memory tabs: i18n, browsing, editing, conflicts, delet
   // (b) Bug 5b: >64KB document Find expands matching chunks past 64KB, scrolls to match, and Show More advances past expanded chunk.
   view.openDoc({ tab: 'library', root: 'docs', path: 'big.md' }, cx);
   await new Promise(r => setTimeout(r, 20));
+  const bigTab = view.activeSideTab?.();
+  if (bigTab && view.tabHandles?.has(bigTab.id)) {
+    view.tabHandles.get(bigTab.id).doc = view.docScroll;
+  }
   nodes.clear();
   view.render(cx);
   assert.equal(nodes.has('doc-show-more'), true, '>64KB doc initially slices at 64KB');
@@ -3045,7 +3233,7 @@ test('PmProject Library & Memory tabs: i18n, browsing, editing, conflicts, delet
   nodes.get('doc-delete')?.clicks(null, cx);
   await view.deleteActiveDoc(cx);
   assert.equal(docsStore.has('docs/spec.md'), false);
-  assert.equal(view.activeDoc, null);
+  assert.notEqual(view.activeDoc?.path, 'spec.md', 'deleted doc tab is closed');
   assert.equal(view.deletedBanner?.path, 'spec.md');
   nodes.clear();
   view.render(cx);
@@ -3054,6 +3242,7 @@ test('PmProject Library & Memory tabs: i18n, browsing, editing, conflicts, delet
   assert.equal(docsStore.has('docs/spec.md'), true, 'undo restores deleted doc from history');
 
   // Open History view -> Esc closes -> open again & restore version.
+  view.showIndexView(cx);
   await view.openHistory('library', 'docs', '', 'all', cx);
   nodes.clear();
   view.render(cx);
@@ -4723,7 +4912,7 @@ test('PmProject @ mention popup, inline tokens, navigation, routing, and local/r
     await new Promise(r => setTimeout(r, 10));
     assert.equal(sentCmds.length, 1);
     assert.equal(sentCmds[0].includes('tpm'), true, 'main composer routes @thread mention to PM');
-    assert.equal(sentCmds[0].includes('Ask [@Alpha Thread](thread:t-a)'), true);
+    assert.equal(sentCmds[0].includes('--text=Ask [@Alpha Thread](thread:t-a)'), true);
     assert.equal(view.draft, '');
     assert.equal(view.input.tokens().length, 0);
 
@@ -5760,7 +5949,8 @@ test('PmProject selectable conversation, window_drag isolation, hover quote, mul
     view.sendMain(cx);
     await new Promise(r => setTimeout(r, 10));
     assert.equal(sentCmds.length, 1);
-    const wire = sentCmds[0][sentCmds[0].length - 1];
+    const lastArg = sentCmds[0][sentCmds[0].length - 1];
+    const wire = lastArg.startsWith('--text=') ? lastArg.slice('--text='.length) : lastArg;
     assert.ok(wire.includes(`(quote:${encodeURIComponent(foldKey)})`));
     assert.ok(wire.includes('Here is my reply'));
     assert.equal(view.quotes.length, 0);
@@ -6497,7 +6687,9 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
   assert.deepEqual(nodes.get('list-steps-t1')?.texts, ['2/4'], 'reviewing step counts Build UI views done + Code review doing (2/4)');
   assert.equal(nodes.has('agent-row-worker:t1'), true, 'worker agent sub-row rendered');
   assert.equal(nodes.has('agent-row-review:t1-review'), true, 'reviewer agent sub-row rendered');
-  assert.equal(nodes.has('agent-row-worker:t_single'), true, 'single-worker thread still renders 1 compact agent row');
+  assert.equal(nodes.has('agent-row-worker:t_single'), false, 'single-worker thread does not render an extra child row');
+  assert.equal(nodes.has('agent-inline-worker:t_single'), true, 'single-worker thread renders inline clickable agent capsule');
+  assert.ok(nodes.get('agent-inline-worker:t_single').allTexts().includes('Sonnet'), 'inline capsule shows compact model label');
   assert.equal(nodes.has('fold-done-ep1'), true, 'unified tail fold merges finished subtask + ended helper');
   assert.equal(nodes.has('fold-done-agents-t1'), false, 'epic child does not render a duplicate agent fold');
   assert.deepEqual(nodes.get('fold-done-ep1')?.texts, ['2 done']);
@@ -6596,7 +6788,7 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
   assert.deepEqual(closedOverlays, ['ov-1']);
   nodes.get('agent-row-worker:t1').clicks({}, cx); // now [review:ov-2, worker:ov-3]
   view.agentWindows = model.focusAgentWindow(view.agentWindows, 'review:t1-review'); // review is newest -> worker(ov-3) is LRU!
-  nodes.get('agent-row-worker:t_single').clicks({}, cx); // evicts worker:t1 (ov-3)
+  nodes.get('agent-inline-worker:t_single').clicks({}, cx); // evicts worker:t1 (ov-3)
   assert.equal(closedOverlays.includes('ov-3'), true);
   assert.equal(view.agentWindows.length, 2);
 
@@ -6604,7 +6796,8 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
   nodes.get('list-t1').clicks({}, cx);
   nodes.clear();
   view.render(cx);
-  assert.equal(nodes.has('thread-back'), true);
+  assert.equal(nodes.has('side-tab-bar'), true, 'multi-tab bar renders on opening thread');
+  assert.equal(nodes.has('side-tab-index'), true, 'index button [≡] replaces single-slot back button');
   assert.equal(nodes.has('thread-status'), true);
   assert.equal(nodes.has('thread-title'), true);
   assert.equal(nodes.has('thread-terminal'), true);
@@ -6612,7 +6805,7 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
   assert.equal(nodes.get('thread-terminal').textColor, '#aaaaaa', 'closed primary window uses muted icon tint');
   assert.equal(nodes.get('thread-terminal').bg, '');
   assert.equal(nodes.has('thread-diff'), true);
-  assert.equal(nodes.has('thread-close'), true);
+  assert.equal(nodes.has('split-close'), true, 'panel close button lives in Row 1 tab bar');
   assert.equal(nodes.has('thread-plan-card'), true);
   assert.equal(nodes.has('substep-fold-1'), true);
   assert.equal(nodes.has('plan-substep-1-0'), false, 'done step folds substeps by default');
@@ -6622,9 +6815,9 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
   assert.equal(nodes.has('plan-substep-1-0'), true, 'clicking substep fold expands folded substeps');
   assert.equal(nodes.has('plan-substep-1-1'), true);
 
-  // Check doing step auto-expansion and active window topbar highlight on t_single (navigate back via #thread-back, click #list-t_single), then return to t1
-  nodes.get('thread-back').clicks({}, cx);
-  assert.equal(view.detail, false, '#thread-back returns to Threads list');
+  // Check doing step auto-expansion and active window topbar highlight on t_single (navigate back via #side-tab-index, click #list-t_single), then return to t1
+  nodes.get('side-tab-index').clicks({}, cx);
+  assert.equal(view.detail, false, '#side-tab-index returns to Threads list');
   nodes.clear();
   view.render(cx);
   nodes.get('list-t_single').clicks({}, cx);
@@ -6639,7 +6832,7 @@ test('Threads 4 UI: epic groups, smooth Bezier wires, hover cards, detail two-la
   nodes.clear();
   view.render(cx);
   assert.equal(nodes.has('plan-substep-1-0'), false, 'clicking active substep fold collapses it');
-  nodes.get('thread-back').clicks({}, cx);
+  nodes.get('side-tab-index').clicks({}, cx);
   nodes.clear();
   view.render(cx);
   nodes.get('list-t1').clicks({}, cx);
@@ -7810,7 +8003,8 @@ test('PmProject composer queues messages while PM is blocked, shows dialog reaso
         return { code: 0, stdout: pmScreen, stderr: '' };
       }
       if (list.includes('send')) {
-        const text = list[list.length - 1];
+        const raw = list[list.length - 1];
+        const text = raw.startsWith('--text=') ? raw.slice('--text='.length) : raw;
         if (sendBehavior === 'blocked_perm') {
           return { code: 1, stdout: '', stderr: 'tpm is blocked (permission)' };
         }
@@ -8008,7 +8202,11 @@ test('queued messages persist across mod reload / app restart and clear once del
     exec: async (_cmd, args) => {
       const list = Array.isArray(args) ? args : [];
       if (list.includes('read')) return { code: 0, stdout: 'Enter to select · ↑/↓ to navigate', stderr: '' };
-      if (list.includes('send')) { sentMessages.push(list[list.length - 1]); return { code: 0, stdout: '', stderr: '' }; }
+      if (list.includes('send')) {
+        const raw = list[list.length - 1];
+        sentMessages.push(raw.startsWith('--text=') ? raw.slice('--text='.length) : raw);
+        return { code: 0, stdout: '', stderr: '' };
+      }
       return { code: 0, stdout: '{}', stderr: '' };
     },
   };
@@ -8283,7 +8481,7 @@ test('PmProject thread detail renders bounded wrapped Popup hover tips for log r
   view.render(cx);
   assert.equal(nativeTips.length, 0, 'PmProject must not emit unbounded native .tooltip() calls');
 
-  // Hovering long log row opens bounded, wrapped, truncated Popup anchored above-left inside the 360px panel.
+  // Hovering long log row opens bounded, wrapped, truncated Popup anchored above-left inside the split panel.
   assert.ok(nodes.has('thread-entry-2'), `expected thread-entry-2, got: ${[...nodes.keys()].join(', ')}`);
   nodes.get('thread-entry-2').hover(true, cx);
   nodes.clear();
@@ -8291,7 +8489,9 @@ test('PmProject thread detail renders bounded wrapped Popup hover tips for log r
   const logPop = nodes.get('hover-tip-thread-entry-2');
   assert.ok(logPop && logPop.content, 'log row hover renders Popup card');
   assert.equal(logPop.anchor, 'bottom_left');
-  assert.ok(logPop.content.w <= 328 && logPop.content.maxW <= 328, `card width (${logPop.content.w}) must stay within 360px panel`);
+  const splitCardW = model.resolveSplitLayout({ mode: 'split', viewWidth: 1280 }).cardWidth;
+  assert.ok(logPop.content.w <= splitCardW - 32 && logPop.content.maxW <= splitCardW - 32,
+    `card width (${logPop.content.w}) must stay within ${splitCardW}px split panel`);
   assert.ok(logPop.content.kids.length >= 2 && logPop.content.kids.length <= model.TOOLTIP_MAX_LINES, 'long log wraps across multiple bounded lines');
   assert.ok(logPop.content.kids.every(k => k.whitespaceNormal), 'wrapped lines enable whitespace_normal');
   assert.ok(logPop.allTexts().at(-1).endsWith('…'), 'overflowing log tip truncates with ellipsis');
@@ -8309,7 +8509,7 @@ test('PmProject thread detail renders bounded wrapped Popup hover tips for log r
   const titlePop = nodes.get('hover-tip-thread-title');
   assert.ok(titlePop && titlePop.content);
   assert.equal(titlePop.anchor, 'top_left');
-  assert.ok(titlePop.content.maxW <= 328);
+  assert.ok(titlePop.content.maxW <= splitCardW - 32);
 
   nodes.get('thread-close').hover(true, cx);
   nodes.clear();
@@ -9748,8 +9948,10 @@ test('PmProject end-to-end: render-phase flushQueue safety, unconfirmed timeout 
       const list = Array.isArray(args) ? args : [];
       if (list.includes('read')) return { code: 0, stdout: '❯ ', stderr: '' };
       if (list.includes('send')) {
-        const target = list[list.length - 2];
-        const text = list[list.length - 1];
+        const sendIdx = list.indexOf('send');
+        const textArg = list.find(x => typeof x === 'string' && x.startsWith('--text='));
+        const target = textArg ? (list[sendIdx + 2] && !list[sendIdx + 2].startsWith('-') ? list[sendIdx + 2] : '') : list[list.length - 2];
+        const text = textArg ? textArg.slice('--text='.length) : list[list.length - 1];
         sentCalls.push({ target, text });
         if (onSendHook) return await onSendHook(target, text);
         return { code: 0, stdout: '', stderr: '' };
@@ -10514,7 +10716,8 @@ test('PmProject UI: paragraph hover dwell anti-flicker, paragraph quote button, 
     view.sendMain(cx);
     await new Promise(r => setTimeout(r, 10));
     assert.equal(sentCmds.length, 1);
-    const wire = sentCmds[0][sentCmds[0].length - 1];
+    const lastArg = sentCmds[0][sentCmds[0].length - 1];
+    const wire = lastArg.startsWith('--text=') ? lastArg.slice('--text='.length) : lastArg;
     assert.ok(wire.includes('¶3'), 'wire contains paragraph quote marker');
     assert.ok(wire.includes('excerpt'), 'wire contains selection quote marker');
     assert.equal(model.splitQuotedMessage(wire).quotes.length, 3, 'all 3 stacked quotes preserved on send');
@@ -12033,6 +12236,23 @@ test('PM observability & recovery: pmTurnWorking, pmActivityView, AsyncGate, and
   const termAgyBg = { address: 't182', status: 'working', report: { state: 'working', msg: '' } };
   assert.equal(model.pmTurnWorking(termAgyBg, [{ address: 't182', status: 'working' }], { phase: 'idle', bg_shells: 1 }), false);
   assert.equal(model.pmTurnWorking(termAgyBg, [{ address: 't182', status: 'working' }], { phase: 'working', bg_shells: 0 }), true);
+  // 1b) Live terminal reporting no status falls back to pm.turn.phase
+  const termNoStatus = { address: 't3', status: '' };
+  assert.equal(model.pmTurnWorking(termNoStatus, [], { phase: 'working' }), true);
+  assert.equal(model.pmTurnWorking(termNoStatus, [], { phase: 'stalled' }), true);
+  assert.equal(model.pmTurnWorking(termNoStatus, [], { phase: 'idle' }), false);
+  assert.equal(model.pmTurnWorking(termNoStatus, [], null), false);
+  assert.equal(model.pmTurnWorking(null, [], { phase: 'working' }), false);
+  // 1c) Undelivered banner text surfaces delayed batches in EN & ZH
+  assert.equal(model.undeliveredBannerText('en', null), '');
+  assert.equal(
+    model.undeliveredBannerText('en', { count: 2, waiting_seconds: 900, state: 'unknown', deliverer_running: false }),
+    '2 pending events undelivered for 15m (state=unknown, deliverer not running)',
+  );
+  assert.equal(
+    model.undeliveredBannerText('zh', { count: 2, waiting_seconds: 900, state: 'unknown', deliverer_running: true }),
+    '2 条事件已等待 15 分钟未能送达 PM（状态=unknown）',
+  );
 
   // 2) Quiet live activity view: dots <3s -> tool summary -> 90s slow (interrupt) -> 300s stalled (interrupt + rotate)
   const baseMs = 1795491000000;
@@ -12053,27 +12273,31 @@ test('PM observability & recovery: pmTurnWorking, pmActivityView, AsyncGate, and
   });
   assert.equal(vTool.mode, 'working');
   assert.match(vTool.label, /正在运行 pm\.py diff #301 · 14s/);
-  assert.equal(vTool.canInterrupt, false);
+  assert.equal(vTool.canInterrupt, true);
 
   const vSlow = model.pmActivityView('zh', {
-    turn: { phase: 'working', started_ms: baseMs, last_activity_ms: baseMs, activity: { kind: 'tool', tool: 'Bash', summary: 'git fetch' } },
+    turn: { phase: 'working', slow: true, started_ms: baseMs, last_activity_ms: baseMs + 60_000, activity: { kind: 'tool', tool: 'Bash', summary: 'git fetch' } },
     working: true,
-    nowMs: baseMs + 95_000,
-    serverNowMs: baseMs + 95_000,
+    nowMs: baseMs + 155_000,
+    serverNowMs: baseMs + 155_000,
   });
   assert.equal(vSlow.mode, 'slow');
   assert.equal(vSlow.canInterrupt, true);
   assert.equal(vSlow.canRotate, false);
+  // FS-17: slow displays duration without progress (95s = 1m 35s), NOT total elapsed (155s = 2m 35s).
+  assert.match(vSlow.label, /1m 35s/);
 
   const vStalled = model.pmActivityView('zh', {
-    turn: { phase: 'stalled', started_ms: baseMs, last_activity_ms: baseMs, activity: { kind: 'tool', tool: 'Bash', summary: 'sleep 999' } },
+    turn: { phase: 'stalled', stalled: true, started_ms: baseMs, last_activity_ms: baseMs + 1_800_000, activity: { kind: 'tool', tool: 'Bash', summary: 'sleep 999' } },
     working: true,
-    nowMs: baseMs + 305_000,
-    serverNowMs: baseMs + 305_000,
+    nowMs: baseMs + 2_105_000,
+    serverNowMs: baseMs + 2_105_000,
   });
   assert.equal(vStalled.mode, 'stalled');
   assert.equal(vStalled.canInterrupt, true);
   assert.equal(vStalled.canRotate, true);
+  // FS-17: stalled displays duration without progress (305s = 5m 5s), NOT total 35m turn elapsed.
+  assert.match(vStalled.label, /5m 5s/);
 
   // 3) AsyncGate preempts hung RPC past deadline and ignores stale completions
   const gate = model.createAsyncGate();
@@ -12258,6 +12482,38 @@ test('Steps card subplan rows bound long notes so titles are never squeezed or o
   assert.equal(compact.hasStyle(compactSub, 'overflow_hidden'), true);
   assert.equal(compact.hasStyle(compactSub.kids[2], 'max_w', '40%'), true);
   assert.equal(compact.hasStyle(compactSub.kids[2].kids[0], 'truncate'), true);
+
+  // 3) Steps & Deps card headers reserve right padding so progress (e.g. 0/4) is never clipped at narrow widths
+  const planCard = detail.nodes.get('thread-plan-card');
+  assert.ok(planCard, 'plan card renders');
+  const planHeader = planCard.kids[0];
+  assert.equal(detail.hasStyle(planHeader, 'w_full'), true, 'steps header fills card width');
+  assert.equal(detail.hasStyle(planHeader, 'min_w', 0), true, 'steps header sets min_w(0)');
+  assert.equal(detail.hasStyle(planHeader, 'pr', 6), true, 'steps header aligns right padding with step rows');
+  const spacer = planHeader.kids[1];
+  assert.equal(detail.hasStyle(spacer, 'flex_1'), true, 'steps header spacer flexes');
+  assert.equal(detail.hasStyle(spacer, 'min_w', 0), true, 'steps header spacer sets min_w(0)');
+
+  const depsTracker = mkTracker();
+  stepsView.renderDepsCard({
+    ui: depsTracker.ui,
+    deps: {
+      progress: '1/2',
+      ready: false,
+      items: [{ id: 'dep-1', title: 'Prerequisite task', isMet: true, clickable: true }],
+    },
+    theme,
+    lang: 'en',
+    icons,
+    compact: false,
+    framed: true,
+    cardId: 'thread-deps-card',
+  });
+  const depsCard = depsTracker.nodes.get('thread-deps-card');
+  assert.ok(depsCard, 'deps card renders');
+  assert.equal(depsTracker.hasStyle(depsCard, 'w_full'), true, 'deps card sets w_full');
+  assert.equal(depsTracker.hasStyle(depsCard, 'min_w', 0), true, 'deps card sets min_w(0)');
+  assert.equal(depsTracker.hasStyle(depsCard.kids[0], 'pr', 6), true, 'deps header reserves right padding');
 });
 
 test('parseRefLink resolves file:// repo & ledger docs, #L anchors, doc:/library:, relative .md, remote/Windows paths, and leaves https/thread intact', () => {
@@ -12893,4 +13149,4011 @@ test('repo_docs: resolveContextLink handles intra-root, research cross-root, and
   assert.deepEqual(model.resolveContextLink(fromReadme, '../mods/pm-project/model.js', files),
     { root: 'repo', path: 'mods/pm-project/model.js' });
   assert.equal(model.resolveContextLink(fromReadme, '../../outside.md', files), null);
+});
+
+test('sidebar split: dual-mode width/ratio memory, legacy migration, reset, and wide/medium/narrow breakpoints', () => {
+  const {
+    resolvePanelMode, resolveSplitLayout, readPanelSizes, updatePanelSizes, resetPanelModeSize,
+    SPLIT_WIDE_MIN, SPLIT_MEDIUM_MIN, word,
+  } = model;
+
+  assert.equal(SPLIT_WIDE_MIN, 1080);
+  assert.equal(SPLIT_MEDIUM_MIN, 700);
+  assert.equal(word('en', 'closeSidePanel'), 'Close side panel');
+  assert.equal(word('zh', 'closeSidePanel'), '关闭侧栏');
+  assert.match(word('en', 'resetPanelWidthTip'), /double-click/i);
+  assert.match(word('zh', 'resetPanelWidthTip'), /双击/);
+
+  // resolvePanelMode: list -> compact; detail/doc/edit/history/change -> split
+  assert.equal(resolvePanelMode({}), 'compact');
+  assert.equal(resolvePanelMode({ detail: true }), 'split');
+  assert.equal(resolvePanelMode({ activeDoc: true }), 'split');
+  assert.equal(resolvePanelMode({ editingDoc: true }), 'split');
+  assert.equal(resolvePanelMode({ historyView: true }), 'split');
+  assert.equal(resolvePanelMode({ changeOpen: true }), 'split');
+
+  // Legacy migration from localStorage.panelWidth
+  assert.deepEqual(readPanelSizes(null, null), { compactPx: null, splitRatio: null });
+  assert.deepEqual(readPanelSizes(null, '350'), { compactPx: 350, splitRatio: null });
+  assert.deepEqual(readPanelSizes(null, '600'), { compactPx: null, splitRatio: 0.5 });
+  assert.deepEqual(readPanelSizes(null, '950'), { compactPx: null, splitRatio: 0.62 });
+  assert.deepEqual(readPanelSizes('{"compactPx":330,"splitRatio":0.52}', '600'), { compactPx: 330, splitRatio: 0.52 });
+
+  // Independent persistence and single-mode reset
+  let sizes = { compactPx: null, splitRatio: null };
+  sizes = updatePanelSizes(sizes, 'compact', 380, 1440);
+  assert.deepEqual(sizes, { compactPx: 380, splitRatio: null });
+  sizes = updatePanelSizes(sizes, 'split', 720, 1440);
+  assert.deepEqual(sizes, { compactPx: 380, splitRatio: 0.5 });
+  // Double-click reset in split only clears splitRatio, keeping compactPx intact
+  const resetSplit = resetPanelModeSize(sizes, 'split');
+  assert.deepEqual(resetSplit, { compactPx: 380, splitRatio: null });
+  const resetCompact = resetPanelModeSize(sizes, 'compact');
+  assert.deepEqual(resetCompact, { compactPx: null, splitRatio: 0.5 });
+
+  // Wide breakpoint (V >= 1080): compact ~27% clamped 320..368, split ~47% clamped 440..760
+  const wideCompact = resolveSplitLayout({ mode: 'compact', viewWidth: 1440 });
+  assert.equal(wideCompact.layoutKind, 'inline');
+  assert.equal(wideCompact.wide, true);
+  assert.equal(wideCompact.cardWidth, 368);
+  assert.equal(wideCompact.slotWidth, 383);
+  assert.equal(wideCompact.conversationPadX, 28);
+
+  const wideSplit = resolveSplitLayout({ mode: 'split', viewWidth: 1440 });
+  assert.equal(wideSplit.layoutKind, 'inline');
+  assert.equal(wideSplit.cardWidth, 677);
+  assert.equal(wideSplit.conversationPadX, 20); // 1440 - (677 + 15) = 748 (< 760, >= 520)
+
+  const ultraWideSplit = resolveSplitLayout({ mode: 'split', viewWidth: 1728 });
+  assert.equal(ultraWideSplit.cardWidth, 760);
+  assert.equal(ultraWideSplit.conversationPadX, 28);
+
+  // Medium breakpoint (700 <= V < 1080): render_check.py V=731 stays inline without overflow
+  const medCompact = resolveSplitLayout({ mode: 'compact', viewWidth: 731 });
+  assert.equal(medCompact.layoutKind, 'inline');
+  assert.equal(medCompact.wide, false);
+  assert.equal(medCompact.cardWidth, 280);
+  assert.equal(medCompact.conversationPadX, 16);
+
+  const medSplit = resolveSplitLayout({ mode: 'split', viewWidth: 731 });
+  assert.equal(medSplit.layoutKind, 'inline');
+  assert.equal(medSplit.cardWidth, 351);
+
+  // Narrow breakpoint (V < 700): switches to sheet drawer overlay
+  const narSplit = resolveSplitLayout({ mode: 'split', viewWidth: 620 });
+  assert.equal(narSplit.layoutKind, 'sheet');
+  assert.equal(narSplit.wide, false);
+  assert.equal(narSplit.cardWidth, 460);
+  assert.equal(narSplit.slotWidth, 460);
+  assert.equal(narSplit.conversationPadX, 20);
+
+  const tinySplit = resolveSplitLayout({ mode: 'split', viewWidth: 480 });
+  assert.equal(tinySplit.layoutKind, 'sheet');
+  assert.equal(tinySplit.cardWidth, 432);
+  assert.equal(tinySplit.conversationPadX, 16);
+});
+
+test('sidebar split: retained dual Entities isolate 20x gripMove drags (0 child renders), dark/light themes, 44px topbar, and narrow sheet', async () => {
+  const nodes = new Map();
+  let currentTheme = {
+    canvas: '#16171a', background: '#1c1d21', surface: '#22242a', chrome: '#111214',
+    raised: '#2b2d35', hover: '#30323b', border: '#2f323b', input: '#343844',
+    foreground: '#f2f3f5', muted: '#a3a8b5', dim: '#727786', accent: '#6b9eff',
+    working: '#57c27c', blocked: '#e56b6f', ansi2: '#57c27c', ansi1: '#e56b6f', ansi3: '#e9b85b',
+  };
+  const makeEl = kind => {
+    const node = {
+      kind, nodeId: null, bgColor: null, hasBorderB: false, hasShadowXs: false,
+      wVal: null, hVal: null, opacityVal: null, kids: [], handlers: {},
+    };
+    const proxy = new Proxy(node, {
+      get(target, prop) {
+        if (prop === 'id') return v => { target.nodeId = v; nodes.set(v, target); return proxy; };
+        if (prop === 'bg') return v => { target.bgColor = v; return proxy; };
+        if (prop === 'border_b') return () => { target.hasBorderB = true; return proxy; };
+        if (prop === 'shadow_xs') return () => { target.hasShadowXs = true; return proxy; };
+        if (prop === 'w') return v => { target.wVal = v; return proxy; };
+        if (prop === 'h') return v => { target.hVal = v; return proxy; };
+        if (prop === 'opacity') return v => { target.opacityVal = v; return proxy; };
+        if (prop === 'child') return c => { if (c != null) target.kids.push(c); return proxy; };
+        if (prop === 'children') return arr => { if (Array.isArray(arr)) target.kids.push(...arr); return proxy; };
+        if (prop === 'when') return (cond, fn) => (cond ? fn(proxy) : proxy);
+        if (prop === 'on_click') return fn => { target.handlers.click = fn; return proxy; };
+        if (prop === 'on_hover') return fn => { target.handlers.hover = fn; return proxy; };
+        if (prop === 'on_mouse_down') return (_b, fn) => { target.handlers.mouseDown = fn; return proxy; };
+        if (prop === 'on_size_change') return fn => { target.handlers.sizeChange = fn; return proxy; };
+        if (prop in target) return target[prop];
+        return () => proxy;
+      },
+    });
+    return proxy;
+  };
+
+  const baseUrl = new URL('./main.js', import.meta.url).href;
+  const loaderSrc = `
+    export async function resolve(specifier, ctx, next) {
+      if (ctx.parentURL?.includes('split-entity-test') && ['gpui-kit', 'gpui-base', 'herdr'].includes(specifier)) return { url: 'split-stub:' + specifier, shortCircuit: true };
+      return next(specifier, ctx);
+    }
+    export async function load(url, ctx, next) {
+      if (url === 'split-stub:gpui-kit') {
+        return { format: 'module', shortCircuit: true, source: 'export class View {} export const div = () => globalThis.__splitKit.div(); export const svg = () => globalThis.__splitKit.svg(); export const image = () => globalThis.__splitKit.image();' };
+      }
+      if (url === 'split-stub:gpui-base') {
+        return { format: 'module', shortCircuit: true, source: 'export const v_flex = () => globalThis.__splitKit.v_flex(); export const h_flex = () => globalThis.__splitKit.h_flex(); export const TextView = { markdown: () => globalThis.__splitKit.div(), plain: () => globalThis.__splitKit.div() }; export const Textarea = { new: () => globalThis.__splitKit.div() }; export const Input = { new: () => globalThis.__splitKit.div() }; export const Popup = { new: () => globalThis.__splitKit.div() }; export const Scrollbar = { new: () => globalThis.__splitKit.div() }; export const TextareaState = globalThis.__splitKit.State; export const InputState = globalThis.__splitKit.State; export const ScrollHandle = globalThis.__splitKit.ScrollHandle;' };
+      }
+      if (url === 'split-stub:herdr') {
+        return { format: 'module', shortCircuit: true, source: 'export const theme = () => globalThis.__splitKit.theme(); export const home = () => "/tmp"; export const appHome = () => "/tmp"; export const exec = async () => ({ code: 0, stdout: "", stderr: "" }); export const readTextFile = async () => ""; export const writeTextFile = async () => {}; export const watchFolder = () => ({ close() {} }); export const layout = () => ({ id: "pm-stage", active: "pm-project", children: [] }); export const run = () => {}; export const terminals = () => []; export const agents = () => []; export const panes = () => []; export const spaces = () => []; export const shared = k => globalThis.__splitKit.shared(k); export const setShared = () => {}; export const props = () => ({}); export const openOverlay = () => {}; export const closeOverlay = () => {}; export const window = () => ({ width: 1440, height: 900 });' };
+      }
+      return next(url, ctx);
+    }
+  `;
+  const { register } = await import('node:module');
+  register('data:text/javascript,' + encodeURIComponent(loaderSrc));
+  const stateStub = () => new Proxy({
+    set_value() {}, value: () => '', focus() {}, is_focused: () => false,
+  }, { get: (o, k) => (k in o ? o[k] : () => {}) });
+  const sharedMap = { 'pm-project': { pm: 'pm-dudu' } };
+  globalThis.__splitKit = {
+    div: () => makeEl('div'),
+    svg: () => makeEl('svg'),
+    image: () => makeEl('image'),
+    v_flex: () => makeEl('v_flex'),
+    h_flex: () => makeEl('h_flex'),
+    State: { new: stateStub },
+    ScrollHandle: { new: () => ({ scroll_to_item() {}, offset: () => ({ x: 0, y: 0 }) }) },
+    theme: () => currentTheme,
+    shared: k => sharedMap[k],
+  };
+
+  // Real cx.new stub tracking retained child Entity render counts with ISOLATED per-Entity cx.
+  const childEntities = [];
+  const pendingTimers = [];
+  const makeCx = (ownerView, onNotify) => {
+    const cxObj = {
+      notify(target) {
+        if (target && typeof target._render === 'function') {
+          target._render();
+        } else {
+          onNotify?.();
+        }
+      },
+      new(ViewClass, p) {
+        const inst = new ViewClass();
+        let ent;
+        const childCx = makeCx(inst, () => ent._render());
+        inst.init?.(p, childCx);
+        ent = {
+          name: ViewClass.name,
+          inst,
+          cx: childCx,
+          renderCount: 0,
+          released: false,
+          set_props(nextP) { inst.update?.(nextP); },
+          release() { this.released = true; return true; },
+          _render() {
+            this.renderCount += 1;
+            return inst.render(childCx);
+          },
+        };
+        childEntities.push(ent);
+        return ent;
+      },
+      spawn() {},
+      timer: {
+        after(ms, fn) {
+          const entry = { ms, fn, cancelled: false, cx: cxObj };
+          pendingTimers.push(entry);
+          return { cancel() { entry.cancelled = true; } };
+        },
+        every() { return { cancel() {} }; },
+      },
+      focus_handle: () => ({ focus() {}, is_focused: () => false }),
+      stop_propagation() {},
+    };
+    return cxObj;
+  };
+
+  const { default: PmProject } = await import(`${baseUrl}?split-entity-test=${Date.now()}`);
+  let shellRenders = 0;
+  const view = new PmProject();
+  const rootCx = makeCx(view, () => { shellRenders += 1; view.render(rootCx); });
+  view.init({}, rootCx);
+  view.machine = '';
+  view.stateFor = '';
+  view.pmName = 'pm-dudu';
+  view.viewWidth = 1440;
+  view.wide = true;
+  view.measured = true;
+  view.listShown = true;
+  view.state = {
+    lang: 'en',
+    pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu' }],
+    tasks: [{ id: 't1', pm: 'pm-dudu', title: 'Split sidebar', status: 'in_progress', branch: 'dev/split', log: [] }],
+  };
+
+  assert.equal(childEntities.length, 2, 'PmProject creates two retained child Entities (Conversation + SideSplit)');
+  const [convEnt, sideEnt] = childEntities;
+
+  // Initial render + explicit child render to verify structure
+  nodes.clear();
+  view.render(rootCx);
+  convEnt._render();
+  sideEnt._render();
+  assert.equal(nodes.get('pm-project-header-bar')?.hasBorderB, false, 'main header bar removes full-width bottom border');
+  assert.equal(nodes.get('side-split-card')?.bgColor, currentTheme.background, 'dark theme split card uses t.background');
+  assert.equal(nodes.get('side-split-card')?.hasShadowXs, false, 'dark theme split card omits shadow_xs');
+  assert.equal(nodes.get('side-header')?.hVal, 44, 'directory sideHeader is unified 44px');
+  assert.equal(nodes.get('panel-grip')?.wVal, 10, 'cross-edge grip is 10px wide');
+
+  // 20x gripMove drag: 0 child Entity re-renders!
+  const convBefore = convEnt.renderCount;
+  const sideBefore = sideEnt.renderCount;
+  shellRenders = 0;
+  view.gripDown({ click_count: 1, position: { x: 1000 } }, rootCx);
+  for (let i = 1; i <= 20; i++) {
+    view.gripMove({ position: { x: 1000 - i * 4 } }, rootCx);
+  }
+  assert.ok(shellRenders >= 20, 'shell re-rendered for each drag step');
+  assert.equal(convEnt.renderCount, convBefore, 'ConversationPaneView rendered 0 times during 20 gripMove calls');
+  assert.equal(sideEnt.renderCount, sideBefore, 'SideSplitPaneView rendered 0 times during 20 gripMove calls');
+  view.gripUp(rootCx);
+
+  // Light theme (paper): split card adds shadow_xs and uses t.background
+  currentTheme = {
+    ...currentTheme,
+    canvas: '#f4f3ef', background: '#ffffff', surface: '#f7f6f3', chrome: '#eceae4',
+    foreground: '#1e1f22', border: '#dedcd5',
+  };
+  nodes.clear();
+  sideEnt._render();
+  assert.equal(nodes.get('side-split-card')?.bgColor, '#ffffff', 'light theme split card uses t.background');
+  assert.equal(nodes.get('side-split-card')?.hasShadowXs, true, 'light theme split card applies shadow_xs');
+
+  // Thread detail: unified 44px topbar, `<-` returns to Threads list, `x` closes entire panel (using isolated sideCx!)
+  view.detail = true;
+  view.thread = 't1';
+  nodes.clear();
+  sideEnt._render();
+  assert.equal(nodes.get('thread-topbar')?.hVal, 44, 'thread detail topbar is unified 44px');
+  assert.equal(nodes.has('side-header'), false, 'split subview replaces sideHeader instead of stacking');
+  assert.ok(nodes.get('thread-back')?.handlers.click, 'thread-back exists');
+  assert.ok(nodes.get('thread-close')?.handlers.click, 'thread-close exists');
+
+  // During same-open compact <-> split transition, 44px topbar stays w_full (no fixed width lock) while scroll body locks.
+  view.panelTransitioning = true;
+  view._panelSlideFromZero = false;
+  view._panelLockWidth = 677;
+  nodes.clear();
+  sideEnt._render();
+  assert.equal(nodes.get('thread-topbar')?.wVal, null, '44px topbar stays w_full during width transition (no fixed w clip)');
+  view.panelTransitioning = false;
+  view._panelLockWidth = null;
+
+  // Clicking `<-` with isolated sideCx must notify shell + conv + side
+  const shellBeforeBack = shellRenders;
+  const convBeforeBack = convEnt.renderCount;
+  nodes.get('thread-back').handlers.click({}, sideEnt.cx);
+  assert.equal(view.detail, false);
+  assert.equal(view.listResting(), true);
+  assert.ok(shellRenders > shellBeforeBack, 'thread-back via sideCx notifies parent shell');
+  assert.ok(convEnt.renderCount > convBeforeBack, 'thread-back via sideCx notifies convEntity for header/padX sync');
+
+  // startNewDoc / cancelEditDoc / openHistory / closeHistory via isolated sideCx all notify parent shell for compact <-> split
+  let sCount = shellRenders;
+  view.startNewDoc('library', sideEnt.cx);
+  assert.ok(shellRenders > sCount, 'startNewDoc via sideCx notifies parent shell');
+  sCount = shellRenders;
+  view.cancelEditDoc(sideEnt.cx);
+  assert.ok(shellRenders > sCount, 'cancelEditDoc via sideCx notifies parent shell');
+  sCount = shellRenders;
+  view.openHistory('library', 'docs', '', 'all', sideEnt.cx);
+  assert.ok(shellRenders > sCount, 'openHistory via sideCx notifies parent shell');
+  sCount = shellRenders;
+  view.closeHistory(sideEnt.cx);
+  assert.ok(shellRenders > sCount, 'closeHistory via sideCx notifies parent shell');
+
+  // answerInOwnWords via isolated sideCx notifies convEntity so main composer shows answering banner
+  const convBeforeAns = convEnt.renderCount;
+  view.answerInOwnWords({ key: 'q1', title: 'Approve?', task: 't1' }, sideEnt.cx);
+  assert.ok(convEnt.renderCount > convBeforeAns, 'answerInOwnWords via sideCx notifies convEntity');
+
+  // Re-open detail and click `x` via isolated sideCx: defers clearing detail until slide-out timer finishes (no flash to compact)
+  view.detail = true;
+  view.listShown = true;
+  pendingTimers.length = 0;
+  nodes.clear();
+  sideEnt._render();
+  const convBeforeClose = convEnt.renderCount;
+  nodes.get('thread-close').handlers.click({}, sideEnt.cx);
+  assert.equal(view.isPanelOpen(), false, 'panel reports closed immediately for header toggle & slide-out');
+  assert.equal(view.panelClosing, true, 'panelClosing holds current split view while sliding out');
+  assert.equal(view.detail, true, 'detail stays intact on frame 1 of slide-out (no flash to compact list)');
+  assert.ok(convEnt.renderCount > convBeforeClose, 'closing panel notifies convEntity so header panel icon deactivates');
+  const hideTimer = pendingTimers.find(t => t.ms === 220 && !t.cancelled);
+  assert.ok(hideTimer, 'panelHideTimer scheduled to clear closed state after slide');
+  hideTimer.fn(hideTimer.cx);
+  assert.equal(view.panelClosing, false);
+  assert.equal(view.detail, false, 'detail cleared once slide-out finishes');
+  assert.equal(view.listShown, false);
+
+  // Clicking #say-answering-x via isolated convCx notifies sideEntity to clear detail ownRow highlight
+  view.state = {
+    ...view.state,
+    tasks: [{ ...view.state.tasks[0], status: 'blocked' }],
+  };
+  view._timelineCache = null;
+  view.answerInOwnWords({ key: 'ask:t1', title: 'Approve?', task: 't1' }, sideEnt.cx);
+  nodes.clear();
+  convEnt._render();
+  assert.ok(nodes.get('say-answering-x')?.handlers.click, '#say-answering-x exists when answering');
+  const sideBeforeCancelAns = sideEnt.renderCount;
+  nodes.get('say-answering-x').handlers.click({ stop_propagation() {} }, convEnt.cx);
+  assert.equal(view.answering, null);
+  assert.ok(sideEnt.renderCount > sideBeforeCancelAns, '#say-answering-x via convCx notifies sideEntity');
+  view.state = {
+    ...view.state,
+    tasks: [{ ...view.state.tasks[0], status: 'in_progress' }],
+  };
+  view._timelineCache = null;
+
+  // Closing from Threads list while view.thread remembers a previous thread must NOT morph into thread detail during slide-out
+  view.detail = false;
+  view.thread = 't1';
+  view.sideTab = 'threads';
+  view.listShown = true;
+  view.panelMounted = true;
+  view.closeSidePanel(sideEnt.cx);
+  nodes.clear();
+  sideEnt._render();
+  assert.ok(nodes.has('thread-list'), 'closing from Threads list keeps thread-list during slide-out');
+  assert.equal(nodes.has('thread-topbar'), false, 'closing from Threads list never morphs into stale thread detail');
+
+  // Esc on a panel opened from closed state (_panelOpenedFromClosed) uses panelClosing deferred cleanup while preserving open tabs
+  view.panelClosing = false;
+  view.listShown = false;
+  view.detail = false;
+  view.openThread('t1', rootCx);
+  assert.equal(view._panelOpenedFromClosed, true);
+  pendingTimers.length = 0;
+  view.escape({ keystroke: 'escape' }, rootCx);
+  assert.equal(view.panelClosing, true, 'Esc on temporary detail defers hiding via panelClosing');
+  assert.equal(view.isPanelOpen(), false, 'panel reports closed immediately');
+  assert.equal(view.detail, true, 'detail stays mounted during Esc slide-out');
+  const escHideTimer = pendingTimers.find(t => t.ms === 220 && !t.cancelled);
+  assert.ok(escHideTimer);
+  escHideTimer.fn(escHideTimer.cx);
+  assert.equal(view.panelClosing, false);
+  assert.equal(view.panelMounted, false);
+  assert.equal(view.tabState.tabs.length, 1, 'open tab is preserved when panel hides');
+
+  // Narrow viewport (< 700px): renders sheet overlay with opacity-animated backdrop click-to-close
+  view.viewWidth = 620;
+  view.wide = false;
+  view.listShown = true;
+  nodes.clear();
+  view.render(rootCx);
+  assert.ok(nodes.has('pm-panel-sheet-layer'), 'narrow viewport renders sheet overlay');
+  assert.equal(nodes.get('pm-panel-backdrop')?.opacityVal, 1, 'narrow sheet backdrop animates via opacity');
+  assert.ok(nodes.get('pm-panel-backdrop')?.handlers.click, 'narrow sheet has clickable backdrop');
+  nodes.get('pm-panel-backdrop').handlers.click({}, rootCx);
+  assert.equal(view.listShown, false, 'clicking sheet backdrop closes side panel');
+
+  view.close();
+  assert.equal(convEnt.released, true, 'close() releases ConversationPaneView entity');
+  assert.equal(sideEnt.released, true, 'close() releases SideSplitPaneView entity');
+});
+
+test('sessionTurns extracts AskUserQuestion / request_user_input as expanded question parts instead of folding into other tools', async () => {
+  const { sessionTurns, extractToolQuestions, isQuestionTool } = model;
+  assert.equal(isQuestionTool('AskUserQuestion'), true);
+  assert.equal(isQuestionTool('request_user_input'), true);
+  assert.equal(isQuestionTool('ask_user'), true);
+  assert.equal(isQuestionTool('Bash'), false);
+
+  // 1) Structured `questions` from upgraded transcripts.py stays separate from Bash/Read tool fold.
+  const turns = sessionTurns([
+    { type: 'tool', id: 'c1', name: 'Bash', input: 'git status', output: 'clean', error: false, offset: 100 },
+    {
+      type: 'tool',
+      id: 'c2',
+      name: 'AskUserQuestion',
+      input: '缺少翻译键时怎么处理？',
+      questions: [{
+        header: 'i18n 回退策略',
+        question: '缺少翻译键时怎么处理？',
+        options: [
+          { label: '回退到英文（推荐）', description: '与现有行为一致' },
+          { label: '保留原键名', description: '方便排查漏译' },
+        ],
+      }],
+      output: '',
+      error: false,
+      offset: 200,
+    },
+    { type: 'tool', id: 'c3', name: 'Read', input: 'model.js', output: 'ok', error: false, offset: 300 },
+  ], { lang: 'zh' });
+  assert.equal(turns.length, 1);
+  assert.deepEqual(turns[0].parts.map(p => p.kind), ['tools', 'question', 'tools']);
+  assert.equal(turns[0].parts[0].label, '跑了 1 条命令');
+  assert.equal(turns[0].parts[1].name, 'AskUserQuestion');
+  assert.equal(turns[0].parts[1].questions[0].header, 'i18n 回退策略');
+  assert.deepEqual(turns[0].parts[1].questions[0].options.map(o => o.label), ['回退到英文（推荐）', '保留原键名']);
+  assert.equal(turns[0].parts[2].label, '读了 1 个文件');
+
+  // 2) Legacy remote pm.py JSON input (both valid JSON and 300-char truncated JSON) still parses cleanly.
+  const legacyValid = extractToolQuestions({
+    name: 'request_user_input',
+    input: JSON.stringify({
+      questions: [{ header: 'Backend', question: 'Pick one?', options: [{ label: 'A', description: 'fast' }, { label: 'B' }] }],
+    }),
+  });
+  assert.equal(legacyValid[0].header, 'Backend');
+  assert.equal(legacyValid[0].question, 'Pick one?');
+  assert.deepEqual(legacyValid[0].options.map(o => o.label), ['A', 'B']);
+
+  const truncatedJson = '{"questions":[{"header":"Locale","question":"Use en default?","options":[{"label":"Yes","description":"Recommended"},{"label":"No","description":"Keep zh';
+  const legacyTrunc = extractToolQuestions({ name: 'AskUserQuestion', input: truncatedJson });
+  assert.equal(legacyTrunc[0].header, 'Locale');
+  assert.equal(legacyTrunc[0].question, 'Use en default?');
+  assert.deepEqual(legacyTrunc[0].options.map(o => o.label), ['Yes', 'No']);
+
+  // 3) UI rendering in PmProject: both thread session tab and agent floating window render the question card directly.
+  const nodes = new Map();
+  const makeEl = (tag) => {
+    const el = {
+      tag,
+      _id: null,
+      _children: [],
+      allTexts() {
+        const out = [];
+        for (const c of this._children) {
+          if (typeof c === 'string' || typeof c === 'number') out.push(String(c));
+          else if (c && typeof c.allTexts === 'function') out.push(...c.allTexts());
+        }
+        return out;
+      },
+    };
+    const proxy = new Proxy(el, {
+      get(target, prop) {
+        if (prop in target) return target[prop];
+        if (prop === 'id') return (v) => { target._id = String(v); nodes.set(String(v), proxy); return proxy; };
+        if (prop === 'child') return (c) => { if (c != null && c !== false) target._children.push(c); return proxy; };
+        if (prop === 'children') return (arr) => { for (const c of arr || []) if (c != null && c !== false) target._children.push(c); return proxy; };
+        if (prop === 'when') return (cond, fn) => (cond ? (fn(proxy) || proxy) : proxy);
+        return () => proxy;
+      },
+    });
+    return proxy;
+  };
+  const stub = (name) => Object.assign(() => makeEl(name), {
+    new: (id, trigger) => { const p = makeEl(name); if (id) p.id(id); if (trigger) p.child(trigger); return p; },
+    markdown: (id) => makeEl('md').id(id),
+    html: (id) => makeEl('html').id(id),
+  });
+  const stateStub = () => new Proxy({ set_value() {}, value: () => '', focus() {}, is_focused: () => false }, { get: (o, k) => (k in o ? o[k] : () => {}) });
+  globalThis.__tipKit = {
+    div: stub('div'), svg: stub('svg'), image: stub('image'),
+    v_flex: stub('v_flex'), h_flex: stub('h_flex'),
+    TextView: stub('TextView'), Textarea: stub('Textarea'), Input: stub('Input'), Popup: stub('Popup'),
+    TextareaState: { new: stateStub },
+    InputState: { new: stateStub },
+    ScrollHandle: { new: () => ({ scroll_to_item() {}, offset: () => ({ x: 0, y: 0 }) }) },
+  };
+  const baseUrl = new URL('./main.js', import.meta.url).href;
+  const { default: PmProject } = await import(`${baseUrl}?worker-question-card=${Date.now()}`);
+  const cx = {
+    notify() {}, spawn() {},
+    timer: { after() { return { cancel() {} }; }, every() { return { cancel() {} }; } },
+    focus_handle: () => ({ focus() {}, is_focused: () => false }),
+    stop_propagation() {},
+  };
+  const sampleSession = {
+    taskId: 'dudu-311',
+    kind: 'claude',
+    id: 'sid-311',
+    started: '2026-11-24T10:00:00.000Z',
+    ended: '2026-11-24T10:01:00.000Z',
+    from: 0,
+    offset: 200,
+    earlier: false,
+    items: [
+      { type: 'tool', id: 'c1', name: 'Bash', input: 'ls', output: 'ok', error: false, offset: 100 },
+      {
+        type: 'tool',
+        id: 'c2',
+        name: 'AskUserQuestion',
+        input: '选哪种方案？',
+        questions: [{
+          header: '08-i18n 确认',
+          question: '选哪种方案？',
+          options: [{ label: '方案一', description: '更稳' }, { label: '方案二', description: '更快' }],
+        }],
+        output: '',
+        error: false,
+        offset: 200,
+      },
+    ],
+  };
+  try {
+    const view = new PmProject();
+    view.init({}, cx);
+    view.viewWidth = 1280; view.wide = true; view.panelWant = 360;
+    view.machine = ''; view.stateFor = ''; view.pmName = 'pm-dudu';
+    view.detail = true; view.thread = 'dudu-311'; view.threadTab = 'session';
+    view.terms = () => []; view.live = () => [];
+    view.state = {
+      lang: 'zh',
+      pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/tmp/dudu', pane: 'hc:t1', runtime: 'hc', status: 'idle' }],
+      tasks: [{
+        id: 'dudu-311', number: 311, title: '08-i18n', project: 'dudu', repo: '/tmp/dudu',
+        status: 'in_progress', pane: 'hc:t311', worker: 'claude',
+        session: { kind: 'claude', id: 'sid-311' }, log: [],
+      }],
+    };
+    view.threadSession = sampleSession;
+    nodes.clear();
+    view.render(cx);
+    const qNodeId = [...nodes.keys()].find(id => id.startsWith('session-question-q:'));
+    assert.ok(qNodeId, 'thread session tab renders AskUserQuestion as an expanded question card');
+    const qText = nodes.get(qNodeId).allTexts().join(' ');
+    assert.match(qText, /08-i18n 确认/);
+    assert.match(qText, /选哪种方案？/);
+    assert.match(qText, /1\. 方案一/);
+    assert.match(qText, /2\. 方案二/);
+    assert.match(qText, /切到终端/);
+    const toolNodeId = [...nodes.keys()].find(id => id.startsWith('session-tools-g:'));
+    assert.ok(toolNodeId);
+    assert.doesNotMatch(nodes.get(toolNodeId).allTexts().join(' '), /别的工具/);
+
+    // Worker floating window renders the same question card directly too.
+    const winView = new PmProject();
+    winView.agentWindow = 'body';
+    winView.lang = 'zh';
+    winView.winProps = {
+      key: 'w311', role: 'worker', name: 'claude', taskId: 'dudu-311', address: 't311',
+      mode: 'chat', lang: 'zh', canSwitchMode: true,
+    };
+    winView.winSession = sampleSession;
+    winView.winSessionState = 'ready';
+    winView.winToolsOpen = new Set();
+    winView.winBriefsOpen = new Set();
+    winView.winScroll = { scroll_to_item() {}, offset: () => ({ x: 0, y: 0 }) };
+    winView.winFocus = { focus() {}, is_focused: () => false };
+    nodes.clear();
+    winView.renderAgentWindow(cx);
+    const winQId = [...nodes.keys()].find(id => id.startsWith('win-question-q:'));
+    assert.ok(winQId, 'worker floating window renders AskUserQuestion as an expanded question card');
+    const winQText = nodes.get(winQId).allTexts().join(' ');
+    assert.match(winQText, /08-i18n 确认/);
+    assert.match(winQText, /1\. 方案一/);
+    assert.match(winQText, /切到终端/);
+  } finally {
+    delete globalThis.__tipKit;
+  }
+});
+
+test('pm-project windowControlButtons maps Windows/Linux/macOS and overlay states', () => {
+  assert.deepEqual(model.windowControlButtons(null), []);
+  assert.deepEqual(model.windowControlButtons({ platform: 'macos', buttons: false, maximized: false }), []);
+  assert.deepEqual(model.windowControlButtons({ platform: 'windows', buttons: true, maximized: false }, { overlay: true }), []);
+
+  const winNorm = model.windowControlButtons({ platform: 'windows', buttons: true, maximized: false });
+  assert.deepEqual(winNorm.map(b => [b.id, b.command, b.icon, b.danger, b.labelKey]), [
+    ['win-minimize', 'window.minimize', 'mods/tabs/win-min.svg', false, 'windowMinimize'],
+    ['win-maximize', 'window.maximize', 'mods/tabs/win-max.svg', false, 'windowMaximize'],
+    ['win-close', 'window.close', 'mods/tabs/win-close.svg', true, 'windowClose'],
+  ]);
+
+  const winMax = model.windowControlButtons({ platform: 'windows', buttons: true, maximized: true });
+  assert.equal(winMax[1].icon, 'mods/tabs/win-restore.svg');
+  assert.equal(winMax[1].labelKey, 'windowRestore');
+
+  const linuxNorm = model.windowControlButtons({ platform: 'linux', buttons: true, maximized: false });
+  assert.deepEqual(linuxNorm.map(b => [b.id, b.command, b.icon, b.glyph, b.iconSize]), [
+    ['win-minimize', 'window.minimize', null, '−', 16],
+    ['win-maximize', 'window.maximize', null, '□', 16],
+    ['win-close', 'window.close', 'mods/pane/close.svg', '', 13],
+  ]);
+
+  for (const lang of ['en', 'zh']) {
+    for (const k of ['windowMinimize', 'windowMaximize', 'windowRestore', 'windowClose']) {
+      assert.ok(model.word(lang, k) && model.word(lang, k) !== k);
+    }
+  }
+});
+
+test('pm-project renders window controls in headerOnly, empty headerOnly, standalone header, and standalone empty view on Windows/Linux and omits on macOS', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;\s*$/gm, '')
+    .replace(/export\s+default\s+class\s+PmProject/, 'class PmProject') + '\nreturn PmProject;';
+
+  const makeEl = (tag, init = {}) => {
+    const node = { tag, id: null, children: [], handlers: {}, hoverStyle: null, ...init };
+    const proxy = new Proxy(node, {
+      get(target, prop) {
+        if (prop === '__node') return target;
+        if (prop === 'id') return v => { target.id = v; return proxy; };
+        if (prop === 'child') return c => { if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'when') return (cond, fn) => (cond ? fn(proxy) : proxy);
+        if (prop === 'on_click') return fn => { target.handlers.click = fn; return proxy; };
+        if (prop === 'on_mouse_down') return (btn, fn) => { target.handlers[`mousedown:${btn}`] = fn; return proxy; };
+        if (prop === 'hover') return fn => {
+          const style = {};
+          const sp = new Proxy(style, { get(st, p) { return v => { st[p] = v; return sp; }; } });
+          fn(sp);
+          target.hoverStyle = style;
+          return proxy;
+        };
+        if (prop in target) return target[prop];
+        return () => proxy;
+      },
+    });
+    return proxy;
+  };
+  const findById = (n, id) => {
+    if (!n || typeof n !== 'object') return null;
+    if (n.id === id) return n;
+    for (const c of n.children || []) {
+      const f = findById(c, id);
+      if (f) return f;
+    }
+    return null;
+  };
+  const collectSvgs = (n, out = []) => {
+    if (!n || typeof n !== 'object') return out;
+    if (n.tag === 'svg' && n.src) out.push(n.src);
+    for (const c of n.children || []) collectSvgs(c, out);
+    return out;
+  };
+
+  let curWin = { platform: 'windows', buttons: true, maximized: false };
+  let curProps = {};
+  let curHeaderState = {
+    session: 's1', hasPm: true, pmName: 'pm-dudu', lang: 'en', title: 'dudu', pathText: '~/dudu',
+    searchTip: 'Search', searchOpen: false, bellTip: 'Bell', waiting: 0, pmCtx: null, errorTip: '',
+    pmStart: 'online', pmOfflineTip: '', panelOpen: true, panelTip: 'Hide', hasRing: false,
+  };
+  let curSharedRef = { pm: 'pm-dudu' };
+  const ran = [];
+  const t = {
+    canvas: '#111', surface: '#1b1b1f', raised: '#27272d', border: '#333', hover: '#2a2a32',
+    foreground: '#fff', muted: '#aaa', dim: '#666', blocked: '#e55', accent: '#6cf',
+  };
+  const stubs = {
+    View: class {}, ...model,
+    div: () => makeEl('div'),
+    h_flex: () => makeEl('h_flex'),
+    v_flex: () => makeEl('v_flex'),
+    svg: src => makeEl('svg', { src }),
+    image: () => makeEl('image'),
+    TextView: { markdown: () => makeEl('md'), html: () => makeEl('html') },
+    TextareaState: { new: () => ({ on() {}, value: () => '', set_value() {}, set_selected_range() {}, set_auto_grow() {}, set_soft_wrap() {}, focus() {} }) },
+    Textarea: { new: () => makeEl('textarea') },
+    InputState: { new: () => ({ on() {}, value: () => '', set_value() {}, focus() {} }) },
+    Input: { new: () => makeEl('input') },
+    ScrollHandle: { new: () => ({ scroll_to_item() {}, offset: () => ({ x: 0, y: 0 }) }) },
+    Scrollbar: { new: () => makeEl('scrollbar') },
+    Popup: { new: () => makeEl('popup') },
+    theme: () => t,
+    home: () => '/Users/me',
+    appHome: () => '/app',
+    exec: async () => ({ code: 0, stdout: '{}' }),
+    execPython: async () => ({ code: 0, stdout: '{}' }),
+    readTextFile: async () => '',
+    writeTextFile: async () => {},
+    watchFolder: () => new Promise(() => {}),
+    layout: () => ({ id: 'pm-stage', active: 'pm-project', children: [{ id: 'pm-project' }] }),
+    run: cmd => ran.push(cmd),
+    terminals: () => [],
+    agents: () => [],
+    panes: () => [],
+    spaces: () => [],
+    shared: key => (key === 'pm-project-header-state' ? curHeaderState : key === 'pm-project' ? curSharedRef : null),
+    setShared() {},
+    props: () => curProps,
+    openOverlay() {},
+    closeOverlay() {},
+    appWindow: () => curWin,
+    renderThreadChangeView: () => makeEl('div'),
+    buildProjectSearch: () => ({}),
+    stepSearchSelection: () => 0,
+    stepSearchScope: () => 'all',
+    stepSearchEscape: () => null,
+    renderProjectSearchOverlay: () => makeEl('div'),
+    renderStepsCard: () => makeEl('div'),
+    renderDepsCard: () => makeEl('div'),
+    treeBranchList: () => [],
+  };
+
+  const PmProject = new Function(...Object.keys(stubs), source)(...Object.values(stubs));
+  const cx = {
+    focus_handle: () => ({ focus() {}, is_focused: () => false }),
+    timer: { after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+    spawn() {},
+    notify() {},
+  };
+
+  // 1. headerOnly mode (with PM) on Windows unmaximized
+  const hdrView = Object.assign(Object.create(PmProject.prototype), {
+    headerOnly: true, lang: 'en', keyFocus: cx.focus_handle(),
+  });
+  const hdrTree = hdrView.renderHeaderOnly(cx).__node;
+  const ctrl = findById(hdrTree, 'pm-window-controls');
+  assert.ok(ctrl, 'headerOnly renders pm-window-controls on Windows');
+  const minBtn = findById(ctrl, 'win-minimize');
+  const maxBtn = findById(ctrl, 'win-maximize');
+  const closeBtn = findById(ctrl, 'win-close');
+  assert.deepEqual(collectSvgs(ctrl), ['mods/tabs/win-min.svg', 'mods/tabs/win-max.svg', 'mods/tabs/win-close.svg']);
+  assert.equal(closeBtn.hoverStyle?.bg, '#e81123');
+  assert.equal(closeBtn.hoverStyle?.text_color, '#ffffff');
+  let stopped = 0;
+  const fakeCx = { stop_propagation() { stopped++; } };
+  minBtn.handlers['mousedown:left']({}, fakeCx);
+  minBtn.handlers.click({}, fakeCx);
+  maxBtn.handlers.click({}, fakeCx);
+  closeBtn.handlers.click({}, fakeCx);
+  assert.equal(stopped, 4);
+  assert.deepEqual(ran, ['window.minimize', 'window.maximize', 'window.close']);
+
+  // 2. headerOnly mode when no PM is selected still shows window controls on Windows maximized
+  curWin = { platform: 'windows', buttons: true, maximized: true };
+  curHeaderState = { session: 's1', hasPm: false, pmName: '', lang: 'en' };
+  const emptyHdrTree = hdrView.renderHeaderOnly(cx).__node;
+  const emptyCtrl = findById(emptyHdrTree, 'pm-window-controls');
+  assert.ok(emptyCtrl, 'empty headerOnly still renders pm-window-controls on Windows');
+  assert.ok(collectSvgs(emptyCtrl).includes('mods/tabs/win-restore.svg'));
+
+  // 3. Standalone header & standalone blank page (!pm, !bodyOnly)
+  const fullView = Object.assign(Object.create(PmProject.prototype), {
+    headerOnly: false, bodyOnly: false, lang: 'en', keyFocus: cx.focus_handle(),
+    state: { pms: [], tasks: [], events: [], lang: 'en' },
+    pmName: '', machine: '', stateFor: '', error: '', onStage: false,
+    syncWinEvents() {}, syncHeaderAction() {}, publishHeaderState() {},
+    pm() { return null; },
+  });
+  const blankTree = fullView.render(cx).__node;
+  assert.ok(findById(blankTree, 'pm-project-header-bar'));
+  assert.ok(findById(blankTree, 'pm-window-controls'));
+
+  // bodyOnly blank page does NOT duplicate window controls (headerOnly owns them)
+  fullView.bodyOnly = true;
+  assert.equal(findById(fullView.render(cx).__node, 'pm-window-controls'), null);
+
+  // 4. macOS (buttons: false): zero window controls rendered
+  curWin = { platform: 'macos', buttons: false, maximized: false };
+  curHeaderState = {
+    session: 's1', hasPm: true, pmName: 'pm-dudu', lang: 'en', title: 'dudu', pathText: '~/dudu',
+    searchTip: 'Search', searchOpen: false, bellTip: 'Bell', waiting: 0, pmCtx: null, errorTip: '',
+    pmStart: 'online', pmOfflineTip: '', panelOpen: true, panelTip: 'Hide', hasRing: false,
+  };
+  assert.equal(findById(hdrView.renderHeaderOnly(cx).__node, 'pm-window-controls'), null);
+  fullView.bodyOnly = false;
+  assert.equal(findById(fullView.render(cx).__node, 'pm-window-controls'), null);
+
+  // 5. Overlay mode on Windows: omitted
+  curWin = { platform: 'windows', buttons: true, maximized: false };
+  curProps = { overlay: 'ov-1' };
+  assert.equal(findById(hdrView.renderHeaderOnly(cx).__node, 'pm-window-controls'), null);
+});
+
+test('sidebar multi-tabs: model.js pure reducers, LRU eviction, dirty guards, escapeStep, resolvePanelMode, and persistence', () => {
+  const {
+    SIDE_TABS_MAX, SIDE_TABS_MAX_PROJECTS,
+    sideTabKey, createSideTabsState,
+    openSideTab, activateSideTab, showSideIndex, toggleSideIndex,
+    closeSideTab, closeOtherSideTabs, closeRightSideTabs, closeAllSideTabs,
+    updateSideTab, upgradeDraftTab, cycleSideTab,
+    resolvePanelMode, escapeStep,
+    readSideTabsStore, hydrateProjectTabs, serializeProjectTabs, word,
+  } = model;
+
+  // Canonical keys
+  assert.equal(sideTabKey({ kind: 'doc', root: 'docs', path: 'plan.md' }), 'doc:docs/plan.md');
+  assert.equal(sideTabKey({ kind: 'thread', taskId: 'dudu-320' }), 'thread:dudu-320');
+  assert.equal(sideTabKey({ kind: 'draft', tab: 'library', id: 7 }), 'draft:library:7');
+  assert.equal(sideTabKey({ kind: 'doc', root: '', path: 'a.md' }), '');
+
+  // Open, dedupe, adjacent insert
+  let st = createSideTabsState();
+  let r = openSideTab(st, { kind: 'doc', root: 'docs', path: 'a.md', title: 'A' }, { now: 100 });
+  assert.equal(r.opened, true);
+  assert.equal(r.activated, true);
+  st = r.state;
+  const tabA = r.tab.id;
+
+  r = openSideTab(st, { kind: 'thread', taskId: 't-1', title: 'Thread 1' }, { now: 200 });
+  st = r.state;
+  const tabT1 = r.tab.id;
+  assert.deepEqual(st.tabs.map(t => t.key), ['doc:docs/a.md', 'thread:t-1']);
+
+  // Dedupe activates existing without duplicating
+  r = openSideTab(st, { kind: 'doc', root: 'docs', path: 'a.md' }, { now: 300 });
+  assert.equal(r.opened, false);
+  assert.equal(r.activated, true);
+  assert.equal(r.state.activeId, tabA);
+  assert.equal(r.state.tabs.length, 2);
+  st = r.state;
+
+  // insertAdjacent puts new tab immediately to the right of active tab (tabA is index 0 -> new at index 1)
+  r = openSideTab(st, { kind: 'doc', root: 'repo', path: 'main.js', title: 'main.js' }, { now: 400, insertAdjacent: true });
+  st = r.state;
+  const tabMain = r.tab.id;
+  assert.deepEqual(st.tabs.map(t => t.key), ['doc:docs/a.md', 'doc:repo/main.js', 'thread:t-1']);
+
+  // Index toggle keeps tabs and remembers lastActiveId; resolvePanelMode stays 'split'
+  const idxRes = showSideIndex(st);
+  assert.equal(idxRes.state.activeId, null);
+  assert.equal(idxRes.state.lastActiveId, tabMain);
+  assert.equal(resolvePanelMode({ tabCount: idxRes.state.tabs.length }), 'split');
+  assert.equal(resolvePanelMode({ tabCount: 0 }), 'compact');
+
+  const backRes = toggleSideIndex(idxRes.state, { now: 500 });
+  assert.equal(backRes.state.activeId, tabMain);
+  st = backRes.state;
+
+  // Cycle tabs forward & backward
+  assert.equal(cycleSideTab(st, 1, { now: 510 }).state.activeId, tabT1);
+  assert.equal(cycleSideTab(st, -1, { now: 520 }).state.activeId, tabA);
+
+  // Dirty close guard & force close
+  st = updateSideTab(st, tabMain, { dirty: true, mode: 'edit' }).state;
+  const blockedClose = closeSideTab(st, tabMain);
+  assert.equal(blockedClose.needsConfirm, tabMain);
+  assert.equal(blockedClose.closed, null);
+  assert.equal(blockedClose.state.activeId, tabMain);
+  assert.equal(blockedClose.state.tabs.length, 3);
+
+  // Batch close skips dirty tabs and reports skippedDirtyIds
+  const batchOthers = closeOtherSideTabs(st, tabA);
+  assert.deepEqual(batchOthers.closed.map(t => t.id), [tabT1]);
+  assert.deepEqual(batchOthers.skippedDirtyIds, [tabMain]);
+  assert.deepEqual(batchOthers.state.tabs.map(t => t.id), [tabA, tabMain]);
+
+  const batchRight = closeRightSideTabs(st, tabA);
+  assert.deepEqual(batchRight.closed.map(t => t.id), [tabT1]);
+  assert.deepEqual(batchRight.skippedDirtyIds, [tabMain]);
+
+  const batchAll = closeAllSideTabs(st);
+  assert.deepEqual(batchAll.skippedDirtyIds, [tabMain]);
+  assert.equal(batchAll.state.tabs.length, 1);
+
+  // Force close dirty tab selects MRU neighbor
+  const forced = closeSideTab(st, tabMain, { force: true });
+  assert.equal(forced.closed.id, tabMain);
+  assert.equal(forced.state.activeId, tabA); // tabA had lastActiveAt 300 > tabT1 200
+
+  // LRU eviction at SIDE_TABS_MAX (12): evicts oldest clean non-active tab, blocks when all 12 are dirty
+  let full = createSideTabsState();
+  for (let i = 1; i <= SIDE_TABS_MAX; i++) {
+    full = openSideTab(full, { kind: 'doc', root: 'docs', path: `d${i}.md`, title: `d${i}` }, { now: i * 10 }).state;
+  }
+  assert.equal(full.tabs.length, SIDE_TABS_MAX);
+  // Make d1 dirty so d2 (oldest clean) is evicted instead
+  full = updateSideTab(full, full.tabs[0].id, { dirty: true }).state;
+  const evictRes = openSideTab(full, { kind: 'doc', root: 'docs', path: 'd13.md' }, { now: 999 });
+  assert.equal(evictRes.opened, true);
+  assert.equal(evictRes.evicted.key, 'doc:docs/d2.md');
+  assert.equal(evictRes.state.tabs.length, SIDE_TABS_MAX);
+
+  // All 12 dirty -> blocked
+  let allDirty = evictRes.state;
+  for (const t of allDirty.tabs) allDirty = updateSideTab(allDirty, t.id, { dirty: true }).state;
+  const blockedOpen = openSideTab(allDirty, { kind: 'doc', root: 'docs', path: 'd14.md' }, { now: 1000 });
+  assert.equal(blockedOpen.blocked, true);
+  assert.equal(blockedOpen.opened, false);
+
+  // Draft upgrade in-place & merge/dedupe with existing doc tab
+  let ds = createSideTabsState();
+  ds = openSideTab(ds, { kind: 'doc', root: 'docs', path: 'existing.md', title: 'existing.md' }, { now: 10 }).state;
+  const d1 = openSideTab(ds, { kind: 'draft', tab: 'library', root: 'docs', title: 'New' }, { now: 20 });
+  const up1 = upgradeDraftTab(d1.state, d1.tab.id, { root: 'docs', path: 'brand-new.md', tab: 'library', title: 'brand-new.md' });
+  assert.equal(up1.mergedInto, null);
+  assert.equal(up1.tab.kind, 'doc');
+  assert.equal(up1.tab.key, 'doc:docs/brand-new.md');
+
+  const d2 = openSideTab(up1.state, { kind: 'draft', tab: 'library', root: 'docs', title: 'New 2' }, { now: 30 });
+  const up2 = upgradeDraftTab(d2.state, d2.tab.id, { root: 'docs', path: 'existing.md', tab: 'library', title: 'existing.md' });
+  assert.ok(up2.mergedInto);
+  assert.equal(up2.removedDraftId, d2.tab.id);
+  assert.equal(up2.state.tabs.length, 2);
+
+  // escapeStep priorities
+  assert.equal(escapeStep({ tabMenu: true, confirmCloseDirty: true, activeTab: true }), 'tabMenu');
+  assert.equal(escapeStep({ confirmCloseDirty: true, activeTab: true }), 'confirmCloseDirty');
+  assert.equal(escapeStep({ change: true, activeTab: true }), 'change');
+  assert.equal(escapeStep({ activeTab: true, listOpen: true }), 'activeTab');
+
+  // Persistence round-trip, corrupt JSON fallback, draft/missing filtering, and maxProjects pruning
+  assert.deepEqual(readSideTabsStore('{bad json'), { v: 1, projects: {} });
+  let ps = createSideTabsState();
+  ps = openSideTab(ps, { kind: 'doc', root: 'docs', path: 'p.md', title: 'p.md' }, { now: 10 }).state;
+  ps = openSideTab(ps, { kind: 'thread', taskId: 't-9', title: 'T9', threadTab: 'session' }, { now: 20 }).state;
+  ps = openSideTab(ps, { kind: 'draft', tab: 'library', root: 'docs', title: 'Draft' }, { now: 30 }).state;
+  const json = serializeProjectTabs(readSideTabsStore(''), 'pm-dudu', ps, { now: 1000 });
+  const hydrated = hydrateProjectTabs(readSideTabsStore(json), 'pm-dudu');
+  assert.equal(hydrated.tabs.length, 2, 'draft tab is not persisted');
+  assert.deepEqual(hydrated.tabs.map(t => t.key), ['doc:docs/p.md', 'thread:t-9']);
+  assert.equal(hydrated.tabs[1].threadTab, 'session');
+
+  // Prune to SIDE_TABS_MAX_PROJECTS (20)
+  let store = { v: 1, projects: {} };
+  for (let i = 1; i <= SIDE_TABS_MAX_PROJECTS + 5; i++) {
+    const one = openSideTab(createSideTabsState(), { kind: 'thread', taskId: `t-${i}` }, { now: i }).state;
+    store = readSideTabsStore(serializeProjectTabs(store, `pm-${i}`, one, { now: i * 100 }));
+  }
+  assert.equal(Object.keys(store.projects).length, SIDE_TABS_MAX_PROJECTS);
+  assert.equal('pm-1' in store.projects, false, 'oldest project pruned');
+  assert.equal(`pm-${SIDE_TABS_MAX_PROJECTS + 5}` in store.projects, true, 'newest project kept');
+
+  // i18n strings exist in both en and zh
+  for (const lang of ['en', 'zh']) {
+    for (const k of [
+      'sideTabsIndex', 'sideTabClose', 'sideTabCloseOthers', 'sideTabCloseRight',
+      'sideTabCloseAll', 'sideTabDirtyWarning', 'sideTabSaveAndClose', 'sideTabDiscardAndClose',
+      'sideTabCancelClose', 'sideTabLimitDirty', 'sideTabOpened', 'sideTabCopyPath', 'sideTabMissing',
+    ]) {
+      assert.ok(word(lang, k) && word(lang, k) !== k, `${lang}.${k} defined`);
+    }
+    assert.ok(word(lang, 'sideTabsAll', 3).includes('3'));
+    assert.ok(word(lang, 'sideTabDirtyHint', 'a.md').includes('a.md'));
+  }
+});
+
+test('sidebar multi-tabs UI: 72px two-row header, 0 ConversationPaneView repaints on tab switch/hover/overflow, dirty guard, and shortcuts', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;\s*$/gm, '')
+    .replace(/export\s+default\s+class\s+PmProject/, 'class PmProject') + '\nreturn PmProject;';
+
+  const nodes = new Map();
+  const makeEl = (tag) => {
+    const rec = { tag, id: null, hVal: null, children: [], handlers: {} };
+    const proxy = new Proxy(rec, {
+      get(target, prop) {
+        if (prop === '__node') return target;
+        if (prop === 'id') return v => { target.id = String(v); nodes.set(String(v), rec); return proxy; };
+        if (prop === 'h') return v => { target.hVal = v; return proxy; };
+        if (prop === 'child') return c => { if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'when') return (cond, fn) => (cond ? (fn(proxy) || proxy) : proxy);
+        if (prop === 'on_click') return fn => { target.handlers.click = fn; return proxy; };
+        if (prop === 'on_hover') return fn => { target.handlers.hover = fn; return proxy; };
+        if (prop === 'on_mouse_down') return (btn, fn) => { target.handlers[`mousedown:${btn}`] = fn; return proxy; };
+        if (prop === 'content') return c => { if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop in target) return target[prop];
+        return () => proxy;
+      },
+    });
+    return proxy;
+  };
+
+  let createdHandles = 0;
+  let releasedHandles = 0;
+  const makeInput = () => {
+    let val = '';
+    const listeners = {};
+    return {
+      value: () => val,
+      set_value(v) { val = String(v ?? ''); },
+      set_selected_range() {},
+      set_auto_grow() {},
+      set_soft_wrap() {},
+      focus() {},
+      on(ev, fn) { listeners[ev] = fn; },
+      _triggerChange(next, cx) { val = next; listeners.change?.({}, cx); },
+    };
+  };
+
+  const childEntities = [];
+  const makeCx = (targetView, onNotify) => ({
+    notify(ent) {
+      if (ent && typeof ent._render === 'function') { ent._render(); return; }
+      onNotify?.();
+    },
+    new(Cls, p) {
+      const inst = new Cls();
+      const ent = {
+        inst, renderCount: 0, released: false,
+        set_props() {},
+        release() { ent.released = true; },
+        cx: null,
+        _render() { ent.renderCount += 1; return inst.render(ent.cx); },
+      };
+      ent.cx = makeCx(inst, () => ent._render());
+      inst.init?.(p, ent.cx);
+      childEntities.push(ent);
+      return ent;
+    },
+    spawn() {},
+    stop_propagation() {},
+    write_to_clipboard() {},
+    focus_handle: () => ({ focus() {}, is_focused: () => false }),
+    timer: { after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+  });
+
+  const t = {
+    canvas: '#121316', background: '#181a1f', surface: '#1e2026', raised: '#252830',
+    popover: '#252830', chrome: '#16181d', border: '#2e323c', hover: '#2a2e38',
+    foreground: '#f0f2f5', muted: '#a0a6b2', dim: '#6d7380', blocked: '#e55', accent: '#5b9cf6',
+  };
+  const stubs = {
+    View: class {}, ...model,
+    div: () => makeEl('div'), h_flex: () => makeEl('h_flex'), v_flex: () => makeEl('v_flex'),
+    svg: () => makeEl('svg'), image: () => makeEl('image'),
+    TextView: { markdown: () => makeEl('md'), html: () => makeEl('html') },
+    TextareaState: { new: makeInput },
+    Textarea: { new: () => makeEl('textarea') },
+    InputState: { new: makeInput },
+    Input: { new: () => makeEl('input') },
+    ScrollHandle: { new: () => { createdHandles++; return { scroll_to_item() {}, release() { releasedHandles++; } }; } },
+    Scrollbar: { new: () => makeEl('scrollbar') },
+    Popup: { new: (id, trig) => makeEl('popup').id(id).child(trig) },
+    theme: () => t, home: () => '/Users/me', appHome: () => '/app',
+    exec: async () => ({ code: 0, stdout: '{}' }),
+    execPython: async () => ({ code: 0, stdout: '{}' }),
+    readTextFile: async () => '', writeTextFile: async () => {},
+    watchFolder: () => new Promise(() => {}),
+    layout: () => ({ id: 'pm-stage', active: 'pm-project', children: [{ id: 'pm-project' }] }),
+    run() {}, terminals: () => [], agents: () => [], panes: () => [], spaces: () => [],
+    shared: () => ({ pm: 'pm-dudu' }), setShared() {}, props: () => ({}),
+    openOverlay() {}, closeOverlay() {}, appWindow: () => ({ platform: 'macos', buttons: false }),
+    renderThreadChangeView: () => makeEl('change'),
+    buildProjectSearch: () => ({ flat: [], groups: [], scopes: ['all'], activeScope: 'all' }),
+    stepSearchSelection: () => ({ index: 0, key: '' }),
+    stepSearchScope: () => 'all',
+    stepSearchEscape: () => ({ action: 'close' }),
+    renderProjectSearchOverlay: () => makeEl('search'),
+    renderStepsCard: () => makeEl('steps'),
+    renderDepsCard: () => makeEl('deps'),
+    treeBranchList: () => [],
+  };
+
+  const PmProject = new Function(...Object.keys(stubs), source)(...Object.values(stubs));
+  const view = new PmProject();
+  const rootCx = makeCx(view, () => view.render(rootCx));
+  view.init({}, rootCx);
+  view.machine = ''; view.stateFor = ''; view.pmName = 'pm-dudu';
+  view.viewWidth = 1440; view.wide = true; view.measured = true; view.listShown = true;
+  view.state = {
+    lang: 'en',
+    pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu' }],
+    tasks: [{ id: 't1', number: 320, pm: 'pm-dudu', title: 'Split sidebar', status: 'in_progress', log: [] }],
+  };
+  view.librarySlug = 'dudu';
+  view.libraryRead = true;
+  view.libraryFiles = [
+    { root: 'docs', path: 'a.md', kind: 'md', size: 100, writable: true, version: 'v1' },
+    { root: 'docs', path: 'b.md', kind: 'md', size: 100, writable: true, version: 'v1' },
+  ];
+  view.docCache.set('docs/a.md', { text: '# Doc A', version: 'v1', size: 7 });
+  view.docCache.set('docs/b.md', { text: '# Doc B', version: 'v1', size: 7 });
+
+  const [convEnt, sideEnt] = childEntities;
+
+  // 0 tabs: compact 44px sideHeader, no side-tab-bar
+  nodes.clear();
+  sideEnt._render();
+  assert.equal(nodes.has('side-tab-bar'), false);
+  assert.equal(nodes.get('side-header')?.hVal, 44);
+  assert.equal(view.currentPanelMode(), 'compact');
+
+  // Open 2 docs + 1 thread -> 36px tab bar + 36px context bar = 72px
+  const handlesBeforeOpen = createdHandles;
+  view.openDoc({ tab: 'library', root: 'docs', path: 'a.md' }, sideEnt.cx);
+  view.openDoc({ tab: 'library', root: 'docs', path: 'b.md' }, sideEnt.cx);
+  view.openThread('t1', sideEnt.cx);
+  assert.equal(view.tabState.tabs.length, 3);
+  assert.ok(createdHandles > handlesBeforeOpen, 'per-tab ScrollHandles allocated outside render()');
+
+  const handlesBeforeRender = createdHandles;
+  nodes.clear();
+  sideEnt._render();
+  assert.equal(createdHandles, handlesBeforeRender, 'render() allocates 0 ScrollHandles');
+  assert.equal(nodes.get('side-tab-bar')?.hVal, 36);
+  assert.equal(nodes.get('thread-topbar')?.hVal, 36);
+  assert.equal(nodes.has('side-tab-overflow'), true, 'overflow N button shown when tabs >= 2');
+
+  // Switching tabs, hovering tabs, opening overflow & context menus: 0 ConversationPaneView repaints!
+  const convBefore = convEnt.renderCount;
+  const tabA = view.tabState.tabs[0];
+  const tabB = view.tabState.tabs[1];
+  nodes.get(`side-tab-${tabA.id}`).handlers.hover(true, sideEnt.cx);
+  nodes.get(`side-tab-${tabA.id}`).handlers.click({}, sideEnt.cx);
+  nodes.get('side-tab-overflow').handlers.click({}, sideEnt.cx);
+  assert.equal(view.tabMenu?.kind, 'overflow');
+  nodes.get(`side-tab-${tabB.id}`).handlers['mousedown:right']({}, sideEnt.cx);
+  assert.equal(view.tabMenu?.kind, 'context');
+  view.handleKeyDown({ keystroke: 'cmd-shift-]' }, sideEnt.cx);
+  view.handleKeyDown({ keystroke: 'cmd-shift-[' }, sideEnt.cx);
+  assert.equal(convEnt.renderCount, convBefore, '0 ConversationPaneView repaints during tab switch/hover/menu/cycle');
+
+  // Index toggle keeps split width (no compact bounce)
+  view.showIndexView(sideEnt.cx);
+  assert.equal(view.tabState.activeId, null);
+  assert.equal(view.currentPanelMode(), 'split', 'index view stays split while tabs are open');
+
+  // Dirty edit snapshot & close guard
+  view.activateTab(tabA.id, sideEnt.cx);
+  view.startEditDoc(sideEnt.cx);
+  view.docEditorInput._triggerChange('# Doc A edited', sideEnt.cx);
+  assert.equal(view.activeSideTab().dirty, true);
+  // Switch away to tabB and back to tabA: draft snapshot preserved!
+  view.activateTab(tabB.id, sideEnt.cx);
+  view.activateTab(tabA.id, sideEnt.cx);
+  assert.equal(view.docEditorInput.value(), '# Doc A edited');
+  // Middle-click dirty tabA triggers inline guard instead of closing
+  nodes.clear();
+  sideEnt._render();
+  nodes.get(`side-tab-${tabA.id}`).handlers['mousedown:middle']({}, sideEnt.cx);
+  assert.equal(view.confirmCloseTabId, tabA.id);
+  nodes.clear();
+  sideEnt._render();
+  assert.equal(nodes.has('side-tab-dirty-bar'), true, 'dirty close guard bar renders inline');
+  // Esc dismisses dirty guard without closing tab
+  view.escape({ keystroke: 'escape' }, sideEnt.cx);
+  assert.equal(view.confirmCloseTabId, '');
+  assert.equal(view.tabState.tabs.length, 3);
+  // Force discard releases tab handles
+  const releasedBefore = releasedHandles;
+  view.closeTab(tabA.id, sideEnt.cx, { force: true });
+  assert.ok(releasedHandles > releasedBefore, 'closing tab releases its ScrollHandles');
+  assert.equal(view.tabState.tabs.length, 2);
+
+  // Closing panel preserves remaining 2 tabs; reopening restores active tab
+  view.closeSidePanel(sideEnt.cx);
+  assert.equal(view.isPanelOpen(), false);
+  assert.equal(view.tabState.tabs.length, 2);
+  view.togglePanel(sideEnt.cx);
+  assert.equal(view.isPanelOpen(), true);
+  assert.equal(view.tabState.tabs.length, 2);
+
+  view.close();
+});
+
+test('sidebar multi-tabs review fixes: async save tab-switch safety, openRepoFile/search shell sync & diff preservation, memory metadata dirty guard, narrow hydration closed state, and Threads open indicator', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;\s*$/gm, '')
+    .replace(/export\s+default\s+class\s+PmProject/, 'class PmProject') + '\nreturn PmProject;';
+
+  const nodes = new Map();
+  const makeEl = (tag) => {
+    const rec = {
+      tag, id: null, children: [], handlers: {}, borderL: 0,
+      allTexts() {
+        const out = [];
+        for (const c of this.children) {
+          if (typeof c === 'string' || typeof c === 'number') out.push(String(c));
+          else if (c && typeof c.allTexts === 'function') out.push(...c.allTexts());
+        }
+        return out;
+      },
+    };
+    const proxy = new Proxy(rec, {
+      get(target, prop) {
+        if (prop === '__node') return target;
+        if (prop === 'id') return v => { target.id = String(v); nodes.set(String(v), target); return proxy; };
+        if (prop === 'border_l') return v => { target.borderL = v; return proxy; };
+        if (prop === 'child') return c => { if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'when') return (cond, fn) => (cond ? (fn(proxy) || proxy) : proxy);
+        if (prop === 'on_click') return fn => { target.handlers.click = fn; return proxy; };
+        if (prop === 'on_hover') return fn => { target.handlers.hover = fn; return proxy; };
+        if (prop === 'on_mouse_down') return (btn, fn) => { target.handlers[`mousedown:${btn}`] = fn; return proxy; };
+        if (prop === 'content') return c => { if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop in target) return target[prop];
+        return () => proxy;
+      },
+    });
+    return proxy;
+  };
+
+  const makeInput = () => {
+    let val = '';
+    const listeners = {};
+    return {
+      value: () => val,
+      set_value(v) { val = String(v ?? ''); },
+      set_selected_range() {},
+      set_auto_grow() {},
+      set_soft_wrap() {},
+      focus() {},
+      on(ev, fn) { listeners[ev] = fn; },
+      _triggerChange(next, cx) { val = next; listeners.change?.({}, cx); },
+    };
+  };
+
+  let shellRenders = 0;
+  const childEntities = [];
+  const makeCx = (onNotify) => ({
+    notify(ent) {
+      if (ent && typeof ent._render === 'function') { ent._render(); return; }
+      onNotify?.();
+    },
+    new(Cls, p) {
+      const inst = new Cls();
+      const ent = {
+        inst, renderCount: 0, released: false,
+        set_props() {}, release() { ent.released = true; },
+        cx: null,
+        _render() { ent.renderCount += 1; return inst.render(ent.cx); },
+      };
+      ent.cx = makeCx(() => ent._render());
+      inst.init?.(p, ent.cx);
+      childEntities.push(ent);
+      return ent;
+    },
+    spawn() {}, stop_propagation() {}, write_to_clipboard() {},
+    focus_handle: () => ({ focus() {}, is_focused: () => false }),
+    timer: { after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+  });
+
+  const t = {
+    canvas: '#121316', background: '#181a1f', surface: '#1e2026', raised: '#252830',
+    popover: '#252830', chrome: '#16181d', border: '#2e323c', hover: '#2a2e38',
+    foreground: '#f0f2f5', muted: '#a0a6b2', dim: '#6d7380', blocked: '#e55', accent: '#5b9cf6',
+  };
+  let resolveSave = null;
+  const stubs = {
+    View: class {}, ...model,
+    div: () => makeEl('div'), h_flex: () => makeEl('h_flex'), v_flex: () => makeEl('v_flex'),
+    svg: () => makeEl('svg'), image: () => makeEl('image'),
+    TextView: { markdown: () => makeEl('md'), html: () => makeEl('html') },
+    TextareaState: { new: makeInput }, Textarea: { new: () => makeEl('textarea') },
+    InputState: { new: makeInput }, Input: { new: () => makeEl('input') },
+    ScrollHandle: { new: () => ({ scroll_to_item() {}, release() {} }) },
+    Scrollbar: { new: () => makeEl('scrollbar') },
+    Popup: { new: (id, trig) => makeEl('popup').id(id).child(trig) },
+    theme: () => t, home: () => '/Users/me', appHome: () => '/app',
+    exec: async () => new Promise(res => { resolveSave = res; }),
+    execPython: async () => new Promise(res => { resolveSave = res; }),
+    readTextFile: async () => '', writeTextFile: async () => {},
+    watchFolder: () => new Promise(() => {}),
+    layout: () => ({ id: 'pm-stage', active: 'pm-project', children: [{ id: 'pm-project' }] }),
+    run() {}, terminals: () => [], agents: () => [], panes: () => [], spaces: () => [],
+    shared: () => ({ pm: 'pm-dudu' }), setShared() {}, props: () => ({}),
+    openOverlay() {}, closeOverlay() {}, appWindow: () => ({ platform: 'macos', buttons: false }),
+    renderThreadChangeView: () => makeEl('change'),
+    buildProjectSearch: () => ({ flat: [], groups: [], scopes: ['all'], activeScope: 'all' }),
+    stepSearchSelection: () => ({ index: 0, key: '' }),
+    stepSearchScope: () => 'all',
+    stepSearchEscape: () => ({ action: 'close' }),
+    renderProjectSearchOverlay: () => makeEl('search'),
+    renderStepsCard: () => makeEl('steps'),
+    renderDepsCard: () => makeEl('deps'),
+    treeBranchList: () => [],
+  };
+
+  const PmProject = new Function(...Object.keys(stubs), source)(...Object.values(stubs));
+  const view = new PmProject();
+  const rootCx = makeCx(() => { shellRenders += 1; view.render(rootCx); });
+  view.init({}, rootCx);
+  view.machine = ''; view.stateFor = ''; view.pmName = 'pm-dudu';
+  view.viewWidth = 1440; view.wide = true; view.measured = true; view.listShown = true;
+  view.state = {
+    lang: 'en',
+    pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu' }],
+    tasks: [{ id: 't1', number: 320, pm: 'pm-dudu', title: 'Split sidebar', status: 'in_progress', branch: 'dev/split', log: [] }],
+  };
+  view.librarySlug = 'dudu'; view.libraryRead = true;
+  view.libraryFiles = [
+    { root: 'docs', path: 'a.md', kind: 'md', size: 100, writable: true, version: 'v1' },
+    { root: 'docs', path: 'b.md', kind: 'md', size: 100, writable: true, version: 'v1' },
+  ];
+  view.memorySlug = 'dudu'; view.memoryRead = true;
+  view.memoryData = {
+    files: [{
+      root: 'memory', path: 'm1.md', name: 'm1', layer: 'project',
+      type: 'project', topic: 'architecture', description: 'Original desc', writable: true, version: 'mv1',
+    }],
+  };
+  view.docCache.set('docs/a.md', { text: '# A', version: 'v1', size: 3 });
+  view.docCache.set('docs/b.md', { text: '# B', version: 'v1', size: 3 });
+  view.docCache.set('memory/m1.md', {
+    text: '---\nname: m1\ndescription: "Original desc"\ntype: project\ntopic: architecture\n---\n\nBody',
+    version: 'mv1', size: 80,
+  });
+
+  const [, sideEnt] = childEntities;
+
+  // Fix 1: Async saveEditingDoc while user switches to another tab updates & closes ONLY the original tab.
+  view.openDoc({ tab: 'library', root: 'docs', path: 'a.md' }, sideEnt.cx);
+  view.openDoc({ tab: 'library', root: 'docs', path: 'b.md' }, sideEnt.cx);
+  const tabA = view.tabState.tabs[0];
+  const tabB = view.tabState.tabs[1];
+  view.activateTab(tabA.id, sideEnt.cx);
+  view.startEditDoc(sideEnt.cx);
+  view.docEditorInput._triggerChange('# A modified', sideEnt.cx);
+  assert.equal(view.activeSideTab().dirty, true);
+  const savePromise = view.saveEditingDoc(sideEnt.cx, { closeTabAfter: true });
+  // Switch to tabB before save finishes!
+  view.activateTab(tabB.id, sideEnt.cx);
+  assert.equal(view.activeSideTab().id, tabB.id);
+  resolveSave({ code: 0, stdout: '{}', stderr: '' });
+  await savePromise;
+  assert.equal(view.tabState.tabs.some(x => x.id === tabA.id), false, 'saved original tabA is closed');
+  assert.equal(view.tabState.tabs.some(x => x.id === tabB.id), true, 'switched-to tabB is NOT closed');
+  assert.equal(view.activeSideTab().id, tabB.id, 'tabB stays active');
+
+  // Fix 3: Clicking Memory metadata chip (type/topic) marks active tab dirty & triggers dirty close guard.
+  view.openDoc({ tab: 'memory', root: 'memory', path: 'm1.md' }, sideEnt.cx);
+  const memTab = view.activeSideTab();
+  view.startEditDoc(sideEnt.cx);
+  assert.equal(view.activeSideTab().dirty, false);
+  nodes.clear();
+  sideEnt._render();
+  assert.ok(nodes.get('edit-topic-ui')?.handlers.click, 'memory topic chip exists');
+  nodes.get('edit-topic-ui').handlers.click({}, sideEnt.cx);
+  assert.equal(view.activeSideTab().dirty, true, 'metadata-only topic change marks tab dirty');
+  view.closeTab(memTab.id, sideEnt.cx);
+  assert.equal(view.confirmCloseTabId, memTab.id, 'dirty close guard blocks closing metadata-edited memory tab');
+  view.closeTab(memTab.id, sideEnt.cx, { force: true });
+
+  // Fix 2: openRepoFile / openMentionRef / pickProjectSearchHit from closed panel with background thread diff
+  // preserves thread Diff snapshot AND notifies shell so panel opens!
+  view.openThread('t1', sideEnt.cx);
+  view.openThreadChange(sideEnt.cx);
+  assert.equal(view.change.open, true);
+  view.closeSidePanel(sideEnt.cx);
+  assert.equal(view.isPanelOpen(), false);
+  const shellBefore = shellRenders;
+  view.openRepoFile('mods/pm-project/main.js', sideEnt.cx);
+  assert.equal(view.isPanelOpen(), true, 'openRepoFile opens closed panel even when background tabs exist');
+  assert.ok(shellRenders > shellBefore, 'openRepoFile notifies shell when opening from closed panel');
+  const threadTab = view.tabState.tabs.find(x => x.kind === 'thread' && x.taskId === 't1');
+  view.activateTab(threadTab.id, sideEnt.cx);
+  assert.equal(view.change.open, true, 'thread Diff state was snapshotted before switching to repo file');
+
+  // Fix 5: Threads directory row displays open-tab indicator when thread is open in a tab.
+  view.showIndexView(sideEnt.cx);
+  view.sideTab = 'threads';
+  nodes.clear();
+  sideEnt._render();
+  const threadRow = nodes.get('list-t1');
+  assert.ok(threadRow, 'list-t1 row rendered in Threads index');
+  assert.equal(threadRow.borderL, 0, 'open thread row has no left accent bar');
+  assert.ok(threadRow.allTexts().includes('Open'), 'open thread row shows Open badge');
+
+  // Fix 4: Narrow/medium viewport (wide=false, listShown=null) with hydrated thread tab stays closed!
+  view.wide = false;
+  view.listShown = null;
+  view.panelClosing = false;
+  view.activateTab(threadTab.id, sideEnt.cx);
+  assert.equal(view.detail, true);
+  assert.equal(view.isPanelOpen(), false, 'hydrated thread tab does not auto-popup panel on narrow/medium viewport');
+
+  view.close();
+});
+
+test('buildMentionMenu finds older merged/finished threads beyond FINISHED_LIMIT via tasks and extraThreads', () => {
+  const { buildMentionMenu, threadList, FINISHED_LIMIT } = model;
+  const pm = { name: 'pm-dudu', project: 'dudu' };
+
+  // Create 1 active task + 8 merged tasks (so #301 is beyond FINISHED_LIMIT=6) + 1 abandoned + 1 review.
+  const allTasks = [
+    { id: 'dudu-active', pm: 'pm-dudu', number: 327, title: 'Mention history threads', status: 'in_progress', branch: 'dev/mention-history', updated: '2026-11-25 10:00' },
+    { id: 'dudu-301', pm: 'pm-dudu', number: 301, title: 'PM 卡住自动恢复', status: 'merged', branch: 'dev/pm-stall-fix', updated: '2026-11-10 08:00' },
+    { id: 'dudu-abn', pm: 'pm-dudu', number: 302, title: 'PM 卡住废弃方案', status: 'abandoned', branch: 'dev/abn', updated: '2026-11-11 08:00' },
+    { id: 'dudu-301-rev', pm: 'pm-dudu', number: 303, title: 'Review PM 卡住', status: 'done', review_of: 'dudu-301', updated: '2026-11-10 09:00' },
+  ];
+  for (let i = 0; i < FINISHED_LIMIT + 2; i++) {
+    allTasks.push({
+      id: `dudu-recent-${i}`,
+      pm: 'pm-dudu',
+      number: 310 + i,
+      title: `Recent merged ${i}`,
+      status: 'merged',
+      branch: `dev/recent-${i}`,
+      updated: `2026-11-2${i} 12:00`,
+    });
+  }
+  const threads = threadList(pm, allTasks, []);
+  assert.equal(threads.finished.length, FINISHED_LIMIT);
+  assert.equal(threads.finished.some(r => r.task === 'dudu-301'), false, '#301 is sliced out of threads.finished');
+
+  // 1) Empty-query default menu does not dump historical finished threads into root items.
+  const rootMenu = buildMentionMenu({
+    lang: 'en',
+    category: 'all',
+    query: '',
+    threads,
+    tasks: allTasks,
+    extraThreads: [{ id: 'dudu-200', number: 200, title: 'Very old archived task', status: 'merged', branch: 'dev/old-200', updated: '2026-10-01 00:00' }],
+  });
+  assert.equal(rootMenu.mode, 'root');
+  assert.deepEqual(rootMenu.items.slice(3).map(i => i.target), ['dudu-active']);
+
+  // 2) Older merged task beyond FINISHED_LIMIT found via `tasks` by 301, #301, Chinese title, and branch.
+  for (const q of ['301', '#301', 'PM 卡住', 'pm-stall-fix']) {
+    const res = buildMentionMenu({ lang: 'zh', category: 'all', query: q, threads, tasks: allTasks });
+    assert.equal(res.items[0]?.target, 'dudu-301', `query "${q}" should rank #301 first`);
+    assert.equal(res.items[0]?.number, 301);
+    assert.equal(res.items.some(i => i.target === 'dudu-abn'), false, 'abandoned task excluded');
+    assert.equal(res.items.some(i => i.target === 'dudu-301-rev'), false, 'review_of task excluded');
+  }
+
+  // 3) Historical task not in `tasks` at all (only in `extraThreads` from `pm.py project tasks`) is found.
+  const extraRows = [
+    { id: 'dudu-200', number: 200, title: '历史合并修复', status: 'merged', branch: 'dev/hist-200', updated: '2026-10-01 00:00' },
+    { id: 'dudu-recent-7', number: 317, title: 'Recent merged 7', status: 'merged', branch: 'dev/recent-7', updated: '2026-11-27 12:00' },
+    { id: 'dudu-abn-extra', number: 201, title: '历史废弃', status: 'abandoned', updated: '2026-10-02 00:00' },
+  ];
+  for (const q of ['200', '#200', '历史合并', 'hist-200']) {
+    const res = buildMentionMenu({ lang: 'zh', category: 'all', query: q, threads, tasks: allTasks, extraThreads: extraRows });
+    assert.equal(res.items[0]?.target, 'dudu-200', `extraThreads query "${q}" should match #200`);
+    assert.equal(res.items.some(i => i.target === 'dudu-abn-extra'), false, 'abandoned extraThread excluded');
+  }
+
+  // 4) Deduplication when the same thread appears in threads.finished, tasks, and extraThreads.
+  const dedup = buildMentionMenu({ lang: 'en', category: 'threads', query: '317', threads, tasks: allTasks, extraThreads: extraRows });
+  assert.equal(dedup.items.filter(i => i.target === 'dudu-recent-7').length, 1, 'duplicate thread appears only once');
+
+  // 5) excludeThread hides the specified thread even if present in tasks and extraThreads.
+  const excluded = buildMentionMenu({
+    lang: 'en',
+    category: 'all',
+    query: '200',
+    threads,
+    tasks: allTasks,
+    extraThreads: extraRows,
+    excludeThread: 'dudu-200',
+  });
+  assert.equal(excluded.items.some(i => i.target === 'dudu-200'), false, 'excludeThread is excluded');
+
+  // 6) threadsLoading shows quiet loading state (threadsSearching) instead of No matches when empty.
+  const loadingAll = buildMentionMenu({
+    lang: 'zh',
+    category: 'all',
+    query: '99999',
+    threads,
+    tasks: allTasks,
+    threadsLoading: true,
+  });
+  assert.equal(loadingAll.loading, true);
+  assert.equal(loadingAll.loadingText, '正在搜索线程…');
+  assert.equal(loadingAll.emptyText, '');
+
+  const loadingThreads = buildMentionMenu({
+    lang: 'en',
+    category: 'threads',
+    query: '99999',
+    threads,
+    tasks: allTasks,
+    threadsLoading: true,
+  });
+  assert.equal(loadingThreads.loading, true);
+  assert.equal(loadingThreads.loadingText, 'Searching threads…');
+  assert.equal(loadingThreads.emptyText, '');
+
+  // Once matches exist, loading does not hide them.
+  const loadingWithMatch = buildMentionMenu({
+    lang: 'en',
+    category: 'all',
+    query: '301',
+    threads,
+    tasks: allTasks,
+    threadsLoading: true,
+  });
+  assert.equal(loadingWithMatch.loading, false);
+  assert.equal(loadingWithMatch.items[0]?.target, 'dudu-301');
+});
+
+test('Phase 0 stop-bleeding: no local threshold extrapolation, idle-duration slow/stalled, msg_id reconciliation, queued send, retry msg_id reuse, self-sustaining tick, and interrupt/rotate feedback', async () => {
+  // 1) FS-6 & FS-13: pmActivityView never extrapolates slow/stalled locally and ignores finished tool (`kind: thinking`).
+  const baseMs = 1795500000000;
+  const vNoExtrap = model.pmActivityView('en', {
+    turn: {
+      phase: 'working',
+      slow: false,
+      stalled: false,
+      started_ms: baseMs,
+      last_activity_ms: baseMs,
+      activity: { kind: 'thinking', tool: 'Bash', summary: 'old finished grep' },
+    },
+    working: true,
+    nowMs: baseMs + 600_000,
+    serverNowMs: baseMs + 600_000,
+  });
+  assert.equal(vNoExtrap.mode, 'working');
+  assert.equal(vNoExtrap.slow, false);
+  assert.equal(vNoExtrap.stalled, false);
+  assert.equal(vNoExtrap.label, 'Thinking · 10m');
+  assert.doesNotMatch(vNoExtrap.label, /old finished grep/);
+
+  // 2) MSG-6: text reconciliation skips events/receipts carrying a different `msg_id`.
+  const at1 = baseMs;
+  const ev1 = { at: '2026-11-25 12:00:00', at_ms: at1, type: 'user', msg_id: 'u-first', text: '继续' };
+  const b2 = { id: 2, msgId: 'u-second', text: '继续', sentAt: at1 + 10_000 };
+  assert.equal(model.settlePending([b2], [ev1]).length, 1, 'must not settle u-second against u-first by text');
+  const ev2 = { at: '2026-11-25 12:00:11', at_ms: at1 + 11_000, type: 'user', msg_id: 'u-second', text: '继续' };
+  assert.equal(model.settlePending([b2], [ev1, ev2]).length, 0, 'settles once matching msg_id arrives');
+  // Receipt reconciliation also skips a receipt with a different msg_id.
+  const r1 = { at: '2026-11-25 12:00:00', at_ms: at1 + 10_000, msg_id: 'u-first', text: '继续' };
+  assert.equal(model.findReceiptMatch(b2, [r1]), null, 'receipt with different msg_id must be skipped');
+
+  // 3) MSG-5: serverQueued bubble settles cleanly once logged user event with its msg_id appears; queuedReasonText is bilingual.
+  const bQueued = { id: 3, msgId: 'u-q1', text: '等会看下', sentAt: at1 + 20_000, queued: true, serverQueued: true, queuedReason: 'starting' };
+  assert.equal(model.settlePending([bQueued], [ev1]).length, 1);
+  assert.equal(model.settlePending([bQueued], [{ at: '2026-11-25 12:00:25', at_ms: at1 + 25_000, type: 'user', msg_id: 'u-q1', text: '等会看下' }]).length, 0);
+  assert.equal(model.queuedReasonText('en', 'starting'), 'PM session is starting');
+  assert.equal(model.queuedReasonText('zh', 'starting'), 'PM 会话正在启动');
+  assert.equal(model.queuedReasonText('zh', 'fifo'), '等待前面的排队消息');
+  assert.equal(model.queuedReasonText('en', 'inflight'), 'Waiting for previous message');
+
+  // 4) RS-1: formatPmActionFeedback covers interrupt outcomes and errors + rotate outcomes/errors in EN & ZH.
+  assert.deepEqual(
+    model.formatPmActionFeedback('zh', 'interrupt', { code: 0, stdout: JSON.stringify({ ok: true, outcome: 'still_working' }) }),
+    { tone: 'warn', text: '打断没有生效（仍在运行）' },
+  );
+  assert.deepEqual(
+    model.formatPmActionFeedback('en', 'interrupt', { code: 0, stdout: JSON.stringify({ ok: true, outcome: 'stopped' }) }),
+    { tone: 'info', text: 'Interrupted current step' },
+  );
+  assert.deepEqual(
+    model.formatPmActionFeedback('en', 'interrupt', { code: 1, stderr: 'hc:t1 is offline' }),
+    { tone: 'error', text: 'Interrupt failed: hc:t1 is offline' },
+  );
+  assert.deepEqual(
+    model.formatPmActionFeedback('zh', 'rotate', { code: 1, stderr: 'seat busy' }),
+    { tone: 'error', text: '换新会话失败：seat busy' },
+  );
+  assert.deepEqual(
+    model.formatPmActionFeedback('en', 'rotate', { code: 0, stdout: '{}' }),
+    { tone: 'info', text: 'Switched to a fresh PM session' },
+  );
+
+  // 5) main.js integration: queued `project send`, `retry` msg_id reuse, self-sustaining tick in renderConversationPane,
+  //    and interrupt/rotate feedback rendering.
+  const { readFileSync } = await import('node:fs');
+  const mainSource = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import[\s\S]*?;\s*\n/gm, '')
+    .replace(/export\s+default\s+class\s+(\w+)/, 'return class $1');
+  const nodes = new Map();
+  const makeEl = kind => {
+    const node = {
+      kind, nodeId: '', texts: [], kids: [],
+      allTexts() { return [...this.texts, ...this.kids.flatMap(c => c.allTexts())]; },
+    };
+    const p = new Proxy(node, {
+      get(target, key) {
+        if (key === Symbol.toPrimitive) return () => 0;
+        if (key === 'id') return v => { target.nodeId = String(v); nodes.set(target.nodeId, target); return p; };
+        if (key === 'child') return c => {
+          if (typeof c === 'string') target.texts.push(c);
+          else if (c && typeof c === 'object' && Array.isArray(c.texts)) target.kids.push(c);
+          return p;
+        };
+        if (key === 'children') return arr => {
+          for (const c of arr || []) {
+            if (typeof c === 'string') target.texts.push(c);
+            else if (c && typeof c === 'object' && Array.isArray(c.texts)) target.kids.push(c);
+          }
+          return p;
+        };
+        if (key === 'when') return (cond, fn) => { if (cond) fn(p); return p; };
+        if (key in target) return target[key];
+        return () => p;
+      },
+    });
+    return p;
+  };
+  let nowClock = baseMs + 5000;
+  let pmStatus = 'working';
+  const sendCalls = [];
+  let nextSendReply = { code: 0, stdout: JSON.stringify({ ok: true, status: 'queued', reason: 'starting', msg_id: '' }), stderr: '' };
+  let nextInterruptReply = { code: 0, stdout: JSON.stringify({ ok: true, outcome: 'still_working' }), stderr: '' };
+  let nextRotateReply = { code: 1, stdout: '', stderr: 'rotation failed' };
+  const storeMap = new Map();
+  const stubs = {
+    ...model,
+    View: class {},
+    div: () => makeEl('div'),
+    v_flex: () => makeEl('v_flex'),
+    h_flex: () => makeEl('h_flex'),
+    svg: () => makeEl('svg'),
+    image: () => makeEl('image'),
+    TextView: {
+      markdown: (_id, text) => makeEl('TextView').child(String(text || '')),
+      html: (_id, text) => makeEl('TextView').child(String(text || '')),
+    },
+    TextareaState: class { value() { return ''; } set_value() {} focus() {} on() {} set_auto_grow() {} },
+    Textarea: { new: () => makeEl('Textarea') },
+    InputState: class { value() { return ''; } set_value() {} focus() {} on() {} },
+    Input: { new: () => makeEl('Input') },
+    ScrollHandle: class { scroll_to_item() {} },
+    Scrollbar: { vertical: () => makeEl('Scrollbar') },
+    Popup: { new: (_id, base) => base },
+    theme: () => ({
+      background: '#111', surface: '#222', raised: '#282828', border: '#333', input: '#444', hover: '#444',
+      foreground: '#fff', muted: '#aaa', dim: '#888', accent: '#48f', blocked: '#f55', done: '#22c55e',
+      solid: '#eee', solid_foreground: '#111', ansi3: '#fa0',
+    }),
+    home: () => '/Users/demo',
+    appHome: () => '/Users/demo/.config/herdr-app',
+    layout: () => ({ active: 'pm-project' }),
+    terminals: () => [{ address: 'tpm', state: 'live', status: pmStatus, turn: 1, foreground: { pid: 901 } }],
+    agents: () => [{ address: 'tpm', status: pmStatus }],
+    panes: () => [],
+    spaces: () => [],
+    shared: () => ({ key: 'pm-dudu', machine: '' }),
+    setShared: () => {},
+    props: () => ({}),
+    openOverlay: () => {},
+    closeOverlay: () => {},
+    appWindow: () => ({}),
+    window: () => ({}),
+    pythonArgv: args => ['python3', ...args],
+    execPython: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    readTextFile: async () => '',
+    writeTextFile: async () => {},
+    watchFolder: () => () => {},
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+    localStorage: {
+      getItem: k => storeMap.get(k) ?? null,
+      setItem: (k, v) => { storeMap.set(k, String(v)); },
+      removeItem: k => { storeMap.delete(k); },
+    },
+    exec: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+  };
+  const Mod = new Function(...Object.keys(stubs), mainSource)(...Object.values(stubs));
+  const timers = [];
+  const spawns = [];
+  let convNotifyCount = 0;
+  const cx = {
+    focus_handle: () => ({ focus() {} }),
+    spawn: fn => { const p = Promise.resolve(fn(cx)); spawns.push(p); return p; },
+    timer: { after: (ms, fn) => { timers.push({ ms, fn }); }, every: () => {} },
+    notify: () => { convNotifyCount++; },
+    stop_propagation: () => {},
+  };
+  const drain = async () => {
+    for (let i = 0; i < 6; i++) {
+      await Promise.all(spawns.splice(0));
+      await new Promise(r => setTimeout(r, 0));
+    }
+  };
+  let draftVal = '';
+  const restoredDrafts = [];
+  const makeInput = () => ({ value: () => draftVal, set_value(v) { draftVal = v; }, set_selected_range() {}, focus() {}, on() {}, set_auto_grow() {} });
+  const view = Object.assign(Object.create(Mod.prototype), {
+    state: {
+      pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:tpm', turn: { phase: 'working', started_ms: baseMs, last_activity_ms: baseMs } }],
+      tasks: [], events: [], lang: 'zh',
+    },
+    lang: 'zh',
+    events: [], pending: [], pendingByPm: new Map(), seq: 0, pastes: [], error: '', logError: '',
+    logTurn: { phase: 'working', started_ms: baseMs, last_activity_ms: baseMs },
+    flushingQueue: false, flushingQueueAt: 0, queueTimer: false, confirmTimer: false, lastLogReadAt: 0, confirmLogProbes: new Set(),
+    pmDialog: null, pmDialogLoading: false, pmDialogAt: 0, pmSendBlockError: '',
+    interruptingPm: '', rotatingPm: '', pmActionFeedback: null, turnTickTimer: false,
+    pmName: 'pm-dudu', logPath: '', logSlug: 'dudu', machine: '', stateFor: '', remoteHome: '',
+    remoteNoProject: '', remoteNoLibrary: '', remoteNoMemory: '', remoteNoSession: '', logState: null,
+    earlierLoading: false, earlierError: '', earlierAnchor: null, ledgerHome: '/tmp/ledger', watching: {},
+    thread: '', threadTask: null, detail: false, threadError: '', threadLog: null, threadLogKept: [],
+    threadEarlierLoading: false, threadEarlierError: '', threadAnchor: null, threadLogExpanded: false,
+    epicOverrides: new Map(), expandedDone: new Set(), substepsToggle: {}, hoverKey: '',
+    agentWindows: [], winSession: 'sess-1', lastWinEventSeq: 0, agentWindowSlot: 0,
+    threadTab: 'log', sideTab: 'threads', librarySlug: 'dudu', libraryRoots: [], libraryFiles: [], libraryRead: true,
+    libraryProbed: true, libraryStale: false, libraryLoading: false, libraryAgain: false, libraryError: '',
+    libraryClosed: new Set(), libraryQuery: '', libraryDropBusy: '', libraryDropError: '',
+    memorySlug: 'dudu', memoryData: null, memoryRead: false, memoryStale: false, memoryLoading: false, memoryAgain: false, memoryError: '',
+    memoryFoldOverrides: new Map(), memoryProjectOpen: true, memoryPersonalOpen: false, memoryCandidatesOpen: false,
+    memoryQuery: '', memoryBusy: '', memoryNoticeError: '',
+    activeDoc: null, docCache: new Map(), docFailed: new Map(), docLoading: '', docError: '',
+    docShownBytes: model.DOC_INITIAL_BYTES, docFindOpen: false, docFindQuery: '', docJumpQuery: '', docFindJump: false, docMatchPos: 0,
+    editingDoc: null, retopicOpen: false, retopicSaving: false, retopicError: '',
+    confirmDeleteKey: '', deleteBusy: '', deleteError: '', deletedBanner: null, historyView: null,
+    reattaching: '', reattachError: null, startingPm: '', startPmError: null,
+    bringBackOpen: false, bringingBack: false, bringBackProgress: null,
+    listShown: false, wide: true, measured: true, panelWant: null, panelDrag: null, viewWidth: 1280, gripLit: false,
+    seen: null, count: 0, settle: 0, away: false, rise: 0, heights: new Map(), tall: 700, high: 700,
+    bell: null, flash: '', unfolded: new Map(), newest: '', atWork: new Set(),
+    scroll: { scroll_to_item() {} }, threadScroll: { scroll_to_item() {} }, sessionScroll: { scroll_to_item() {} },
+    libraryScroll: { scroll_to_item() {} }, memoryScroll: { scroll_to_item() {} }, docScroll: { scroll_to_item() {} }, historyScroll: { scroll_to_item() {} },
+    keyFocus: { focus() {} }, onStage: true, typing: '', mainKey: 'pm:pm-dudu', threadKey: '', outgoing: new Map(),
+    files: [], threadFiles: [], attachError: null, pasted: { stamp: '', n: 0 }, answering: null, quotes: [],
+    input: makeInput(), threadInput: makeInput(), libraryInput: makeInput(), memoryInput: makeInput(), docFindInput: makeInput(),
+    docNameInput: makeInput(), memDescInput: makeInput(), docEditorInput: makeInput(),
+    nowMs: () => nowClock,
+    refresh: () => {},
+    readLog: () => {},
+    notifyPanes: (_cx, opts) => { if (opts?.conv) convNotifyCount++; },
+    landed: (_key, _draft, ok) => { if (!ok) restoredDrafts.push(_draft); },
+    runProjectWrite: async argv => {
+      if (argv[0] === 'project' && argv[1] === 'send') {
+        const idx = argv.indexOf('--msg-id');
+        sendCalls.push({ argv, msgId: idx >= 0 ? argv[idx + 1] : '' });
+        return nextSendReply;
+      }
+      if (argv[0] === 'project' && argv[1] === 'interrupt') return nextInterruptReply;
+      if (argv[0] === 'rotate') return nextRotateReply;
+      return { code: 0, stdout: '{}', stderr: '' };
+    },
+  });
+
+  // 5a) MSG-5: `project send` returning `status: "queued"` stays Queued with reason, no error, no draft restore.
+  draftVal = '换会话期间发的一句';
+  view.sendMain(cx);
+  await drain();
+  assert.equal(sendCalls.length, 1);
+  assert.equal(restoredDrafts.length, 0, 'queued reply must NOT restore draft');
+  assert.equal(view.pending.length, 1);
+  assert.equal(view.pending[0].queued, true);
+  assert.equal(view.pending[0].serverQueued, true);
+  assert.equal(view.pending[0].failed, '');
+  assert.equal(view.pending[0].queuedReason, 'starting');
+  nodes.clear();
+  view.renderConversationPane(cx);
+  assert.match(nodes.get(`queued-pending:${view.pending[0].id}`)?.allTexts().join(' ') || '', /排队中 · PM 会话正在启动/);
+
+  // 5b) MSG-5: Retrying a failed bubble reuses the exact original `msg_id`.
+  const origMsgId = 'u-retry-keep-123';
+  view.pending = [{
+    id: 99, msgId: origMsgId, text: '重试这句', said: '重试这句', words: '重试这句',
+    to: '', files: [], quotes: [], sentAt: nowClock, draftKey: 'pm:pm-dudu',
+    queued: false, inFlight: false, failed: 'temporary error',
+  }];
+  sendCalls.length = 0;
+  nextSendReply = { code: 0, stdout: JSON.stringify({ ok: true, status: 'delivered', msg_id: origMsgId, offset: 42, at_ms: nowClock }), stderr: '' };
+  view.retry(99, cx);
+  await drain();
+  assert.equal(sendCalls.length, 1);
+  assert.equal(sendCalls[0].msgId, origMsgId, 'retry must reuse original msg_id');
+
+  // 5c) FS-16: Self-sustaining 1-second tick inside renderConversationPane (without calling outer render()).
+  timers.length = 0;
+  view.turnTickTimer = false;
+  view.renderConversationPane(cx);
+  const tick1 = timers.find(t => t.ms === 1000);
+  assert.ok(tick1, 'renderConversationPane schedules 1000ms turn tick');
+  timers.length = 0;
+  nowClock += 1000;
+  convNotifyCount = 0;
+  tick1.fn(cx);
+  assert.equal(convNotifyCount, 1, '1000ms tick notifies conversation pane');
+  assert.equal(view.turnTickTimer, false);
+  // Conversation pane re-renders on its own (dual-entity mode) -> must re-schedule the next 1000ms tick!
+  view.renderConversationPane(cx);
+  assert.ok(timers.some(t => t.ms === 1000), 'subsequent renderConversationPane self-sustains the 1000ms tick');
+
+  // 5d) RS-1: interruptPm and rotatePmFromStall display outcome and error in #pm-action-feedback-bar.
+  view.interruptPm(cx);
+  await drain();
+  assert.equal(view.pmActionFeedback?.tone, 'warn');
+  assert.match(view.pmActionFeedback?.text || '', /打断没有生效/);
+  nodes.clear();
+  view.renderConversationPane(cx);
+  assert.match(nodes.get('pm-action-feedback-bar')?.allTexts().join(' ') || '', /打断没有生效/);
+
+  view.rotatePmFromStall(cx);
+  await drain();
+  assert.equal(view.pmActionFeedback?.tone, 'error');
+  assert.match(view.pmActionFeedback?.text || '', /换新会话失败：rotation failed/);
+  nodes.clear();
+  view.renderConversationPane(cx);
+  assert.match(nodes.get('pm-action-feedback-bar')?.allTexts().join(' ') || '', /换新会话失败：rotation failed/);
+});
+
+test('Phase 1 observation kernel: INTERNAL_PROJECT_FILES, supervised=false / unknown status, turn2 fallback, and pi_compact events', async () => {
+  // 1) Internal project files registered in JS
+  assert.equal(model.INTERNAL_PROJECT_FILES.has('pm-turn-journal.jsonl'), true);
+  assert.equal(model.INTERNAL_PROJECT_FILES.has('pm-turn-journal.1.jsonl'), true);
+  assert.equal(model.INTERNAL_PROJECT_FILES.has('pm-turn.beat'), true);
+
+  // 2) Stale supervisor / unknown health renders bilingual Status unknown without stalled/interrupt icons
+  const vUnknownEn = model.pmActivityView('en', {
+    turn: { phase: 'working', health: 'unknown', stalled: false },
+    supervised: false,
+    working: true,
+  });
+  assert.equal(vUnknownEn.mode, 'unknown');
+  assert.equal(vUnknownEn.unknown, true);
+  assert.equal(vUnknownEn.stalled, false);
+  assert.equal(vUnknownEn.canInterrupt, false);
+  assert.equal(vUnknownEn.label, 'Status unknown, reconnecting…');
+
+  const vUnknownZh = model.pmActivityView('zh', {
+    turn2: { supervised: false, turn: { phase: 'idle', health: 'unknown' } },
+    working: false,
+  });
+  assert.equal(vUnknownZh.mode, 'unknown');
+  assert.equal(vUnknownZh.label, '状态未知，正在重连…');
+
+  // 3) turn2 fallback works even without v1 turn
+  const baseMs = 1795600000000;
+  const vTurn2Tool = model.pmActivityView('en', {
+    turn: null,
+    turn2: {
+      supervised: true,
+      turn: {
+        phase: 'tool',
+        health: 'ok',
+        started_ms: baseMs,
+        last_progress_ms: baseMs + 5000,
+        activity: { kind: 'tool', tool: 'Bash', summary: 'npm test' },
+      },
+    },
+    supervised: true,
+    working: true,
+    nowMs: baseMs + 8000,
+    serverNowMs: baseMs + 8000,
+  });
+  assert.equal(vTurn2Tool.mode, 'working');
+  assert.match(vTurn2Tool.label, /Running npm test · 8s/);
+
+  // 4) pm_pi_compact.js bridges agent_start, tool_execution_start, tool_execution_end
+  const piExt = await import('../pm-dash/skill/scripts/pm_pi_compact.js');
+  const spawned = [];
+  const handlers = new Map();
+  piExt.default(
+    { on(ev, fn) { handlers.set(ev, fn); }, sendMessage() {} },
+    {
+      instructions: 'rules',
+      spawnHook(cmd, args) {
+        let written = '';
+        spawned.push({ cmd, args, get stdin() { return written; } });
+        return { stdin: { on() {}, end(s) { written = s; } }, unref() {} };
+      },
+    },
+  );
+  handlers.get('agent_start')?.({ sessionId: 'pi-1' }, { cwd: '/tmp/proj' });
+  handlers.get('tool_execution_start')?.({ toolName: 'bash', toolCallId: 'c1', args: { command: 'ls -la' } }, { cwd: '/tmp/proj' });
+  handlers.get('tool_execution_end')?.({ toolName: 'bash', toolCallId: 'c1' }, { cwd: '/tmp/proj' });
+  const payloads = spawned.map(s => JSON.parse(s.stdin));
+  assert.deepEqual(payloads.map(p => p.hook_event_name), ['AgentStart', 'ToolStart', 'ToolEnd']);
+  assert.equal(payloads[1].tool_summary, 'ls -la');
+});
+
+test('Phase 2 occupation governance: full §3.9 pmActivityView table (EN & ZH), preamble, always-on interrupt, busy composer bar & preempt UX', async () => {
+  const baseMs = 1795700000000;
+  const makeTurn2 = (turnPatch = {}, extra = {}) => ({
+    version: 2,
+    supervised: true,
+    beat_age_ms: 1000,
+    session: { runtime: 'hc', terminal: 't12', agent_kind: 'claude', fg_pid: 4200, epoch: 1 },
+    turn: {
+      id: 'hc:local:t12:4200:5',
+      phase: 'generating',
+      health: 'ok',
+      health_reason: '',
+      started_ms: baseMs,
+      phase_since_ms: baseMs,
+      last_progress_ms: baseMs,
+      activity: { kind: 'generate', tool: '', summary: '', since_ms: baseMs, preamble: '' },
+      ...turnPatch,
+    },
+    bg_shells: { count: 0, commands: [] },
+    ...extra,
+  });
+
+  // Row 1: supervised: false OR snapshot > 15s stale -> unknown + openTerminal (muted tone, no interrupt)
+  for (const [lang, expected] of [['en', 'Status unknown, reconnecting…'], ['zh', '状态未知，正在重连…']]) {
+    const vStale = model.pmActivityView(lang, {
+      turn2: makeTurn2({ phase: 'generating', health: 'ok' }),
+      working: true,
+      nowMs: baseMs + 25_000,
+      serverNowMs: baseMs + 5_000,
+      receivedAtMs: baseMs + 5_000, // snapshot age = 20s > 15s
+    });
+    assert.equal(vStale.mode, 'unknown');
+    assert.equal(vStale.label, expected);
+    assert.equal(vStale.tone, 'muted');
+    assert.equal(vStale.canOpenTerminal, true);
+    assert.equal(vStale.canInterrupt, false);
+    assert.equal(vStale.canRotate, false);
+  }
+
+  // Row 2: submitted -> dots, no icons
+  const vSub = model.pmActivityView('en', {
+    turn2: makeTurn2({ phase: 'submitted', health: 'ok' }),
+    working: true,
+    nowMs: baseMs + 2000,
+    serverNowMs: baseMs + 2000,
+  });
+  assert.equal(vSub.mode, 'dots');
+  assert.equal(vSub.label, '');
+  assert.equal(vSub.canInterrupt, false);
+  assert.equal(vSub.canOpenTerminal, false);
+
+  // Row 3: generating, ok, < 3s -> dots WITH always-on interrupt icon!
+  const vGenShort = model.pmActivityView('zh', {
+    turn2: makeTurn2({ phase: 'generating', health: 'ok' }),
+    working: true,
+    nowMs: baseMs + 1500,
+    serverNowMs: baseMs + 1500,
+  });
+  assert.equal(vGenShort.mode, 'dots');
+  assert.equal(vGenShort.label, '');
+  assert.equal(vGenShort.canInterrupt, true);
+
+  // Row 4: generating, ok >= 3s (without and with preamble O-f)
+  const vGenEn = model.pmActivityView('en', {
+    turn2: makeTurn2({ phase: 'generating', health: 'ok' }),
+    working: true,
+    nowMs: baseMs + 12_000,
+    serverNowMs: baseMs + 12_000,
+  });
+  assert.equal(vGenEn.label, 'Thinking · 12s');
+  assert.equal(vGenEn.canInterrupt, true);
+  assert.equal(vGenEn.canOpenTerminal, false);
+
+  const vGenPreambleZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({
+      phase: 'generating',
+      health: 'ok',
+      activity: { kind: 'generate', tool: '', summary: '', since_ms: baseMs, preamble: '在查 @ 弹层的候选来源' },
+    }),
+    working: true,
+    nowMs: baseMs + 12_000,
+    serverNowMs: baseMs + 12_000,
+  });
+  assert.equal(vGenPreambleZh.label, '在查 @ 弹层的候选来源 · 12s');
+  assert.equal(vGenPreambleZh.preamble, '在查 @ 弹层的候选来源');
+  assert.equal(vGenPreambleZh.canInterrupt, true);
+
+  // Row 5: generating, slow -> Writing a long piece / 正在生成较长内容 (neutral, interrupt)
+  const vGenSlowEn = model.pmActivityView('en', {
+    turn2: makeTurn2({ phase: 'generating', health: 'slow', last_progress_ms: baseMs }),
+    working: true,
+    nowMs: baseMs + 100_000,
+    serverNowMs: baseMs + 100_000,
+  });
+  assert.equal(vGenSlowEn.mode, 'slow');
+  assert.equal(vGenSlowEn.tone, 'neutral');
+  assert.equal(vGenSlowEn.label, 'Writing a long piece · 1m 40s');
+  assert.equal(vGenSlowEn.canInterrupt, true);
+
+  const vGenSlowZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({ phase: 'generating', health: 'slow', last_progress_ms: baseMs }),
+    working: true,
+    nowMs: baseMs + 100_000,
+    serverNowMs: baseMs + 100_000,
+  });
+  assert.equal(vGenSlowZh.label, '正在生成较长内容 · 1m 40s');
+
+  // Row 6: tool, ok -> Running <summary> · <cmd_dur> (uses command since_ms, NOT total turn!)
+  const vToolOk = model.pmActivityView('zh', {
+    turn2: makeTurn2({
+      phase: 'tool',
+      health: 'ok',
+      started_ms: baseMs,
+      phase_since_ms: baseMs + 20_000,
+      activity: { kind: 'tool', tool: 'Bash', summary: 'git status', since_ms: baseMs + 20_000, preamble: '先核对分支状态' },
+    }),
+    working: true,
+    nowMs: baseMs + 28_000,
+    serverNowMs: baseMs + 28_000,
+  });
+  assert.equal(vToolOk.label, '正在运行 git status · 8s');
+  assert.equal(vToolOk.preamble, '先核对分支状态');
+  assert.equal(vToolOk.canInterrupt, true);
+  assert.equal(vToolOk.canOpenTerminal, false);
+
+  // Row 7: tool, slow -> Foreground command running for <dur>: <summary> + interrupt, openTerminal
+  const vToolSlowEn = model.pmActivityView('en', {
+    turn2: makeTurn2({
+      phase: 'tool',
+      health: 'slow',
+      health_reason: 'tool_soft_budget',
+      phase_since_ms: baseMs + 10_000,
+      activity: { kind: 'tool', tool: 'Bash', summary: 'pytest', since_ms: baseMs + 10_000 },
+    }),
+    working: true,
+    nowMs: baseMs + 50_000,
+    serverNowMs: baseMs + 50_000,
+  });
+  assert.equal(vToolSlowEn.mode, 'slow');
+  assert.equal(vToolSlowEn.tone, 'neutral');
+  assert.equal(vToolSlowEn.label, 'Foreground command running for 40s: pytest');
+  assert.equal(vToolSlowEn.canInterrupt, true);
+  assert.equal(vToolSlowEn.canOpenTerminal, true);
+
+  const vToolSlowZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({
+      phase: 'tool',
+      health: 'slow',
+      health_reason: 'tool_soft_budget',
+      phase_since_ms: baseMs + 10_000,
+      activity: { kind: 'tool', tool: 'Bash', summary: 'pytest', since_ms: baseMs + 10_000 },
+    }),
+    working: true,
+    nowMs: baseMs + 50_000,
+    serverNowMs: baseMs + 50_000,
+  });
+  assert.equal(vToolSlowZh.label, '前台命令已运行 40s：pytest');
+
+  // Row 8: tool, suspect -> Command may be waiting for input + interrupt, openTerminal
+  const vToolSuspEn = model.pmActivityView('en', {
+    turn2: makeTurn2({
+      phase: 'tool',
+      health: 'suspect',
+      health_reason: 'tool_waiting_input',
+      activity: { kind: 'tool', tool: 'Bash', summary: 'ssh prod', since_ms: baseMs },
+    }),
+    working: true,
+    nowMs: baseMs + 70_000,
+    serverNowMs: baseMs + 70_000,
+  });
+  assert.equal(vToolSuspEn.mode, 'suspect');
+  assert.equal(vToolSuspEn.label, 'Command may be waiting for input: ssh prod');
+  assert.equal(vToolSuspEn.canInterrupt, true);
+  assert.equal(vToolSuspEn.canOpenTerminal, true);
+
+  const vToolSuspZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({
+      phase: 'tool',
+      health: 'suspect',
+      health_reason: 'tool_waiting_input',
+      activity: { kind: 'tool', tool: 'Bash', summary: 'ssh prod', since_ms: baseMs },
+    }),
+    working: true,
+    nowMs: baseMs + 70_000,
+    serverNowMs: baseMs + 70_000,
+  });
+  assert.equal(vToolSuspZh.label, '命令可能在等输入：ssh prod');
+
+  // Row 9: waiting_upstream -> Model service retrying (attempt 3) + interrupt
+  const vRetryEn = model.pmActivityView('en', {
+    turn2: makeTurn2({
+      phase: 'waiting_upstream',
+      health: 'slow',
+      activity: { kind: 'waiting_upstream', summary: 'retry:3', since_ms: baseMs },
+    }),
+    working: true,
+    nowMs: baseMs + 15_000,
+    serverNowMs: baseMs + 15_000,
+  });
+  assert.equal(vRetryEn.mode, 'waiting_upstream');
+  assert.equal(vRetryEn.label, 'Model service retrying (attempt 3)');
+  assert.equal(vRetryEn.canInterrupt, true);
+
+  const vRetryZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({
+      phase: 'waiting_upstream',
+      health: 'slow',
+      activity: { kind: 'waiting_upstream', summary: 'retry:3', since_ms: baseMs },
+    }),
+    working: true,
+    nowMs: baseMs + 15_000,
+    serverNowMs: baseMs + 15_000,
+  });
+  assert.equal(vRetryZh.label, '模型服务重试中（第 3 次）');
+
+  // Row 10: blocked -> Waiting for you in the terminal + openTerminal
+  const vBlockedEn = model.pmActivityView('en', {
+    turn2: makeTurn2({ phase: 'blocked', health: 'ok', health_reason: 'permission', activity: { kind: 'blocked', summary: 'permission' } }),
+    working: false,
+  });
+  assert.equal(vBlockedEn.mode, 'blocked');
+  assert.equal(vBlockedEn.label, 'Waiting for you in the terminal: permission');
+  assert.equal(vBlockedEn.canOpenTerminal, true);
+  assert.equal(vBlockedEn.canInterrupt, false);
+
+  const vBlockedZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({ phase: 'blocked', health: 'ok', health_reason: 'permission', activity: { kind: 'blocked', summary: 'permission' } }),
+    working: false,
+  });
+  assert.equal(vBlockedZh.label, '等你在终端确认：permission');
+
+  // Row 11: recovering -> Recovering: <step> + openTerminal
+  const vRecEn = model.pmActivityView('en', {
+    turn2: makeTurn2({ phase: 'recovering', health: 'ok', activity: { kind: 'recovering', summary: 'retrying turn' } }),
+    working: true,
+  });
+  assert.equal(vRecEn.mode, 'recovering');
+  assert.equal(vRecEn.label, 'Recovering: retrying turn');
+  assert.equal(vRecEn.canOpenTerminal, true);
+
+  const vRecZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({ phase: 'recovering', health: 'ok', activity: { kind: 'recovering', summary: '续上本轮' } }),
+    working: true,
+  });
+  assert.equal(vRecZh.label, '正在自动恢复：续上本轮');
+
+  // Row 12: health: stalled -> Unresponsive <dur> (<evidence>) + interrupt, rotate, openTerminal
+  const vStallEn = model.pmActivityView('en', {
+    turn2: makeTurn2({
+      phase: 'generating',
+      health: 'stalled',
+      health_reason: 'pty_frozen',
+      started_ms: baseMs,
+      last_progress_ms: baseMs + 10_000,
+    }),
+    working: true,
+    nowMs: baseMs + 70_000,
+    serverNowMs: baseMs + 70_000,
+  });
+  assert.equal(vStallEn.mode, 'stalled');
+  assert.equal(vStallEn.tone, 'stalled');
+  assert.equal(vStallEn.label, 'Unresponsive for 1m (screen unchanged for 45s)');
+  assert.equal(vStallEn.canInterrupt, true);
+  assert.equal(vStallEn.canRotate, true);
+  assert.equal(vStallEn.canOpenTerminal, true);
+
+  const vStallZh = model.pmActivityView('zh', {
+    turn2: makeTurn2({
+      phase: 'generating',
+      health: 'stalled',
+      health_reason: 'no_step_timeout',
+      started_ms: baseMs,
+      last_progress_ms: baseMs,
+    }),
+    working: true,
+    nowMs: baseMs + 240_000,
+    serverNowMs: baseMs + 240_000,
+  });
+  assert.equal(vStallZh.label, '无响应 4m（依据：4 分钟没有新的一步）');
+
+  // Row 13: idle with bg_shells.count > 0 -> hidden activity row, bgShells count preserved for header tooltip
+  const vBgIdle = model.pmActivityView('en', {
+    turn2: makeTurn2({ phase: 'idle', health: 'ok' }, { bg_shells: { count: 2, commands: ['npm run dev', 'tail -f'] } }),
+    working: false,
+  });
+  assert.equal(vBgIdle.active, false);
+  assert.equal(vBgIdle.mode, 'idle');
+  assert.equal(vBgIdle.bgShells, 2);
+
+  // Busy composer bar (O-e, D3): only shown when busy AND (hasDraft || queued messages)
+  // Empty composer + no queued messages -> null (activity row already shows status + interrupt icon)
+  assert.equal(model.pmBusyComposerView('en', {
+    actView: vToolSlowEn,
+    turn2: makeTurn2({}, { session: { runtime: 'hc', terminal: 't12', agent_kind: 'claude' } }),
+    working: true,
+    hasDraft: false,
+    queuedCount: 0,
+  }), null);
+  // Consumed / answered / failed inbox rows do NOT count as queued
+  assert.equal(model.pmBusyComposerView('en', {
+    actView: vToolSlowEn,
+    turn2: makeTurn2({}, {
+      session: { runtime: 'hc', terminal: 't12', agent_kind: 'claude' },
+      inbox: [
+        { id: 'u1', kind: 'user', state: 'consumed' },
+        { id: 'u2', kind: 'user', state: 'answered' },
+        { id: 'u3', kind: 'user', state: 'failed' },
+      ],
+    }),
+    working: true,
+    hasDraft: false,
+    queuedCount: 0,
+  }), null);
+
+  // With draft: Claude -> "this step", Agy -> "this turn", EN & ZH + preempt action label
+  const busyClaudeEn = model.pmBusyComposerView('en', {
+    actView: vToolSlowEn,
+    turn2: makeTurn2({}, { session: { runtime: 'hc', terminal: 't12', agent_kind: 'claude' } }),
+    working: true,
+    hasDraft: true,
+  });
+  assert.equal(busyClaudeEn.text, 'Coordinator is running pytest; your message will be seen after this step');
+  assert.equal(busyClaudeEn.actionLabel, 'Interrupt and handle this first');
+
+  const busyAgyZh = model.pmBusyComposerView('zh', {
+    actView: vGenPreambleZh,
+    turn2: makeTurn2({}, { session: { runtime: 'hc', terminal: 't12', agent_kind: 'agy' } }),
+    working: true,
+    hasDraft: true,
+  });
+  assert.equal(busyAgyZh.text, '协调者正在在查 @ 弹层的候选来源；这条消息会在它答完这一轮后被看到');
+  assert.equal(busyAgyZh.actionLabel, '打断它，先处理这条');
+
+  // Without draft, with queued message (client queue or mailbox accepted/typed)
+  const busyQueuedEn = model.pmBusyComposerView('en', {
+    actView: vToolSlowEn,
+    turn2: makeTurn2({}, { session: { runtime: 'hc', terminal: 't12', agent_kind: 'claude' } }),
+    working: true,
+    hasDraft: false,
+    queuedCount: 1,
+  });
+  assert.equal(busyQueuedEn.text, 'Coordinator is running pytest; queued message will be seen after this step');
+  assert.equal(busyQueuedEn.actionLabel, 'Interrupt and handle queued message');
+
+  const busyInboxZh = model.pmBusyComposerView('zh', {
+    actView: vGenPreambleZh,
+    turn2: makeTurn2({}, {
+      session: { runtime: 'hc', terminal: 't12', agent_kind: 'agy' },
+      inbox: [
+        { id: 'u1', kind: 'user', state: 'accepted' },
+        { id: 'u2', kind: 'user', state: 'typed' },
+      ],
+    }),
+    working: true,
+    hasDraft: false,
+    queuedCount: 0,
+  });
+  assert.equal(busyInboxZh.text, '协调者正在在查 @ 弹层的候选来源；2 条排队消息会在它答完这一轮后被看到');
+  assert.equal(busyInboxZh.actionLabel, '打断它，先处理排队消息');
+
+  assert.equal(model.pmBusyComposerView('en', { actView: vBgIdle, working: false, hasDraft: true }), null);
+  assert.equal(model.pmBusyComposerView('en', { actView: vBlockedEn, working: false, hasDraft: true }), null);
+
+  // Full main.js integration: busy bar hidden when empty, renders #pm-busy-bar + icon-only #pm-preempt-btn when draft or queued exists,
+  // timeline height shrink re-triggers follow (settle > 0) so activity row is never clipped, and clicking preempt interrupts AND sends draft!
+  const fs = await import('node:fs');
+  const mainSource = fs.readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^\s*import\s+[\s\S]*?;\s*$/gm, '')
+    .replace(/export\s+default\s+/, 'return ');
+  const nodes = new Map();
+  const makeEl = () => {
+    const rec = { id: '', texts: [], clicks: null, sizeChange: null, a11y: '', kids: [] };
+    const collect = n => [...n.texts, ...n.kids.flatMap(collect)];
+    rec.allTexts = () => collect(rec);
+    const proxy = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === '__rec') return rec;
+        if (prop === 'id') return v => { rec.id = v; nodes.set(v, rec); return proxy; };
+        if (prop === 'child') return c => { if (c?.__rec) rec.kids.push(c.__rec); else if (c != null && c !== '') rec.texts.push(String(c)); return proxy; };
+        if (prop === 'children') return arr => { for (const c of arr || []) { if (c?.__rec) rec.kids.push(c.__rec); else if (c != null && c !== '') rec.texts.push(String(c)); } return proxy; };
+        if (prop === 'when') return (cond, fn) => (cond ? (fn(proxy) || proxy) : proxy);
+        if (prop === 'on_click') return fn => { rec.clicks = fn; return proxy; };
+        if (prop === 'on_size_change') return fn => { rec.sizeChange = fn; return proxy; };
+        if (prop === 'accessibility_label') return v => { rec.a11y = String(v || ''); return proxy; };
+        return () => proxy;
+      },
+    });
+    return proxy;
+  };
+  const blank = () => makeEl();
+  const writeCalls = [];
+  let draftVal = '';
+  const makeInput = () => ({ value: () => draftVal, set_value: v => { draftVal = v; }, set_selected_range() {}, focus() {} });
+  const stubs = {
+    View: class {},
+    ...model,
+    TextView: { markdown: (_id, md) => makeEl().child(md) },
+    Textarea: { new: () => makeEl() },
+    Input: { new: () => makeEl() },
+    Popup: { new: (id, trigger) => makeEl().id(id).child(trigger) },
+    div: makeEl, v_flex: makeEl, h_flex: makeEl, svg: makeEl, image: makeEl,
+    appHome: () => '/app', home: () => '/Users/me',
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    appWindow: () => ({ platform: 'macos' }),
+    terminals: () => [{ address: 'tpm', state: 'live', status: 'working', report: { state: 'working' }, foreground: { pid: 99 } }],
+    agents: () => [{ address: 'tpm', status: 'working' }],
+    panes: () => [], spaces: () => [],
+    theme: () => ({
+      background: '#111', chrome: '#181818', surface: '#202020', raised: '#282828', hover: '#303030',
+      border: '#383838', foreground: '#eee', muted: '#bbb', dim: '#888', accent: '#59f', blocked: '#e55', ansi3: '#da4', canvas: '#111',
+    }),
+    layout: () => ({ id: 'root', children: [{ id: 'pm-stage', active: 'pm-project', children: [] }] }),
+    shared: () => ({ pm: 'pm-dudu' }),
+  };
+  const scope = new Proxy(stubs, {
+    has: (target, name) => name in target || !(name in globalThis),
+    get: (target, name) => (name in target ? target[name] : name === Symbol.unscopables ? undefined : blank),
+  });
+  const Mod = new Function('scope', `with (scope) { ${mainSource} }`)(scope);
+  const cx = { spawn: f => { f(cx); }, notify() {}, stop_propagation() {}, timer: { after() {} } };
+  const view = Object.assign(Object.create(Mod.prototype), {
+    state: {
+      pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:tpm', agent: 'agy' }],
+      tasks: [], events: [], lang: 'zh',
+    },
+    lang: 'zh', events: [], pending: [], pendingByPm: new Map(), seq: 0, pastes: [],
+    error: '', logError: '',
+    logTurn: { phase: 'working', started_ms: baseMs, last_activity_ms: baseMs },
+    logTurn2: makeTurn2(
+      { phase: 'generating', health: 'ok', activity: { kind: 'generate', tool: '', summary: '', since_ms: baseMs, preamble: '在读 model.js' } },
+      { session: { runtime: 'hc', terminal: 'tpm', agent_kind: 'agy' } },
+    ),
+    logSupervised: true,
+    serverNowMs: baseMs + 12_000, serverNowAt: baseMs + 12_000,
+    pmName: 'pm-dudu', logPath: '', logSlug: 'dudu', machine: '', stateFor: '', remoteHome: '',
+    interruptingPm: '', rotatingPm: '', pmActionFeedback: null, turnTickTimer: false,
+    flushingQueue: false, flushingQueueAt: 0, queueTimer: false, confirmTimer: false, lastLogReadAt: 0, confirmLogProbes: new Set(),
+    pmDialog: null, pmDialogLoading: false, pmDialogAt: 0, pmSendBlockError: '',
+    listShown: false, wide: true, measured: true, panelWant: null, panelDrag: null, viewWidth: 1280,
+    seen: null, count: 0, settle: 0, away: false, rise: 0, heights: new Map(), tall: 700, high: 700,
+    bell: null, flash: '', unfolded: new Map(), newest: '', atWork: new Set(),
+    scroll: { scroll_to_item() {} }, keyFocus: { focus() {} }, onStage: true, typing: '',
+    mainKey: 'pm:pm-dudu', threadKey: '', outgoing: new Map(),
+    files: [], threadFiles: [], attachError: null, pasted: { stamp: '', n: 0 }, answering: null, quotes: [],
+    input: makeInput(), threadInput: makeInput(),
+    nowMs: () => baseMs + 12_000,
+    refresh: () => {}, readLog: () => {}, notifyPanes: () => {}, landed: () => {},
+    runProjectWrite: async argv => {
+      writeCalls.push(argv);
+      if (argv[0] === 'project' && argv[1] === 'interrupt') {
+        return { code: 0, stdout: JSON.stringify({ ok: true, outcome: 'stopped' }), stderr: '' };
+      }
+      if (argv[0] === 'project' && argv[1] === 'send') {
+        return { code: 0, stdout: JSON.stringify({ ok: true, status: 'delivered', msg_id: 'u-preempt', offset: 99, at_ms: baseMs + 12_500 }), stderr: '' };
+      }
+      return { code: 0, stdout: '{}', stderr: '' };
+    },
+  });
+  // 1) Empty composer + no queued messages: activity row shows interrupt icon, busy bar is NOT shown.
+  nodes.clear();
+  view.draft = '';
+  draftVal = '';
+  view.renderConversationPane(cx);
+  assert.ok(nodes.has('pm-interrupt-btn'), 'interrupt icon is always shown during active working');
+  assert.match(nodes.get('pm-typing-label')?.allTexts().join(' ') || '', /在读 model\.js · 12s/);
+  assert.ok(!nodes.has('pm-busy-bar'), 'busy bar must NOT render when composer is empty and nothing is queued');
+
+  // 2) Typing a draft shows compact busy bar with icon-only preempt button (tooltip/a11y label, no text child).
+  nodes.clear();
+  draftVal = '先处理这条紧急消息';
+  view.draft = draftVal;
+  view.renderConversationPane(cx);
+  assert.ok(nodes.has('pm-busy-bar'), 'busy bar renders above composer when PM is busy and draft is non-empty');
+  assert.match(nodes.get('pm-busy-text')?.allTexts().join(' ') || '', /协调者正在在读 model\.js；这条消息会在它答完这一轮后被看到/);
+  assert.ok(nodes.has('pm-preempt-btn'));
+  assert.equal(nodes.get('pm-preempt-btn').a11y, '打断它，先处理这条');
+  assert.deepEqual(nodes.get('pm-preempt-btn').allTexts(), [], 'preempt button is icon-only without bulky text label');
+
+  // 3) When timeline shrinks (e.g. busy bar appears in footer), on_size_change re-triggers follow (settle > 0) so bottom activity row is never clipped.
+  view.settle = 0;
+  view.away = false;
+  nodes.get('pm-project-timeline').sizeChange({ height: 660 }, cx);
+  assert.equal(view.tall, 660);
+  assert.ok(view.settle > 0, 'shrinking timeline while following re-arms settle scroll to keep activity row visible');
+
+  // While scrolled up (away === true), shrinking timeline must NOT yank the reader back to bottom.
+  view.settle = 0;
+  view.away = true;
+  nodes.get('pm-project-timeline').sizeChange({ height: 620 }, cx);
+  assert.equal(view.settle, 0, 'shrinking timeline while away does not force scroll');
+  view.away = false;
+
+  // Clicking "打断它，先处理这条" calls interrupt FIRST, then sends the composer draft!
+  nodes.get('pm-preempt-btn').clicks(null, cx);
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(writeCalls[0]?.[0], 'project');
+  assert.equal(writeCalls[0]?.[1], 'interrupt');
+  assert.equal(writeCalls[1]?.[0], 'project');
+  assert.equal(writeCalls[1]?.[1], 'send');
+  assert.equal(draftVal, '', 'draft cleared after preempt send');
+
+  // Header terminal tooltip notes background shells when idle with bg_shells.count > 0 (§3.9 last row)
+  view.logTurn2 = makeTurn2({ phase: 'idle', health: 'ok' }, { bg_shells: { count: 2, commands: ['dev'] } });
+  const hdr = view.buildHeaderData(view.pm(), 0, false);
+  assert.equal(hdr.pmTerminalTip, '打开 PM 终端（2 个后台命令）');
+});
+
+test('Phase 3a: INTERNAL_PROJECT_FILES, mailbox paths, and §3.9 bubble lifecycle mapping', async () => {
+  for (const name of ['applied-reports.json', 'applied-reports.lock', 'applied-reports.jsonl', 'applied-reports.0001.jsonl', 'mailboxes']) {
+    assert.equal(model.INTERNAL_PROJECT_FILES.has(name), true, `${name} should be internal`);
+  }
+  assert.equal(model.isContextRelevantChange('project', ['/ledger/projects/dudu/mailboxes/pm/mailbox.0001.jsonl'], { ledgerHome: '/ledger', slug: 'dudu' }), false);
+  assert.equal(model.isContextRelevantChange('project', ['/ledger/projects/dudu/applied-reports.0001.jsonl'], { ledgerHome: '/ledger', slug: 'dudu' }), false);
+  assert.equal(model.isLibraryRelevantChange(['/ledger/projects/dudu/mailboxes/pm/mailbox.0001.jsonl'], { ledgerHome: '/ledger', slug: 'dudu' }), false);
+
+  assert.equal(model.queuedReasonText('en', 'waiting_quiet_or_draft'), 'Queued (unsent draft in terminal)');
+  assert.equal(model.queuedReasonText('zh', 'waiting_quiet_or_draft'), '排队中（终端有未发草稿）');
+  assert.equal(model.queuedReasonText('en', 'blocked_prompt'), 'PM terminal is waiting on a prompt');
+
+  assert.deepEqual(model.bubbleLifecycleView('en', { state: 'accepted', hold_reason: 'waiting_quiet_or_draft' }), {
+    state: 'queued', label: 'Queued (unsent draft in terminal)', queued: true, hasDraft: true,
+  });
+  assert.equal(model.bubbleLifecycleView('en', { state: 'typed' }).label, 'Delivered');
+  assert.equal(model.bubbleLifecycleView('en', { state: 'consumed' }).label, 'Read');
+  assert.equal(model.bubbleLifecycleView('en', { state: 'answered' }).label, 'Answered');
+});
+
+test('§3.9 bubble states come from the PM mailbox: a logged message is not shown as delivered until it is', () => {
+  // sending → queued (why) → delivered, waiting → read → gone once answered; only failed is red.
+  assert.deepEqual(model.bubbleLifecycleView('zh', { state: 'accepted', sending: true }),
+    { state: 'sending', label: '发送中', sending: true });
+  assert.equal(model.bubbleLifecycleView('zh', { state: 'accepted', hold_reason: 'pm_working' }).label,
+    '排队中 · 等待 PM 当前轮次结束');
+  assert.equal(model.bubbleLifecycleView('zh', { state: 'typed' }, { pmWorking: true, steersMidTurn: true }).label,
+    '已送达，等它做完这一步');
+  assert.equal(model.bubbleLifecycleView('zh', { state: 'typed' }, { pmWorking: true, steersMidTurn: false }).label,
+    '已送达，等它答完这一轮');
+  assert.equal(model.bubbleLifecycleView('en', { state: 'typed' }, { pmWorking: true }).label,
+    'Delivered, it reads it after this step');
+  assert.equal(model.bubbleLifecycleView('zh', { state: 'consumed' }).label, '已读到');
+  assert.equal(model.bubbleLifecycleView('en', { state: 'failed', last_error: 'turn_errored' }).failed, true);
+  assert.equal(model.deliveryLineView('zh', { state: 'answered' }), null);
+  assert.equal(model.deliveryLineView('zh', { state: 'typed' }, { pmWorking: true, agentKind: 'agy' }).label,
+    '已送达，等它答完这一轮');
+  assert.equal(model.deliveryLineView('zh', { state: 'typed' }, { pmWorking: true, agentKind: 'claude' }).label,
+    '已送达，等它做完这一步');
+
+  // The logged user line (written when the message was accepted) carries its mailbox row; answered rows drop off.
+  const events = [
+    { type: 'user', at: '2026-11-26 10:00:00', text: 'check the alerts', msg_id: 'u-1' },
+    { type: 'user', at: '2026-11-26 10:01:00', text: 'and this one', msg_id: 'u-2' },
+    { type: 'user', at: '2026-11-26 10:02:00', text: 'typed in the terminal', msg_id: '' },
+  ];
+  const inbox = [
+    { kind: 'user', id: 'u-1', state: 'accepted', hold_reason: 'waiting_quiet_or_draft', sending: true },
+    { kind: 'user', id: 'u-2', state: 'answered' },
+    { kind: 'batch', id: 'u-1', state: 'typed' },
+  ];
+  const users = model.timeline(events, [], { inbox }).filter(i => i.kind === 'user');
+  assert.deepEqual(users.map(i => i.delivery?.state || ''), ['accepted', '', '']);
+  assert.equal(model.deliveryLineView('zh', users[0].delivery).label, '排队中（终端有未发草稿）');
+  const blocks = model.timelineRows(model.turns(model.timeline(events, [], { inbox }), ''));
+  assert.equal(blocks.find(b => b.kind === 'user' && b.text === 'check the alerts').delivery.state, 'accepted');
+
+  // The timeline cache follows state changes of the rows, nothing else.
+  const sig1 = model.inboxSignature(inbox);
+  assert.equal(model.inboxSignature([...inbox]), sig1);
+  assert.notEqual(model.inboxSignature([{ ...inbox[0], state: 'typed', sending: false }, inbox[1]]), sig1);
+});
+
+test('the line under a message never shows a mailbox code: every reason reads in both languages', () => {
+  const codes = {
+    epoch_requeued: ['Sending again to the new PM session', '换了 PM 会话，重新发送'],
+    typist_busy: ['Waiting for another message to finish typing', '等另一条消息打完'],
+    migrated_inflight: ['Carried over from before the update', '更新前没送出，接着发送'],
+    migrated_outbox: ['Carried over from before the update', '更新前没送出，接着发送'],
+    recovered: ['Carried over from before the update', '更新前没送出，接着发送'],
+    waiting_turn_leave_working: ['Waiting for PM turn to finish', '等待 PM 当前轮次结束'],
+    retry_unstarted: ['Sending again: the PM did not start on it', 'PM 没接住，重新发送'],
+    retry_after_interrupted: ['Sending again: its turn was interrupted', '那一轮被打断，重新发送'],
+    retry_after_errored: ['Sending again: its turn hit an error', '那一轮出错，重新发送'],
+    unsupported: ['This PM cannot receive this kind of message', '这个 PM 收不了这类消息'],
+  };
+  for (const [code, [en, zh]] of Object.entries(codes)) {
+    assert.equal(model.queuedReasonText('en', code), en, code);
+    assert.equal(model.queuedReasonText('zh', code), zh, code);
+  }
+  // A code nobody named yet still does not leak; words (an hc error message) are shown as they are.
+  assert.equal(model.queuedReasonText('zh', 'some_future_code'), '等待发送');
+  assert.equal(model.queuedReasonText('en', 'some_future_code'), 'Waiting to be sent');
+  assert.equal(model.queuedReasonText('en', 'hc send failed: no such terminal'), 'hc send failed: no such terminal');
+  assert.equal(model.bubbleLifecycleView('zh', { state: 'accepted', hold_reason: 'epoch_requeued' }).label,
+    '排队中 · 换了 PM 会话，重新发送');
+  assert.equal(model.bubbleLifecycleView('zh', { state: 'failed', last_error: 'turn_errored' }).label, '发送失败: 那一轮出错');
+  assert.equal(model.bubbleLifecycleView('en', { state: 'failed', last_error: 'turn_interrupted' }).label,
+    'Failed: its turn was interrupted');
+});
+
+test('alert.undelivered ui outlet: the banner names mailbox messages past their SLA, with or without events', () => {
+  assert.equal(
+    model.undeliveredBannerText('en', { count: 0, messages: 1, message_reason: 'blocked_prompt', waiting_seconds: 180, state: 'blocked', deliverer_running: true }),
+    '1 message not typed into the PM for 3m (PM terminal is waiting on a prompt, state=blocked)',
+  );
+  assert.equal(
+    model.undeliveredBannerText('zh', { count: 2, messages: 3, message_reason: 'pm_working', waiting_seconds: 900, state: 'working', deliverer_running: false }),
+    '2 条事件已等待 15 分钟未能送达 PM（状态=working，投递器未运行）；3 条消息已等待 15 分钟未打进 PM 终端（等待 PM 当前轮次结束）',
+  );
+  assert.equal(model.undeliveredBannerText('en', { count: 0, messages: 0 }), '');
+});
+
+test('no part of the project view types into a terminal itself (every send goes through pm.py) or uses a browser-only global', async () => {
+  // A message to the PM is `pm.py project send`; one to a worker, reviewer or helper is `pm.py send
+  // --as-user`: queued for that terminal's one typist (pm-message-routing.md §9.2 waves 2-3). A raw
+  // `hc send` (or `hc keys` / `hc interrupt`, or herdr's `agent prompt`) from here would type beside it.
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const dir = new URL('./', import.meta.url);
+  const sources = readdirSync(dir).filter(f => f.endsWith('.js') && !f.endsWith('.d.ts'));
+  assert.ok(sources.includes('main.js') && sources.includes('model.js'));
+  const raw = [
+    /['"`]hc['"`]\s*,\s*['"`](send|keys|interrupt)['"`]/,   // an argv ['hc', 'send', …]
+    /['"`]hc (send|keys|interrupt)\b/,                     // a command line "hc send …"
+    /['"`]agent['"`]\s*,\s*['"`](prompt|send-keys)['"`]/,  // herdr agent prompt / send-keys
+    /\bsendArgv\b/,                                        // the old raw-send argv builder
+    /\bText(En|De)coder\b/,                               // not in the mod runtime: utf8ByteLength / chunkUtf8Text
+  ];
+  for (const file of sources) {
+    const text = readFileSync(new URL(file, dir), 'utf8');
+    for (const re of raw) assert.doesNotMatch(text, re, `${file}: ${re}`);
+  }
+  assert.equal(model.sendArgv, undefined);
+  // The way that remains: pm.py's own commands.
+  assert.deepEqual(model.terminalSendArgv('t9', { text: 'hi' }).slice(0, 2), ['send', '--as-user']);
+  assert.deepEqual(model.projectSendArgv('dudu', { msgId: 'm-1', text: 'hi' }).slice(0, 2), ['project', 'send']);
+});
+
+test('Threads single-worker inline: formatAgentModelEffort, threadAgentLayout & inlineAgentBadgeText', () => {
+  const { formatAgentModelEffort, threadAgents, threadAgentLayout, inlineAgentBadgeText } = model;
+
+  // Compact model + effort formatting across Claude, Agy, Codex, profiles, and fallbacks
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'hard', kind: 'claude', model: 'opus', effort: 'xhigh', advisor: 'fable' } }),
+    { model: 'Opus', effort: 'xhigh', label: 'Opus·xhigh' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'light', kind: 'claude', model: 'sonnet', effort: 'medium' } }),
+    { model: 'Sonnet', effort: 'med', label: 'Sonnet·med' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'opus-high', kind: 'claude', model: 'opus', effort: 'high' } }),
+    { model: 'Opus', effort: 'high', label: 'Opus·high' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ worker: { profile: 'standard', kind: 'claude', model: 'opus', effort: '' } }),
+    { model: 'Opus', effort: '', label: 'Opus' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'deep', kind: 'claude', model: 'claude-fable-5-2', effort: 'xhigh' } }),
+    { model: 'Fable', effort: 'xhigh', label: 'Fable·xhigh' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'neon', kind: 'agy', model: 'gemini-4-neon-high', effort: '' } }),
+    { model: 'Neon', effort: 'high', label: 'Neon·high' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'neon-medium', kind: 'agy', model: 'gemini-4-neon-medium', effort: '' } }),
+    { model: 'Neon', effort: 'med', label: 'Neon·med' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'carbon', kind: 'agy', model: 'gemini-4-carbon-high', effort: '' } }),
+    { model: 'Carbon', effort: 'high', label: 'Carbon·high' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'opus', kind: 'agy', model: 'claude-opus-5-5-medium', effort: '' } }),
+    { model: 'Opus', effort: 'med', label: 'Opus·med' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { profile: 'orchestrator', kind: 'agy', model: 'gemini-pro-orchestrator-neon', effort: '' } }),
+    { model: 'Orchestrator', effort: '', label: 'Orchestrator' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ kind: 'codex', model: 'gpt-5', effort: 'high' }),
+    { model: 'GPT-5', effort: 'high', label: 'GPT-5·high' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ kind: 'codex', model: '', effort: 'high' }),
+    { model: 'Codex', effort: 'high', label: 'Codex·high' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ profile: 'opus-high', kind: 'claude', model: 'opus', effort: '' }),
+    { model: 'Opus', effort: 'high', label: 'Opus·high' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ profile: 'neon-medium', kind: 'agy', model: '', effort: '' }),
+    { model: 'Neon', effort: 'med', label: 'Neon·med' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ profile: 'hard', kind: 'claude', model: '', effort: '' }),
+    { model: 'Claude', effort: '', label: 'Claude' },
+  );
+  assert.deepEqual(
+    formatAgentModelEffort({ engine: { kind: 'claude', model: 'us.anthropic.claude-sonnet-4-5-v1:0', effort: 'low' } }),
+    { model: 'Sonnet', effort: 'low', label: 'Sonnet·low' },
+  );
+  assert.deepEqual(formatAgentModelEffort(null, 'claude'), { model: 'Claude', effort: '', label: 'Claude' });
+  assert.deepEqual(formatAgentModelEffort(null, ''), { model: '', effort: '', label: '' });
+
+  // threadAgents populates modelShort / effort / modelBadge; threadAgentLayout splits single-worker vs multi-agent
+  const singleAg = threadAgents(
+    {
+      id: 't-neon', title: 'Single Neon worker', status: 'in_progress', pane: 'hc:tn1',
+      engine: { profile: 'neon', kind: 'agy', model: 'gemini-4-neon-high', effort: '' },
+      helpers: [{ name: 'old-h', status: 'done', kind: 'agy', model: 'gemini-4-neon-medium' }],
+    },
+    { terms: [{ address: 'tn1', state: 'live', status: 'working', labels: { task: 't-neon' } }], lang: 'en' },
+  );
+  assert.equal(singleAg.active[0].modelBadge, 'Neon·high');
+  assert.equal(singleAg.active[0].modelShort, 'Neon');
+  assert.equal(singleAg.active[0].effort, 'high');
+  const singleLayout = threadAgentLayout(singleAg);
+  assert.equal(singleLayout.inlineWorker?.key, 'worker:t-neon');
+  assert.deepEqual(singleLayout.subAgents, []);
+  assert.equal(singleLayout.ended.length, 1);
+
+  const multiAg = threadAgents(
+    {
+      id: 't-multi', title: 'Worker + reviewer', status: 'review', pane: 'hc:tm1',
+      engine: { profile: 'carbon', kind: 'agy', model: 'gemini-4-carbon-high' },
+      review: { id: 't-multi-rev', status: 'in_progress', pane: 'hc:tm2', engine: { profile: 'hard', kind: 'claude', model: 'opus', effort: 'xhigh' } },
+    },
+    {
+      terms: [
+        { address: 'tm1', state: 'live', status: 'idle', labels: { task: 't-multi' } },
+        { address: 'tm2', state: 'live', status: 'working', labels: { task: 't-multi-rev' } },
+      ],
+      lang: 'en',
+    },
+  );
+  const multiLayout = threadAgentLayout(multiAg);
+  assert.equal(multiLayout.inlineWorker, null);
+  assert.deepEqual(multiLayout.subAgents.map(a => [a.role, a.modelBadge]), [
+    ['worker', 'Carbon·high'],
+    ['review', 'Opus·xhigh'],
+  ]);
+
+  // Active non-worker alone (e.g. worker ended, merge helper still running) stays as compact sub-row
+  const helperOnly = threadAgentLayout({
+    active: [{ key: 'helper:t1:h1', role: 'helper', modelBadge: 'Neon·med' }],
+    ended: [{ key: 'worker:t1', role: 'worker', modelBadge: 'Opus·xhigh' }],
+  });
+  assert.equal(helperOnly.inlineWorker, null);
+  assert.equal(helperOnly.subAgents.length, 1);
+
+  // Responsive width breakpoints for inline capsule text (graceful truncation & icon preservation)
+  const sampleAgent = { displayName: 'Milo', actionLabel: '编码', modelBadge: 'Opus·xhigh', modelShort: 'Opus' };
+  assert.deepEqual(model.inlineAgentBadgeParts(sampleAgent, 420), { name: 'Milo', action: '编码', model: 'Opus·xhigh' });
+  assert.equal(inlineAgentBadgeText(sampleAgent, 420), 'Milo · 编码 · Opus·xhigh');
+  assert.equal(inlineAgentBadgeText(sampleAgent, 360), 'Milo · 编码 · Opus·xhigh');
+  assert.equal(inlineAgentBadgeText(sampleAgent, 360, { inEpic: true }), 'Milo · Opus');
+  assert.equal(inlineAgentBadgeText(sampleAgent, 310), 'Milo · Opus');
+  assert.equal(inlineAgentBadgeText(sampleAgent, 285), 'Milo');
+  assert.equal(inlineAgentBadgeText(sampleAgent, 260), '');
+  assert.equal(inlineAgentBadgeText(sampleAgent, 290, { inEpic: true }), '');
+  assert.equal(inlineAgentBadgeText({ modelBadge: '', modelShort: '' }, 420), '');
+
+  // Deterministic short agent names + guaranteed uniqueness under the same task (including collision probing)
+  const { AGENT_NAMES, agentDisplayName, inferAgentAction, agentActionTense, agentActionLabel } = model;
+  assert.ok(AGENT_NAMES.includes('Milo') && AGENT_NAMES.includes('Nora') && AGENT_NAMES.includes('Kira'));
+  assert.equal(agentDisplayName('worker:dudu-347'), agentDisplayName('worker:dudu-347'), 'same seed always maps to same name');
+  const collisionUsed = new Set();
+  const n1 = agentDisplayName('same-seed', collisionUsed);
+  const n2 = agentDisplayName('same-seed', collisionUsed);
+  const n3 = agentDisplayName('same-seed', collisionUsed);
+  assert.equal(new Set([n1, n2, n3]).size, 3, 'linear probing guarantees unique names even on identical hash');
+  // Even > pool size never repeats
+  const bigUsed = new Set();
+  const many = Array.from({ length: AGENT_NAMES.length + 3 }, (_, i) => agentDisplayName(`seed-${i}`, bigUsed));
+  assert.equal(new Set(many).size, AGENT_NAMES.length + 3);
+
+  // Within a single task with worker + review + 2 helpers (active + ended), all displayNames are distinct
+  const crowded = threadAgents(
+    {
+      id: 't-crowd', title: '修复按钮对齐', status: 'review', pane: 'hc:cw',
+      engine: { kind: 'claude', model: 'opus', effort: 'xhigh' },
+      review: { id: 't-crowd-rev', status: 'in_progress', pane: 'hc:cr', engine: { kind: 'agy', model: 'gemini-4-neon-high' } },
+      helpers: [
+        { name: 'land-t-crowd', terminal: 'ch1', status: 'running', kind: 'agy', model: 'gemini-4-neon-medium', live_state: 'working' },
+        { name: 'triage-t-crowd', terminal: 'ch2', status: 'done', kind: 'agy', model: 'gemini-4-neon-medium' },
+      ],
+    },
+    {
+      terms: [
+        { address: 'cw', state: 'live', status: 'idle', labels: { task: 't-crowd' } },
+        { address: 'cr', state: 'live', status: 'working', labels: { task: 't-crowd-rev' } },
+        { address: 'ch1', state: 'live', status: 'working', labels: { helper: 'land-t-crowd', 'helper.task': 't-crowd' } },
+      ],
+      lang: 'en',
+    },
+  );
+  assert.equal(crowded.all.length, 4);
+  assert.equal(new Set(crowded.all.map(a => a.displayName)).size, 4, 'every agent in the same task has a unique short name');
+  assert.deepEqual(
+    crowded.all.map(a => [a.role, a.action, a.actionLabel]),
+    [
+      ['worker', 'fix', 'Fix'],
+      ['review', 'review', 'Reviewing'],
+      ['helper', 'merge', 'Merging'],
+      ['helper', 'triage', 'Triaged'],
+    ],
+  );
+
+  // Action inference across roles, real object-array & string subplans (never leaking task-level plan), task metadata, and helpers
+  assert.equal(inferAgentAction({ role: 'review', task: { title: 'Anything' } }), 'review');
+  assert.equal(inferAgentAction({ role: 'helper', purpose: 'land' }), 'merge');
+  assert.equal(inferAgentAction({ role: 'helper', purpose: 'triage' }), 'triage');
+  assert.equal(inferAgentAction({ role: 'helper', helperName: 'scan-pitfalls' }), 'probe');
+  assert.equal(inferAgentAction({ role: 'helper', helperName: 'cleanup-worktrees' }), 'cleanup');
+  assert.equal(inferAgentAction({ role: 'helper', helperName: 'install-mbp' }), 'install');
+  assert.equal(inferAgentAction({
+    role: 'worker',
+    task: {
+      title: '实现新面板',
+      subplan: [{ text: '编码实现', state: 'done' }, { text: '运行单测验证', state: 'doing' }],
+    },
+  }), 'test', 'real ledger object-array subplan matches state=doing');
+  assert.equal(inferAgentAction({
+    role: 'worker',
+    task: {
+      title: '实现新面板',
+      subplan: [{ text: '写代码', state: 'done' }, { text: '合入 main', state: 'doing' }],
+    },
+  }), 'merge', 'real ledger object-array subplan matches merge step');
+  assert.equal(inferAgentAction({
+    role: 'worker',
+    task: {
+      title: '实现新面板',
+      subplan: ['[x] 编码', '[>] 调研接口'],
+    },
+  }), 'probe', 'legacy string subplan still supported via parsePlanItems');
+  assert.equal(inferAgentAction({
+    role: 'worker',
+    task: {
+      title: '实现新面板',
+      plan: [{ text: '编码', state: 'done' }, { text: '审查', state: 'doing' }],
+      subplan: [{ text: '实现内联胶囊', state: 'done' }],
+    },
+  }), 'code', 'worker ignores task-level plan so review stage does not duplicate reviewer action');
+  assert.equal(inferAgentAction({
+    role: 'worker',
+    task: {
+      title: '实现新面板',
+      plan: ['[x] 编码', '[>] 合入 main'],
+    },
+  }), 'code', 'worker without doing subplan falls back to task title/default rather than outer plan');
+  assert.equal(inferAgentAction({ role: 'worker', task: { title: 'Threads 视觉优化对比图', branch: 'dev/threads-mock' } }), 'design');
+  assert.equal(inferAgentAction({ role: 'worker', task: { title: '调研 Cursor Projects 交互' } }), 'probe');
+  assert.equal(inferAgentAction({ role: 'worker', task: { title: '清理旧物与监督扩展' } }), 'cleanup');
+  assert.equal(inferAgentAction({ role: 'worker', task: { title: '安装脚本平滑迁移' } }), 'install');
+  assert.equal(inferAgentAction({ role: 'worker', task: { title: '排查 PM 卡死根因' } }), 'triage');
+  assert.equal(inferAgentAction({ role: 'worker', task: { title: 'Worker + Reviewer task' } }), 'code', 'worker title mentioning Reviewer stays code');
+  assert.equal(inferAgentAction({ role: 'worker', task: { title: '实现内联图标并补齐单测' } }), 'code', 'feature title mentioning unit tests stays code');
+
+  // English 3-tense verbs (doing / done / base) & Chinese 2-char action labels
+  assert.equal(agentActionTense('working'), 'doing');
+  assert.equal(agentActionTense('running'), 'doing');
+  assert.equal(agentActionTense('done'), 'done');
+  assert.equal(agentActionTense('merged'), 'done');
+  assert.equal(agentActionTense('ended', { ended: true, taskStatus: 'merged' }), 'done');
+  assert.equal(agentActionTense('idle'), 'base');
+  assert.equal(agentActionTense('blocked'), 'base');
+  assert.equal(agentActionTense('paused'), 'base');
+  assert.equal(agentActionTense('working', { ended: true }), 'base');
+
+  const tenseCases = [
+    ['code', '编码', 'Coding', 'Coded', 'Code'],
+    ['review', '审查', 'Reviewing', 'Reviewed', 'Review'],
+    ['merge', '合入', 'Merging', 'Merged', 'Merge'],
+    ['triage', '排查', 'Triaging', 'Triaged', 'Triage'],
+    ['probe', '调研', 'Probing', 'Probed', 'Probe'],
+    ['design', '设计', 'Designing', 'Designed', 'Design'],
+    ['install', '安装', 'Installing', 'Installed', 'Install'],
+    ['cleanup', '清理', 'Cleaning', 'Cleaned', 'Cleanup'],
+    ['test', '测试', 'Testing', 'Tested', 'Test'],
+    ['fix', '修复', 'Fixing', 'Fixed', 'Fix'],
+    ['docs', '文档', 'Documenting', 'Documented', 'Docs'],
+  ];
+  for (const [act, zh, doing, done, base] of tenseCases) {
+    assert.equal(agentActionLabel('zh', act, 'working'), zh);
+    assert.equal(agentActionLabel('zh', act, 'done'), zh);
+    assert.equal(agentActionLabel('zh', act, 'idle'), zh);
+    assert.equal(agentActionLabel('en', act, 'working'), doing, `${act} working`);
+    assert.equal(agentActionLabel('en', act, 'running'), doing, `${act} running`);
+    assert.equal(agentActionLabel('en', act, 'done'), done, `${act} done`);
+    assert.equal(agentActionLabel('en', act, 'merged'), done, `${act} merged`);
+    assert.equal(agentActionLabel('en', act, 'idle'), base, `${act} idle`);
+    assert.equal(agentActionLabel('en', act, 'paused'), base, `${act} paused`);
+  }
+});
+
+test('Threads single-worker inline UI: inline model+effort capsule, narrow width icon-only, multi-agent compact sub-rows, and toggle window', async () => {
+  const nodes = new Map();
+  const overlayCalls = [];
+  const closedOverlays = [];
+  let nextOv = 1;
+  const makeEl = (tag, init = '') => {
+    const rec = {
+      tag, id: '', src: tag === 'svg' || tag === 'image' ? init : '',
+      texts: [], kids: [], clicks: null, hover: null, bg: '',
+      allTexts() { return [...this.texts, ...this.kids.flatMap(k => k.allTexts())]; },
+      allSvgs() { return [...(this.tag === 'svg' && this.src ? [this.src] : []), ...this.kids.flatMap(k => k.allSvgs())]; },
+      allImages() { return [...(this.tag === 'image' && this.src ? [this.src] : []), ...this.kids.flatMap(k => k.allImages())]; },
+    };
+    const proxy = new Proxy(rec, {
+      get(_t, key) {
+        if (key === '__rec') return rec;
+        if (key === 'then') return undefined;
+        return (...args) => {
+          if (key === 'id') { rec.id = String(args[0] || ''); nodes.set(rec.id, rec); }
+          else if (key === 'bg') { rec.bg = String(args[0] || ''); }
+          else if (key === 'on_click') { rec.clicks = args[0]; }
+          else if (key === 'on_hover') { rec.hover = args[0]; }
+          else if (key === 'when') { if (args[0]) args[1](proxy); }
+          else if (key === 'child') {
+            const c = args[0];
+            if (typeof c === 'string' || typeof c === 'number') rec.texts.push(String(c));
+            else if (c?.__rec) rec.kids.push(c.__rec);
+          } else if (key === 'children') {
+            for (const c of (args[0] || [])) {
+              if (typeof c === 'string' || typeof c === 'number') rec.texts.push(String(c));
+              else if (c?.__rec) rec.kids.push(c.__rec);
+            }
+          } else if (key === 'content') {
+            const c = args[0];
+            if (c?.__rec) rec.kids.push(c.__rec);
+          }
+          return proxy;
+        };
+      },
+    });
+    return proxy;
+  };
+  const stub = name => Object.assign((...a) => makeEl(name, typeof a[0] === 'string' ? a[0] : ''), {
+    new: (id, trigger) => { const p = makeEl(name); if (id) p.id(id); if (trigger) p.child(trigger); return p; },
+    markdown: id => makeEl('md').id(id),
+    html: id => makeEl('html').id(id),
+  });
+  const stateStub = () => new Proxy({ set_value() {}, value: () => '', focus() {}, is_focused: () => false }, { get: (o, k) => (k in o ? o[k] : () => {}) });
+
+  const agyProg = { key: 'agy', name: 'Antigravity', icon: 'icons/agy.png', tint: false };
+  const claudeProg = { key: 'claude', name: 'Claude Code', icon: 'icons/claude.svg', tint: true };
+  const tasks = [
+    {
+      id: 't-inline-agy', number: 345, pm: 'pm-dudu', title: 'Single Neon worker task', status: 'in_progress',
+      pane: 'hc:ta1', updated: '2026-11-26 10:00',
+      engine: { profile: 'neon', kind: 'agy', model: 'gemini-4-neon-high', effort: '' },
+      plan: [{ text: 'Implement', state: 'doing' }, { text: 'Review', state: 'todo' }],
+      subplan: [{ text: 'Build inline pill', state: 'doing' }, { text: 'Verify', state: 'todo' }],
+    },
+    {
+      id: 't-inline-claude', number: 346, pm: 'pm-dudu', title: 'Single Opus xhigh worker', status: 'in_progress',
+      pane: 'hc:ta2', updated: '2026-11-26 09:59',
+      engine: { profile: 'hard', kind: 'claude', model: 'opus', effort: 'xhigh', advisor: 'fable' },
+    },
+    {
+      id: 't-multi-rev', number: 342, pm: 'pm-dudu', title: 'Worker + Reviewer task', status: 'review',
+      pane: 'hc:tm1', updated: '2026-11-26 09:58',
+      engine: { profile: 'carbon', kind: 'agy', model: 'gemini-4-carbon-high', effort: '' },
+      plan: [{ text: 'Implement', state: 'done' }, { text: 'Code review', state: 'doing' }],
+      subplan: [{ text: 'Implement seat tab', state: 'done' }],
+      review: { id: 't-multi-rev-r', status: 'in_progress', pane: 'hc:tm2', engine: { profile: 'hard', kind: 'claude', model: 'opus', effort: 'xhigh' } },
+    },
+    {
+      id: 't-multi-help', number: 344, pm: 'pm-dudu', title: 'Worker + Helper task', status: 'in_progress',
+      pane: 'hc:thw', updated: '2026-11-26 09:57',
+      engine: { profile: 'light', kind: 'claude', model: 'sonnet', effort: 'medium' },
+      helpers: [{ name: 'inspect-ui', terminal: 'th1', status: 'running', kind: 'agy', model: 'gemini-4-neon-medium', live_state: 'working' }],
+    },
+  ];
+  const terms = [
+    { address: 'ta1', state: 'live', status: 'working', labels: { task: 't-inline-agy' }, program: agyProg },
+    { address: 'ta2', state: 'live', status: 'working', labels: { task: 't-inline-claude' }, program: claudeProg },
+    { address: 'tm1', state: 'live', status: 'idle', labels: { task: 't-multi-rev' }, program: agyProg },
+    { address: 'tm2', state: 'live', status: 'working', labels: { task: 't-multi-rev-r' }, program: claudeProg },
+    { address: 'thw', state: 'live', status: 'working', labels: { task: 't-multi-help' }, program: claudeProg },
+    { address: 'th1', state: 'live', status: 'working', labels: { helper: 'inspect-ui', 'helper.of': 't-multi-help' }, program: agyProg },
+  ];
+
+  const { readFileSync } = await import('node:fs');
+  const mainPath = new URL('./main.js', import.meta.url);
+  const src = readFileSync(mainPath, 'utf8')
+    .replace(/^import\s+\{[^}]*\}\s+from\s+'[^']+';\s*$/gm, '')
+    .replace(/export default class PmProject/, 'return class PmProject');
+  const stubs = {
+    View: class {}, div: stub('div'), svg: stub('svg'), image: stub('image'),
+    v_flex: stub('v_flex'), h_flex: stub('h_flex'),
+    TextView: stub('TextView'), Textarea: stub('Textarea'), Input: stub('Input'), Popup: stub('Popup'),
+    Scrollbar: { vertical: id => makeEl('div').id(`scrollbar:${id}`) },
+    TextareaState: { new: stateStub }, InputState: { new: stateStub },
+    ScrollHandle: { new: () => ({ scroll_to_item() {}, offset: () => ({ x: 0, y: 0 }) }) },
+    theme: () => ({ background: '#111', chrome: '#181818', surface: '#222', raised: '#262626', popover: '#262626', border: '#333', hover: '#2a2a2a', input: '#333', foreground: '#eee', muted: '#aaa', dim: '#777', accent: '#58a6ff', working: '#3fb950', ansi2: '#3fb950', blocked: '#f85149' }),
+    home: () => '/tmp', appHome: () => '/tmp',
+    exec: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    execPython: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    readTextFile: async () => '', writeTextFile: async () => {}, watchFolder: () => new Promise(() => {}),
+    layout: () => ({ id: 'pm-stage', active: 'pm-project', children: [{ id: 'work' }, { id: 'pm-project' }] }),
+    run: () => {}, terminals: () => terms, agents: () => [], panes: () => [], spaces: () => [],
+    shared: k => (k === 'pm-project' ? { pm: 'pm-dudu' } : undefined), setShared: () => {}, props: () => ({}),
+    openOverlay: spec => { const id = `ov-${nextOv++}`; overlayCalls.push({ id, spec }); return id; },
+    closeOverlay: id => { closedOverlays.push(id); },
+    appWindow: () => ({ platform: 'macos' }),
+    renderThreadChangeView: () => makeEl('div'),
+    renderStepsCard: () => makeEl('div'), renderDepsCard: () => makeEl('div'), treeBranchList: (_u, items) => makeEl('v_flex').children(items),
+    ...model,
+    ...searchMod,
+  };
+  const Mod = new Function(...Object.keys(stubs), src)(...Object.values(stubs));
+  const cx = {
+    focus_handle: () => ({ focus() {}, is_focused: () => false }),
+    spawn: () => {},
+    timer: { after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+    notify: () => {},
+    stop_propagation: () => {},
+  };
+  const view = new Mod();
+  view.init({}, cx);
+  view.onStage = true; view.listShown = true;
+  view.viewWidth = 1280; view.wide = true; view.measured = true;
+  view.panelSizes = { compactPx: 420, splitRatio: null };
+  view.pmName = 'pm-dudu'; view.machine = ''; view.stateFor = '';
+  view.terms = () => terms; view.live = () => [];
+  view.state = { lang: 'en', pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:pm' }], tasks, events: [] };
+
+  // 1) Wide panel (420px): single-worker tasks render inline capsule with icon + friendly name + tense-aware action + model·effort, NO child sub-row
+  nodes.clear();
+  view.render(cx);
+  const agyName = model.agentDisplayName('worker:t-inline-agy');
+  const claudeName = model.agentDisplayName('worker:t-inline-claude');
+  assert.equal(nodes.has('agent-row-worker:t-inline-agy'), false, 'single agy worker has no child row');
+  assert.equal(nodes.has('agent-inline-worker:t-inline-agy'), true, 'single agy worker has inline capsule');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-agy').allImages().includes('icons/agy.png'), 'inline capsule keeps agy icon');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-agy').allTexts().includes(agyName), 'inline capsule shows friendly short name');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-agy').allTexts().includes('Coding'), 'working worker shows present-participle Coding');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-agy').allTexts().includes('Neon·high'), 'inline capsule shows Neon·high');
+  assert.equal(nodes.get('agent-inline-worker:t-inline-agy').allSvgs().some(s => s.endsWith('window-pop.svg')), false, 'closed inline capsule omits window-pop');
+
+  assert.equal(nodes.has('agent-row-worker:t-inline-claude'), false, 'single claude worker has no child row');
+  assert.equal(nodes.has('agent-inline-worker:t-inline-claude'), true, 'single claude worker has inline capsule');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-claude').allSvgs().includes('icons/claude.svg'), 'inline capsule keeps claude icon');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-claude').allTexts().includes(claudeName), 'inline capsule shows friendly short name');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-claude').allTexts().includes('Coding'), 'working claude worker shows Coding');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-claude').allTexts().includes('Opus·xhigh'), 'inline capsule shows Opus·xhigh');
+
+  // 2) Multi-agent tasks (>=2 active): NO inline capsule, compact sub-rows with distinct short names + tense-aware action + model·effort and no duplicate spinner
+  assert.equal(nodes.has('agent-inline-worker:t-multi-rev'), false, 'multi-agent worker+review does not inline');
+  assert.equal(nodes.has('agent-row-worker:t-multi-rev'), true);
+  assert.equal(nodes.has('agent-row-review:t-multi-rev-r'), true);
+  const revUsed = new Set();
+  const revWorkerName = model.agentDisplayName('worker:t-multi-rev', revUsed);
+  const revReviewerName = model.agentDisplayName('review:t-multi-rev-r', revUsed);
+  assert.notEqual(revWorkerName, revReviewerName, 'worker and reviewer have distinct names');
+  assert.ok(nodes.get('agent-row-worker:t-multi-rev').allTexts().includes(revWorkerName));
+  assert.ok(nodes.get('agent-row-worker:t-multi-rev').allTexts().includes('Code'), 'idle worker uses base form Code');
+  assert.ok(nodes.get('agent-row-worker:t-multi-rev').allTexts().includes('Carbon·high'));
+  assert.ok(nodes.get('agent-row-review:t-multi-rev-r').allTexts().includes(revReviewerName));
+  assert.ok(nodes.get('agent-row-review:t-multi-rev-r').allTexts().includes('Reviewing'), 'working reviewer uses Reviewing');
+  assert.ok(nodes.get('agent-row-review:t-multi-rev-r').allTexts().includes('Opus·xhigh'));
+  assert.equal(nodes.get('agent-row-review:t-multi-rev-r').allSvgs().some(s => s.endsWith('spinner.svg')), false, 'compact sub-row uses dot instead of duplicate spinner');
+
+  assert.equal(nodes.has('agent-inline-worker:t-multi-help'), false, 'multi-agent worker+helper does not inline');
+  assert.equal(nodes.has('agent-row-worker:t-multi-help'), true);
+  assert.equal(nodes.has('agent-row-helper:t-multi-help:th1'), true);
+  assert.ok(nodes.get('agent-row-worker:t-multi-help').allTexts().includes('Coding'));
+  assert.ok(nodes.get('agent-row-worker:t-multi-help').allTexts().includes('Sonnet·med'));
+  assert.ok(nodes.get('agent-row-helper:t-multi-help:th1').allTexts().includes('Probing'));
+  assert.ok(nodes.get('agent-row-helper:t-multi-help:th1').allTexts().includes('inspect-ui'));
+  assert.ok(nodes.get('agent-row-helper:t-multi-help:th1').allTexts().includes('Neon·med'));
+
+  // Chinese view renders 2-char Chinese actions (编码 / 审查 / 调研)
+  view.state = { ...view.state, lang: 'zh' };
+  nodes.clear();
+  view.render(cx);
+  assert.ok(nodes.get('agent-inline-worker:t-inline-agy').allTexts().includes('编码'));
+  assert.ok(nodes.get('agent-row-review:t-multi-rev-r').allTexts().includes('审查'));
+  assert.ok(nodes.get('agent-row-helper:t-multi-help:th1').allTexts().includes('调研'));
+  view.state = { ...view.state, lang: 'en' };
+  nodes.clear();
+  view.render(cx);
+
+  // 3) Click inline capsule toggles floating small window without opening thread detail; small window titlebar echoes friendly name + live tense
+  let stopped = false;
+  const clickCx = { ...cx, stop_propagation: () => { stopped = true; } };
+  nodes.get('agent-inline-worker:t-inline-agy').clicks({}, clickCx);
+  assert.equal(stopped, true, 'clicking inline capsule stops propagation so thread detail does not open');
+  assert.equal(view.detail, false);
+  assert.equal(overlayCalls.length, 1);
+  const openedTitlebarProps = overlayCalls[0].spec.layout.children[0].content.props;
+  assert.equal(openedTitlebarProps.displayName, agyName);
+  assert.equal(openedTitlebarProps.action, 'code');
+  assert.equal(model.agentWindowOpen(view.agentWindows, 'worker:t-inline-agy'), true);
+  nodes.clear();
+  view.render(cx);
+  assert.equal(nodes.get('agent-inline-worker:t-inline-agy').allSvgs().some(s => s.endsWith('window-pop.svg')), true, 'open inline capsule shows window-pop icon');
+
+  // Floating window titlebar echoes displayName + live tense (Coding when working -> Coded when ended/done)
+  const winView = new Mod();
+  winView.agentWindow = 'titlebar';
+  winView.lang = 'en';
+  winView.winProps = { ...openedTitlebarProps, ended: false };
+  nodes.clear();
+  winView.render(cx);
+  assert.ok(nodes.get('win-titlebar-worker:t-inline-agy').allTexts().includes(`${agyName} · Coding`), 'live titlebar echoes name + Coding');
+  winView.winProps = { ...openedTitlebarProps, address: '', ended: true };
+  nodes.clear();
+  winView.render(cx);
+  assert.ok(nodes.get('win-titlebar-worker:t-inline-agy').allTexts().includes(`${agyName} · Coded`), 'ended titlebar echoes name + Coded');
+
+  // Hover inline capsule shows agent hover card with friendly name + model·effort
+  nodes.clear();
+  view.render(cx);
+  nodes.get('agent-inline-worker:t-inline-agy').hover(true, cx);
+  nodes.clear();
+  view.render(cx);
+  const inlineHoverText = nodes.get('hover-card-agent:worker:t-inline-agy')?.allTexts().join(' ') || '';
+  assert.match(inlineHoverText, new RegExp(agyName));
+  assert.match(inlineHoverText, /Neon·high/);
+
+  // Re-click inline capsule closes floating small window (toggle semantics)
+  nodes.get('agent-inline-worker:t-inline-agy').clicks({}, clickCx);
+  assert.deepEqual(closedOverlays, ['ov-1']);
+  assert.equal(model.agentWindowOpen(view.agentWindows, 'worker:t-inline-agy'), false);
+
+  // 4) Narrow panel width: 310px keeps name + modelShort; 285px keeps name; 260px keeps icon-only
+  view.panelSizes = { compactPx: 310, splitRatio: null };
+  nodes.clear();
+  view.render(cx);
+  assert.deepEqual(nodes.get('agent-inline-worker:t-inline-agy').allTexts(), [agyName, '·', 'Neon']);
+  assert.deepEqual(nodes.get('agent-inline-worker:t-inline-claude').allTexts(), [claudeName, '·', 'Opus']);
+  assert.ok(nodes.get('agent-inline-worker:t-inline-agy').allImages().includes('icons/agy.png'));
+
+  view.panelSizes = { compactPx: 285, splitRatio: null };
+  nodes.clear();
+  view.render(cx);
+  assert.deepEqual(nodes.get('agent-inline-worker:t-inline-agy').allTexts(), [agyName]);
+  assert.deepEqual(nodes.get('agent-inline-worker:t-inline-claude').allTexts(), [claudeName]);
+
+  view.panelSizes = { compactPx: 260, splitRatio: null };
+  nodes.clear();
+  view.render(cx);
+  assert.deepEqual(nodes.get('agent-inline-worker:t-inline-agy').allTexts(), []);
+  assert.deepEqual(nodes.get('agent-inline-worker:t-inline-claude').allTexts(), []);
+  assert.ok(nodes.get('agent-inline-worker:t-inline-agy').allImages().includes('icons/agy.png'), 'icon preserved at narrowest width');
+  assert.ok(nodes.get('agent-inline-worker:t-inline-claude').allSvgs().includes('icons/claude.svg'), 'icon preserved at narrowest width');
+});
+
+test('inline image preview: extraction, markdown rewrite, sizing, i18n, and path containment security', () => {
+  const ctx = {
+    repo: '/Users/alice/work/dudu',
+    ledgerHome: '/Users/alice/.dudu',
+    slug: 'dudu',
+    conversation: '/Users/alice/.dudu/projects/dudu/conversation.jsonl',
+  };
+
+  // Supported extensions
+  for (const ok of ['a.png', 'b.JPG', 'c.jpeg', 'd.webp', 'e.GIF']) {
+    assert.equal(model.isPreviewableImage(ok), true, ok);
+  }
+  for (const no of ['a.svg', 'b.pdf', 'c.md', 'd.txt', '', null]) {
+    assert.equal(model.isPreviewableImage(no), false, String(no));
+  }
+
+  // Extraction from markdown images, links, absolute file:// inside project/repo, and bare refs
+  const md = [
+    '对比图已同步：[threads-cmp.png](library:docs/threads-cmp.png)',
+    '还有内联语法 ![架构图](library:docs/arch.webp "架构") 和仓库图 [demo](file:assets/demo.jpg)',
+    '绝对路径 ![abs](file:///Users/alice/.dudu/projects/dudu/docs/sub/shot.gif) 与 [repoAbs](file:///Users/alice/work/dudu/docs/ui.PNG)',
+    '重复引用 [again](library:docs/threads-cmp.png)',
+    '行内代码忽略：`![code](library:docs/ignored-inline.png)` 和 `library:docs/ignored-bare.png`',
+    '```markdown',
+    '![fenced](library:docs/ignored-fence.png)',
+    '```',
+    '越权与外链拒绝：![evil1](file:///etc/passwd.png) ![evil2](file:///Users/bob/secret.png) ![evil3](library:docs/../../secret.png) ![evil4](https://example.com/a.png) ![evil5](library:memory/note.png) ![evil6](library:docs/.hidden.png) ![evil7](file:.git/x.png)',
+  ].join('\n');
+
+  const refs = model.extractInlineImageRefs(md, ctx);
+  assert.deepEqual(refs.map(r => [r.root, r.path, r.baseDir, r.relPath]), [
+    ['docs', 'threads-cmp.png', '/Users/alice/.dudu/projects/dudu/docs', 'threads-cmp.png'],
+    ['docs', 'arch.webp', '/Users/alice/.dudu/projects/dudu/docs', 'arch.webp'],
+    ['repo', 'assets/demo.jpg', '/Users/alice/work/dudu', 'assets/demo.jpg'],
+    ['docs', 'sub/shot.gif', '/Users/alice/.dudu/projects/dudu/docs', 'sub/shot.gif'],
+    ['repo', 'docs/ui.PNG', '/Users/alice/work/dudu', 'docs/ui.PNG'],
+  ]);
+  assert.equal(refs[0].name, 'threads-cmp.png');
+  assert.equal(refs[1].alt, '架构图');
+  assert.equal(refs[1].isMarkdownImage, true);
+
+  // Limit cap works
+  assert.equal(model.extractInlineImageRefs(md, ctx, { limit: 2 }).length, 2);
+
+  // Markdown image rewrite preserves code blocks/inline code and skips disallowed URLs
+  const rewritten = model.rewriteMarkdownImagesForDisplay(
+    '看图 ![对比](library:docs/a.png) 和 ![](file:img/b.jpg) `![code](library:docs/c.png)` ![ext](https://example.com/x.png)',
+    ctx,
+  );
+  assert.equal(
+    rewritten,
+    '看图 [对比](library:docs/a.png) 和 [b.jpg](file:img/b.jpg) `![code](library:docs/c.png)` ![ext](https://example.com/x.png)',
+  );
+
+  // Aspect-ratio-preserving fitImageBox without upscaling
+  assert.deepEqual(model.fitImageBox(1600, 800, { maxWidth: 480, maxHeight: 280 }), { width: 480, height: 240 });
+  assert.deepEqual(model.fitImageBox(600, 1200, { maxWidth: 480, maxHeight: 280 }), { width: 140, height: 280 });
+  assert.deepEqual(model.fitImageBox(200, 100, { maxWidth: 480, maxHeight: 280 }), { width: 200, height: 100 });
+  assert.deepEqual(model.fitImageBox(0, 0, { maxWidth: 480, maxHeight: 280 }), { width: 240, height: 140 });
+
+  // Bilingual strings
+  assert.equal(model.word('en', 'imageOpenPreview'), 'Open image preview');
+  assert.equal(model.word('zh', 'imageOpenPreview'), '打开原图预览');
+  assert.equal(model.word('en', 'imageLoading'), 'Loading image…');
+  assert.equal(model.word('zh', 'imageLoading'), '正在加载图片…');
+  assert.equal(model.word('en', 'imageLoadFailed'), 'Image preview unavailable');
+  assert.equal(model.word('zh', 'imageLoadFailed'), '无法加载图片预览');
+  assert.equal(model.word('en', 'imageTooLarge'), 'Image is too large to preview here.');
+  assert.equal(model.word('zh', 'imageTooLarge'), '图片过大，无法在此预览。');
+  assert.equal(model.word('en', 'imageDimensions', 800, 600), '800 × 600');
+  assert.equal(model.word('zh', 'imageDimensions', 800, 600), '800 × 600');
+});
+
+test('inline image staging python helpers: real PNG/GIF probing, remote round-trip, and symlink/magic/size rejection', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'dudu-img-stage-'));
+  try {
+    const docsDir = join(tmp, 'docs');
+    const outsideDir = join(tmp, 'outside');
+    const cacheDir = join(tmp, 'cache', 'pm-images');
+    mkdirSync(docsDir, { recursive: true });
+    mkdirSync(outsideDir, { recursive: true });
+
+    // Minimal valid PNG header (320x180)
+    const pngBuf = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(pngBuf, 0);
+    pngBuf.writeUInt32BE(13, 8);
+    pngBuf.write('IHDR', 12, 'ascii');
+    pngBuf.writeUInt32BE(320, 16);
+    pngBuf.writeUInt32BE(180, 20);
+    writeFileSync(join(docsDir, 'sample.png'), pngBuf);
+
+    // Minimal valid GIF89a header (120x90)
+    const gifBuf = Buffer.alloc(14);
+    gifBuf.write('GIF89a', 0, 'ascii');
+    gifBuf.writeUInt16LE(120, 6);
+    gifBuf.writeUInt16LE(90, 8);
+    writeFileSync(join(docsDir, 'anim.gif'), gifBuf);
+
+    // Fake PNG (text bytes with .png extension)
+    writeFileSync(join(docsDir, 'fake.png'), 'not actually a png file');
+
+    // Outside secret file + symlink inside docs pointing outside
+    writeFileSync(join(outsideDir, 'secret.png'), pngBuf);
+    symlinkSync(join(outsideDir, 'secret.png'), join(docsDir, 'escape.png'));
+
+    const runPy = argv => {
+      const r = spawnSync('python3', argv, { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      return JSON.parse(r.stdout.trim());
+    };
+
+    // 1. Local staging succeeds for valid PNG and GIF
+    const stagedPng = runPy(model.stageLocalImageArgv(docsDir, 'sample.png', cacheDir));
+    assert.equal(stagedPng.ok, true);
+    assert.equal(stagedPng.width, 320);
+    assert.equal(stagedPng.height, 180);
+    assert.match(stagedPng.rel, /^cache\/pm-images\/[0-9a-f]{20}\.png$/);
+    assert.equal(existsSync(join(tmp, stagedPng.rel)), true);
+
+    const stagedGif = runPy(model.stageLocalImageArgv(docsDir, 'anim.gif', cacheDir));
+    assert.equal(stagedGif.ok, true);
+    assert.equal(stagedGif.width, 120);
+    assert.equal(stagedGif.height, 90);
+
+    // 2. Remote read + local write round-trip
+    const [, remoteArgs] = model.readRemoteImageArgv(docsDir, 'sample.png');
+    const remoteRes = runPy(remoteArgs);
+    assert.equal(remoteRes.ok, true);
+    assert.equal(remoteRes.width, 320);
+    assert.equal(remoteRes.height, 180);
+    const b64Path = join(tmp, 'remote.b64.tmp');
+    writeFileSync(b64Path, remoteRes.b64, 'ascii');
+    const written = runPy(model.writeStagedImageArgv(cacheDir, remoteRes.hash, remoteRes.ext, b64Path));
+    assert.equal(written.ok, true);
+    assert.equal(written.rel, stagedPng.rel);
+    assert.equal(existsSync(b64Path), false, 'temp b64 file cleaned up');
+
+    // 3. Security rejections: symlink escape, traversal, fake magic bytes, size limit
+    const symRes = runPy(model.stageLocalImageArgv(docsDir, 'escape.png', cacheDir));
+    assert.equal(symRes.ok, false);
+
+    const travRes = runPy(model.stageLocalImageArgv(docsDir, '../outside/secret.png', cacheDir));
+    assert.equal(travRes.ok, false);
+
+    const fakeRes = runPy(model.stageLocalImageArgv(docsDir, 'fake.png', cacheDir));
+    assert.equal(fakeRes.ok, false);
+
+    const bigRes = runPy(model.stageLocalImageArgv(docsDir, 'sample.png', cacheDir, { maxBytes: 10 }));
+    assert.equal(bigRes.ok, false);
+    assert.equal(bigRes.error, 'too large');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('auto-open side tab on new PM reply/question: dedup, no history replay, dirty-editor guardrail, and image priority', () => {
+  const ctx = {
+    repo: '/Users/alice/work/dudu',
+    ledgerHome: '/Users/alice/.dudu',
+    slug: 'dudu',
+    conversation: '/Users/alice/.dudu/projects/dudu/conversation.jsonl',
+  };
+
+  // Baseline history events (already present on first load)
+  const histEv1 = { seq: 10, type: 'pm', text: '历史图 [old.png](library:docs/old.png)' };
+  const histEv2 = { seq: 11, type: 'question', task: 't1', text: '历史问题 [spec.md](library:docs/spec.md)' };
+  const seen = new Set([model.autoOpenEventKey(histEv1), model.autoOpenEventKey(histEv2)]);
+
+  // 1. Historical events never trigger auto-open
+  const r0 = model.pickAutoOpenTarget([histEv1, histEv2], ctx, { seenKeys: seen, tasks: [] });
+  assert.equal(r0.target, null);
+  assert.deepEqual(r0.newKeys, []);
+
+  // 2. Newly arrived PM reply with both a Library doc and an image prefers the image and opens once
+  const newPm = { seq: 12, msg_id: 'm-12', type: 'pm', text: '见 [plan.md](library:docs/plan.md) 和 [cmp.png](library:docs/cmp.png)' };
+  const r1 = model.pickAutoOpenTarget([histEv1, histEv2, newPm], ctx, { seenKeys: seen, tasks: [] });
+  assert.equal(r1.eventKey, 'msg:m-12');
+  assert.deepEqual(r1.target, {
+    tab: 'library',
+    root: 'docs',
+    path: 'cmp.png',
+    key: 'docs/cmp.png',
+    kind: 'image',
+    name: 'cmp.png',
+  });
+  for (const k of r1.newKeys) seen.add(k);
+
+  // 3. Same message never re-opens after user manually closes the tab
+  const r2 = model.pickAutoOpenTarget([histEv1, histEv2, newPm], ctx, { seenKeys: seen, tasks: [] });
+  assert.equal(r2.target, null);
+
+  // 4. Newly arrived open blocked question with a Library markdown doc auto-opens the doc
+  const newQ = { seq: 13, type: 'thread', status: 'blocked', task: 't-open', text: '请审方案 [design.md](library:docs/design.md)' };
+  const r3 = model.pickAutoOpenTarget([histEv1, newPm, newQ], ctx, {
+    seenKeys: seen,
+    tasks: [{ id: 't-open', status: 'blocked' }],
+  });
+  assert.equal(r3.eventKey, 'seq:13');
+  assert.equal(r3.target?.root, 'docs');
+  assert.equal(r3.target?.path, 'design.md');
+  assert.equal(r3.target?.kind, 'doc');
+  for (const k of r3.newKeys) seen.add(k);
+
+  // 5. Already-resolved question does NOT auto-open
+  const resolvedQ = { seq: 14, type: 'thread', status: 'blocked', task: 't-done', text: '旧问题 [done.md](library:docs/done.md)' };
+  const r4 = model.pickAutoOpenTarget([resolvedQ], ctx, {
+    seenKeys: seen,
+    tasks: [{ id: 't-done', status: 'done' }],
+  });
+  assert.equal(r4.target, null);
+  for (const k of r4.newKeys) seen.add(k);
+
+  // 6. Guardrail: when user is editing an unsaved dirty tab, do NOT interrupt (and mark seen so it won't pop later)
+  const whileDirty = { seq: 15, type: 'pm', text: '新图 ![shot](library:docs/new.png)' };
+  const r5 = model.pickAutoOpenTarget([whileDirty], ctx, {
+    seenKeys: seen,
+    tasks: [],
+    editingDirty: true,
+  });
+  assert.equal(r5.target, null);
+  assert.deepEqual(r5.newKeys, ['seq:15']);
+
+  // 7. Security: disallowed paths & code blocks never auto-open
+  const unsafeEv = {
+    seq: 16,
+    type: 'pm',
+    text: '`[code](library:docs/in-code.md)` ![evil](file:///etc/passwd.png) [mem](library:memory/a.md)',
+  };
+  const r6 = model.pickAutoOpenTarget([unsafeEv], ctx, { seenKeys: seen, tasks: [] });
+  assert.equal(r6.target, null);
+
+  // 8. Regression: loading earlier history (prepend) never triggers auto-open on next readLog
+  const baseline = [
+    { seq: 100, at: '2026-11-26 09:50:00', type: 'pm', text: '基线消息 [base.png](library:docs/base.png)' },
+    { seq: 105, at: '2026-11-26 09:55:00', type: 'user', text: 'ok' },
+  ];
+  const st = model.seedAutoOpenState(baseline);
+  assert.equal(st.minSeq, 105);
+  assert.equal(st.minAt, '2026-11-26 09:55:00');
+
+  const earlierPrepended = [
+    { seq: 80, at: '2026-11-26 09:10:00', type: 'pm', text: '更早历史图 [old-chart.png](library:docs/old-chart.png)' },
+    { at: '2026-11-26 09:20:00', type: 'pm', text: '无 seq 的更早历史文档 [old-doc.md](library:docs/old-doc.md)' },
+  ];
+  // Even without markAutoOpenHistory, watermark blocks older prepended events
+  const rPre1 = model.pickAutoOpenTarget([...earlierPrepended, ...baseline], ctx, {
+    seenKeys: st.seen,
+    minSeq: st.minSeq,
+    minAt: st.minAt,
+    tasks: [],
+  });
+  assert.equal(rPre1.target, null);
+  assert.equal(rPre1.newKeys.length, 2);
+
+  // With markAutoOpenHistory (as loadEarlierEvents does), prepended events are already recorded as seen
+  const st2 = model.seedAutoOpenState(baseline);
+  model.markAutoOpenHistory(st2, earlierPrepended);
+  const rPre2 = model.pickAutoOpenTarget([...earlierPrepended, ...baseline], ctx, {
+    seenKeys: st2.seen,
+    minSeq: st2.minSeq,
+    minAt: st2.minAt,
+    tasks: [],
+  });
+  assert.equal(rPre2.target, null);
+  assert.deepEqual(rPre2.newKeys, []);
+
+  // Genuine new tail event arriving after loadEarlier STILL auto-opens
+  const tailNew = { seq: 106, at: '2026-11-26 10:00:00', type: 'pm', text: '新对比图 [fresh.png](library:docs/fresh.png)' };
+  const rTail = model.pickAutoOpenTarget([...earlierPrepended, ...baseline, tailNew], ctx, {
+    seenKeys: st2.seen,
+    minSeq: st2.minSeq,
+    minAt: st2.minAt,
+    tasks: [],
+  });
+  assert.equal(rTail.eventKey, 'seq:106');
+  assert.equal(rTail.target?.path, 'fresh.png');
+});
+
+test('compactLogLine flattens multi-line log entries and thread detail log rows stay bounded without overlap', async (t) => {
+  const { compactLogLine } = model;
+  assert.equal(compactLogLine('line 1\nline 2\r\n  line 3  '), 'line 1 line 2 line 3');
+  assert.equal(compactLogLine('用户补充英文文案细节：\n- 进行中 (working)\n- 已完成 (done)'), '用户补充英文文案细节： - 进行中 (working) - 已完成 (done)');
+  assert.equal(compactLogLine(''), '');
+  assert.equal(compactLogLine(null), '');
+
+  const nodes = new Map();
+  const makeEl = (tag) => {
+    const el = {
+      tag, idVal: '', kids: [], texts: [], styles: [], onHoverFn: null, onClickFn: null, popupContent: null,
+      allTexts() {
+        return [...this.texts, ...this.kids.flatMap(k => (k?.allTexts ? k.allTexts() : []))];
+      },
+      hasStyle(name, arg) {
+        return this.styles.some(s => s.name === name && (arg === undefined || s.args[0] === arg));
+      },
+    };
+    const proxy = new Proxy(el, {
+      get(target, prop) {
+        if (prop in target) return target[prop];
+        if (prop === 'id') return (v) => { target.idVal = v; nodes.set(v, target); return proxy; };
+        if (prop === 'child') return (c) => {
+          if (typeof c === 'string' || typeof c === 'number') target.texts.push(String(c));
+          else if (c) target.kids.push(c);
+          return proxy;
+        };
+        if (prop === 'children') return (arr) => { for (const c of (arr || [])) proxy.child(c); return proxy; };
+        if (prop === 'when') return (cond, fn) => { if (cond) fn(proxy); return proxy; };
+        if (prop === 'on_hover') return (fn) => { target.onHoverFn = fn; return proxy; };
+        if (prop === 'on_click') return (fn) => { target.onClickFn = fn; return proxy; };
+        if (prop === 'content') return (c) => { target.popupContent = c; return proxy; };
+        return (...args) => { target.styles.push({ name: String(prop), args }); return proxy; };
+      },
+    });
+    return proxy;
+  };
+  const stub = (name) => Object.assign((...a) => makeEl(name), {
+    new: (id, trigger) => {
+      const p = makeEl(name);
+      if (id) p.id(id);
+      if (trigger) p.child(trigger);
+      return p;
+    },
+    markdown: (id, t) => makeEl('md').id(id).child(t),
+    html: (id, t) => makeEl('html').id(id).child(t),
+  });
+  const stateStub = () => new Proxy({
+    set_value() {}, value: () => '', focus() {}, is_focused: () => false,
+  }, { get: (o, k) => (k in o ? o[k] : () => {}) });
+  globalThis.__tipKit = {
+    div: stub('div'), svg: stub('svg'), image: stub('image'),
+    v_flex: stub('v_flex'), h_flex: stub('h_flex'),
+    TextView: stub('TextView'), Textarea: stub('Textarea'), Input: stub('Input'), Popup: stub('Popup'),
+    TextareaState: { new: stateStub },
+    InputState: { new: stateStub },
+    ScrollHandle: { new: () => ({ scroll_to_item() {}, offset: () => ({ x: 0, y: 0 }) }) },
+  };
+  t.after(() => { delete globalThis.__tipKit; });
+  const baseUrl = new URL('./main.js', import.meta.url).href;
+  const { default: PmProject } = await import(`${baseUrl}?multiline-log-test=${Date.now()}`);
+  const cx = { notify() {}, spawn() {}, timer: { after() { return { cancel() {} }; }, every() { return { cancel() {} }; } }, focus_handle: () => ({ focus() {}, is_focused: () => false }), stop_propagation() {} };
+  const view = new PmProject();
+  view.init({}, cx);
+  view.viewWidth = 1000;
+  view.wide = true;
+  view.panelWant = 400;
+  view.machine = '';
+  view.stateFor = '';
+  view.pmName = 'pm-dudu';
+  view.detail = true;
+  view.thread = 'dudu-multiline-log';
+  const multiLineNote = '用户补充英文文案细节：\n- 进行中 (working / running)：现在分词\n- 已完成 (done / merged)：过去分词\n请同步补齐单测。';
+  view.state = {
+    lang: 'zh',
+    pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', context_tokens: 80000 }],
+    tasks: [{
+      task: 'dudu-multiline-log', number: 347, title: 'Multiline log check', status: 'in_progress', project: 'dudu',
+      log: [
+        { n: 0, at: '2026-11-26 10:00', text: 'dispatched to worker (neon)' },
+        { n: 1, at: '2026-11-26 10:06', text: '第一行\n第二行' },
+        { n: 2, at: '2026-11-26 10:07', text: multiLineNote },
+      ],
+    }],
+  };
+  view.threadTask = view.state.tasks[0];
+  view.threadLog = { entries: view.state.tasks[0].log, earlier: 0 };
+
+  // Compact recent-3 mode: multi-line entries render as single-line bounded rows with no raw newlines
+  nodes.clear();
+  view.threadLogExpanded = false;
+  view.render(cx);
+  const logBox = nodes.get('thread-log');
+  assert.ok(logBox, 'thread-log container renders');
+  assert.equal(logBox.hasStyle('w_full'), true, 'thread-log container sets w_full');
+  assert.equal(logBox.hasStyle('min_w', 0), true, 'thread-log container sets min_w(0)');
+  const row2 = nodes.get('thread-entry-2');
+  assert.ok(row2, 'compact log row renders');
+  assert.equal(row2.hasStyle('w_full'), true, 'compact log row sets w_full');
+  assert.equal(row2.hasStyle('min_w', 0), true, 'compact log row sets min_w(0)');
+  assert.equal(row2.hasStyle('flex_none'), true, 'compact log row sets flex_none');
+  assert.equal(row2.hasStyle('overflow_hidden'), true, 'compact log row clips overflow');
+  const row2Texts = row2.allTexts();
+  assert.equal(row2Texts.some(t => t.includes('\n')), false, 'compact log row must not contain raw newlines');
+  assert.ok(row2Texts.includes(compactLogLine(multiLineNote)), 'compact log row displays flattened single-line text');
+
+  // Hovering compact row still shows full wrapped tooltip
+  row2.onHoverFn(true, cx);
+  nodes.clear();
+  view.render(cx);
+  const pop = nodes.get('hover-tip-thread-entry-2');
+  assert.ok(pop && pop.popupContent, 'hovering compact multi-line log entry opens tooltip Popup');
+  assert.ok(pop.popupContent.allTexts().some(t => t.includes('现在分词')), 'tooltip preserves multi-line content');
+
+  // Expanded mode: entries use w_full + min_w(0) + flex_none so multi-line blocks never shrink or overlap
+  nodes.clear();
+  view.hoverKey = '';
+  view.threadLogExpanded = true;
+  view.render(cx);
+  const expRow2 = nodes.get('thread-entry-2');
+  assert.ok(expRow2, 'expanded log row renders');
+  assert.equal(expRow2.hasStyle('w_full'), true, 'expanded log row sets w_full');
+  assert.equal(expRow2.hasStyle('min_w', 0), true, 'expanded log row sets min_w(0)');
+  assert.equal(expRow2.hasStyle('flex_none'), true, 'expanded log row sets flex_none');
+});
+
+test('Phase 4: recovering activity step mapping, pm-incident in-place merge, turns separation, and pm-stall ignore (EN + ZH)', () => {
+  // 1. pmActivityView Row 11: mapped structured step keys AND verbatim custom text (EN + ZH)
+  const vKeyEn = model.pmActivityView('en', {
+    turn2: { turn: { phase: 'recovering', health: 'ok', activity: { kind: 'recovering', summary: 'interrupt_tool' } }, supervised: true },
+    working: true,
+  });
+  assert.equal(vKeyEn.mode, 'recovering');
+  assert.equal(vKeyEn.label, 'Recovering: interrupting hung command');
+  assert.equal(vKeyEn.canOpenTerminal, true);
+
+  const vKeyZh = model.pmActivityView('zh', {
+    turn2: {
+      turn: { phase: 'recovering', health: 'ok' },
+      incident: { step_name: 'restart_seat' },
+      supervised: true,
+    },
+    working: true,
+  });
+  assert.equal(vKeyZh.mode, 'recovering');
+  assert.equal(vKeyZh.label, '正在自动恢复：重启 PM 会话');
+
+  // 2. timeline(): merges `pm-incident` events in place by key, ignores `pm-stall`, and turns() keeps incident standalone
+  const events = [
+    { type: 'user', at: '2026-11-26 10:00:00', text: 'run tests' },
+    { type: 'event', source: 'pm-stall', at: '2026-11-26 10:04:00', text: 'internal stall noise' },
+    {
+      type: 'event',
+      source: 'pm-incident',
+      at: '2026-11-26 10:04:01',
+      key: 't1:1:W1',
+      incident_id: 'inc:1:W1:1000',
+      incident_class: 'W1',
+      status: 'open',
+      stage: 1,
+      step: 'interrupt_turn',
+      folded: false,
+      reason: 'no_step_timeout',
+      text: 'Upstream silent; interrupting turn',
+    },
+    {
+      type: 'event',
+      source: 'pm-incident',
+      at: '2026-11-26 10:04:20',
+      key: 't1:1:W1',
+      incident_id: 'inc:1:W1:1000',
+      incident_class: 'W1',
+      status: 'resolved',
+      stage: 2,
+      step: 'continue_turn',
+      folded: true,
+      reason: 'no_step_timeout',
+      text: 'Recovered after 19s',
+    },
+    { type: 'pm', at: '2026-11-26 10:04:25', by: 'hc:t7', text: 'Tests passed.' },
+  ];
+  const tl = model.timeline(events, [], { today: '2026-11-26' });
+  assert.equal(tl.some(i => String(i.text || '').includes('internal stall noise')), false);
+  const incItems = tl.filter(i => i.kind === 'incident');
+  assert.equal(incItems.length, 1);
+  assert.equal(incItems[0].key, 'incident:t1:1:W1');
+  assert.equal(incItems[0].status, 'resolved');
+  assert.equal(incItems[0].folded, true);
+  assert.equal(incItems[0].count, 2);
+
+  const blocks = model.turns(tl, 'hc:t7');
+  const incBlock = blocks.find(b => b.kind === 'incident');
+  assert.ok(incBlock);
+  assert.equal(blocks.some(b => b.kind === 'turn' && b.parts.some(p => p.kind === 'incident')), false);
+
+  // 3. incidentRowView EN + ZH across folded / resolved / recovering / notified
+  const foldEn = model.incidentRowView('en', incBlock);
+  assert.equal(foldEn.icon, 'check');
+  assert.equal(foldEn.tone, 'muted');
+  assert.equal(foldEn.folded, true);
+  assert.equal(foldEn.label, 'Auto-recovered · Recovered after 19s');
+
+  const foldZh = model.incidentRowView('zh', incBlock);
+  assert.equal(foldZh.label, '已自动恢复 · Recovered after 19s');
+
+  const resEn = model.incidentRowView('en', { status: 'resolved', folded: false, text: 'Session restarted' });
+  assert.equal(resEn.tone, 'resolved');
+  assert.equal(resEn.label, 'Recovered · Session restarted');
+
+  const recZh = model.incidentRowView('zh', { status: 'open', step: 'continue_turn', text: 'W2 dead turn' });
+  assert.equal(recZh.tone, 'recovering');
+  assert.equal(recZh.icon, 'refresh');
+  assert.equal(recZh.label, '正在自动恢复：续上本轮');
+
+  const alertEn = model.incidentRowView('en', { status: 'notified', text: 'W2 capacity exceeded' });
+  assert.equal(alertEn.tone, 'alert');
+  assert.equal(alertEn.icon, 'bell');
+  assert.equal(alertEn.label, 'Needs your attention: W2 capacity exceeded');
+
+  const alertZh = model.incidentRowView('zh', { status: 'notified', text: '模型配额耗尽' });
+  assert.equal(alertZh.label, '需要你介入：模型配额耗尽');
+
+  // 4. Deduplicate prefix when backend `_format_incident_text` already supplied the status prefix (EN + ZH)
+  const preFoldZh = model.incidentRowView('zh', { status: 'resolved', folded: true, text: '已自动恢复（模型响应连续 4 分钟无推进）。' });
+  assert.equal(preFoldZh.label, '已自动恢复（模型响应连续 4 分钟无推进）。');
+  const preFoldEn = model.incidentRowView('en', { status: 'resolved', folded: true, text: 'Auto-recovered (model stream silent for 4m).' });
+  assert.equal(preFoldEn.label, 'Auto-recovered (model stream silent for 4m).');
+  const preRecZh = model.incidentRowView('zh', { status: 'resolved', folded: false, text: '已从「这一轮因错误中止」中恢复。' });
+  assert.equal(preRecZh.label, '已从「这一轮因错误中止」中恢复。');
+  const preNotifZh = model.incidentRowView('zh', { status: 'notified', text: '自动恢复需要人工介入（这一轮因错误中止）：需要你介入处理。' });
+  assert.equal(preNotifZh.label, '自动恢复需要人工介入（这一轮因错误中止）：需要你介入处理。');
+  const preNotifEn = model.incidentRowView('en', { status: 'notified', text: 'Recovery stopped (turn ended with error): needs your attention.' });
+  assert.equal(preNotifEn.label, 'Recovery stopped (turn ended with error): needs your attention.');
+});
+
+test('parent sub-tasks sort in stable topological depends_on order with ready-first and safe cycle fallback', () => {
+  const { taskTree, subThreads } = model;
+  const pm = { name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:tpm' };
+
+  // 1) Real-world #331 epic scenario: #349 was created most recently (newest updated) but depends on #337,
+  // so it must appear after #336 (Phase 4) and #337 (Phase 5), in the same layer as #338 (Phase 6a) and before #339 (Phase 6b).
+  const epicTasks = [
+    { id: 'dudu-pm-6', number: 331, pm: 'pm-dudu', title: 'PM 卡住根治总计划', status: 'in_progress', updated: '2026-11-25 23:15' },
+    { id: 'dudu-pm-3-2', number: 335, pm: 'pm-dudu', title: '第 3a 期', status: 'done', parent: 'dudu-pm-6', updated: '2026-11-26 01:00' },
+    { id: 'dudu-pm-3b', number: 341, pm: 'pm-dudu', title: '第 3b 期', status: 'review', parent: 'dudu-pm-6', depends_on: ['dudu-pm-3-2'], updated: '2026-11-26 10:25' },
+    { id: 'dudu-release-020', number: 349, pm: 'pm-dudu', title: '发布 dudu v0.2.0', status: 'proposed', parent: 'dudu-pm-6', depends_on: ['dudu-pm-5'], updated: '2026-11-26 10:32' },
+    { id: 'dudu-pm-6b', number: 339, pm: 'pm-dudu', title: '第 6b 期', status: 'proposed', parent: 'dudu-pm-6', depends_on: ['dudu-pm-6a'], updated: '2026-11-25 23:15' },
+    { id: 'dudu-pm-6a', number: 338, pm: 'pm-dudu', title: '第 6a 期', status: 'proposed', parent: 'dudu-pm-6', depends_on: ['dudu-pm-5'], updated: '2026-11-25 23:15' },
+    { id: 'dudu-pm-5', number: 337, pm: 'pm-dudu', title: '第 5 期', status: 'proposed', parent: 'dudu-pm-6', depends_on: ['dudu-pm-4'], updated: '2026-11-25 23:15' },
+    { id: 'dudu-pm-4', number: 336, pm: 'pm-dudu', title: '第 4 期', status: 'proposed', parent: 'dudu-pm-6', depends_on: ['dudu-pm-3b'], updated: '2026-11-26 01:23' },
+  ];
+  const expectedOrder = ['dudu-pm-3b', 'dudu-pm-4', 'dudu-pm-5', 'dudu-pm-6a', 'dudu-release-020', 'dudu-pm-6b'];
+  const tree = taskTree(pm, epicTasks, [], { lang: 'zh' });
+  const epicNode = tree.flatOpen.find(n => n.task === 'dudu-pm-6');
+  assert.ok(epicNode, 'epic node exists');
+  assert.deepEqual(epicNode.children.map(c => c.task), expectedOrder);
+  const parts = subThreads(epicTasks, 'dudu-pm-6', [], [], 'zh');
+  assert.deepEqual(parts.filter(r => r.group !== 'finished').map(r => r.task), expectedOrder);
+
+  // 2) Ready proposed tasks (no deps or all deps met, including retired deps) sort ahead of waiting proposed tasks;
+  // same-layer ties without numbers fall back to created ascending.
+  const readyTasks = [
+    { id: 'ep-r', pm: 'pm-dudu', title: 'Ready ordering', status: 'in_progress', updated: '2026-11-26 09:00' },
+    { id: 'r-active', pm: 'pm-dudu', title: 'Active prereq', status: 'in_progress', parent: 'ep-r', updated: '2026-11-26 09:10' },
+    { id: 'r-wait', pm: 'pm-dudu', title: 'Waiting on active', status: 'proposed', parent: 'ep-r', depends_on: ['r-active'], created: '2026-11-26 08:00', updated: '2026-11-26 10:00' },
+    { id: 'r-ready-late', pm: 'pm-dudu', title: 'Ready via retired dep', status: 'proposed', parent: 'ep-r', depends_on: ['r-done-retired'], created: '2026-11-26 09:30', updated: '2026-11-26 09:30' },
+    { id: 'r-ready-early', pm: 'pm-dudu', title: 'Ready no deps', status: 'proposed', parent: 'ep-r', created: '2026-11-26 09:00', updated: '2026-11-26 10:05' },
+  ];
+  const retiredDeps = [
+    { id: 'r-done-retired', pm: 'pm-dudu', title: 'Retired prereq', status: 'merged', parent: 'ep-r', retired: true, updated: '2026-11-26 08:30' },
+  ];
+  const readyTree = taskTree(pm, readyTasks, [], { lang: 'zh', retiredParts: retiredDeps });
+  const readyEpic = readyTree.flatOpen.find(n => n.task === 'ep-r');
+  assert.deepEqual(readyEpic.children.map(c => c.task), ['r-active', 'r-ready-early', 'r-ready-late', 'r-wait']);
+  const readyParts = subThreads(readyTasks, 'ep-r', [], [], 'zh', retiredDeps);
+  assert.deepEqual(readyParts.filter(r => r.group !== 'finished').map(r => r.task), ['r-active', 'r-ready-early', 'r-ready-late', 'r-wait']);
+
+  // 3) Cycle dependencies (2-cycle, 3-cycle, self-dependency, and downstream of cycle) safely degrade without infinite loops or dropped nodes.
+  const cycleTasks = [
+    { id: 'ep-c', pm: 'pm-dudu', title: 'Cycle epic', status: 'in_progress', updated: '2026-11-26 09:00' },
+    { id: 'c-after', number: 410, pm: 'pm-dudu', title: 'After cycle', status: 'proposed', parent: 'ep-c', depends_on: ['c-b'], updated: '2026-11-26 10:00' },
+    { id: 'c-b', number: 402, pm: 'pm-dudu', title: 'Cycle B', status: 'proposed', parent: 'ep-c', depends_on: ['c-a'], updated: '2026-11-26 09:50' },
+    { id: 'c-a', number: 401, pm: 'pm-dudu', title: 'Cycle A', status: 'proposed', parent: 'ep-c', depends_on: ['c-b'], updated: '2026-11-26 09:40' },
+    { id: 'c-self', number: 400, pm: 'pm-dudu', title: 'Self dep', status: 'proposed', parent: 'ep-c', depends_on: ['c-self'], updated: '2026-11-26 09:30' },
+  ];
+  const cycleTree = taskTree(pm, cycleTasks, [], { lang: 'zh' });
+  const cycleEpic = cycleTree.flatOpen.find(n => n.task === 'ep-c');
+  assert.deepEqual(cycleEpic.children.map(c => c.task), ['c-self', 'c-a', 'c-b', 'c-after']);
+  assert.deepEqual(subThreads(cycleTasks, 'ep-c', [], [], 'zh').map(r => r.task), ['c-self', 'c-a', 'c-b', 'c-after']);
+
+  // 4) Remote namespaced tasks resolve depends_on via sourceId within the same machine.
+  const remotePm = { name: 'box/pm-dudu', project: 'dudu', machine: 'box', repo: '/r/dudu' };
+  const remoteTasks = [
+    { id: 'box/ep', sourceId: 'ep', machine: 'box', pm: 'box/pm-dudu', title: 'Remote epic', status: 'in_progress', updated: '2026-11-26 09:00' },
+    { id: 'box/t2', sourceId: 't2', machine: 'box', number: 20, pm: 'box/pm-dudu', title: 'Step 2', status: 'proposed', parent: 'box/ep', depends_on: ['t1'], updated: '2026-11-26 10:00' },
+    { id: 'box/t1', sourceId: 't1', machine: 'box', number: 10, pm: 'box/pm-dudu', title: 'Step 1', status: 'proposed', parent: 'box/ep', updated: '2026-11-26 09:00' },
+  ];
+  const remoteTree = taskTree(remotePm, remoteTasks, [], { lang: 'en' });
+  assert.deepEqual(remoteTree.flatOpen.find(n => n.task === 'box/ep').children.map(c => c.task), ['box/t1', 'box/t2']);
+});
+
+test('Phase 5: turn2.inbox consumed/answered confirms bubbles immediately and prevents resend duplication without receipts.json', () => {
+  const t0 = model.eventTime('2026-11-26 23:00:00');
+  const b1 = { id: 101, msgId: 'u-inbox-1', text: '第一条确认消息', words: '第一条确认消息', sentAt: t0, deliveredAt: t0 + 100, sentTo: 't7', timedOut: true, failed: 'timed out' };
+  const b2 = { id: 102, msgId: 'u-inbox-2', text: '第二条确认消息', words: '第二条确认消息', sentAt: t0, deliveredAt: t0 + 120, sentTo: 't7' };
+  const bQueued = { id: 103, msgId: 'u-inbox-queued', text: '仅排队未进入回合', words: '仅排队未进入回合', sentAt: t0, deliveredAt: t0 + 140, sentTo: 't7' };
+
+  // 1) `accepted` / `typed` states do NOT confirm bubbles yet; `consumed` / `answered` DO, even with identical timestamps.
+  const turn2Pending = {
+    inbox: [
+      { id: 'u-inbox-queued', kind: 'user', state: 'typed', typed_ms: t0 + 150 },
+    ],
+  };
+  assert.deepEqual(model.receiptsFromTurn2Inbox(turn2Pending), []);
+
+  const turn2Confirmed = {
+    inbox: [
+      { id: 'u-inbox-1', kind: 'user', state: 'consumed', consumed_ms: t0 + 200 },
+      { id: 'u-inbox-2', kind: 'user', state: 'answered', answered_ms: t0 + 200 },
+      { id: 'u-inbox-queued', kind: 'user', state: 'accepted', accepted_ms: t0 + 140 },
+    ],
+  };
+  const inboxReceipts = model.receiptsFromTurn2Inbox(turn2Confirmed);
+  assert.equal(inboxReceipts.length, 2);
+  // Same timestamp + different msg_id must NOT collide when merged.
+  assert.equal(model.mergeReceipts(inboxReceipts, []).length, 2);
+
+  // 2) Reconcile with NO `receipts` array relies solely on `turn2.inbox`: confirms b1 & b2 immediately, clears timedOut/failed, leaves queued b3 untouched.
+  const res = model.reconcilePendingSends([b1, b2, bQueued], [], {
+    now: t0 + 30_000,
+    pmAddress: 't7',
+    pmWorking: false,
+    logReady: true,
+    receipts: [],
+    turn2: turn2Confirmed,
+    lang: 'zh',
+  });
+  const byId = Object.fromEntries(res.pending.map(p => [p.msgId, p]));
+  assert.equal(byId['u-inbox-1']?.received, true, 'consumed inbox item confirms timed-out bubble immediately');
+  assert.equal(Boolean(byId['u-inbox-1']?.failed), false);
+  assert.equal(Boolean(byId['u-inbox-1']?.timedOut), false);
+  assert.equal(byId['u-inbox-2']?.received, true, 'answered inbox item confirms bubble immediately');
+  assert.equal(Boolean(byId['u-inbox-queued']?.received), false, 'accepted/typed inbox item must not confirm prematurely');
+
+  // 3) Once conversation.jsonl logs the matching user event, settledReceiptIndices deducts the inbox receipt by msg_id.
+  const ev1 = { at: '2026-11-26 23:00:01', at_ms: t0 + 1000, type: 'user', msg_id: 'u-inbox-1', text: '第一条确认消息' };
+  const ev2 = { at: '2026-11-26 23:00:01', at_ms: t0 + 1000, type: 'user', msg_id: 'u-inbox-2', text: '第二条确认消息' };
+  const used = model.settledReceiptIndices(inboxReceipts, [ev1, ev2]);
+  assert.equal(used.size, 2);
+  assert.equal(model.findReceiptMatch({ id: 999, msgId: 'u-inbox-other', text: '第一条确认消息', sentAt: t0 + 2000 }, inboxReceipts, used), null);
+});
+
+test('Threads progress spinner detection covers direct workers, helpers, pane match, structured status, and state fallback', () => {
+  const { taskTree, workingTasks } = model;
+  const pm = { name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:pm' };
+  const terms = [
+    { address: 't-direct', state: 'live', status: 'working', labels: { task: 't-work' } },
+    { address: 't-struct', state: 'live', status: { app: 'antigravity', state: 'working' }, labels: { task: 't-obj-status' } },
+    { address: 't-pane-only', state: 'live', status: 'working', labels: {} },
+    { address: 't-idle', state: 'live', status: 'idle', labels: { task: 't-idle-task' } },
+    { address: 't-land', state: 'live', status: 'working', labels: { helper: 'land-t-postgate', 'helper.of': 'pm-dudu', 'helper.task': 't-postgate' } },
+    { address: 't-subhelp', state: 'live', status: 'working', labels: { helper: 'probe-a', 'helper.of': 't-worker-helper' } },
+    { address: 't-pm-gen', state: 'live', status: 'working', labels: { helper: 'pm-general', 'helper.of': 'pm-dudu' } },
+    { address: 'box/t-rem', state: 'live', status: 'working', labels: { task: 't-remote' } },
+  ];
+
+  const atWork = workingTasks(terms, []);
+  assert.equal(atWork.has('t-work'), true, 'direct working worker');
+  assert.equal(atWork.has('t-obj-status'), true, 'structured status object');
+  assert.equal(atWork.has('t-postgate'), true, 'task-serving helper via helper.task');
+  assert.equal(atWork.has('t-worker-helper'), true, 'worker helper via helper.of');
+  assert.equal(atWork.has('pm-dudu'), false, 'general PM helper is not a task');
+  assert.equal(atWork.has('t-idle-task'), false, 'idle worker does not spin');
+  assert.equal(atWork.has('t-remote'), false, 'remote terminal excluded from local workingTasks');
+
+  const tasks = [
+    { id: 't-work', pm: 'pm-dudu', title: 'Direct working', status: 'in_progress', pane: 'hc:t-direct', updated: '2026-11-26 10:00' },
+    { id: 't-obj-status', pm: 'pm-dudu', title: 'Object status', status: 'in_progress', pane: 'hc:t-struct', updated: '2026-11-26 09:59' },
+    { id: 't-pane', pm: 'pm-dudu', title: 'Pane-only match', status: 'in_progress', pane: 'hc:t-pane-only', updated: '2026-11-26 09:58' },
+    { id: 't-fallback', pm: 'pm-dudu', title: 'State worker fallback', status: 'in_progress', worker: 'working', updated: '2026-11-26 09:57' },
+    { id: 't-idle-task', pm: 'pm-dudu', title: 'Idle worker', status: 'in_progress', pane: 'hc:t-idle', updated: '2026-11-26 09:56' },
+    {
+      id: 't-postgate', pm: 'pm-dudu', title: 'Post-gate merge', status: 'in_progress', updated: '2026-11-26 09:55',
+      plan: [{ text: 'Code', state: 'done', anchor: 'work' }, { text: 'Merge', state: 'done', anchor: 'merge' }, { text: 'Install', state: 'doing', anchor: 'custom' }],
+    },
+    { id: 't-worker-helper', pm: 'pm-dudu', title: 'Helper active while worker idle', status: 'in_progress', updated: '2026-11-26 09:54' },
+  ];
+  const tree = taskTree(pm, tasks, [], { terms, live: [], lang: 'en' });
+  const byId = new Map(tree.flatOpen.map(n => [n.task, n]));
+  assert.equal(byId.get('t-work')?.working, true);
+  assert.equal(byId.get('t-obj-status')?.working, true);
+  assert.equal(byId.get('t-pane')?.working, true);
+  assert.equal(byId.get('t-fallback')?.working, true);
+  assert.equal(byId.get('t-postgate')?.working, true);
+  assert.equal(byId.get('t-worker-helper')?.working, true);
+  assert.equal(byId.get('t-idle-task')?.working, false);
+});
+
+test('Threads UI removes left accent bar on opened rows and animates active working/review spinners', async () => {
+  const { readFileSync } = await import('node:fs');
+  const mainPath = new URL('./main.js', import.meta.url);
+  const src = readFileSync(mainPath, 'utf8')
+    .replace(/^import\s+\{[^}]*\}\s+from\s+'[^']+';\s*$/gm, '')
+    .replace(/export default class PmProject/, 'return class PmProject');
+
+  const nodes = new Map();
+  const makeEl = (tag, init = '') => {
+    const rec = {
+      tag, id: '', src: tag === 'svg' || tag === 'image' ? init : '',
+      borderL: 0, spinMs: 0, texts: [], kids: [],
+      allTexts() { return [...this.texts, ...this.kids.flatMap(k => k.allTexts())]; },
+      allSpins() { return [...(this.spinMs ? [{ src: this.src, ms: this.spinMs }] : []), ...this.kids.flatMap(k => k.allSpins())]; },
+    };
+    const proxy = new Proxy(rec, {
+      get(_t, key) {
+        if (key === '__rec') return rec;
+        if (key === 'then') return undefined;
+        return (...args) => {
+          if (key === 'id') { rec.id = String(args[0] || ''); nodes.set(rec.id, rec); }
+          else if (key === 'border_l') { rec.borderL = Number(args[0] || 0); }
+          else if (key === 'spin') { rec.spinMs = Number(args[0] || 0); }
+          else if (key === 'when') { if (args[0]) args[1](proxy); }
+          else if (key === 'child') {
+            const c = args[0];
+            if (typeof c === 'string' || typeof c === 'number') rec.texts.push(String(c));
+            else if (c?.__rec) rec.kids.push(c.__rec);
+          } else if (key === 'children') {
+            for (const c of (args[0] || [])) {
+              if (typeof c === 'string' || typeof c === 'number') rec.texts.push(String(c));
+              else if (c?.__rec) rec.kids.push(c.__rec);
+            }
+          } else if (key === 'content') {
+            const c = args[0];
+            if (c?.__rec) rec.kids.push(c.__rec);
+          }
+          return proxy;
+        };
+      },
+    });
+    return proxy;
+  };
+  const stub = name => Object.assign((...a) => makeEl(name, typeof a[0] === 'string' ? a[0] : ''), {
+    new: (id, trigger) => { const p = makeEl(name); if (id) p.id(id); if (trigger) p.child(trigger); return p; },
+    markdown: id => makeEl('md').id(id),
+    html: id => makeEl('html').id(id),
+  });
+  const stateStub = () => new Proxy({ set_value() {}, value: () => '', focus() {}, is_focused: () => false }, { get: (o, k) => (k in o ? o[k] : () => {}) });
+  const t = {
+    background: '#111', chrome: '#181818', surface: '#222', raised: '#262626', popover: '#262626',
+    border: '#333', hover: '#2a2a2a', input: '#333', foreground: '#eee', muted: '#aaa', dim: '#777',
+    accent: '#58a6ff', working: '#3fb950', ansi2: '#3fb950', blocked: '#f85149',
+  };
+  const tasks = [
+    { id: 't-spin-on', number: 353, pm: 'pm-dudu', title: 'Actively working thread', status: 'in_progress', pane: 'hc:tw1', updated: '2026-11-26 10:00' },
+    { id: 't-spin-off', number: 354, pm: 'pm-dudu', title: 'Idle in-progress thread', status: 'in_progress', pane: 'hc:tw2', updated: '2026-11-26 09:59' },
+    {
+      id: 't-rev-spin', number: 355, pm: 'pm-dudu', title: 'Active review thread', status: 'review', pane: 'hc:tw3', updated: '2026-11-26 09:58',
+      review: { id: 't-rev-spin-r', status: 'in_progress', pane: 'hc:tr1' },
+    },
+    { id: 't-rev-wait', number: 356, pm: 'pm-dudu', title: 'Review waiting for verdict', status: 'review', pane: 'hc:tw4', updated: '2026-11-26 09:57' },
+    { id: 't-done-open', number: 357, pm: 'pm-dudu', title: 'Finished opened thread', status: 'merged', updated: '2026-11-26 09:50' },
+  ];
+  const terms = [
+    { address: 'tw1', state: 'live', status: 'working', labels: { task: 't-spin-on' } },
+    { address: 'tw2', state: 'live', status: 'idle', labels: { task: 't-spin-off' } },
+    { address: 'tw3', state: 'live', status: 'idle', labels: { task: 't-rev-spin' } },
+    { address: 'tr1', state: 'live', status: 'working', labels: { task: 't-rev-spin-r' } },
+    { address: 'tw4', state: 'live', status: 'idle', labels: { task: 't-rev-wait' } },
+  ];
+  const stubs = {
+    View: class {}, div: stub('div'), svg: stub('svg'), image: stub('image'),
+    v_flex: stub('v_flex'), h_flex: stub('h_flex'),
+    TextView: stub('TextView'), Textarea: stub('Textarea'), Input: stub('Input'), Popup: stub('Popup'),
+    Scrollbar: { vertical: id => makeEl('div').id(`scrollbar:${id}`) },
+    TextareaState: { new: stateStub }, InputState: { new: stateStub },
+    ScrollHandle: { new: () => ({ scroll_to_item() {}, offset: () => ({ x: 0, y: 0 }) }) },
+    theme: () => t, home: () => '/tmp', appHome: () => '/tmp',
+    exec: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    execPython: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    readTextFile: async () => '', writeTextFile: async () => {}, watchFolder: () => new Promise(() => {}),
+    layout: () => ({ id: 'pm-stage', active: 'pm-project', children: [{ id: 'work' }, { id: 'pm-project' }] }),
+    run: () => {}, terminals: () => terms, agents: () => [], panes: () => [], spaces: () => [],
+    shared: k => (k === 'pm-project' ? { pm: 'pm-dudu' } : undefined), setShared: () => {}, props: () => ({}),
+    openOverlay: () => 'ov-1', closeOverlay: () => {}, appWindow: () => ({ platform: 'macos' }),
+    renderThreadChangeView: () => makeEl('div'),
+    renderStepsCard: () => makeEl('div'), renderDepsCard: () => makeEl('div'),
+    treeBranchList: (_u, items) => makeEl('v_flex').children(items),
+    ...model,
+    ...searchMod,
+  };
+  const Mod = new Function(...Object.keys(stubs), src)(...Object.values(stubs));
+  const cx = {
+    focus_handle: () => ({ focus() {}, is_focused: () => false }),
+    spawn: () => {}, timer: { after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+    notify: () => {}, stop_propagation: () => {},
+  };
+  const view = new Mod();
+  view.init({}, cx);
+  view.onStage = true; view.listShown = true;
+  view.viewWidth = 1280; view.wide = true; view.measured = true;
+  view.panelSizes = { compactPx: 420, splitRatio: null };
+  view.pmName = 'pm-dudu'; view.machine = ''; view.stateFor = '';
+  view.terms = () => terms; view.live = () => [];
+  view.state = { lang: 'en', pms: [{ name: 'pm-dudu', project: 'dudu', repo: '/r/dudu', pane: 'hc:pm' }], tasks, events: [] };
+  view.tabState = {
+    activeId: null,
+    tabs: [
+      { id: 'tab-1', key: model.sideTabKey({ kind: 'thread', taskId: 't-spin-on' }), kind: 'thread', taskId: 't-spin-on', title: 'Actively working thread' },
+      { id: 'tab-2', key: model.sideTabKey({ kind: 'thread', taskId: 't-done-open' }), kind: 'thread', taskId: 't-done-open', title: 'Finished opened thread' },
+    ],
+  };
+
+  nodes.clear();
+  view.render(cx);
+  const spinOnRow = nodes.get('list-t-spin-on');
+  const spinOffRow = nodes.get('list-t-spin-off');
+  const revSpinRow = nodes.get('list-t-rev-spin');
+  const revWaitRow = nodes.get('list-t-rev-wait');
+  const doneOpenRow = nodes.get('list-t-done-open');
+
+  assert.ok(spinOnRow, 'working row rendered');
+  assert.equal(spinOnRow.borderL, 0, 'opened active thread row has no left accent bar');
+  assert.ok(spinOnRow.allTexts().includes('Open'), 'opened active thread row keeps Open label');
+  assert.deepEqual(spinOnRow.allSpins(), [{ src: 'mods/workspace-chrome/spinner.svg', ms: 900 }], 'working task spinner rotates');
+
+  assert.ok(spinOffRow, 'idle in-progress row rendered');
+  assert.deepEqual(spinOffRow.allSpins(), [], 'idle worker does not spin');
+
+  assert.ok(revSpinRow, 'active review row rendered');
+  assert.deepEqual(revSpinRow.allSpins(), [{ src: 'mods/workspace-chrome/spinner.svg', ms: 900 }], 'active reviewer spinner rotates');
+
+  assert.ok(revWaitRow, 'waiting review row rendered');
+  assert.deepEqual(revWaitRow.allSpins(), [], 'waiting review does not spin');
+
+  assert.ok(doneOpenRow, 'finished opened row rendered');
+  assert.equal(doneOpenRow.borderL, 0, 'opened finished thread row has no left accent bar');
+  assert.ok(doneOpenRow.allTexts().includes('Open'), 'opened finished thread row keeps Open label');
+
+  // Search hit row also has no left accent bar when opened.
+  nodes.clear();
+  view.threadsQuery = 'working';
+  view.threadsSearchRows = [
+    { task: 't-spin-on', number: 353, title: 'Actively working thread', status: 'in_progress', group: 'working', working: true, updated: '2026-11-26 10:00' },
+  ];
+  view.render(cx);
+  const hitRow = nodes.get('threads-hit-t-spin-on');
+  assert.ok(hitRow, 'search hit row rendered');
+  assert.equal(hitRow.borderL, 0, 'opened search hit row has no left accent bar');
+  assert.ok(hitRow.allTexts().includes('Open'), 'opened search hit row keeps Open label');
+  assert.deepEqual(hitRow.allSpins(), [{ src: 'mods/workspace-chrome/spinner.svg', ms: 900 }], 'search hit working spinner rotates');
+});
+
+test('projectSendArgv & remote deliverProject: local target, no --, leading-dash payloads, and old pm.py fallback', async () => {
+  // 1) projectSendArgv places optional target before flags and uses --text=/--from= without `--`
+  //    so both newer pm.py and older Python <3.12 argparse subparsers accept it.
+  assert.deepEqual(
+    model.projectSendArgv('08-i18n', { msgId: 'u-1', target: 't3', text: 'codex 可以用了，后面派 codex fast、Astra 2' }),
+    ['project', 'send', '08-i18n', 't3', '--msg-id', 'u-1', '--text=codex 可以用了，后面派 codex fast、Astra 2'],
+  );
+  assert.deepEqual(
+    model.projectSendArgv('08-i18n', { msgId: 'u-2', target: 't3', text: '- item\n--help', question: 'q-1' }),
+    ['project', 'send', '08-i18n', 't3', '--msg-id', 'u-2', '--question', 'q-1', '--text=- item\n--help'],
+  );
+  assert.deepEqual(
+    model.projectSendArgv('08-i18n', { msgId: 'u-3', text: '-h' }),
+    ['project', 'send', '08-i18n', '--msg-id', 'u-3', '--text=-h'],
+  );
+  assert.deepEqual(
+    model.projectSendArgv('08-i18n', { msgId: 'u-4', target: 't3', fromFile: '/tmp/pm-send.tmp' }),
+    ['project', 'send', '08-i18n', 't3', '--msg-id', 'u-4', '--from=/tmp/pm-send.tmp'],
+  );
+  assert.deepEqual(
+    model.projectSendArgv('08-i18n', { msgId: 'u-5', fromFile: '/tmp/pm-send.tmp' }),
+    ['project', 'send', '08-i18n', '--msg-id', 'u-5', '--from=/tmp/pm-send.tmp'],
+  );
+
+  // 2) Main view deliverProject harness: remote machine + local machine + old remote fallback.
+  const src = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^\s*import\s+[\s\S]*?;\s*$/gm, '')
+    .replace(/export\s+default\s+class\s+(\w+)/, 'class $1') + '\nreturn PmProject;';
+  const calls = [];
+  let responder = () => ({ code: 0, stdout: JSON.stringify({ ok: true, status: 'accepted', offset: 12 }), stderr: '' });
+  const stubs = {
+    View: class {}, div: () => {}, svg: () => {}, image: () => {},
+    v_flex: () => {}, h_flex: () => {}, TextView: {}, TextareaState: {}, Textarea: () => {},
+    InputState: {}, Input: () => {}, ScrollHandle: {}, Scrollbar: () => {}, Popup: () => {},
+    theme: () => ({}), home: () => '/here', appHome: () => '/app',
+    exec: async (cmd, args, opts) => {
+      calls.push([cmd, args, opts]);
+      if (cmd === 'sh' && String(args?.[1] || '').includes('mktemp')) {
+        return { code: 0, stdout: '/tmp/pm-remote-send.tmp\n', stderr: '' };
+      }
+      if (cmd === 'sh' && String(args?.[1] || '').includes('base64')) {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (cmd === 'rm') return { code: 0, stdout: '', stderr: '' };
+      return responder(cmd, args, opts);
+    },
+    readTextFile: async () => '', writeTextFile: async () => {}, watchFolder: async () => [],
+    layout: () => null, run: () => {}, terminals: () => [], agents: () => [], panes: () => [],
+    spaces: () => [], shared: () => null, setShared: () => {}, props: () => ({}),
+    openOverlay: () => {}, closeOverlay: () => {}, window: () => ({}),
+    execPython: async (execFn, args, opts) => execFn('python3', args, opts),
+    renderThreadChangeView: () => null,
+    buildProjectSearch: () => ({}), stepSearchSelection: () => 0, stepSearchScope: () => 'all',
+    stepSearchEscape: () => ({}), renderProjectSearchOverlay: () => null,
+    renderStepsCard: () => null, renderDepsCard: () => null, treeBranchList: () => [],
+    ...model,
+  };
+  const Mod = new Function(...Object.keys(stubs), src)(...Object.values(stubs));
+  const pmThere = argv => model.remotePmArgv(argv)[1];
+  const makeView = (machine) => {
+    const pm = {
+      name: 'pm-08-i18n',
+      project: '08-i18n',
+      repo: '/home/dev/08-i18n',
+      pane: 'hc:t3',
+      conversation: '/home/dev/.dudu/projects/08-i18n/conversation.jsonl',
+    };
+    const v = Object.assign(Object.create(Mod.prototype), {
+      machine,
+      pmName: machine ? `${machine}/pm-08-i18n` : 'pm-08-i18n',
+      state: { pms: [pm], tasks: [], lang: 'zh' },
+      ledgerHome: '/here/.dudu',
+      lang: 'zh',
+      noProjectSendFor: '',
+      seq: 0,
+      nowMs: () => 1700000000000,
+      hostPlatform: () => 'darwin',
+      pm: () => pm,
+      where: () => (machine ? { on: machine } : {}),
+      pasteFolder: () => '',
+      prune: () => {},
+    });
+    return v;
+  };
+
+  // 2a) Remote project (`dev`, terminal `t3`): passes local target `t3` (NEVER `dev/t3`) for normal and `-`-prefixed text.
+  const remote = makeView('dev');
+  calls.length = 0;
+  const r1 = await remote.deliverProject('t3', 'codex 可以用了，后面派 codex fast、Astra 2', [], { msgId: 'u-r1', slug: '08-i18n' });
+  assert.equal(r1.reply?.status, 'accepted');
+  assert.deepEqual(calls, [[
+    'sh',
+    pmThere(['project', 'send', '08-i18n', 't3', '--msg-id', 'u-r1', '--text=codex 可以用了，后面派 codex fast、Astra 2']),
+    { on: 'dev', timeout: 45000 },
+  ]]);
+
+  calls.length = 0;
+  await remote.deliverProject('t3', '- leading dash item', [], { msgId: 'u-r2', slug: '08-i18n' });
+  assert.deepEqual(calls, [[
+    'sh',
+    pmThere(['project', 'send', '08-i18n', 't3', '--msg-id', 'u-r2', '--text=- leading dash item']),
+    { on: 'dev', timeout: 45000 },
+  ]]);
+
+  // 2b) Remote large text (> SAVE_INLINE_BYTES): stages file on `dev` and passes local target `t3` + `--from=...`.
+  calls.length = 0;
+  const big = '- ' + 'a'.repeat(model.SAVE_INLINE_BYTES + 16);
+  await remote.deliverProject('t3', big, [], { msgId: 'u-r3', slug: '08-i18n' });
+  const projectSendCall = calls.find(c => c[0] === 'sh' && Array.isArray(c[1]) && c[1].includes('project'));
+  assert.deepEqual(
+    projectSendCall,
+    ['sh', pmThere(['project', 'send', '08-i18n', 't3', '--msg-id', 'u-r3', '--from=/tmp/pm-remote-send.tmp']), { on: 'dev', timeout: 45000 }],
+  );
+
+  // 2c) Old remote pm.py rejecting `project send` (e.g. invalid choice / unrecognized arguments) AND older than `--as-user`:
+  //     falls back to `pm.py send` (with `--as-user` -> without `--as-user`), remembers `noProjectSendFor = 'dev'`.
+  const oldRemote = makeView('dev');
+  calls.length = 0;
+  responder = (_cmd, args) => {
+    if (args.includes('project') && args.includes('send')) {
+      return { code: 2, stdout: '', stderr: "usage: pm.py project [-h]\npm.py project: error: invalid choice: 'send'\n" };
+    }
+    if (args.includes('send') && args.includes('--as-user')) {
+      return { code: 2, stdout: '', stderr: 'usage: pm.py [-h]\npm.py: error: unrecognized arguments: --as-user\n' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const fb1 = await oldRemote.deliverProject('t3', '- old remote text', [], { msgId: 'u-old-1', slug: '08-i18n' });
+  assert.equal(fb1.reply, null);
+  assert.equal(oldRemote.noProjectSendFor, 'dev');
+  assert.deepEqual(calls.map(c => c[1]), [
+    pmThere(['project', 'send', '08-i18n', 't3', '--msg-id', 'u-old-1', '--text=- old remote text']),
+    pmThere(['send', '--as-user', '--', 't3', '- old remote text']),
+    pmThere(['send', '--', 't3', '- old remote text']),
+  ]);
+  // Subsequent send on same old remote skips `project send` and goes straight to `this.send`.
+  calls.length = 0;
+  await oldRemote.deliverProject('t3', 'second msg', [], { msgId: 'u-old-2', slug: '08-i18n' });
+  assert.deepEqual(calls.map(c => c[1]), [
+    pmThere(['send', '--as-user', '--', 't3', 'second msg']),
+    pmThere(['send', '--', 't3', 'second msg']),
+  ]);
+
+  // 2d) Real backend error (not an old-CLI parse error) must NOT fall back or mark `noProjectSendFor`.
+  const errRemote = makeView('dev');
+  calls.length = 0;
+  responder = () => ({ code: 2, stdout: '', stderr: 'PM session is offline\n' });
+  await assert.rejects(
+    () => errRemote.deliverProject('t3', 'hi', [], { msgId: 'u-err', slug: '08-i18n' }),
+    /PM session is offline/,
+  );
+  assert.equal(errRemote.noProjectSendFor, '');
+  assert.equal(calls.length, 1);
+
+  // 2e) Local project (`machine: ''`) passes local target and `--text=...` for both normal and leading-`-` text.
+  const local = makeView('');
+  calls.length = 0;
+  responder = () => ({ code: 0, stdout: JSON.stringify({ ok: true, status: 'accepted', offset: 99 }), stderr: '' });
+  const locRes = await local.deliverProject('t3', '- local bullet', [], { msgId: 'u-loc-1', slug: '08-i18n' });
+  assert.equal(locRes.reply?.offset, 99);
+  assert.deepEqual(calls, [[
+    'env',
+    ['-u', 'HC_TERMINAL_ID', '-u', 'HERDR_PANE_ID', 'python3', '/app/mods/pm-dash/skill/scripts/pm.py',
+      'project', 'send', '08-i18n', 't3', '--msg-id', 'u-loc-1', '--text=- local bullet'],
+    { timeout: 45000 },
+  ]]);
 });

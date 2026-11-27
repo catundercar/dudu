@@ -248,7 +248,7 @@ class InstallTest(unittest.TestCase):
             "type": "command", "command": f"{cmd_prefix} hook-session-start", "timeout": 10}]})
         expected["hooks"]["PreCompact"] = [{"hooks": [{"type": "command", "command":
             f"{cmd_prefix} hook-pre-compact", "timeout": 10}]}]
-        expected["hooks"]["PreToolUse"] = [{"matcher": "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command":
+        expected["hooks"]["PreToolUse"] = [{"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command":
             f"{cmd_prefix} hook-pre-tool", "timeout": 10}]}]
         expected["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command":
             f"{cmd_prefix} hook-turn", "timeout": 15}]}]
@@ -329,7 +329,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(pre["timeout"], 10)
         self.assertTrue(pre["command"].endswith(" hook-pre-compact"))
         pre_tool = hooks["PreToolUse"][0]
-        self.assertEqual(pre_tool["matcher"], "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit")
+        self.assertEqual(pre_tool["matcher"], "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit")
         self.assertFalse(pre_tool["hooks"][0].get("async", False))
         self.assertEqual(pre_tool["hooks"][0]["timeout"], 10)
         self.assertTrue(pre_tool["hooks"][0]["command"].endswith(" hook-pre-tool"))
@@ -396,7 +396,7 @@ class InstallTest(unittest.TestCase):
             self.assertIn("unrecognized arguments: --discord", result.stderr)
 
     def test_shipped_layout(self):
-        shipped = REPO / "layouts/pm.json"
+        shipped = REPO / "layouts/dudu.json"
         tree = json.loads(shipped.read_text())
         self.assertNotIn("generated_by", tree)
         self.assertEqual(tree["toast"], "pm-toast")
@@ -416,7 +416,7 @@ class InstallTest(unittest.TestCase):
 
         # Adding the directory layout first must not transfer ownership to the installer.
         self.seed_layout()
-        target = self.desktop / "layouts/pm.json"
+        target = self.desktop / "layouts/dudu.json"
         target.write_bytes(shipped.read_bytes())
         self.assertIn("already contains pm-nav", self.run_install())
         self.assertEqual(target.read_bytes(), shipped.read_bytes())
@@ -427,7 +427,7 @@ class InstallTest(unittest.TestCase):
         source = self.seed_layout()
         source_bytes = source.read_bytes()
         self.run_install()  # Existing HERDR_APP_HOME enables desktop automatically.
-        target = self.desktop / "layouts/pm.json"
+        target = self.desktop / "layouts/dudu.json"
         actual = json.loads(target.read_text())
         expected = copy.deepcopy(MAIN)
         expected["toast"] = "pm-toast"
@@ -449,7 +449,7 @@ class InstallTest(unittest.TestCase):
         target.write_text(json.dumps(actual))
         self.assertIn('Add "toast": "pm-toast"', self.run_install())
         self.assertEqual(json.loads(target.read_text()), {**actual, "toast": "pm-toast"})
-        self.assertFalse(target.with_name("pm.json.pm-backup").exists())
+        self.assertFalse(target.with_name("dudu.json.pm-backup").exists())
         # An unmarked pm layout is the person's: unchanged, with one line on adding it by hand.
         del actual["generated_by"]
         target.write_text(json.dumps(actual))
@@ -465,7 +465,7 @@ class InstallTest(unittest.TestCase):
         target.write_text('{"id":"custom","type":"row","children":[]}')
         previous = target.read_bytes()
         self.run_install()
-        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), previous)
+        self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), previous)
         self.assertEqual(json.loads(target.read_text())["generated_by"], "dudu install.sh")
 
     def seed_pm_agents(self, own=False):
@@ -478,10 +478,10 @@ class InstallTest(unittest.TestCase):
                                                   "cloned_from": {"name": "agents", "version": "0.1.16"}}))
         (mod / "model.js").write_text("export function mine() {}" if own else "export function includePMs() {}")
         (mod / "main.js").write_text("export default class Agents {}")
-        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        layout = json.loads((REPO / "layouts/dudu.json").read_text())
         block = layout["children"][0]["children"][1]["children"][-1]
         block["content"]["mod"] = "pm-agents"
-        target = self.desktop / "layouts/pm.json"
+        target = self.desktop / "layouts/dudu.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(layout))
         return mod, target, layout, block
@@ -496,7 +496,7 @@ class InstallTest(unittest.TestCase):
         output = self.run_install()
         self.assertIn("Show agents instead of pm-agents (retired)", output)
         self.assertFalse(mod.exists())
-        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), before)
         block["content"]["mod"] = "agents"
         self.assertEqual(json.loads(target.read_text()), layout)
         self.assertIn("Skip layout", self.run_install())  # nothing left to migrate
@@ -523,8 +523,8 @@ class InstallTest(unittest.TestCase):
     def test_existing_layout_gets_pm_list(self):
         # A pm layout from before pm-list, unmarked and edited by the person (as Herdr rewrites it).
         self.seed_layout()
-        target = self.desktop / "layouts/pm.json"
-        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        target = self.desktop / "layouts/dudu.json"
+        layout = json.loads((REPO / "layouts/dudu.json").read_text())
         lists = layout["children"][0]["children"][1]
         lists["children"] = [node for node in lists["children"] if node["id"] != "pm-list"]
         lists["children"][1]["size"] = {"px": 200}
@@ -536,7 +536,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(target.read_bytes(), before)
         output = self.run_install()
         self.assertIn(f"Add the pm-list block to {target}", output)
-        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), before)
         expected = copy.deepcopy(layout)
         expected["children"][0]["children"][1]["children"].insert(1, PM_LIST)   # right under pm-nav
         self.assertEqual(json.loads(target.read_text()), expected)
@@ -575,8 +575,8 @@ class InstallTest(unittest.TestCase):
     def test_existing_layout_gets_pm_project(self):
         # A pm layout from before the project view, unmarked and edited by the person.
         self.seed_layout()
-        target = self.desktop / "layouts/pm.json"
-        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        target = self.desktop / "layouts/dudu.json"
+        layout = json.loads((REPO / "layouts/dudu.json").read_text())
         stage = layout["children"][1]
         stage["children"] = stage["children"][:2]
         layout["background"] = "custom"
@@ -585,7 +585,7 @@ class InstallTest(unittest.TestCase):
         self.assertIn(f"Would Add the pm-project block to {target}", self.run_install("--dry-run"))
         self.assertEqual(target.read_bytes(), before)
         self.assertIn(f"Add the pm-project block to {target}", self.run_install())
-        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), before)
         expected = copy.deepcopy(layout)
         expected["children"][1]["children"].append(PM_PROJECT)
         self.assertEqual(json.loads(target.read_text()), expected)
@@ -603,8 +603,8 @@ class InstallTest(unittest.TestCase):
     def test_existing_layout_gets_window_drag(self):
         # A pm layout from before pm-board had window_drag, and with legacy single-block pm-project.
         self.seed_layout()
-        target = self.desktop / "layouts/pm.json"
-        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        target = self.desktop / "layouts/dudu.json"
+        layout = json.loads((REPO / "layouts/dudu.json").read_text())
         board = layout["children"][1]["children"][1]
         del board["window_drag"]
         layout["children"][1]["children"][2] = {
@@ -622,7 +622,7 @@ class InstallTest(unittest.TestCase):
         applied = self.run_install()
         self.assertIn(board_msg, applied)
         self.assertIn(proj_msg, applied)
-        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), before)
         expected = copy.deepcopy(layout)
         expected["children"][1]["children"][1:] = copy.deepcopy([PM_BOARD, PM_PROJECT])
         self.assertEqual(json.loads(target.read_text()), expected)
@@ -657,6 +657,97 @@ class InstallTest(unittest.TestCase):
         self.assertIn("already contains pm-nav", self.run_install())
         self.assertEqual(target.read_bytes(), own)
 
+    def test_migrates_legacy_pm_layout_safely(self):
+        # Existing user with customized layouts/pm.json (no dudu.json yet): copy to dudu.json,
+        # keep pm.json intact so a running pm layout is not disrupted, and apply pending upgrades.
+        self.seed_layout()
+        legacy = self.desktop / "layouts/pm.json"
+        target = self.desktop / "layouts/dudu.json"
+        layout = json.loads((REPO / "layouts/dudu.json").read_text())
+        layout["background"] = "custom-canvas"
+        layout["font"] = "Custom Mono"
+        layout["generated_by"] = "dudu install.sh"
+        legacy.write_text(json.dumps(layout))
+        before = legacy.read_bytes()
+
+        dry = self.run_install("--dry-run")
+        self.assertIn(f"Would Migrate {legacy} to {target}", dry)
+        self.assertFalse(target.exists())
+        self.assertEqual(legacy.read_bytes(), before)
+
+        output = self.run_install()
+        self.assertIn(f"Migrate {legacy} to {target}", output)
+        self.assertIn(f"Kept {legacy}", output)
+        self.assertIn('layout.switch \'{"name":"dudu"}\'', output)
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(legacy.read_bytes(), before)
+        self.assertFalse(target.with_name("dudu.json.pm-backup").exists())
+
+        # Subsequent run is idempotent and does not overwrite edits made to dudu.json.
+        updated = json.loads(target.read_text())
+        updated["background"] = "dudu-edited"
+        target.write_text(json.dumps(updated))
+        dudu_bytes = target.read_bytes()
+        again = self.run_install()
+        self.assertIn("already contains pm-nav", again)
+        self.assertEqual(target.read_bytes(), dudu_bytes)
+        self.assertEqual(legacy.read_bytes(), before)
+
+        # Migrating an older pm.json (missing pm-list and toast) upgrades dudu.json while leaving pm.json untouched.
+        target.unlink()
+        old = json.loads((REPO / "layouts/dudu.json").read_text())
+        old["background"] = "old-custom"
+        old["generated_by"] = "dudu install.sh"
+        del old["toast"]
+        old["children"][0]["children"][1]["children"] = [
+            node for node in old["children"][0]["children"][1]["children"] if node["id"] != "pm-list"
+        ]
+        legacy.write_text(json.dumps(old))
+        old_bytes = legacy.read_bytes()
+        upgraded_out = self.run_install()
+        self.assertIn(f"Migrate {legacy} to {target}", upgraded_out)
+        self.assertIn(f"Add the pm-list block to {target}", upgraded_out)
+        self.assertIn('Add "toast": "pm-toast"', upgraded_out)
+        self.assertEqual(legacy.read_bytes(), old_bytes)
+        migrated = json.loads(target.read_text())
+        self.assertEqual(migrated["background"], "old-custom")
+        self.assertEqual(migrated["toast"], "pm-toast")
+        self.assertEqual([n["id"] for n in migrated["children"][0]["children"][1]["children"]],
+                         ["pm-nav", "pm-list", "spaces", "agents"])
+
+        # An unrelated pm.json (without pm-nav, or invalid JSON) is left untouched and dudu.json is generated from main.json.
+        for unrelated in ('{"id":"custom","type":"row","children":[]}', '{invalid'):
+            with self.subTest(unrelated=unrelated):
+                target.unlink(missing_ok=True)
+                legacy.write_text(unrelated)
+                out = self.run_install()
+                self.assertIn(f"Generate {target}", out)
+                self.assertEqual(legacy.read_text(), unrelated)
+                self.assertEqual(json.loads(target.read_text())["generated_by"], "dudu install.sh")
+
+    def test_uninstall_handles_legacy_pm_layout(self):
+        self.seed_layout()
+        legacy = self.desktop / "layouts/pm.json"
+        target = self.desktop / "layouts/dudu.json"
+        marked = json.loads((REPO / "layouts/dudu.json").read_text())
+        marked["generated_by"] = "dudu install.sh"
+        legacy.write_text(json.dumps(marked))
+        self.run_install()
+        self.assertTrue(target.is_file())
+        self.assertTrue(legacy.is_file())
+        # Uninstall removes both marked dudu.json and marked legacy pm.json.
+        self.run_install("--uninstall")
+        self.assertFalse(target.exists())
+        self.assertFalse(legacy.exists())
+
+        # Unmarked legacy pm.json is preserved on uninstall.
+        unmarked = (REPO / "layouts/dudu.json").read_bytes()
+        legacy.write_bytes(unmarked)
+        out = self.run_install("--uninstall")
+        self.assertIn(f"Keep layout {legacy}", out)
+        self.assertEqual(legacy.read_bytes(), unmarked)
+
     def test_uninstall_keeps_ledger_and_other_hooks(self):
         self.seed_layout()
         other = {"type": "command", "command": "echo other"}
@@ -675,7 +766,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.read_settings()["hooks"]["Stop"], original["hooks"]["Stop"])
         self.assertEqual(self.read_settings()["hooks"]["SessionStart"][0]["hooks"], [other])
         self.assertNotIn("skills/pm/scripts/pm.py", self.settings.read_text())
-        for path in (self.claude / "skills/pm", *(self.desktop / "mods" / name for name in MODS), self.desktop / "layouts/pm.json"):
+        for path in (self.claude / "skills/pm", *(self.desktop / "mods" / name for name in MODS), self.desktop / "layouts/dudu.json"):
             self.assertFalse(path.exists())
         self.assertTrue((self.desktop / "layouts/main.json").is_file())
         self.assertTrue((self.claude / "settings.json.pm-backup").is_file())
@@ -706,7 +797,7 @@ class InstallTest(unittest.TestCase):
 
     def test_uninstall_preserves_unmarked_layout(self):
         self.seed_layout()
-        target = self.desktop / "layouts/pm.json"
+        target = self.desktop / "layouts/dudu.json"
         for content in ('{"id":"custom","type":"row","children":[]}',
                         '{"id":"pm-nav","type":"block"}', '{invalid'):
             with self.subTest(layout=content):
@@ -829,7 +920,7 @@ class InstallTest(unittest.TestCase):
             {"hooks": [{"type": "command", "command": command("hook-session-start"), "timeout": 10}]})
         expected["hooks"]["PreCompact"] = [{"hooks": [
             {"type": "command", "command": command("hook-pre-compact"), "timeout": 10}]}]
-        expected["hooks"]["PreToolUse"] = [{"matcher": "request_user_input|ask_user|AskUserQuestion|apply_patch|write_file|edit_file|Edit|Write", "hooks": [
+        expected["hooks"]["PreToolUse"] = [{"matcher": "request_user_input|ask_user|AskUserQuestion|Bash|shell|local_shell_call|apply_patch|write_file|edit_file|Edit|Write", "hooks": [
             {"type": "command", "command": command("hook-pre-tool"), "timeout": 10}]}]
         expected["hooks"]["Stop"] = [other, {"hooks": [
             {"type": "command", "command": command("hook-turn"), "timeout": 15, "async": True}]}]
@@ -916,14 +1007,14 @@ class InstallTest(unittest.TestCase):
                             for p in p.rglob("*"))
         self.run_install_py("--dry-run", "--desktop")
         self.assertFalse((self.claude / "skills/pm").exists())
-        self.assertFalse((self.desktop / "layouts/pm.json").exists())
+        self.assertFalse((self.desktop / "layouts/dudu.json").exists())
         pyc_after = sorted(str(p) for p in (REPO / "__pycache__", BUNDLE / "__pycache__") if p.exists()
                            for p in p.rglob("*"))
         self.assertEqual(pyc_after, pyc_before)
 
         self.run_install_py("--desktop")
         py_snapshot = self.snapshot()
-        layout = json.loads((self.desktop / "layouts/pm.json").read_text())
+        layout = json.loads((self.desktop / "layouts/dudu.json").read_text())
         self.assertEqual(layout["generated_by"], "dudu install.sh")
         self.assertEqual(layout["toast"], "pm-toast")
         self.assertEqual(layout["children"][1]["children"][1:], [PM_BOARD, PM_PROJECT])
@@ -936,15 +1027,15 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), py_snapshot)
         self.run_install_py("--uninstall")
         self.assertFalse((self.claude / "skills/pm").exists())
-        self.assertFalse((self.desktop / "layouts/pm.json").exists())
+        self.assertFalse((self.desktop / "layouts/dudu.json").exists())
         for name in MODS:
             self.assertFalse((self.desktop / "mods" / name).exists())
         self.assertNotIn("hooks", self.read_settings())
 
     def test_install_py_splits_legacy_pm_project_and_rejects_reserved_split_ids(self):
         self.seed_layout()
-        target = self.desktop / "layouts/pm.json"
-        layout = json.loads((REPO / "layouts/pm.json").read_text())
+        target = self.desktop / "layouts/dudu.json"
+        layout = json.loads((REPO / "layouts/dudu.json").read_text())
         layout["children"][1]["children"][2] = {
             "id": "pm-project", "type": "block", "window_drag": False,
             "background": "surface", "size": {"weight": 2},
@@ -956,7 +1047,7 @@ class InstallTest(unittest.TestCase):
         self.assertIn(f"Would {proj_msg}", self.run_install_py("--dry-run"))
         self.assertEqual(target.read_bytes(), before)
         self.assertIn(proj_msg, self.run_install_py())
-        self.assertEqual(target.with_name("pm.json.pm-backup").read_bytes(), before)
+        self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), before)
         migrated = json.loads(target.read_text())["children"][1]["children"][2]
         self.assertEqual(migrated["type"], "column")
         self.assertEqual(migrated["resizable"], False)

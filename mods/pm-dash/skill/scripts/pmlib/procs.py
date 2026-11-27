@@ -12,9 +12,11 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
-from typing import Any, Mapping, Sequence
+import time
+from typing import Any, Callable, Mapping, Sequence
 
 import pmlib.agents.reads
 import pmlib.agents.registry
@@ -105,6 +107,7 @@ _BG_SIDECAR_RE = re.compile(
     r"|\beslint\b"
     r"|watchdog"
     r"|telemetry"
+    r"|\bcaffeinate\b"
     r"|pm_pi_compact"
     r"|pm\.py\S*\s+wait\b"
     r"|\bhc\s+events\b"
@@ -306,6 +309,294 @@ def background_work(info: Mapping[str, Any] | Any) -> list[str]:
     return found
 
 
+def _parse_ps_time_ms(raw: str) -> int:
+    """Parse POSIX `ps -o time=` (`[DD-]HH:MM:SS` or `MM:SS.cc`) into milliseconds."""
+    text = str(raw or "").strip()
+    if not text:
+        return 0
+    days = 0
+    if "-" in text:
+        d_part, _, text = text.partition("-")
+        if d_part.isdigit():
+            days = int(d_part)
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            hrs, mins, secs = int(parts[0]), int(parts[1]), float(parts[2])
+        elif len(parts) == 2:
+            hrs, mins, secs = 0, int(parts[0]), float(parts[1])
+        else:
+            return 0
+    except ValueError:
+        return 0
+    total_s = days * 86400 + hrs * 3600 + mins * 60 + secs
+    return max(0, int(round(total_s * 1000)))
+
+
+def foreground_tool_stat(info: Mapping[str, Any] | Any) -> dict[str, Any]:
+    """Return `{"tool_pid": int, "cmd": str, "cpu_ms": int}` for an active foreground child command of an agent.
+
+    Uses `ps` on POSIX (1.5s timeout); returns zeros on Windows or when no foreground tool process is active.
+    """
+    empty = {"tool_pid": 0, "cmd": "", "cpu_ms": 0}
+    if info is None or osutil.WINDOWS:
+        return empty
+    if isinstance(info, Mapping):
+        root = info.get("pid")
+        fg = info.get("foreground")
+        fg_pid = fg.get("pid") if isinstance(fg, Mapping) else None
+    else:
+        root = getattr(info, "pid", None)
+        fg_pid = getattr(info, "foreground_pid", None)
+    if not root and not fg_pid:
+        return empty
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,pgid=,time=,command="],
+            capture_output=True, text=True, timeout=1.5,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return empty
+
+    rows: dict[int, tuple[int, int, str]] = {}
+    cpu_by_pid: dict[int, int] = {}
+    children: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5 or not (parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit()):
+            continue
+        pid, ppid, pgid, cputime, cmd = int(parts[0]), int(parts[1]), int(parts[2]), parts[3], parts[4]
+        rows[pid] = (ppid, pgid, cmd)
+        cpu_by_pid[pid] = _parse_ps_time_ms(cputime)
+        children.setdefault(ppid, []).append(pid)
+    if not rows:
+        return empty
+
+    start_pid = int(root or fg_pid)
+    agent_pid, _ = _resolve_agent_root(start_pid, int(fg_pid) if fg_pid else None, rows, children, info)
+    if agent_pid not in rows:
+        return empty
+    agent_pgid = rows[agent_pid][1]
+    fg_child = 0
+    fg_cmd = ""
+    for child_pid in children.get(agent_pid, []):
+        if child_pid not in rows:
+            continue
+        _, child_pgid, command = rows[child_pid]
+        if not command.strip() or _BG_SIDECAR_RE.search(command):
+            continue
+        if agent_pgid > 0 and child_pgid > 0 and child_pgid != agent_pgid:
+            continue
+        fg_child = child_pid
+        summary = _SHELL_WRAPPER_RE.sub("", command).strip()
+        if summary.startswith(("'", '"')) and summary.endswith(summary[0]) and len(summary) >= 2:
+            summary = summary[1:-1].strip()
+        fg_cmd = osutil.clip(summary or command, 120)
+    if not fg_child:
+        return empty
+
+    total_cpu = 0
+    stack = [fg_child]
+    seen: set[int] = set()
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        total_cpu += cpu_by_pid.get(cur, 0)
+        stack.extend(children.get(cur, ()))
+    return {"tool_pid": fg_child, "cmd": fg_cmd, "cpu_ms": total_cpu}
+
+
+def is_descendant_of(
+    pid: int,
+    ancestor_pid: int,
+    rows: Mapping[int, tuple[int, int, str]],
+) -> bool:
+    """True when `pid` descends from `ancestor_pid` in `rows` (or equals `ancestor_pid`)."""
+    if pid <= 1 or ancestor_pid <= 1:
+        return False
+    cur = int(pid)
+    seen: set[int] = set()
+    for _ in range(128):
+        if cur == ancestor_pid:
+            return True
+        if cur in seen or cur not in rows:
+            return False
+        seen.add(cur)
+        ppid = rows[cur][0]
+        if ppid <= 1 or ppid == cur:
+            return False
+        cur = ppid
+    return False
+
+
+def process_descendants(
+    root_pid: int,
+    *,
+    rows: Mapping[int, tuple[int, int, str]] | None = None,
+    children: Mapping[int, list[int]] | None = None,
+    exclude_pids: Sequence[int] | set[int] | frozenset[int] = (),
+) -> list[int]:
+    """Return `root_pid` and all its descendant PIDs in leaves-first order, excluding `exclude_pids` and PID<=1."""
+    if root_pid <= 1:
+        return []
+    if rows is None or children is None:
+        rows, children = _process_table()
+    if root_pid not in rows:
+        return []
+    excluded = {int(p) for p in exclude_pids if isinstance(p, int) and p > 0}
+    excluded.add(os.getpid())
+    order: list[int] = []
+    seen: set[int] = set()
+
+    def _visit(cur: int) -> None:
+        if cur <= 1 or cur in seen or cur in excluded or cur not in rows:
+            return
+        seen.add(cur)
+        for kid in children.get(cur, ()):
+            _visit(kid)
+        order.append(cur)
+
+    _visit(int(root_pid))
+    return order
+
+
+def is_tool_alive(
+    tool_pid: int,
+    *,
+    agent_pid: int | None = None,
+    table_fn: Callable[[], tuple[dict[int, tuple[int, int, str]], dict[int, list[int]]]] | None = None,
+) -> bool:
+    """True while `tool_pid` is still live (and still descends from `agent_pid` if `agent_pid` is live)."""
+    if tool_pid <= 1:
+        return False
+    rows, _ = (table_fn or _process_table)()
+    if tool_pid not in rows:
+        return False
+    if agent_pid and agent_pid > 1 and agent_pid in rows:
+        return is_descendant_of(tool_pid, int(agent_pid), rows)
+    return True
+
+
+def signal_foreground_tool(
+    tool_pid: int,
+    sig: int,
+    *,
+    agent_pid: int | None = None,
+    kill_fn: Callable[[int, int], Any] | None = None,
+    table_fn: Callable[[], tuple[dict[int, tuple[int, int, str]], dict[int, list[int]]]] | None = None,
+) -> dict[str, Any]:
+    """Send `sig` ONLY to `tool_pid` and its descendants — NEVER `-pgid` (`killpg`), because the foreground
+    shell command shares the process group with the coordinator agent itself (§3.6 W4)."""
+    if tool_pid <= 1 or tool_pid == os.getpid() or (agent_pid and int(tool_pid) == int(agent_pid)):
+        return {"signaled": [], "root_alive": False}
+    rows, children = (table_fn or _process_table)()
+    if tool_pid not in rows:
+        return {"signaled": [], "root_alive": False}
+    if agent_pid and agent_pid > 1 and agent_pid in rows and not is_descendant_of(tool_pid, int(agent_pid), rows):
+        return {"signaled": [], "root_alive": False}
+
+    exclude = {os.getpid()}
+    if agent_pid and agent_pid > 1:
+        exclude.add(int(agent_pid))
+    targets = process_descendants(tool_pid, rows=rows, children=children, exclude_pids=exclude)
+    if not targets:
+        return {"signaled": [], "root_alive": False}
+
+    if osutil.WINDOWS:
+        sigkill = getattr(signal, "SIGKILL", 9)
+        sigterm = getattr(signal, "SIGTERM", 15)
+        if sig in (sigkill, sigterm):
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(int(tool_pid))],
+                    capture_output=True, text=True, timeout=5,
+                )
+            return {"signaled": targets, "root_alive": True}
+
+    sender = kill_fn or os.kill
+    signaled: list[int] = []
+    for pid in targets:
+        if pid <= 1 or pid == os.getpid() or (agent_pid and pid == int(agent_pid)):
+            continue
+        try:
+            sender(int(pid), int(sig))
+            signaled.append(int(pid))
+        except OSError:
+            continue
+    return {"signaled": signaled, "root_alive": True}
+
+
+def interrupt_foreground_tool(
+    tool_pid: int,
+    *,
+    agent_pid: int | None = None,
+    clock: Any = None,
+    sigterm_after_s: float = 5.0,
+    sigkill_after_s: float = 5.0,
+    kill_fn: Callable[[int, int], Any] | None = None,
+    table_fn: Callable[[], tuple[dict[int, tuple[int, int, str]], dict[int, list[int]]]] | None = None,
+) -> dict[str, Any]:
+    """Escalate `SIGINT` -> 5s `SIGTERM` -> 5s `SIGKILL` against `tool_pid` subtree only."""
+    stages: list[tuple[int, float]] = [
+        (getattr(signal, "SIGINT", 2), max(0.0, float(sigterm_after_s))),
+        (getattr(signal, "SIGTERM", 15), max(0.0, float(sigkill_after_s))),
+        (getattr(signal, "SIGKILL", 9), 0.2),
+    ]
+    all_signaled: list[int] = []
+    last_sig = 0
+    sleep_fn = clock.sleep if (clock is not None and hasattr(clock, "sleep")) else time.sleep
+    for sig, wait_s in stages:
+        if not is_tool_alive(tool_pid, agent_pid=agent_pid, table_fn=table_fn):
+            return {"alive": False, "last_signal": last_sig, "signaled": all_signaled}
+        res = signal_foreground_tool(
+            tool_pid, sig, agent_pid=agent_pid, kill_fn=kill_fn, table_fn=table_fn,
+        )
+        last_sig = int(sig)
+        all_signaled.extend(res["signaled"])
+        if wait_s > 0:
+            sleep_fn(wait_s)
+        if not is_tool_alive(tool_pid, agent_pid=agent_pid, table_fn=table_fn):
+            return {"alive": False, "last_signal": last_sig, "signaled": all_signaled}
+    return {
+        "alive": is_tool_alive(tool_pid, agent_pid=agent_pid, table_fn=table_fn),
+        "last_signal": last_sig,
+        "signaled": all_signaled,
+    }
+
+
+def terminate_pid(
+    pid: int,
+    *,
+    expected_substrings: Sequence[str] = (),
+    kill_fn: Callable[[int, int], Any] | None = None,
+    table_fn: Callable[[], tuple[dict[int, tuple[int, int, str]], dict[int, list[int]]]] | None = None,
+) -> bool:
+    """Terminate a single stale supervisor process (`pid > 1`) with `SIGTERM` (W7a).
+
+    When `expected_substrings` is provided (POSIX), verifies that `pid` exists in the live process table
+    and its command line contains all expected tokens before signaling, preventing PID-reuse false kills.
+    """
+    if pid <= 1 or pid == os.getpid():
+        return False
+    tokens = [str(tok).lower() for tok in expected_substrings if str(tok).strip()]
+    if tokens and not osutil.WINDOWS:
+        rows, _ = (table_fn or _process_table)()
+        row = rows.get(int(pid))
+        if row is None:
+            return False
+        cmd_low = str(row[2] or "").lower()
+        if any(tok not in cmd_low for tok in tokens):
+            return False
+    sender = kill_fn or os.kill
+    try:
+        sender(int(pid), int(getattr(signal, "SIGTERM", 15)))
+        return True
+    except OSError:
+        return False
+
+
 class Processes:
     """Port for launching detached `pm.py` subprocesses, computing code marks, and building clean environments."""
 
@@ -369,6 +660,24 @@ class Processes:
 
     def background_work(self, info: Mapping[str, Any] | Any) -> list[str]:
         return background_work(info)
+
+    def foreground_tool_stat(self, info: Mapping[str, Any] | Any) -> dict[str, Any]:
+        return foreground_tool_stat(info)
+
+    def signal_foreground_tool(
+        self,
+        tool_pid: int,
+        sig: int,
+        *,
+        agent_pid: int | None = None,
+    ) -> dict[str, Any]:
+        return signal_foreground_tool(tool_pid, sig, agent_pid=agent_pid)
+
+    def is_tool_alive(self, tool_pid: int, *, agent_pid: int | None = None) -> bool:
+        return is_tool_alive(tool_pid, agent_pid=agent_pid)
+
+    def terminate_pid(self, pid: int, *, expected_substrings: Sequence[str] = ()) -> bool:
+        return terminate_pid(pid, expected_substrings=expected_substrings)
 
     def spawn_pm(
         self,
@@ -544,4 +853,23 @@ def build_context(
         ctx.deliver_watchers = tuple(watchers)
     if deliver_holds is None and seat_mod is not None:
         ctx.deliver_holds = (lambda repo: seat_mod.next_session_ready(repo, ctx=ctx),)
+    landing_mod = _load_hook_module("pmlib.landing")
+    if landing_mod is not None:
+        def _land_handoff(task_id: str, approval: Any, principal: Any) -> Any:
+            # The supervisor acts in a context of its own: no terminal identity taken from this process's
+            # environment (a drain started from a helper's or the PM's terminal inherits theirs).
+            sup = build_context(str(home_obj.root), env=supervisor_env(env_map))
+            return landing_mod.Landing(sup).handoff_to_helper(task_id, approval, principal=principal)
+        ctx.land_handoff = _land_handoff
+    discord_alert_mod = _load_hook_module("pmlib.discord")
+    if discord_alert_mod is not None:
+        ctx.alert_sinks = (lambda slug, repo, alert: discord_alert_mod.DiscordMirror(ctx).alert_undelivered(
+            slug, repo, alert),)
     return ctx
+
+
+def supervisor_env(env: Mapping[str, str]) -> dict[str, str]:
+    """`env` without what names a terminal or a helper session: the environment of the project supervisor's own
+    actions (its identity is an explicit `Principal`, never a terminal id it pretends to be)."""
+    return {k: v for k, v in env.items()
+            if k not in ("HC_TERMINAL_ID", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID") and not k.startswith("PM_HELPER_")}

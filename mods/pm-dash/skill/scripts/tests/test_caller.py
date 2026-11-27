@@ -38,7 +38,7 @@ from pmlib.errors import IdentityError  # noqa: E402
 from pmlib.events.inbox import InboxWatcher  # noqa: E402
 from pmlib.ledger.ledger import Ledger  # noqa: E402
 from pmlib.project.conversation import Conversation  # noqa: E402
-from pmlib.events.policy import wake_fields_for  # noqa: E402
+from pmlib.messaging.router import wake_fields_for  # noqa: E402
 from pmlib.gitrepo import GitRepo  # noqa: E402
 from pmlib.project.project import ProjectRegistry  # noqa: E402
 from pmlib.workers.dispatch import worker_argv_for  # noqa: E402
@@ -420,7 +420,7 @@ class DevMachine(unittest.TestCase):
 # Each situation is its own Context (make_ctx): its ledger (registrations and tasks), its terminal ids and
 # environment, a counting FakeHc for herdr-core and a FakeTui for the herdr TUI. The functions are asked of a
 # Caller built on that Context (the ones the legacy module-level wrappers forward to), wake_fields of
-# events.policy.wake_rule with the project registry's app_pm (as reactions asks it), worker_task_for_hook of
+# messaging.router.wake_rule with the project registry's app_pm (as reactions asks it), worker_task_for_hook of
 # workers.sessions.worker_task_for_hook_for. Run: python3 -m unittest discover -s mods/pm-dash/skill/scripts/tests
 # -p test_caller.py
 

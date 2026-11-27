@@ -51,6 +51,9 @@ REFUSAL_WORD_RE = re.compile(r"^[A-Za-z0-9_ .-]{1,60}$")
 WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:/")
 ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
+# Interactive question tools whose full question/options payload must survive transcript summarization.
+QUESTION_TOOLS = frozenset({"AskUserQuestion", "request_user_input", "ask_user", "ask_question"})
+
 # Tool input fields summarized as a single line; other tools fall back to compact JSON.
 INPUT_FIELDS = {
     "Bash": ("command",),
@@ -401,6 +404,44 @@ def _block_text(blocks: list[Any]) -> str:
     return "\n".join(parts)
 
 
+def _extract_transcript_questions(inp: Any, tidy: Tidier) -> list[dict[str, Any]]:
+    """Extract structured questions/options from interactive question tool input without 300-char truncation."""
+    if not isinstance(inp, dict):
+        return []
+    raw_list = inp.get("questions")
+    if not isinstance(raw_list, list) or not raw_list:
+        q_text = str(inp.get("question") or inp.get("prompt") or "").strip()
+        opts = inp.get("options") if isinstance(inp.get("options"), list) else []
+        if not q_text and not opts:
+            return []
+        raw_list = [{"header": inp.get("header") or inp.get("title") or "", "question": q_text, "options": opts}]
+    out: list[dict[str, Any]] = []
+    for item in raw_list:
+        if not isinstance(item, dict):
+            continue
+        header = tidy.line(str(item.get("header") or item.get("title") or "").strip())
+        question = tidy.body(str(item.get("question") or item.get("prompt") or "").strip())
+        opts: list[dict[str, str]] = []
+        for raw_opt in (item.get("options") if isinstance(item.get("options"), list) else []):
+            if isinstance(raw_opt, dict):
+                label = tidy.line(str(raw_opt.get("label") or raw_opt.get("title") or raw_opt.get("text") or "").strip())
+                desc = tidy.line(str(raw_opt.get("description") or raw_opt.get("why") or "").strip())
+            elif isinstance(raw_opt, str):
+                label, desc = tidy.line(raw_opt.strip()), ""
+            else:
+                continue
+            if not label:
+                continue
+            opt: dict[str, str] = {"label": label}
+            if desc:
+                opt["description"] = desc
+            opts.append(opt)
+        if header or question or opts:
+            q_obj: dict[str, Any] = {"header": header, "question": question or header, "options": opts}
+            out.append(q_obj)
+    return out
+
+
 def _input_summary(name: str, inp: Any) -> str:
     if isinstance(inp, dict):
         for key in INPUT_FIELDS.get(name, ()):
@@ -532,15 +573,20 @@ def _parse_transcript_line(raw: bytes | None, end: int, tidy: Tidier) -> _Parsed
         elif btype == "tool_use":
             name = blk.get("name") if isinstance(blk.get("name"), str) else ""
             call_id = blk.get("id") if isinstance(blk.get("id"), str) else ""
+            raw_inp = blk.get("input")
+            qs = _extract_transcript_questions(raw_inp, tidy) if name in QUESTION_TOOLS else []
+            summary_text = (qs[0]["question"] or qs[0]["header"]) if qs else _input_summary(name, raw_inp)
             item: dict[str, Any] = {
                 "type": "tool",
                 "at": at,
                 "name": name,
-                "input": tidy.line(_input_summary(name, blk.get("input"))),
+                "input": tidy.line(summary_text),
                 "output": "",
                 "error": False,
                 "offset": end,
             }
+            if qs:
+                item["questions"] = qs
             if call_id:
                 item["id"] = call_id
             out.items.append(item)

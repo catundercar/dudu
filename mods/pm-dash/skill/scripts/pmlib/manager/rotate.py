@@ -7,16 +7,68 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
+from ..agents.profiles import profiles as agent_profiles
 from ..agents.sessions import claude_folder, opening, pm_session
 from ..context import Context
 from ..errors import Refused
+from ..events.supervisor import deliver_under_typist_lock
 from ..home import project_slug
+from ..messaging.address import LogicalAddress, parse_legacy_endpoint
+from ..messaging.envelope import P4_BATCH, Envelope, new_env_id
+from ..messaging.principal import Principal
 from ..osutil import shell_join
 from ..procs import background_work
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
+from ..project.turn_reducer import record_endpoint
+from ..project.turn_state import TurnTracker
 from .launch import pm_argv, pm_model, pm_start_argv, successor_argv
 from .seat import RETIRE_WAIT, record_swap_notice, swap_reason_text
+
+
+def resolve_rotate_target(
+    profile: str | None,
+    model: str | None,
+    fallback_kind: str,
+    *,
+    ctx: Context | None = None,
+) -> tuple[str, str, str]:
+    """Resolve `(agent_kind, model, effort)` for `pm.py rotate [--profile P] [--model M]`."""
+    c = Context.from_env() if ctx is None else ctx
+    eff_kind = str(fallback_kind or "claude").strip().lower() or "claude"
+    eff_model = str(model or "").strip()
+    eff_profile = str(profile or "").strip()
+    if not eff_profile:
+        return eff_kind, eff_model, ""
+    table = agent_profiles(c.config.read())
+    entry = table.get(eff_profile)
+    if not isinstance(entry, Mapping):
+        raise Refused(c.config.tr(
+            f"unknown rotation profile {eff_profile!r}; known: {', '.join(table) or '(none)'}",
+            f"未知的轮换档位 {eff_profile!r}；可用：{', '.join(table) or '（无）'}",
+        ))
+    kind_val = str(entry.get("kind") or eff_kind or "claude").strip().lower()
+    model_val = eff_model or str(entry.get("model") or "").strip()
+    effort_val = str(entry.get("effort") or "").strip()
+    return kind_val, model_val, effort_val
+
+
+def _apply_claude_effort(argv: list[str], effort: str) -> list[str]:
+    if not effort:
+        return list(argv)
+    out = list(argv)
+    cut = out.index("--") if "--" in out else len(out)
+    head = out[:cut]
+    cleaned: list[str] = []
+    i = 0
+    while i < len(head):
+        if head[i] == "--effort" and i + 1 < len(head):
+            i += 2
+            continue
+        cleaned.append(head[i])
+        i += 1
+    cleaned.extend(["--effort", effort])
+    return cleaned + out[cut:]
 
 
 def _rotate_herdr_impl(
@@ -45,12 +97,19 @@ def _rotate_herdr_impl(
         )
     new = made.group(1)
     info = c.tui.pane_process_info(old)
-    kind = rec.get("agent") or "claude"
-    program = Path(c.agents.start_argv(kind)[0]).name
-    args = next((p["argv"][1:] for p in info.get("foreground_processes", [])
-                 if p.get("argv") and Path(p["argv"][0]).name == program), [])
+    prev_kind = rec.get("agent") or "claude"
+    profile_arg = getattr(a, "profile", None)
     model_arg = getattr(a, "model", None)
-    argv = pm_argv(kind, successor_argv(kind, args, pm_model(kind, model_arg, ctx=c), prompt, ctx=c), repo, ctx=c)
+    kind, target_model, target_effort = resolve_rotate_target(profile_arg, model_arg, prev_kind, ctx=c)
+    if kind != prev_kind:
+        argv = pm_start_argv(repo, kind, pm_model(kind, target_model or None, ctx=c), prompt, ctx=c)
+    else:
+        program = Path(c.agents.start_argv(kind)[0]).name
+        args = next((p["argv"][1:] for p in info.get("foreground_processes", [])
+                     if p.get("argv") and Path(p["argv"][0]).name == program), [])
+        argv = pm_argv(kind, successor_argv(kind, args, pm_model(kind, target_model or None, ctx=c), prompt, ctx=c), repo, ctx=c)
+    if target_effort and kind == "claude":
+        argv = _apply_claude_effort(argv, target_effort)
     # The name must be free for the new session, and the registration names its pane before it starts.
     holder = next((x.get("pane_id") for x in c.tui.agents() if x.get("name") == name), None)
     kept = dict(rec, previous=previous)
@@ -65,12 +124,20 @@ def _rotate_herdr_impl(
     def _switch(cur: dict[str, Any] | None) -> dict[str, Any]:
         fresh = dict(cur) if cur is not None else dict(rec)
         fresh["agent_session"] = None
+        cur_ep = record_endpoint(fresh)
+        next_epoch = int((cur_ep.epoch if cur_ep else 1) or 1) + 1
+        ep_dict = {**(cur_ep.to_dict() if cur_ep else {"runtime": "tui", "machine": None}),
+                   "workspace": workspace, "terminal": new, "epoch": next_epoch}
         fresh.update({"pane": new, "workspace": workspace, "claimed": c.clock.now(), "previous": previous,
+                      "endpoint": ep_dict, "epoch": next_epoch,
                       "rotations": fresh.get("rotations", 0) + 1})
         return fresh
 
     c.store.change_registration(slug, _switch)
-    if c.tui.pane_run(new, shell_join(argv, powershell=True)) is None:
+    switched_reg = c.store.registration(slug) or {}
+    switched_epoch = int(switched_reg.get("epoch") or 1)
+    TurnTracker(c, repo).pm_mailbox.requeue_unconsumed_on_epoch_change(switched_epoch)
+    if c.tui.bootstrap_pane_exec(new, shell_join(argv, powershell=True)) is None:
         # Nothing started: the old session stays the PM, under its name.
         c.tui.pane_close(new)
         if holder:
@@ -306,6 +373,7 @@ def _end_session_later_impl(
     agent_pid: int | None = None,
     kill_terminal: bool = False,
     *,
+    force: bool = False,
     ctx: Context,
 ) -> str | None:
     """End the outgoing PM session from a detached background process once its turn and background work finish.
@@ -317,6 +385,8 @@ def _end_session_later_impl(
         args += ["--agent-pid", str(agent_pid)]
     if kill_terminal:
         args.append("--kill-terminal")
+    if force:
+        args.append("--force")
     cwd = ctx.home.root if ctx.home.root.is_dir() else None
     if ctx.procs.spawn_pm(args, cwd=cwd) is None:
         tr = ctx.config.tr
@@ -333,9 +403,11 @@ def end_session_later(
     term: str,
     agent_pid: int | None = None,
     kill_terminal: bool = False,
+    *,
+    force: bool = False,
 ) -> str | None:
     """Legacy wrapper for `end_session_later` using `Context.from_env()`."""
-    return _end_session_later_impl(repo, term, agent_pid=agent_pid, kill_terminal=kill_terminal, ctx=Context.from_env())
+    return _end_session_later_impl(repo, term, agent_pid=agent_pid, kill_terminal=kill_terminal, force=force, ctx=Context.from_env())
 
 
 _DEFAULT_END_SESSION_LATER = end_session_later
@@ -399,12 +471,29 @@ def still_running(old: str, work: list[str], *, ctx: Context | None = None) -> N
         return
     tr = c.config.tr
     what = "; ".join(work) or tr("its turn", "它这一轮")
-    c.hc.send(
-        rec["terminal"],
-        "[from pm.py end-session] " + tr(
-            f"The previous PM session hc:{old} still runs ({what}) {RETIRE_WAIT // 60} min after the rotation, so it was "
-            f"not ended. Once that is done, end it: `hc kill {old}`.",
-            f"上一任 PM 会话 hc:{old} 轮换 {RETIRE_WAIT // 60} 分钟后还在跑（{what}），所以没有关掉它。"
-            f"那些活做完后再关：`hc kill {old}`。",
-        ),
+    msg = "[from pm.py end-session] " + tr(
+        f"The previous PM session hc:{old} still runs ({what}) {RETIRE_WAIT // 60} min after the rotation, so it was "
+        f"not ended. Once that is done, end it: `hc kill {old}`.",
+        f"上一任 PM 会话 hc:{old} 轮换 {RETIRE_WAIT // 60} 分钟后还在跑（{what}），所以没有关掉它。"
+        f"那些活做完后再关：`hc kill {old}`。",
     )
+    ep = record_endpoint(rec) or parse_legacy_endpoint(str(rec["terminal"]), runtime_hint="hc")
+    if ep is None:
+        return
+    now_ms = int(float(c.clock.time()) * 1000)
+    proj_slug = project_slug(rec.get("repo") or rec.get("name") or "project")
+    env = Envelope(
+        env_id=new_env_id(now_ms),
+        idempotency_key="",
+        schema_version=1,
+        created_ms=now_ms,
+        kind="event.notify",
+        sender=Principal.supervisor(proj_slug),
+        recipient=LogicalAddress.pm(proj_slug),
+        project=proj_slug,
+        cause={"kind": "end_session_still_running", "old_terminal": old},
+        priority=P4_BATCH,
+        body={"text": msg},
+    )
+    repo = str(rec.get("repo") or "")
+    deliver_under_typist_lock(c, ep, env, repo=repo, if_idle=False)

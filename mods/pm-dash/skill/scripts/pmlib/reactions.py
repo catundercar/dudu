@@ -29,7 +29,7 @@ from .context import Context
 from .errors import PmError, Refused
 from .events.deliver import PASSED, Delivery
 from .events.deps_watch import DependencyWatcher
-from .events.policy import wake_fields_for
+from .messaging.router import wake_fields_for
 from .events.stalls import StallWatcher
 from .ledger.deps import DEP_MET_STATUSES, dep_key_for, evaluate_depends_on, format_dep_summary, parse_depends_on
 from .ledger.family import Family, Rollup, parent_of
@@ -37,14 +37,14 @@ from .ledger.ledger import Change, Ledger
 from .ledger.plan import plan_progress, sync_plan_for_status
 from .ledger.question import quick_answers
 from .ledger.task import ACTIVE, CLOSED, Task, hc_terminal_of
-from .ledger.transition import Transition, TransitionHooks, TransitionPlan, UpdateRequest, plan_input
+from .ledger.transition import Transition, TransitionHooks, TransitionPlan, UpdateRequest, plan_input, record_applied_key
 from .memory.candidates import MemoryCandidates, candidate_names_of
 from .project.project import ProjectRegistry
 from .project.readmodel import answered_tasks, asked_at
 from .project.conversation import Conversation, conversation_events
 from .review.review import Reviews
 from .store import valid_task_id
-from .workers.lifecycle import close_later_for, close_reported_for, close_worker_for
+from .workers.lifecycle import close_later_for, close_reported_for, close_worker_for, live_worker_for
 from .workers.service import Workers
 from .workers.sessions import remember_session_for
 
@@ -139,16 +139,35 @@ class Updates:
         return TransitionPlan(request=req, fields=fields, outer_steps=outer_steps, outer_explicit=outer_explicit,
                               sub_steps=sub_steps, deps_val=deps_val, options=options, asked=asked)
 
-    def update(self, req: UpdateRequest, say: Say = _quiet) -> UpdateDone:
+    def update(
+        self,
+        req: UpdateRequest,
+        say: Say = _quiet,
+        *,
+        idem_key: str = "",
+        env_id: str = "",
+        on_after_task_write: Callable[[Transition], None] | None = None,
+    ) -> UpdateDone:
         """`pm.py update`: Phase A, a silent fast path or the locked transition, then the reactions."""
         snapshot = self._ledger.load(req.id).raw
         req.id = snapshot["id"]
         tid = req.id
-        plan = self.prepare(req, snapshot)
+        replay_hit = bool(
+            idem_key and isinstance(snapshot.get("applied_reports"), dict) and idem_key in snapshot["applied_reports"]
+        )
+        if replay_hit:
+            plan = TransitionPlan(request=req, fields=req.field_values(), idem_key=idem_key, env_id=env_id)
+        else:
+            plan = self.prepare(req, snapshot)
+            plan.idem_key = idem_key
+            plan.env_id = env_id
         has_field_change = any(v is not None for v in plan.fields.values()) or plan.deps_val is not None
         quiet = (not req.no_review and not req.note and not plan.options and not req.send and not has_field_change)
-        remember = lambda cur: remember_session_for(self.ctx, cur)  # noqa: E731
-        if req.step_done and plan.outer_steps is None and plan.sub_steps is None and quiet:
+        def remember(cur: dict[str, Any]) -> None:
+            remember_session_for(self.ctx, cur)
+            if idem_key:  # the fast paths keep the report's key in the task too (C6a): a replay never re-applies
+                record_applied_key(cur, idem_key, env_id=env_id, now=self.ctx.clock.now(), changes=[])
+        if not replay_hit and req.step_done and plan.outer_steps is None and plan.sub_steps is None and quiet:
             task, changed, d, t, nxt = self._ledger.advance_step(tid, on_task=remember)
             raw = task.raw
             if not t:
@@ -159,14 +178,17 @@ class Updates:
                 tail = f", next: {nxt}" if nxt else ", all done"
                 say(f"{raw['id']}: {raw['status']} (plan {d}/{t}{tail})")
             return UpdateDone(task=raw)
-        if plan.sub_steps is not None and plan.outer_steps is None and not req.step_done and quiet:
+        if not replay_hit and plan.sub_steps is not None and plan.outer_steps is None and not req.step_done and quiet:
             raw = self._ledger.update_subplan(tid, plan.sub_steps, on_task=remember).raw
             done_n, total_n, _ = plan_progress(raw.get("subplan"))
             suffix = f"subplan {done_n}/{total_n}" if total_n else "subplan cleared"
             say(f"{raw['id']}: {raw['status']} ({suffix})")
             return UpdateDone(task=raw)
-        self.probe(plan, snapshot)
+        if not replay_hit:
+            self.probe(plan, snapshot)
         tr = self.transition(tid, plan)
+        if on_after_task_write is not None:
+            on_after_task_write(tr)
         wake(self.ctx, tr)
         say(f"{tr.after['id']}: {tr.after['status']}")
         after(self.ctx, tr, say)
@@ -215,6 +237,12 @@ def wake(ctx: Context, tr: Transition) -> None:
         Workers(ctx)._deliver_later(tr.after["repo"])
 
 
+def _reviewer_alive(ctx: Context, tid: str) -> bool:
+    """True when `<tid>-review` is in progress and its reviewer's terminal still runs."""
+    rev = ctx.store.task(f"{tid}-review")
+    return isinstance(rev, dict) and rev.get("status") == "in_progress" and bool(live_worker_for(ctx, rev))
+
+
 def after(ctx: Context, tr: Transition, say: Say = _quiet) -> None:
     """Rows 2-9b, in order (see the module docstring)."""
     task, changes, req = tr.after, tr.changes, tr.request
@@ -226,7 +254,12 @@ def after(ctx: Context, tr: Transition, say: Say = _quiet) -> None:
         if collected:
             say(f"{tid}: collected research: {', '.join(collected)}")
     if tr.will_auto_review:
-        say(Reviews(ctx).run_auto_review(tid, req.commit or "", tr.resolved_sha, req.note or ""))
+        # A fresh report: `should_auto_review` already ruled out a reviewer that is alive, and its entry was written
+        # without waking the PM, so the review must start here (a dead reviewer's task still says in_progress).
+        # Only a replay of the same report (C6a crash recovery) may find the reviewer it started before the crash;
+        # then no second one starts while that one is alive.
+        if not (tr.already_applied and _reviewer_alive(ctx, tid)):
+            say(Reviews(ctx).run_auto_review(tid, req.commit or "", tr.resolved_sha, req.note or ""))
         return
     if req.send:
         say(workers.send_back(task, req.note or "", wait=req.wait).message)

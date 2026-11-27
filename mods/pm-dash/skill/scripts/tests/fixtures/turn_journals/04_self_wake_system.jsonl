@@ -1,0 +1,7 @@
+{"seq": 1, "t": 1795600000000, "src": "supervisor", "kind": "hc_state", "endpoint": {"runtime": "hc", "machine": null, "terminal": "t12", "workspace": "ws_1", "session_id": "sess_1", "agent_kind": "agy", "fg_pid": 48291, "epoch": 1}, "state": "live", "status": "idle", "status_ms": 1795600000000, "turn": 40, "reported": true}
+{"seq": 2, "t": 1795600300000, "src": "watcher:agy", "kind": "step_system"}
+{"seq": 3, "t": 1795600300500, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "working", "status_ms": 1795600300000, "turn": 40, "reported": true}
+{"seq": 4, "t": 1795600303000, "src": "watcher:agy", "kind": "step_tool_start", "tool": "run_command", "summary": "pm.py status"}
+{"seq": 5, "t": 1795600305000, "src": "watcher:agy", "kind": "step_tool_end"}
+{"seq": 6, "t": 1795600309000, "src": "watcher:agy", "kind": "step_reply"}
+{"seq": 7, "t": 1795600309100, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "idle", "status_ms": 1795600309050, "turn": 41, "reported": true}

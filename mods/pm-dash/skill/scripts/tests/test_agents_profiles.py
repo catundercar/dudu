@@ -687,6 +687,41 @@ class ClaudeSessionsTests(unittest.TestCase):
         saved = json.loads(cache_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["version"], 2)
 
+    def test_turns_extracts_structured_questions_without_truncating_options(self):
+        long_desc = "详细说明" * 40  # > 300 chars total JSON when combined with multiple options
+        lines = [
+            make_row("user", "继续做 08-i18n", ts="2026-11-24T10:00:00.000Z"),
+            make_row("assistant", [
+                {"type": "tool_use", "id": "toolu_b1", "name": "Bash", "input": {"command": "git status"}},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_q1",
+                    "name": "AskUserQuestion",
+                    "input": {
+                        "questions": [{
+                            "header": "i18n 策略",
+                            "question": "新增文案默认走英文还是中文？",
+                            "options": [
+                                {"label": "默认英文（推荐）", "description": long_desc},
+                                {"label": "默认中文", "description": "仅中文界面展示"},
+                                {"label": "双语并存", "description": "同时维护 en/zh 两套"},
+                            ],
+                        }],
+                    },
+                },
+            ], ts="2026-11-24T10:00:05.000Z"),
+        ]
+        self.write_transcript("-tmp-ask", self.SID, lines)
+        got = self.sessions.turns({"kind": "claude", "id": self.SID}).to_dict()
+        q_item = next(i for i in got["items"] if i.get("name") == "AskUserQuestion")
+        self.assertEqual(q_item["input"], "新增文案默认走英文还是中文？")
+        self.assertEqual(len(q_item["questions"]), 1)
+        q = q_item["questions"][0]
+        self.assertEqual(q["header"], "i18n 策略")
+        self.assertEqual(q["question"], "新增文案默认走英文还是中文？")
+        self.assertEqual([o["label"] for o in q["options"]], ["默认英文（推荐）", "默认中文", "双语并存"])
+        self.assertTrue(q["options"][0]["description"].startswith("详细说明"))
+
 
 
 

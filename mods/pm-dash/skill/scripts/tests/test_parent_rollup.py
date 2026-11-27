@@ -18,7 +18,7 @@ if str(SCRIPTS / "tests") not in sys.path:
     sys.path.insert(0, str(SCRIPTS / "tests"))
 
 from fakes import FakeClock, FakeHc, FakeProcs, FakeTui, make_ctx  # noqa: E402
-from pmlib.events import policy  # noqa: E402
+from pmlib.messaging import router as policy  # noqa: E402
 from pmlib.events.deliver import Delivery  # noqa: E402
 from pmlib.gitrepo import GitRepo  # noqa: E402
 from pmlib.home import project_slug  # noqa: E402

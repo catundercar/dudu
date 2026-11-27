@@ -30,7 +30,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
-from fakes import FakeChangeWaiter, FakeHc, FakeTui, make_ctx  # noqa: E402
+from fakes import FakeChangeWaiter, FakeClock, FakeHc, FakeTui, make_ctx  # noqa: E402
 from pmlib import cli, hooks, store as store_mod  # noqa: E402
 from pmlib.caller import Caller  # noqa: E402
 from pmlib.commands import ledger as ledger_cmd, workers as workers_cmd  # noqa: E402
@@ -1561,7 +1561,7 @@ class ContextStoreAndProjectTests(LedgerCase):
         (alt.home.projects / "demo").mkdir(parents=True)
         (alt.home.registrations / "demo.json").write_text(json.dumps({"name": "pm-demo", "project": "demo",
                                                                        "repo": "/work/demo"}))
-        (alt.home.projects / "demo/decisions.md").write_text("- 另一份账本\n", encoding="utf-8", newline="\n")
+        (alt.home.projects / "demo/decisions.md").write_bytes("- 另一份账本\n".encode("utf-8"))
         self.assertEqual(alt.store.document("demo", "project", "decisions.md"), "- 另一份账本\n")
         self.assertIn("Context 标签", self.ctx.store.document("demo", "project", "decisions.md"))
 
@@ -2323,6 +2323,54 @@ class LibraryAndMemoryTests(unittest.TestCase):
         self.assertTrue(cfg_reset["enabled"])
         self.assertFalse(cfg_reset["custom"])
         self.assertEqual(cfg_reset["include"], [])
+
+
+class DashTurnWireEventsTests(unittest.TestCase):
+    """Phase 5: pm-dash prompt/reply wire events come from `pm-turn-journal.jsonl` (+ 1-version `turns.log` fallback)."""
+
+    def test_dash_state_emits_prompt_reply_wires_from_turn_journal_and_ignores_stale_turns_log(self) -> None:
+        from pmlib.home import project_slug
+        from pmlib.project.turn_state import TurnTracker
+        from pmlib.views.state import dash_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = root / "alpha"
+            repo_b = root / "legacy-beta"
+            repo_a.mkdir()
+            repo_b.mkdir()
+            clk = FakeClock("2026-11-26 22:00:00")
+            ctx = make_ctx(root / "ledger", clock=clk)
+            slug_a = project_slug(repo_a)
+            slug_b = project_slug(repo_b)
+            ctx.home.registrations.mkdir(parents=True, exist_ok=True)
+            ctx.home.registration(slug_a).write_text(json.dumps({
+                "name": "pm-alpha", "project": "alpha", "repo": str(repo_a),
+                "runtime": "hc", "terminal": "t7", "pane": "hc:t7", "agent": "claude",
+            }), encoding="utf-8")
+            ctx.home.registration(slug_b).write_text(json.dumps({
+                "name": "pm-beta", "project": "beta", "repo": str(repo_b),
+                "runtime": "hc", "terminal": "t8", "pane": "hc:t8", "agent": "claude",
+            }), encoding="utf-8")
+
+            tracker_a = TurnTracker(ctx, str(repo_a))
+            t0_ms = int(clk.time() * 1000)
+            tracker_a.append_observation({"src": "hook", "kind": "hook_prompt", "t": t0_ms, "cause": "user"}, reduce_now=True)
+            tracker_a.append_observation({"src": "hook", "kind": "hook_stop", "t": t0_ms + 5000, "has_reply": True}, reduce_now=True)
+
+            # Put a stale turns.log line for pm-alpha (must be ignored) and a legacy turns.log line for unupgraded pm-beta.
+            ctx.home.turn_log.write_text(
+                "2026-11-20 01:00 [hc:t7] UserPromptSubmit: turn\n"
+                "2026-11-26 21:59 [hc:t8] Stop: turn\n",
+                encoding="utf-8",
+            )
+
+            st = dash_state(ctx)
+            alpha_wires = [e for e in st["events"] if e.get("pm") == "pm-alpha" and e.get("kind") in ("prompt", "reply")]
+            self.assertEqual([e["kind"] for e in alpha_wires], ["prompt", "reply"])
+            self.assertFalse(any("2026-11-20" in e.get("at", "") for e in alpha_wires))
+            beta_wires = [e for e in st["events"] if e.get("pm") == "pm-beta" and e.get("kind") in ("prompt", "reply")]
+            self.assertEqual([(e["kind"], e["at"]) for e in beta_wires], [("reply", "2026-11-26 21:59")])
 
 
 if __name__ == "__main__":

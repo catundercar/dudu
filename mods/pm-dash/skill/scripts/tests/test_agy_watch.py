@@ -489,12 +489,12 @@ class AgyTranscriptWatcherTests(unittest.TestCase):
         ])
 
         w = AgyTranscriptWatcher(ctx)
-        # First sync seeds at EOF (step 2) without replaying historical turns or writing receipts.
+        # First sync seeds at EOF (step 2) without replaying historical turns or writing legacy receipts.
         self.assertEqual(w.sync(self.repo), 0)
         self.assertEqual(Conversation(ctx, self.repo).events(), [])
-        self.assertEqual(Conversation(ctx, self.repo).receipts(), [])
+        self.assertFalse(ctx.home.project_for(self.repo).receipts.exists())
 
-        # New turns appended afterwards ARE recorded incrementally (with receipt for user prompt).
+        # New turns appended afterwards ARE recorded incrementally without creating legacy receipts.json.
         _append_rows(tp, [
             _user_row(3, "升级后的新问题", at=_utc_iso(3 * 3600 + 5)),
             _pm_row(4, "升级后的新回复", at=_utc_iso(3 * 3600 + 10)),
@@ -505,8 +505,7 @@ class AgyTranscriptWatcherTests(unittest.TestCase):
             ("user", "升级后的新问题"),
             ("pm", "升级后的新回复"),
         ])
-        receipts = Conversation(ctx, self.repo).receipts()
-        self.assertEqual([r["text"] for r in receipts], ["升级后的新问题"])
+        self.assertFalse(ctx.home.project_for(self.repo).receipts.exists())
 
     def test_switching_compact_to_full_transcript_preserves_last_step(self):
         ctx = make_ctx(self.tmp.name, clock=_clock_at(30), agy_dir=self.agy_dir)
@@ -609,13 +608,13 @@ class AgyTranscriptWatcherTests(unittest.TestCase):
         w = AgyTranscriptWatcher(ctx)
         self.assertEqual(w.look(self.repo, {}, {}), 1.5)
 
-        receipts = Conversation(ctx, self.repo).receipts()
-        self.assertEqual(len(receipts), 1)
-        expected_ms = int((BASE_UTC + datetime.timedelta(seconds=15)).timestamp() * 1000)
-        self.assertEqual(receipts[0]["text"], "帮我看看进度")
-        self.assertEqual(receipts[0]["at_ms"], expected_ms)
-        self.assertEqual(receipts[0]["pane"], "hc:t182")
-        self.assertEqual(receipts[0]["session"], conv_id)
+        self.assertFalse(ctx.home.project_for(self.repo).receipts.exists())
+        events = Conversation(ctx, self.repo).events()
+        self.assertEqual([(e["type"], e["text"]) for e in events], [
+            ("agent", "worker ping"),
+            ("user", "帮我看看进度"),
+            ("pm", "一切正常。"),
+        ])
 
     def test_same_minute_rotation_switches_session_via_rotations_counter(self):
         clk = _clock_at(30)

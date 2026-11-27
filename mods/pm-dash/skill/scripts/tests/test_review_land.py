@@ -61,7 +61,8 @@ from pmlib.project.readmodel import Projects  # noqa: E402
 from pmlib.workers.dispatch import review_placement_for, worker_argv_for  # noqa: E402
 from pmlib.workers.lifecycle import close_worker_for  # noqa: E402
 from pmlib.workers.reattach import start_beside_pm_for  # noqa: E402
-from tests.fakes import FakeClock, FakeHc, FakeProcs, FakeTui, make_ctx  # noqa: E402
+from pmlib.workers.service import Workers  # noqa: E402
+from tests.fakes import FakeClock, FakeHc, FakeProcs, FakeTui, make_ctx, queued_sends, run_spawned_drains  # noqa: E402
 
 PM_SCRIPT = SCRIPTS / "pm.py"
 _OK_CMD = f'"{sys.executable}" -c "pass"' if os.name == "nt" else "true"
@@ -1417,12 +1418,7 @@ class DelegateBase(ReviewLandCase):
         return [s["args"] for s in self.procs.spawned if s["args"][:1] == [cmd]]
 
     def async_sends(self) -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
-        for args in self.spawned_by("_deliver-send"):
-            term = args[1]
-            msg = Path(args[args.index("--file") + 1]).read_text(encoding="utf-8")
-            out.append((term, msg))
-        return out
+        return queued_sends(self.ctx)
 
     def make_worker_task(self, slug: str, branch: str = "dev/feat", pane: str = "hc:t20",
                          status: str = "review", plan=None, extra_file: str = "feat.txt"):
@@ -1643,6 +1639,28 @@ class DelegatedMergeTests(DelegateBase):
         self.assertTrue(self.load_raw(tid).get("retired"))
         self.assertFalse(wt.exists())
 
+    def test_supervisor_hands_a_stalled_worker_merge_to_an_exec_helper_as_itself(self) -> None:
+        """No `HC_TERMINAL_ID` posing as the PM: the stall watcher hands the approved merge over in process, as
+        `Principal.supervisor`, from whatever terminal identity the process it runs in inherited."""
+        tid, _wt, _ = self.make_worker_task("stall", branch="dev/stall", pane="hc:t20", status="in_progress")
+        self.be("hc:t7")
+        with contextlib.redirect_stdout(io.StringIO()):
+            review_cmds.cmd_approve(argparse.Namespace(id=tid, via="worker", keep=True, message="- merge stall",
+                                                       timeout=420, note="- deploy"), ctx=self.ctx)
+        self.assertEqual(self.load_raw(tid)["land_approved"]["executor"], "worker")
+        # A drain started from the worker's own terminal (it inherited HC_TERMINAL_ID=t20) gives up on the send.
+        self.be("hc:t20")
+        self.assertTrue(StallWatcher(self.ctx).fallback_land_to_helper(self.load_raw(tid), reason="send failed",
+                                                                       term="t20"))
+        la = self.load_raw(tid)["land_approved"]
+        self.assertEqual((la["executor"], la["by"]), ("helper", f"supervisor:{self.name}"))
+        self.assertEqual((la["message"], la["keep"], la["timeout"], la["note"]), ("- merge stall", True, 420, "- deploy"))
+        self.assertTrue(la["helper_name"].startswith(f"land-{tid}"))
+        # Started beside the PM's terminal (t7), owned by the PM, scoped to this task.
+        helper = next(h for h in helper_entries(self.ctx.store.registration(self.name)) if h["name"] == la["helper_name"])
+        self.assertEqual((helper.get("parent"), helper.get("mode"), helper.get("for_task")), ("t7", "exec", tid))
+        self.assertFalse([r for r in self.procs.ran if "approve" in r.get("argv", [])])
+
     def test_approve_revoke_blocks_subsequent_worker_land(self) -> None:
         tid, _, _ = self.make_worker_task("rev", branch="dev/rev", pane="hc:t20")
         self.be("hc:t7")
@@ -1828,25 +1846,20 @@ class AsyncSendHintsAndCompatTests(DelegateBase):
         self.assertEqual(len(sends), 1)
         self.assertEqual(sends[0], ("t20", "[from hc:t7] 继续做"))
 
-        # Test background worker cmd__deliver_send on success -> updates round_handed
-        msg_file = self.base / "m.txt"
-        msg_file.write_text("[from hc:t7] 继续做")
+        # The detached drain types it under the terminal's lease; once it went in, the round is handed.
         self.be("")
-        workers_cmds.cmd__deliver_send(argparse.Namespace(
-            term="t20", file=str(msg_file), unlink=True,
-            task=tid, repo=str(self.repo), pre_turn=2, timeout=30,
-        ), ctx=self.ctx)
-        self.assertFalse(msg_file.exists())
+        self.assertEqual(run_spawned_drains(self.ctx), 1)
+        self.assertIn(("t20", "[from hc:t7 #"), [(t, m[:len("[from hc:t7 #")]) for t, m in self.hc.sent])
+        self.assertTrue(self.hc.sent[-1][1].endswith("] 继续做"))
         self.assertEqual(self.load_raw(tid)["round"]["turn"], 2)
 
-        # Test background worker cmd__deliver_send on failure -> wakes PM with triage hint
+        # A queued send that does not go in (terminal gone) wakes the PM with a triage hint.
         self.hc.terminals.pop("t20", None)
-        msg_file2 = self.base / "m2.txt"
-        msg_file2.write_text("[from hc:t7] 再试")
-        workers_cmds.cmd__deliver_send(argparse.Namespace(
-            term="t20", file=str(msg_file2), unlink=True,
-            task=tid, repo=str(self.repo), pre_turn=2, timeout=30,
-        ), ctx=self.ctx)
+        self.be("hc:t7")
+        with contextlib.redirect_stdout(io.StringIO()):
+            Workers(self.ctx).send_async_later("t20", "[from hc:t7] 再试", task_id=tid, repo=str(self.repo))
+        self.be("")
+        run_spawned_drains(self.ctx)
         _, _, items = Delivery(self.ctx, str(self.repo)).pending_batch()
         self.assertEqual(len(items), 1)
         self.assertIn(f"pm.py triage {tid}", items[0]["event"]["text"])

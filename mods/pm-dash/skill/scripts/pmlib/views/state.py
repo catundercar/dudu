@@ -7,14 +7,18 @@ import re
 
 from ..agents.sessions import sessions_reader
 from ..context import Context
+from ..events.deliver import Delivery
+from ..events.supervisor import read_pm_turn_view
 from ..helpers.records import helper_entries
+from ..home import project_slug
 from ..ledger.deps import evaluate_depends_on
 from ..ledger.ledger import Ledger
 from ..ledger.task import ACTIVE, CLOSED, needs_cleanup, task_number
 from ..manager.launch import pm_compact_tokens
 from ..osutil import stale_lock
-from ..project.conversation import conversation_events, read_receipts
+from ..project.conversation import conversation_events
 from ..project.project import ProjectRegistry
+from ..project.turn_state import TurnTracker
 from ..project.readmodel import (
     LiveSnapshot,
     Projects,
@@ -25,7 +29,6 @@ from ..project.readmodel import (
     task_closed,
     task_offline,
 )
-from ..project.turn_state import TurnTracker
 from ..store import local_tz_offset
 from ..workers.lifecycle import term_status
 from ..workers.sessions import ATTACHED, pm_session_info_for, task_session_info_for
@@ -116,6 +119,79 @@ def state_helpers(record, hc_live=None, live_rows=None, ended_rows=None):
     return out
 
 
+def _turn_wire_events(ctx, pms, home):
+    """Build prompt/reply flow events from `pm-turn-journal.jsonl`, with 1-version `turns.log` fallback."""
+    wire = []
+    journal_covered_panes = set()
+    for p in pms:
+        repo = p.get("repo") or ""
+        pane = p.get("pane") or ""
+        pm_name = p.get("name") or ""
+        if not repo or not pane:
+            continue
+        pf = home.project_for(repo)
+        if not pf.pm_turn_journal.is_file() and not pf.pm_turn_journal_prev.is_file():
+            continue
+        journal_covered_panes.add(pane)
+        slug = project_slug(repo)
+        saw_reply = True
+        for row in TurnTracker(ctx, repo).read_journal_entries(limit=200):
+            kind = row.get("kind")
+            if kind not in ("hook_prompt", "hook_stop", "turn_summary"):
+                continue
+            seq = int(row.get("seq") or 0)
+            t_ms = int(row.get("t") or 0)
+            at_str = (
+                datetime.datetime.fromtimestamp(t_ms / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+                if t_ms > 0
+                else ""
+            )
+            if kind == "hook_prompt":
+                wire.append({
+                    "key": f"j:{slug}:{seq}:prompt",
+                    "at": at_str,
+                    "by": pane,
+                    "task": "",
+                    "pm": pm_name,
+                    "status": "",
+                    "text": "",
+                    "kind": "prompt",
+                })
+                saw_reply = False
+            elif kind == "hook_stop" or (kind == "turn_summary" and not saw_reply):
+                wire.append({
+                    "key": f"j:{slug}:{seq}:reply",
+                    "at": at_str,
+                    "by": pane,
+                    "task": "",
+                    "pm": pm_name,
+                    "status": "",
+                    "text": "",
+                    "kind": "reply",
+                })
+                saw_reply = True
+    legacy_pane_pm = {
+        p["pane"]: p["name"]
+        for p in pms
+        if p.get("pane") and p["pane"] not in journal_covered_panes
+    }
+    if legacy_pane_pm and home.turn_log.exists():
+        for line in home.turn_log.read_text(errors="replace").splitlines()[-400:]:
+            m = TURN_LINE.match(line)
+            if m and m.group(2) in legacy_pane_pm:
+                wire.append({
+                    "key": "m:" + line,
+                    "at": m.group(1),
+                    "by": m.group(2),
+                    "task": "",
+                    "pm": legacy_pane_pm[m.group(2)],
+                    "status": "",
+                    "text": "",
+                    "kind": "prompt" if m.group(3) == "UserPromptSubmit" else "reply",
+                })
+    return wire
+
+
 def dash_state(ctx=None):
     """Everything the dashboard draws: PMs, tasks, live agents and recent events."""
     ctx = Context.from_env() if ctx is None else ctx
@@ -133,17 +209,18 @@ def dash_state(ctx=None):
     pm_sources = []
     for path in sorted(home.registrations.glob("*.json")) if home.registrations.exists() else []:
         rec = json.loads(path.read_text())
-        live = by_pane.get(rec.get("pane") or "", {})
-        if rec.get("runtime") == "hc":
+        pane_val = rec.get("pane", "")
+        is_hc_pm = rec.get("runtime") == "hc" or str(pane_val).startswith("hc:")
+        live = by_pane.get(pane_val or "", {})
+        if is_hc_pm:
             live = projects_reg.hc_pm(rec.get("repo") or "") or {}
         alive = live.get("name") == rec.get("name")
         ctx_tokens = sessions.context_tokens(pm_session_info_for(ctx, rec)) if sessions else 0
         repo = rec.get("repo", "")
-        pane_val = rec.get("pane", "")
         runtime = rec.get("runtime") or ("tui" if pane_val and not pane_val.startswith("hc:") else "")
         repo_ok = bool(repo and Path(repo).is_dir())
         pm_agent = rec.get("agent", "")
-        receipts = read_receipts(home.project_for(repo).receipts)[-20:] if repo else []
+        receipts = TurnTracker(ctx, repo).receipts_projection(limit=20) if repo else []
         pm_entry = {"name": rec["name"], "project": rec.get("project", ""), "repo": repo,
                     "pane": pane_val, "runtime": runtime, "repo_ok": repo_ok,
                     "status": live.get("agent_status") if alive else "offline",
@@ -182,7 +259,7 @@ def dash_state(ctx=None):
     # Whose terminal is gone or did not come back: one `hc ls --all` look when an open hc task, non-archived hc PM,
     # or running helper exists.
     needs_hc = (
-        any(not rec.get("archived") and rec.get("runtime") == "hc" for rec, _, _, _ in pm_sources)
+        any(not rec.get("archived") and (rec.get("runtime") == "hc" or str(rec.get("pane") or "").startswith("hc:")) for rec, _, _, _ in pm_sources)
         or any(t["status"] in ATTACHED and (t.get("pane") or "").startswith("hc:") for t in every)
         or any(h.get("status") == "running" and h.get("terminal") for t in every for h in helper_entries(t))
         or any(h.get("status") == "running" and h.get("terminal") for rec, _, _, _ in pm_sources for h in helper_entries(rec))
@@ -201,13 +278,30 @@ def dash_state(ctx=None):
             p["helpers"] = pm_helpers
         repo = rec.get("repo") or ""
         if repo:
+            is_hc = rec.get("runtime") == "hc" or str(p.get("pane") or "").startswith("hc:")
             term_addr = str(rec.get("terminal") or (p["pane"][3:] if str(p.get("pane") or "").startswith("hc:") else ""))
             term_row = (live_rows or {}).get(term_addr) if term_addr and isinstance(live_rows, dict) else None
-            p["turn"] = TurnTracker(ctx, repo).live_snapshot(
+            if term_addr and is_hc:
+                raw_info = ctx.hc.get_raw(term_addr, errors=True)
+                if isinstance(raw_info, dict) and not raw_info.get("error") and raw_info.get("state") == "live":
+                    term_row = raw_info
+            turn_view = read_pm_turn_view(
+                ctx,
+                repo,
                 rec,
-                {"agent_status": p.get("status") if alive else "offline", "name": p.get("name")},
                 term_info=term_row,
+                live_pm={"agent_status": p.get("status") if alive else "offline", "name": p.get("name")},
+                revive=bool(is_hc and not rec.get("archived")),
             )
+            p["turn"] = turn_view["turn"]
+            p["turn2"] = turn_view["turn2"]
+            p["supervised"] = turn_view["supervised"]
+            if is_hc and not rec.get("archived"):
+                undel = Delivery(ctx, repo).undelivered_status(
+                    live_state=str((p.get("status") if alive else "offline") or ""),
+                )
+                if undel:
+                    p["undelivered"] = undel
     tui_panes = set(by_pane) if listing else None
     by_id_all = {t["id"]: t for t in every if isinstance(t, dict) and t.get("id")}
     left = []
@@ -286,15 +380,8 @@ def dash_state(ctx=None):
         pm = owner_pm(t)
         if mark and pm and len(ended.setdefault(pm, {})) < ENDED_ENGINES:
             ended[pm][t["id"]] = mark
-    # Chat turns with a PM, as recorded by the turn hook.
-    if home.turn_log.exists():
-        pane_pm = {p["pane"]: p["name"] for p in pms}
-        for line in home.turn_log.read_text(errors="replace").splitlines()[-400:]:
-            m = TURN_LINE.match(line)
-            if m and m.group(2) in pane_pm:
-                events.append({"key": "m:" + line, "at": m.group(1), "by": m.group(2), "task": "",
-                               "pm": pane_pm[m.group(2)], "status": "", "text": "",
-                               "kind": "prompt" if m.group(3) == "UserPromptSubmit" else "reply"})
+    # Chat turns with a PM, from `pm-turn-journal.jsonl` (1-version fallback to `turns.log`).
+    events.extend(_turn_wire_events(ctx, pms, home))
     # The numbers on a project's card and the ledger overview, computed via Projects (pm_project.py):
     # waiting is claimed blocked (not answered), working is in progress with terminal not offline,
     # and unclaimed_blocked tracks blocked tasks with no registered PM separately.

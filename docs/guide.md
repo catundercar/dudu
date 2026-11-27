@@ -28,7 +28,7 @@ The hooks are `SessionStart`, which tells a new session whether the project has 
 
 Codex runs a new hook only after you trust it: it asks when it next starts. Hooks also need the `hooks` feature, which is on by default (`codex features list` shows it; `[features]` in `~/.codex/config.toml` can turn it off). The installer does not edit `config.toml`.
 
-With `./install.sh`, if `~/.config/herdr-app` exists, the installer also copies `pm-dash`, `pm-nav`, `pm-list`, `pm-toast` and `pm-project` into its `mods/` directory and creates `layouts/pm.json` from `layouts/main.json`. The original layout is unchanged. An existing PM layout containing `pm-nav` is kept; if it has no `pm-list` block yet, the installer adds only that block (right under `pm-nav`, after saving the first `pm.json.pm-backup`); a `pm-list` block that is still right above `agents`, where earlier versions put it, stays there and the installer prints how to move it; likewise adds a missing `pm-project` block to the `pm-stage` stack; and adds `"window_drag": true` to its `pm-board` and `pm-project` blocks when they have no such field, so their title bars move the window; it leaves your other edits alone. Before replacing another existing `pm.json`, the installer saves the first `pm.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
+With `./install.sh`, if `~/.config/herdr-app` exists, the installer also copies `pm-dash`, `pm-nav`, `pm-list`, `pm-toast` and `pm-project` into its `mods/` directory and creates `layouts/dudu.json` from `layouts/main.json` (or, for existing installs that still have `layouts/pm.json` containing `pm-nav`, migrates it to `layouts/dudu.json` while keeping `layouts/pm.json` untouched so a running `pm` layout is not disrupted). The original layout is unchanged. An existing `dudu` layout containing `pm-nav` is kept; if it has no `pm-list` block yet, the installer adds only that block (right under `pm-nav`, after saving the first `dudu.json.pm-backup`); a `pm-list` block that is still right above `agents`, where earlier versions put it, stays there and the installer prints how to move it; likewise adds a missing `pm-project` block to the `pm-stage` stack; and adds `"window_drag": true` to its `pm-board` and `pm-project` blocks when they have no such field, so their title bars move the window; it leaves your other edits alone. Before replacing another existing `dudu.json`, the installer saves the first `dudu.json.pm-backup`. Generated layouts are marked with `generated_by: "dudu install.sh"` and include `cloned_from` metadata when the main layout has a version. If the base layout is missing or has an incompatible structure, the skill and mods still install and the script prints manual layout steps.
 
 ```bash
 ./install.sh --desktop          # Install desktop mods even before its config directory exists
@@ -57,7 +57,7 @@ Restart running agent sessions to load the skill and hooks.
 
 ## Add it from herdr.dev
 
-This repository is also a Herdr layout: `layouts/pm.json` plus the `pm-nav`, `pm-list`, `pm-toast`, `pm-dash` and `pm-project` mods. The sidebar has the PM entry on top with the PMs right under it (each project's PM with its live status and age; click to open the project), then spaces, then agents. A project opens as one conversation with its coordinator: what you said, the PM's replies, each task as a thread line in the place it started, showing what it is now, and the PM's questions as cards with answers to pick; the side panel lists the project's open tasks, the sessions working in it and what ended last, and shows a thread's log, terminal and changes when you open one. Read [RECIPE.md](../RECIPE.md) for its behavior, dependencies, and rebuild instructions. A public GitHub repository with the `herdr-layout` topic can appear in the [Herdr layout directory](https://herdr.dev/layouts).
+This repository is also a Herdr layout: `layouts/dudu.json` plus the `pm-nav`, `pm-list`, `pm-toast`, `pm-dash` and `pm-project` mods. The sidebar has the PM entry on top with the PMs right under it (each project's PM with its live status and age; click to open the project), then spaces, then agents. A project opens as one conversation with its coordinator: what you said, the PM's replies, each task as a thread line in the place it started, showing what it is now, and the PM's questions as cards with answers to pick; the side panel lists the project's open tasks, the sessions working in it and what ended last, and shows a thread's log, terminal and changes when you open one. Read [RECIPE.md](../RECIPE.md) for its behavior, dependencies, and rebuild instructions. A public GitHub repository with the `herdr-layout` topic can appear in the [Herdr layout directory](https://herdr.dev/layouts).
 
 Open **Board** and click **Set up** to copy the bundled skill into every coding agent found and add their hooks. Before setup, the board shows a centered setup block and the sidebar says **Set up**; status checks do not write files. Success shows a reminder to restart your coding agent sessions and say “act as PM for this project”, then displays the board. Errors stay visible with a retryable button. If any installed `pm.py` differs from the bundle, the normal board shows a quiet **Update** action using the same installer. Setup is checked at startup and after the action, not on the ledger polling timer.
 
@@ -94,7 +94,7 @@ Below, `pm.py` means `python3 <skill folder>/scripts/pm.py`, for example `python
    Switch to the installed layout, then click the board entry under **PM** in the sidebar:
 
    ```bash
-   herdr-app do layout.switch '{"name":"pm"}'
+   herdr-app do layout.switch '{"name":"dudu"}'
    ```
 
    The installer only prints this command; it does not switch your layout or touch running windows. `herdr-app commands` lists the commands supported by your installed version.
@@ -170,7 +170,7 @@ The installer does not create or overwrite this configuration. The ledger home s
 
 ## Alerts
 
-In the `pm` layout (other layouts are unchanged):
+In the `dudu` layout (other layouts are unchanged):
 
 - **Only the PM's toasts.** When a PM finishes its turn or needs you, Herdr's own "… finished" / "… needs you" toast shows; clicking it focuses that PM, and leaves the board (or a project view) first if one is up. Agents the PM dispatched (a terminal with a `task` label, or whose parent terminal has a `pm` label) report to the PM instead, so both of their toasts close at once without drawing anything. This is `mods/pm-toast`, which the layout uses in place of Herdr's `toast`. Agents you started yourself and every other notification look and behave as before.
 - **No task alerts.** A task moving to `review` or `blocked` posts no notification of its own; the PM's turn ends and its toast is the signal.
@@ -247,9 +247,9 @@ the desktop mods' separate remote-data refresh timers.
 
 Use this command for either installation path; there is no uninstall button in the board. If you installed through herdr.dev, download this repository to run it. `--agents` limits it to the named agents.
 
-This removes PM command hooks (commands containing `skills/pm/scripts/pm.py`) from `~/.claude/settings.json` and `~/.codex/hooks.json`, each agent's `skills/pm`, the five PM mod directories (`pm-dash`, `pm-nav`, `pm-list`, `pm-toast`, `pm-project`), and `layouts/pm.json` only when it carries the installer’s `generated_by` marker. Unmarked layouts (including layouts from older installers) are kept. If a hooks file is invalid, uninstall warns and skips its hook cleanup but still removes installed files. Other settings and hooks are kept, including unrelated commands grouped with a PM hook.
+This removes PM command hooks (commands containing `skills/pm/scripts/pm.py`) from `~/.claude/settings.json` and `~/.codex/hooks.json`, each agent's `skills/pm`, the five PM mod directories (`pm-dash`, `pm-nav`, `pm-list`, `pm-toast`, `pm-project`), and `layouts/dudu.json` (plus any legacy `layouts/pm.json`) only when it carries the installer’s `generated_by` marker. Unmarked layouts (including layouts from older installers) are kept. If a hooks file is invalid, uninstall warns and skips its hook cleanup but still removes installed files. Other settings and hooks are kept, including unrelated commands grouped with a PM hook.
 
-The ledger home (printed at the end), the `*.pm-backup` copies of hooks files, and `layouts/pm.json.pm-backup` are retained. The uninstaller does not restore a whole backup, so settings added after installation are not lost. If you use the desktop PM layout, switch back to `main` before uninstalling:
+The ledger home (printed at the end), the `*.pm-backup` copies of hooks files, and `layouts/dudu.json.pm-backup` are retained. The uninstaller does not restore a whole backup, so settings added after installation are not lost. If you use the desktop `dudu` layout, switch back to `main` before uninstalling:
 
 ```bash
 herdr-app do layout.switch '{"name":"main"}'
@@ -259,7 +259,7 @@ herdr-app do layout.switch '{"name":"main"}'
 
 Use these steps when automatic layout generation is skipped. Paths below are relative to `HERDR_APP_HOME` (default `~/.config/herdr-app`). The mods must already be installed, for example with `./install.sh --desktop`.
 
-1. Copy `layouts/main.json` to `layouts/pm.json`. If `main.json` is absent, obtain the default layout from your Herdr desktop installation first. Keep any custom layout you want to preserve before replacing it.
+1. Copy `layouts/main.json` to `layouts/dudu.json`. If `main.json` is absent, obtain the default layout from your Herdr desktop installation first. Keep any custom layout you want to preserve before replacing it.
 2. Find the `sidebar-lists` column. Insert this node as the first element of its `children` array:
 
    ```json
@@ -290,12 +290,12 @@ Use these steps when automatic layout generation is skipped. Paths below are rel
    `window_drag` lets the blank part of each page's title bar move the window, as Herdr's own top bars do; the pages keep presses on their controls and content.
 
 4. At the root object, add `"toast": "pm-toast"` (hides the toasts of agents the PM dispatched; see [Alerts](#alerts)).
-5. Save valid JSON, then select it with `herdr-app do layout.switch '{"name":"pm"}'`.
+5. Save valid JSON, then select it with `herdr-app do layout.switch '{"name":"dudu"}'`.
 
 ## Repository structure
 
 - `install.py` / `install.sh` — desktop installation, preview, and uninstall (`install.sh` delegates to `install.py`); calls the shared skill installer.
-- `layouts/pm.json` — distributable PM layout.
+- `layouts/dudu.json` — distributable `dudu` layout.
 - `mods/pm-dash/` — desktop project/task board, including `setup.py` for per-agent skill/hooks installation and read-only status.
 - `mods/pm-dash/skill/` — the single bundled PM skill (`SKILL.md`, the playbook and reference files), ledger CLI, and browser dashboard.
 - `mods/pm-nav/` — desktop sidebar entry and summary; returns to work when you navigate away from the board.

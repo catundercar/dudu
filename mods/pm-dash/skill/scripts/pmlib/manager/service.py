@@ -25,9 +25,12 @@ from ..errors import NotFound, PmError, Refused
 from ..events import deliver as deliver_mod
 from ..home import project_slug
 from ..ledger.ledger import Ledger
+from ..messaging.address import parse_legacy_endpoint
 from ..osutil import shell_join
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry, pm_name
+from ..project.turn_reducer import record_endpoint
+from ..project.turn_state import TurnTracker
 from ..store import lock_file, replace_task_file, unlock_file, write_atomic
 from ..terminals.hc import is_shell_terminal
 from ..terminals.tabs import pm_tab_name
@@ -138,6 +141,20 @@ class ManagerSessions:
             return self.ctx.caller
         return Caller(self.ctx)
 
+    def _start_pm_terminal_result(
+        self,
+        repo: str,
+        argv: Sequence[str],
+        space: str | None = None,
+        new_space: str = "",
+    ) -> launch_mod.StartTerminalResult:
+        if getattr(self.ctx, "_legacy", False) and launch_mod.start_pm_terminal is not launch_mod._DEFAULT_START_PM_TERMINAL:
+            return launch_mod.StartTerminalResult(
+                terminal=launch_mod.start_pm_terminal(repo, argv, space, new_space),
+                has_tab=True,
+            )
+        return launch_mod._start_pm_terminal_result(repo, argv, space, new_space, ctx=self.ctx)
+
     def _start_pm_terminal(
         self,
         repo: str,
@@ -145,9 +162,7 @@ class ManagerSessions:
         space: str | None = None,
         new_space: str = "",
     ) -> str | None:
-        if getattr(self.ctx, "_legacy", False) and launch_mod.start_pm_terminal is not launch_mod._DEFAULT_START_PM_TERMINAL:
-            return launch_mod.start_pm_terminal(repo, argv, space, new_space)
-        return launch_mod._start_pm_terminal_impl(repo, argv, space, new_space, ctx=self.ctx)
+        return self._start_pm_terminal_result(repo, argv, space, new_space).terminal
 
     def _end_session_later(
         self,
@@ -156,10 +171,13 @@ class ManagerSessions:
         *,
         agent_pid: int | None = None,
         kill_terminal: bool = False,
+        force: bool = False,
     ) -> str | None:
         if getattr(self.ctx, "_legacy", False) and rotate_mod.end_session_later is not rotate_mod._DEFAULT_END_SESSION_LATER:
             return rotate_mod.end_session_later(repo, term, agent_pid=agent_pid, kill_terminal=kill_terminal)
-        return rotate_mod._end_session_later_impl(repo, term, agent_pid=agent_pid, kill_terminal=kill_terminal, ctx=self.ctx)
+        return rotate_mod._end_session_later_impl(
+            repo, term, agent_pid=agent_pid, kill_terminal=kill_terminal, force=force, ctx=self.ctx
+        )
 
     def _background_work(self, info: dict[str, Any]) -> list[str]:
         if rotate_mod.background_work is not rotate_mod._DEFAULT_BACKGROUND_WORK:
@@ -323,7 +341,7 @@ class ManagerSessions:
                 if eff_pane == self.ctx.pane and _is_real_hc(self.ctx) and sys.stdin.isatty() and sys.stdout.isatty():
                     deliver_mod.Delivery(self.ctx, repo).ensure_running()
                     return ClaimResult(pane=eff_pane, name=name, project=Path(repo).name, lines=lines, exec_argv=s_argv)
-                self.ctx.hc.send(eff_pane[3:], "exec " + shell_join(s_argv))
+                self.ctx.hc.bootstrap_shell_exec(eff_pane[3:], "exec " + shell_join(s_argv))
             deliver_mod.Delivery(self.ctx, repo).ensure_running()
         if sdir and eff_pane == self.ctx.pane and self.ctx.env.get("DISCORD_STATE_DIR") != str(sdir):
             lines.append("restart to connect Discord:\n  " + self.launch_command(repo, resume="<session id>"))
@@ -385,16 +403,20 @@ class ManagerSessions:
         if old_term and not seat_running(repo, ctx=self.ctx):
             old_info = self.ctx.hc.get_raw(old_term) or {}
             if ((old_info.get("labels") or {}).get("pm") == Path(repo).name and is_shell_terminal(old_info)
-                    and self.ctx.hc.send(old_term, "exec " + shell_join(s_argv)) is not None):
+                    and self.ctx.hc.bootstrap_shell_exec(old_term, "exec " + shell_join(s_argv)) is not None):
                 made = old_term
                 self.ctx.hc.keep(made)
                 self.ctx.hc.label(made, f"pm={Path(repo).name}", "pm.seat=1")
-        made = made or self._start_pm_terminal(
-            repo,
-            s_argv,
-            (own.get("labels") or {}).get("herdr.space"),
-            "" if current else eff_name,
-        )
+        started_tab = True
+        if not made:
+            started = self._start_pm_terminal_result(
+                repo,
+                s_argv,
+                (own.get("labels") or {}).get("herdr.space"),
+                "" if current else eff_name,
+            )
+            made = started.terminal
+            started_tab = started.has_tab
         if not made:
             raise Refused("could not start the PM session (is herdr-core running?)")
         claim_lines: list[str] = []
@@ -409,6 +431,8 @@ class ManagerSessions:
                 self.ctx.hc.kill(made)
                 self.ctx.hc.remove(made)
             raise
+        if not started_tab:
+            claim_lines.append(launch_mod.no_tab_warning(made, ctx=self.ctx))
         if was_existing and not explicit_prompt:
             record_swap_notice(repo, tr("session recovery", "重启恢复"), by=f"hc:{made}", ctx=self.ctx)
         if not current:
@@ -583,7 +607,9 @@ class ManagerSessions:
         notes: str | None = None,
         reason: str | None = None,
         model: str | None = None,
+        profile: str | None = None,
         transcript: str | None = None,
+        force: bool = False,
     ) -> RotateResult:
         """Replace the PM session of a project with a fresh one that starts from `handover`."""
         tr = self.ctx.config.tr
@@ -605,7 +631,7 @@ class ManagerSessions:
         if isinstance(rec.get("agent_session"), dict):
             previous["agent_session"] = rec["agent_session"]
         name, handover = Path(repo).name, f"{self.ctx.procs.pm_script()} handover"
-        eff_reason = swap_reason_text(reason=reason, model=model, ctx=self.ctx)
+        eff_reason = swap_reason_text(reason=reason, model=model, profile=profile, ctx=self.ctx)
         if rec.get("runtime") != "hc":
             # The herdr TUI: the new PM opens in a tab of its own, so it says what it took over, as before.
             prompt = "[from pm.py rotate] " + tr(
@@ -617,7 +643,7 @@ class ManagerSessions:
                 "启动提示里如果说另有一个 PM，那就是你要接替的那一个，登记马上会转到你名下。"
                 f"先运行 `{handover}`，只按它给出的内容接手，"
                 "然后用三四句话告诉用户：你接手了哪些在办的事、哪些事在等他。")
-            args_bag = types.SimpleNamespace(repo=repo, notes=notes, reason=reason, model=model, transcript=transcript)
+            args_bag = types.SimpleNamespace(repo=repo, notes=notes, reason=reason, model=model, profile=profile, transcript=transcript)
             if getattr(self.ctx, "_legacy", False) and rotate_mod.rotate_herdr is not rotate_mod._DEFAULT_ROTATE_HERDR:
                 res = rotate_mod.rotate_herdr(args_bag, repo, rec, previous, prompt, is_self)
                 return RotateResult(mode="tui", lines=list(res) if isinstance(res, list) else [])
@@ -627,14 +653,22 @@ class ManagerSessions:
         prompt = "[from pm.py rotate] " + takeover_prompt(name, handover, eff_reason, ctx=self.ctx)
         term = rec["terminal"]
         old = self.ctx.hc.get_raw(term) or {}
-        kind = rec.get("agent") or self.ctx.agents.terminal_kind(old) or "claude"
-        old_args = outgoing_agent_args(repo, old, kind, ctx=self.ctx)
-        argv = pm_argv(
-            kind,
-            successor_argv(kind, old_args, pm_model(kind, model, ctx=self.ctx), prompt, ctx=self.ctx),
-            repo,
-            ctx=self.ctx,
-        )
+        prev_kind = rec.get("agent") or self.ctx.agents.terminal_kind(old) or "claude"
+        kind, target_model, target_effort = rotate_mod.resolve_rotate_target(profile, model, prev_kind, ctx=self.ctx)
+        eff_model = pm_model(kind, target_model or None, ctx=self.ctx)
+        if kind != prev_kind:
+            old_args = []
+            argv = launch_mod.pm_start_argv(repo, kind, eff_model, prompt, ctx=self.ctx)
+        else:
+            old_args = outgoing_agent_args(repo, old, kind, ctx=self.ctx)
+            argv = pm_argv(
+                kind,
+                successor_argv(kind, old_args, eff_model, prompt, ctx=self.ctx),
+                repo,
+                ctx=self.ctx,
+            )
+        if target_effort and kind == "claude":
+            argv = rotate_mod._apply_claude_effort(argv, target_effort)
         prev_sid = (rec.get("agent_session") or {}).get("id") if isinstance(rec.get("agent_session"), dict) else ""
 
         if in_seat(repo, rec, old, ctx=self.ctx):
@@ -661,19 +695,32 @@ class ManagerSessions:
                     retired_ids.append(prev_sid)
                     fresh["retired_sessions"] = retired_ids[-8:]
                 fresh["agent_session"] = None
+                cur_ep = record_endpoint(fresh) or parse_legacy_endpoint(f"hc:{term}", runtime_hint="hc")
+                next_epoch = int((cur_ep.epoch if cur_ep else 1) or 1) + 1
+                if cur_ep is not None:
+                    ep_dict = {**cur_ep.to_dict(), "epoch": next_epoch, "agent_kind": kind}
+                else:
+                    ep_dict = {"runtime": "hc", "machine": None, "terminal": term, "epoch": next_epoch, "agent_kind": kind}
                 fresh.update({"pane": f"hc:{term}", "terminal": term, "seat": True, "claimed": self.ctx.clock.now(),
-                              "agent": kind, "previous": {**previous, "terminal": term},
+                              "agent": kind, "endpoint": ep_dict, "epoch": next_epoch,
+                              "previous": {**previous, "terminal": term},
                               "rotations": fresh.get("rotations", 0) + 1})
                 return fresh
 
             self.ctx.store.change_registration(project_slug(repo), _rotate_seat)
+            rotated_ep = parse_legacy_endpoint(f"hc:{term}", runtime_hint="hc")
+            new_reg_after = self.ctx.store.registration(project_slug(repo)) or {}
+            new_epoch_val = int(new_reg_after.get("epoch") or 1)
+            TurnTracker(self.ctx, repo).pm_mailbox.requeue_unconsumed_on_epoch_change(
+                new_epoch_val, endpoint_uid=rotated_ep.uid if rotated_ep else ""
+            )
             old_pm_panes = {rec.get("pane"), (rec.get("previous") or {}).get("pane")
                             if isinstance(rec.get("previous"), dict) else ""}
             move_pm_tasks_to_pane(repo, old_pm_panes, f"hc:{term}", ctx=self.ctx)
             record_swap_notice(repo, eff_reason, by=f"hc:{term}", ctx=self.ctx)
             deliver_mod.Delivery(self.ctx, repo).ensure_running()
-            # End the outgoing session's process group once its turn and background work finish; the terminal stays.
-            warn = self._end_session_later(repo, term, agent_pid=agent_pid, kill_terminal=False)
+            # End the outgoing session's process group once its turn and background work finish (or immediately when force=True).
+            warn = self._end_session_later(repo, term, agent_pid=agent_pid, kill_terminal=False, force=force)
             lines = [*([] if not warn else [warn]), tr(
                 f"next PM session queued in seat hc:{term} (in the same terminal); the outgoing session ends once its turn "
                 "is over" + (". End this turn briefly (one short line); the new session takes over next." if is_self else "."),
@@ -683,7 +730,8 @@ class ManagerSessions:
 
         # Legacy non-seat PM: perform one last terminal rotation so the PM enters a fixed `pm.py seat` terminal.
         s_argv = seat_argv(repo, argv, kind=kind, prompt="" if self.ctx.agents.takes_prompt(kind) else prompt, ctx=self.ctx)
-        made = self._start_pm_terminal(repo, s_argv, (old.get("labels") or {}).get("herdr.space"))
+        started = self._start_pm_terminal_result(repo, s_argv, (old.get("labels") or {}).get("herdr.space"))
+        made = started.terminal
         if not made:
             raise Refused("could not start the new PM seat; the old PM stays registered")
         retired = term
@@ -694,12 +742,21 @@ class ManagerSessions:
         def _rotate_legacy_into_seat(cur: dict[str, Any] | None) -> dict[str, Any]:
             fresh = dict(cur) if cur is not None else dict(rec)
             fresh["agent_session"] = None
+            cur_ep = record_endpoint(fresh) or parse_legacy_endpoint(f"hc:{made}", runtime_hint="hc")
+            next_epoch = int((cur_ep.epoch if cur_ep else 1) or 1) + 1
+            ep_dict = {**(cur_ep.to_dict() if cur_ep else {"runtime": "hc", "machine": None}), "terminal": made, "epoch": next_epoch, "agent_kind": kind}
             fresh.update({"pane": f"hc:{made}", "terminal": made, "seat": True, "claimed": self.ctx.clock.now(),
-                          "agent": kind, "previous": {**previous, "terminal": retired},
+                          "agent": kind, "endpoint": ep_dict, "epoch": next_epoch,
+                          "previous": {**previous, "terminal": retired},
                           "rotations": fresh.get("rotations", 0) + 1})
             return fresh
 
         self.ctx.store.change_registration(project_slug(repo), _rotate_legacy_into_seat)
+        rotated_ep = parse_legacy_endpoint(f"hc:{made}", runtime_hint="hc")
+        new_reg_after = self.ctx.store.registration(project_slug(repo)) or {}
+        TurnTracker(self.ctx, repo).pm_mailbox.requeue_unconsumed_on_epoch_change(
+            int(new_reg_after.get("epoch") or 1), endpoint_uid=rotated_ep.uid if rotated_ep else ""
+        )
         old_pm_panes = {rec.get("pane"), f"hc:{retired}", (rec.get("previous") or {}).get("pane")
                         if isinstance(rec.get("previous"), dict) else ""}
         move_pm_tasks_to_pane(repo, old_pm_panes, f"hc:{made}", ctx=self.ctx)
@@ -707,8 +764,9 @@ class ManagerSessions:
         deliver_mod.Delivery(self.ctx, repo).ensure_running()
         self.ctx.hc.name_tab(made, pm_tab_name(repo))
         self.ctx.hc.name_tab(retired, "", only_if=pm_tab_name(repo))
-        warn = self._end_session_later(repo, retired, kill_terminal=True)
-        lines = [*([] if not warn else [warn]), tr(
+        warn = self._end_session_later(repo, retired, kill_terminal=True, force=force)
+        no_tab = [] if started.has_tab else [launch_mod.no_tab_warning(made, ctx=self.ctx)]
+        lines = [*([] if not warn else [warn]), *no_tab, tr(
             f"new PM seat started in hc:{made} (migrated from legacy PM hc:{retired}); hc:{retired} ends once its "
             "turn is over"
             + (". End this turn briefly (one short line); the new session takes over next." if is_self else "."),
@@ -824,7 +882,7 @@ class ManagerSessions:
                                         "kind": cur_kind, "argv": spec["argv"], "started_at": self.ctx.clock.now(),
                                         "session_seq": seq}, ctx=self.ctx)
                 if spec.get("prompt") and hc_term:
-                    _seat_prompt_sender(proc, hc_term, cur_kind, spec["prompt"], ctx=self.ctx)
+                    _seat_prompt_sender(proc, hc_term, cur_kind, spec["prompt"], repo=repo, ctx=self.ctx)
                 started_ok, fail_reason = _wait_seat_session(
                     repo, proc, cur_kind, base_turn,
                     rotated_in=bool(spec.get("rotated_in") and not spec.get("is_fallback")),
@@ -880,13 +938,32 @@ class ManagerSessions:
         agent_pid: int | None = None,
         kill_terminal: bool = False,
         timeout: float = RETIRE_WAIT,
+        force: bool = False,
     ) -> None:
         """Wait until the outgoing PM session finishes its turn and any non-wait background commands (two quiet looks in
-        a row), then end its process group (or, with `kill_terminal=True` for legacy non-seat PMs, kill the old terminal)."""
+        a row), then end its process group (or stop immediately without waiting when `force=True`)."""
         tr = self.ctx.config.tr
         repo = self.ctx.git.project_root(repo_arg) if repo_arg else ""
-        deadline, quiet = self.ctx.clock.time() + timeout, 0
         target_pid = agent_pid
+        if force:
+            info = self.ctx.hc.get_raw(terminal) or {}
+            if info.get("state") != "live":
+                return
+            if kill_terminal:
+                if not (info.get("labels") or {}).get("pm"):
+                    self.ctx.hc.kill(terminal)
+                return
+            seat = read_seat_state(repo, ctx=self.ctx) if repo else {}
+            cur_pid = seat.get("agent_pid")
+            pid = target_pid or cur_pid
+            if not pid:
+                return
+            if target_pid and cur_pid is not None and cur_pid != target_pid:
+                return
+            if osutil.pid_alive(pid):
+                osutil.stop_pid_group(pid)
+            return
+        deadline, quiet = self.ctx.clock.time() + timeout, 0
         while self.ctx.clock.time() < deadline:
             info = self.ctx.hc.get_raw(terminal) or {}
             if info.get("state") != "live":
