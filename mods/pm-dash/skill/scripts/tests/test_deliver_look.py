@@ -78,8 +78,8 @@ TWO_LOOKS = PRELUDE + textwrap.dedent("""
     assert changes.terminals == {"t7"}, changes.terminals
     sends = [c for c in calls if c[0] == "send"]
     assert len(sends) == 1, calls
-    assert sends[0][1:3] == ("--if", "idle") and sends[0][3] == "t7", sends[0]
-    assert "the nightly build broke" in sends[0][4] and sends[0][4].startswith("[from pm.py deliver] "), sends[0][4]
+    assert sends[0][1:5] == ("--if", "idle", "--", "t7"), sends[0]  # options, then `--`, terminal, text
+    assert "the nightly build broke" in sends[0][5] and sends[0][5].startswith("[from pm.py deliver] "), sends[0][5]
     assert due == 0, due
     first_end = size()
     assert dlv.delivered_offset() == first_end, (dlv.delivered_offset(), first_end)
@@ -87,7 +87,7 @@ TWO_LOOKS = PRELUDE + textwrap.dedent("""
 
     # PM turn hook arrives AFTER deliver_look already advanced delivered_offset: first receipt must not warn repeat
     # on stdout, while the exact same batch arriving a second time DOES emit the repeat warning on stdout.
-    hook_payload = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": sends[0][4], "cwd": repo})
+    hook_payload = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": sends[0][5], "cwd": repo})
     out1 = io.StringIO()
     with mock.patch.object(sys, "stdin", io.StringIO(hook_payload)), contextlib.redirect_stdout(out1):
         hooks.cmd_hook_turn(None, ctx=ctx)
@@ -98,7 +98,7 @@ TWO_LOOKS = PRELUDE + textwrap.dedent("""
     with mock.patch.object(sys, "stdin", io.StringIO(hook_payload)), contextlib.redirect_stdout(out2):
         hooks.cmd_hook_turn(None, ctx=ctx)
     assert "repeat" in out2.getvalue(), out2.getvalue()
-    r2 = dlv.took_delivery(sends[0][4])
+    r2 = dlv.took_delivery(sends[0][5])
     assert r2 and r2.repeated and "repeat" in (r2.warning or ""), r2
 
     calls.clear()
@@ -107,7 +107,9 @@ TWO_LOOKS = PRELUDE + textwrap.dedent("""
     due = dlv.look(changes, stops)
     assert [c for c in calls if c[0] == "send"] == [], calls
     assert [c[:2] for c in calls] == [("get", "t7")], calls
-    assert due == RECONCILE, due
+    # The UserPromptSubmit above opened a PM turn: the P1 supervisor re-samples every 5s while a turn is active
+    # (pm-stuck-root-fix §3.2); with no active turn the look would wait the full RECONCILE.
+    assert due == 5.0, due
     assert dlv.delivered_offset() == size(), (dlv.delivered_offset(), size())
     assert dlv.received_ranges() == [[0, first_end]], dlv.received_ranges()
     print("ok")

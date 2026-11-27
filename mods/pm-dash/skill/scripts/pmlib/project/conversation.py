@@ -201,6 +201,24 @@ class Conversation:
     def turn_cause(self) -> dict[str, Any]:
         """{"after": "deliver", "batch": [start, end]} when the turn ending now was started by a delivered batch."""
         try:
+            snap = json.loads(self.files.pm_turn.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            snap = None
+        if isinstance(snap, dict):
+            turn = snap.get("turn")
+            if isinstance(turn, dict):
+                phase = str(turn.get("phase") or "idle")
+                if phase not in ("idle", "offline", "starting"):
+                    cause_obj = turn.get("cause")
+                    if isinstance(cause_obj, dict):
+                        kind = str(cause_obj.get("kind") or "")
+                        if kind == "deliver":
+                            batch = cause_obj.get("batch")
+                            return {"after": "deliver", **({"batch": list(batch)} if isinstance(batch, list) else {})}
+                        if kind:
+                            return {}
+        # 1-version read-only fallback for unupgraded peers/migrations (§4.8).
+        try:
             cause = json.loads(self.files.turn_cause.read_text())
         except (OSError, ValueError):
             return {}

@@ -48,6 +48,8 @@ from pmlib.errors import NotFound, Refused  # noqa: E402
 from pmlib.events.deliver import Delivery  # noqa: E402
 from pmlib.events.stalls import StallWatcher  # noqa: E402
 from pmlib.gitrepo import GitRepo  # noqa: E402
+from pmlib.messaging.typist import endpoint_mailbox  # noqa: E402
+from pmlib.workers.send import worker_endpoint  # noqa: E402
 from pmlib.home import Home, project_slug  # noqa: E402
 from pmlib.ledger.board import Board  # noqa: E402
 from pmlib.ledger.ledger import Ledger  # noqa: E402
@@ -454,8 +456,10 @@ class TaskNumbersTests(LedgerCase):
 
         self.cmd_quiet(workers_cmds.cmd_send, target="alpha#1", message="ping worker", file=None, task=None, repo=".",
                        timeout=10, wait=False)
-        sends = [s["args"] for s in self.procs.spawned if s["args"][:1] == ["_deliver-send"]]
-        self.assertEqual([(a[1], a[a.index("--task") + 1]) for a in sends], [("t30", a1)])  # handed to the background
+        sends = [s["args"] for s in self.procs.spawned if s["args"][:1] == ["_drain-endpoint"]]
+        self.assertEqual([a[1] for a in sends], ["t30"])  # handed to the background
+        queued = endpoint_mailbox(self.ctx, worker_endpoint("t30")).get(sends[0][sends[0].index("--env") + 1])
+        self.assertEqual(queued.envelope.cause.get("task_id"), a1)
 
         hints = hooks.mention_hints(self.repo_a, f"check [@Fix](thread:{a1}) and [alt](thread:#1)", ctx=self.ctx)
         self.assertTrue(any("#1; Fix auth" in h for h in hints))
@@ -725,6 +729,58 @@ class TwoLayerPlanAndAutoReview(LedgerCase):
 
     def delivery(self):
         return Delivery(self.ctx, str(self.repo))
+
+    def _review_task(self, tid, wt):
+        self.save({
+            "id": tid, "title": "t", "project": self.name, "repo": str(self.repo),
+            "status": "in_progress", "owner": "pm", "base": "main", "branch": "dev/ar",
+            "worktree": str(wt), "pane": "hc:t20", "agent": "w-ar", "dispatched": True,
+            "worker": {"profile": "standard", "kind": "claude", "model": "opus"},
+            "created": self.clock.now(), "log": [],
+            "plan": [{"text": "work", "state": "doing", "anchor": "work"},
+                     {"text": "review", "state": "todo", "anchor": "review"},
+                     {"text": "merge", "state": "todo", "anchor": "merge"}],
+        })
+
+    def test_new_commit_after_the_reviewer_died_starts_a_new_review(self):
+        """Fable review #1: a reviewer task left in_progress by a dead reviewer must not swallow the next report."""
+        wt, sha1 = self.make_worktree("dev/ar")
+        tid = f"{self.name}-ar"
+        self._review_task(tid, wt)
+        self.be("hc:t20")
+        self.cmd_quiet(ledger_cmds.cmd_update, id=tid, status="review", commit=sha1, keep=False, note="done 1")
+        self.assertEqual(self.hc.runs, 1)
+        rev = self.load(f"{tid}-review")
+        self.hc.terminals.pop(rev["pane"][3:], None)  # crash / quota / closed, without a report
+        self.assertEqual(self.load(f"{tid}-review")["status"], "in_progress")
+        subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "--allow-empty", "-q", "-m", "worker commit 2"], check=True)
+        sha2 = subprocess.run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        self.be("hc:t20")
+        self.cmd_quiet(ledger_cmds.cmd_update, id=tid, status="review", commit=sha2, keep=False, note="done 2")
+        self.assertEqual(self.hc.runs, 2)
+        self.assertEqual(self.load(tid)["auto_review"]["status"], "running")
+
+    def test_replayed_report_does_not_start_a_second_live_reviewer(self):
+        """C6a: replaying the same report after a crash finds the reviewer it already started alive: none more."""
+        from pmlib import reactions
+        from pmlib.ledger.transition import Transition, TransitionPlan, UpdateRequest
+        wt, sha1 = self.make_worktree("dev/ar")
+        tid = f"{self.name}-ar"
+        self._review_task(tid, wt)
+        self.be("hc:t20")
+        self.cmd_quiet(ledger_cmds.cmd_update, id=tid, status="review", commit=sha1, keep=False, note="done 1")
+        self.assertEqual(self.hc.runs, 1)
+        req = UpdateRequest(id=tid, status="review", commit=sha1, note="done 1")
+        replay = Transition(plan=TransitionPlan(request=req, fields={}), after=self.load(tid),
+                            changes=["status=review"], will_auto_review=True, already_applied=True)
+        reactions.after(self.ctx, replay)
+        self.assertEqual(self.hc.runs, 1)
+        # ...but if that reviewer died before the replay, the replay starts one.
+        self.hc.terminals.pop(self.load(f"{tid}-review")["pane"][3:], None)
+        reactions.after(self.ctx, replay)
+        self.assertEqual(self.hc.runs, 2)
 
     def test_parse_plan_steps_and_negation_safe_anchors(self):
         steps, explicit = parse_plan_steps(

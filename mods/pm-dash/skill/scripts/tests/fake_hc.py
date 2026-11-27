@@ -92,6 +92,7 @@ def main():
             out = row(address, terms[address])
         elif cmd == "send":
             opts, rest = take_options(rest, {"--if"})
+            rest = rest[1:] if rest[:1] == ["--"] else rest
             address, term = term_of(rest[0])
             if term.get("state") != "live":
                 fail("not_live", f"terminal {address} is not live")

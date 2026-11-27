@@ -30,7 +30,7 @@ Clone or download this repository, then run from its root:
 python install.py     # Windows (cmd / PowerShell) or any platform without Bash
 ```
 
-It copies the skill into each coding agent it finds (Claude Code, Codex, pi), adds their hooks, and installs the desktop mods and a `pm` layout. Restart running agent sessions afterwards. `./install.sh --dry-run` previews without writing files.
+It copies the skill into each coding agent it finds (Claude Code, Codex, pi), adds their hooks, and installs the desktop mods and a `dudu` layout. Restart running agent sessions afterwards. `./install.sh --dry-run` previews without writing files.
 
 The skill's source is this repository (`mods/pm-dash/skill`). To change the skill on any machine, change it here and run `./install.sh` again, or open a pull request; do not edit an installed copy such as `~/.claude/skills/pm`, which the next install replaces. When an installed copy has local edits, the installer first copies it to `install/backups/` in the ledger home (`~/.dudu`) and says so.
 
@@ -43,7 +43,7 @@ You can also add it from herdr.dev and click **Set up** on the board. Both paths
 1. Switch to the installed layout:
 
    ```bash
-   herdr-app do layout.switch '{"name":"pm"}'
+   herdr-app do layout.switch '{"name":"dudu"}'
    ```
 
 2. Open an agent session (Claude Code, Codex, pi) in your project directory inside the Herdr desktop app and say **“act as PM for this project”**. Any other agent can be started as the manager with `pm.py start --kind <agent>`; see [Get started](docs/guide.md#get-started) in the guide.
@@ -53,7 +53,7 @@ You can also add it from herdr.dev and click **Set up** on the board. Both paths
 ## More
 
 - [Configuration](docs/guide.md#configuration): language, default agents and models, adding other agents.
-- [Alerts](docs/guide.md#alerts): which notifications the `pm` layout shows.
+- [Alerts](docs/guide.md#alerts): which notifications the `dudu` layout shows.
 - [Uninstall](docs/guide.md#uninstall): `./install.sh --uninstall`, keeping the ledger.
 - [Manual desktop layout fallback](docs/guide.md#manual-desktop-layout-fallback): when the layout cannot be generated.
 - [Repository structure](docs/guide.md#repository-structure).

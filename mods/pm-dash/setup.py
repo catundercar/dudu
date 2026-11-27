@@ -32,8 +32,8 @@ HOOKS = [
     ("Stop", "hook-turn", 15),
 ]
 PRE_TOOL_MATCHERS = {
-    "claude": "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit",
-    "codex": "request_user_input|ask_user|AskUserQuestion|apply_patch|write_file|edit_file|Edit|Write",
+    "claude": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit",
+    "codex": "request_user_input|ask_user|AskUserQuestion|Bash|shell|local_shell_call|apply_patch|write_file|edit_file|Edit|Write",
 }
 SCRIPT = "skills/pm/scripts/pm.py"
 WINDOWS = os.name == "nt"

@@ -90,6 +90,7 @@ const STRINGS = {
     archivedSummary: n => `${n} ${n === 1 ? 'project' : 'projects'} · restoring starts a new PM that takes over from the handover`,
     pausedLine: (n, titles) => `Paused ${n}: ${titles}`, nothingPaused: 'Nothing was open', archivedOn: day => `archived ${day}`,
     restore: 'Restore', openProject: 'Open project', archiveProject: 'Archive project', newProject: 'New project',
+    windowMinimize: 'Minimize', windowMaximize: 'Maximize', windowRestore: 'Restore', windowClose: 'Close',
     remoteProject: 'On another machine: click opens its conversation; archive it there',
     archiveTitle: name => `Archive ${name}?`, archiveLead: 'The PM session closes, and these threads are marked paused and stop reminding you:',
     archiveNone: 'The PM session closes. No threads are open.',
@@ -149,6 +150,7 @@ const STRINGS = {
     archivedSummary: n => `${n} 个项目 · 恢复后 PM 重新启动，从交接记录接手`,
     pausedLine: (n, titles) => `暂停 ${n}：${titles}`, nothingPaused: '归档时没有在办的事', archivedOn: day => `${day} 归档`,
     restore: '恢复', openProject: '打开项目', archiveProject: '归档项目', newProject: '新建项目',
+    windowMinimize: '最小化', windowMaximize: '最大化', windowRestore: '还原', windowClose: '关闭',
     remoteProject: '在另一台机器上：点击打开对话；归档要到那台机器上做',
     archiveTitle: name => `归档 ${name}?`, archiveLead: 'PM 会话会关掉，下面这些线程标成暂停，不再提醒你：',
     archiveNone: 'PM 会话会关掉。现在没有在办的线程。',
@@ -182,6 +184,10 @@ export function setupState(status) {
   if (!list('installed').length) return 'missing';
   if (list('outdated').length) return 'outdated';
   return list('ready').length ? 'ready' : 'missing';
+}
+
+export function shouldRecheckSetup(status, busy = false, checking = false) {
+  return !busy && !checking && (status === 'missing' || status === 'outdated');
 }
 
 // The ledger home pm.py uses: PM_HOME, else ~/.claude/pm where an earlier install
@@ -238,6 +244,18 @@ export function lostSummary(lang, lost) {
   if (hasPm && n) return restart ? `PM and ${agentsWord} did not come back` : `PM and ${agentsWord} stopped`;
   if (hasPm) return restart ? 'PM did not come back' : 'PM stopped';
   return restart ? `${agentsWord} did not come back` : `${agentsWord} stopped`;
+}
+
+// What waits undelivered for a project's PM (`pm.py state` pms[].undelivered): the events of a batch
+// (`count`) and the messages past their delivery SLA (`messages`, the alert.undelivered route's hub
+// outlet), which may be there with no batch at all (`count` 0).
+export function undeliveredSummary(lang, undelivered) {
+  if (!undelivered || typeof undelivered !== 'object') return '';
+  const count = (Number(undelivered.count) || 0) + (Number(undelivered.messages) || 0);
+  if (count <= 0) return '';
+  const secs = Math.max(60, Number(undelivered.waiting_seconds) || 0);
+  const dur = age(secs * 1000, lang);
+  return lang === 'zh' ? `${count} 条未送达（${dur}）` : `${count} undelivered (${dur})`;
 }
 
 // Task numbers (`#42`) assigned per project; absent on review threads and older remote peers.
@@ -891,6 +909,7 @@ export function projectCards(state, lines = {}, today = '') {
     key: pm.name, name: projectName(pm), repo: pm.repo || '', machine: pm.machine || '', status: pm.status || '',
     agent: agentName(pm.agent), archived: pm.archived || null, counts: projectCounts(pm, state.tasks, today),
     ...(!pm.archived && pm.lost && typeof pm.lost === 'object' ? { lost: pm.lost } : {}),
+    ...(!pm.archived && pm.undelivered && typeof pm.undelivered === 'object' ? { undelivered: pm.undelivered } : {}),
     at: lastEventAt(state.events, pm.name), line: lines[pm.name] || [],
     paused: state.tasks.filter(t => (t.pm || '') === pm.name && t.status === 'paused').map(t => t.title || t.sourceId || t.id),
   }));
@@ -1675,4 +1694,39 @@ export function tooltipLayout(text, opts = {}) {
     pos,
     rect,
   };
+}
+
+export function windowControlButtons(win, { overlay = false } = {}) {
+  if (overlay || win?.buttons !== true) return [];
+  const isWindows = win.platform === 'windows';
+  const maximized = win.maximized === true;
+  return [
+    {
+      id: 'win-minimize',
+      command: 'window.minimize',
+      icon: isWindows ? 'mods/tabs/win-min.svg' : null,
+      glyph: isWindows ? '' : '−',
+      iconSize: 16,
+      danger: false,
+      labelKey: 'windowMinimize',
+    },
+    {
+      id: 'win-maximize',
+      command: 'window.maximize',
+      icon: isWindows ? (maximized ? 'mods/tabs/win-restore.svg' : 'mods/tabs/win-max.svg') : null,
+      glyph: isWindows ? '' : '□',
+      iconSize: 16,
+      danger: false,
+      labelKey: maximized ? 'windowRestore' : 'windowMaximize',
+    },
+    {
+      id: 'win-close',
+      command: 'window.close',
+      icon: isWindows ? 'mods/tabs/win-close.svg' : 'mods/pane/close.svg',
+      glyph: '',
+      iconSize: isWindows ? 16 : 13,
+      danger: true,
+      labelKey: 'windowClose',
+    },
+  ];
 }

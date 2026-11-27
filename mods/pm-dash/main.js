@@ -1,8 +1,8 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, window as appWindow, watchFolder, terminals, agents, panes, run, props, closeOverlay, openOverlay, layout as desktopLayout } from 'herdr';
-import { setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts, wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, taskSteps, taskDependencies, taskNumber, formatTaskNumber, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime, tooltipLayout } from './model.js';
-import { page, pageView, pageHeader, projectHeader, keepPress, dialogView, initDialog, restoreProject, readLines, archivePopup, NEW_DIALOG, openProject, showPage } from './projects.js';
+import { setupState, shouldRecheckSetup, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts, wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, taskSteps, taskDependencies, taskNumber, formatTaskNumber, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime, tooltipLayout } from './model.js';
+import { page, pageView, pageHeader, projectHeader, windowControlsBar, keepPress, dialogView, initDialog, restoreProject, readLines, archivePopup, NEW_DIALOG, openProject, showPage } from './projects.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
 import { execPython, NO_PYTHON } from './python.js';
@@ -41,7 +41,7 @@ export default class PmDash extends View {
     this.endedOpen = new Set(); this.showDropped = new Set(); this.hoverEnded = null;
     // The page's keyboard, for Esc: taken each time the stage turns to this page, and on a click in it.
     this.keys = cx.focus_handle(); this.onStage = false;
-    this.setupStatus = null; this.setupError = ''; this.setupBusy = false; this.setupDone = false; this.noPython = false;
+    this.setupStatus = null; this.setupError = ''; this.setupBusy = false; this.setupChecking = false; this.setupDone = false; this.noPython = false;
     this.localState = this.state; this.remoteStates = {};
     this.primed = false; this.size = { width: 980, height: 640 };
     this.queue = []; this.recent = []; this.replayIndex = 0; this.auto = false;
@@ -81,6 +81,7 @@ export default class PmDash extends View {
       this.refreshRemote(cx);
       cx.timer.every(5000, cx => this.refreshRemote(cx));
     });
+    cx.timer.every(3000, cx => this.recheckSetupIfNeeded(cx));
     cx.timer.every(10000, cx => this.refresh(cx));
     this.armIdle(cx);
   }
@@ -114,6 +115,8 @@ export default class PmDash extends View {
     this.publish(cx);
   }
   async checkSetup() {
+    if (this.setupChecking) return;
+    this.setupChecking = true;
     try {
       const result = await execPython(exec, [appHome() + '/' + MOD_FOLDER + 'setup.py', '--status', '--claude-home', home() + '/.claude']);
       this.noPython = false;
@@ -124,7 +127,21 @@ export default class PmDash extends View {
       this.setupStatus = 'missing';
       // No Python to run setup.py: the card says how to get one instead of an error.
       this.noPython = error?.message === NO_PYTHON; this.setupError = this.noPython ? '' : String(error);
+    } finally {
+      this.setupChecking = false;
     }
+  }
+  recheckSetupIfNeeded(cx) {
+    if (!shouldRecheckSetup(this.setupStatus, this.setupBusy, this.setupChecking)) return;
+    const prev = this.setupStatus;
+    cx.spawn(async cx => {
+      await this.checkSetup();
+      if (this.setupStatus !== prev) {
+        if (this.setupStatus === 'ready') this.refresh(cx);
+        run('pm-nav.setup-changed');
+        cx.notify();
+      }
+    });
   }
   setUp(cx) {
     if (this.setupBusy) return;
@@ -162,8 +179,10 @@ export default class PmDash extends View {
       if (this.setupError) block.child(div().w_full().whitespace_normal().text_color(t.blocked).child(this.setupError));
       block.child(this.setupButton(t, 'setup'));
     }
+    const winControls = typeof windowControlsBar === 'function' ? windowControlsBar(this, t, { divider: false }) : null;
     return v_flex().id('setup-root').size_full().min_w(0).min_h(0).bg(t.canvas).text_color(t.foreground).text_size(13)
-      .child(keepPress(this, v_flex().id('setup-scroll')).size_full().overflow_scroll().p(24)
+      .when(Boolean(winControls), el => el.child(h_flex().id('setup-header').h(42).w_full().flex_none().pr(14).items_center().justify_end().child(winControls)))
+      .child(keepPress(this, v_flex().id('setup-scroll')).flex_1().min_h(0).w_full().overflow_scroll().p(24)
         .child(v_flex().w_full().flex_1().items_center().justify_center().child(block)));
   }
   geometry() {

@@ -12,6 +12,8 @@ from ..events import stalls as stalls_mod
 from ..home import project_slug
 from ..ledger.ledger import Change, Ledger
 from ..ledger.task import Task
+from ..messaging.address import parse_legacy_endpoint
+from ..messaging.typist import unblock_endpoint
 from ..project.conversation import Conversation
 from ..terminals.events import RECONCILE
 from ..terminals.screen import classify_stuck_screen, known_prompt_action
@@ -147,7 +149,13 @@ class HelperWatcher:
                         raw_screen, allow_trust=self.ctx.git.is_owned_worktree(h.get("cwd") or ""),
                     )
                     auto_key = ("helper-auto", term, pkind)
-                    if keys and stops.get(auto_key, 0) < 2 and self.ctx.hc.keys(term, *keys) is not None:
+                    ep = parse_legacy_endpoint(f"hc:{term}", runtime_hint="hc")
+                    pressed = (unblock_endpoint(self.ctx, ep, keys)
+                               if keys and stops.get(auto_key, 0) < 2 and ep is not None else False)
+                    if pressed is None:  # another typist on this terminal right now: look again, not stuck yet
+                        due = min(due, stall_grace)
+                        continue
+                    if pressed:
                         stops[auto_key] = stops.get(auto_key, 0) + 1
                         stops.pop(stop_key, None)
                         due = min(due, stall_grace)

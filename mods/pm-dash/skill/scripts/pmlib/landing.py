@@ -27,6 +27,7 @@ from .ledger.plan import plan_progress, post_merge_steps, sync_plan_on_approve, 
 from .ledger.question import QUESTION_FIELDS
 from .ledger.task import CLOSED, Task, hc_terminal_of
 from .ledger.transition import UpdateRequest
+from .messaging.principal import Principal
 from .osutil import Options, shell_quote, slugify, stop_group
 from .project.project import ProjectRegistry
 from .reactions import Updates, _rollup_ancestors
@@ -303,14 +304,33 @@ class Landing:
 
     # --- approve ---
 
-    def approve(self, req: ApproveRequest) -> Landed:
+    def handoff_to_helper(self, task_id: str, approval: Any, *, principal: Principal) -> Landed:
+        """The project supervisor hands a merge the PM approved to its worker, which did not carry it out, to an
+        exec helper: the same approval (commit, message, keep, timeout, note), `--via helper`, as `principal`
+        (the supervisor's own identity; it never poses as the PM's terminal)."""
+        la = approval if isinstance(approval, dict) else {}
+        req = ApproveRequest(
+            id=task_id, via="helper", commit=la.get("commit") or None, message=la.get("message") or None,
+            keep=bool(la.get("keep")), timeout=int(la["timeout"]) if la.get("timeout") else None,
+            note=la.get("note") or None,
+        )
+        return self.approve(req, principal=principal)
+
+    def approve(self, req: ApproveRequest, *, principal: Principal | None = None) -> Landed:
         """PM approves a task for merge and delegates execution (`land` + post-merge steps) asynchronously to its
-        worker (default when live) or a dedicated execution helper. Returns at once; never blocks the PM."""
+        worker (default when live) or a dedicated execution helper. Returns at once; never blocks the PM.
+        `principal`: an explicit caller instead of this terminal's (only the project's supervisor, handing a
+        stalled worker's approved merge to a helper)."""
         tr, ctx = self._tr, self.ctx
         task = self._ledger.load(req.id).raw
         tid = task["id"]
         done = Landed(task_id=tid)
-        if self._caller.helper_self_info() or (ctx.pane and not self._caller.is_pm_caller(task)):
+        task_slug = project_slug(task["repo"]) if task.get("repo") else ""
+        if principal is not None:
+            if principal.role != "supervisor" or (principal.project and principal.project != task_slug):
+                raise self._refuse(tr(f"refused: {principal.actor_id} may not approve merging {tid}",
+                                      f"已拒绝：{principal.actor_id} 不能批准合并 {tid}"))
+        elif self._caller.helper_self_info() or (ctx.pane and not self._caller.is_pm_caller(task)):
             raise self._refuse(tr(f"refused: only the PM may approve merging {tid}",
                                   f"已拒绝：只有 PM 可以批准合并 {tid}"))
         if req.revoke:
@@ -363,7 +383,11 @@ class Landing:
                     f"请先 `pm.py reattach {tid}` 或改用 `pm.py approve {tid} --via helper`"))
             executor = "worker"
         elif via == "helper":
-            if not ctx.pane.startswith("hc:"):
+            # The helper starts beside the project's desktop-app PM: the caller's terminal, or (the supervisor)
+            # the PM's registered one.
+            has_app_pm = ctx.pane.startswith("hc:") if principal is None else bool(
+                (self._projects.app_pm(repo) or {}).get("terminal"))
+            if not has_app_pm:
                 raise self._refuse(tr("--via helper requires a desktop-app PM ($HC_TERMINAL_ID)",
                                       "--via helper 需要桌面版 PM（$HC_TERMINAL_ID）"))
             executor = "helper"
@@ -376,7 +400,7 @@ class Landing:
                 executor = "manual"
 
         approved = {
-            "by": ctx.pane or "cli",
+            "by": principal.actor_id if principal is not None else (ctx.pane or "cli"),
             "at": ctx.clock.now_sec(),
             "branch": branch,
             "base": base,
@@ -397,7 +421,8 @@ class Landing:
             # Avoid colliding with a running helper of the same name by suffixing if needed.
             hname = self._helper_name(f"land-{tid}", repo)
             fields = self._helper_fields(prompt_text, hname, req, repo, tid,
-                                         timeout=max(int(approved["timeout"]) + 300, helpers_timeout_for(ctx)))
+                                         timeout=max(int(approved["timeout"]) + 300, helpers_timeout_for(ctx)),
+                                         parent_pm=principal is not None)
             # Write approval first (with helper_name) so the helper is authorized immediately on start,
             # then update executor_pane once the terminal address is known.
             approved["helper_name"] = hname
@@ -463,7 +488,7 @@ class Landing:
         if executor == "worker":
             message = f"[from {ctx.pane or 'pm.py'}] {prompt_text}"
             workers.send_async_later(term, message, task_id=tid, repo=repo,
-                                     pre_turn=worker_info.get("turn") or 0, timeout=180)
+                                     pre_turn=worker_info.get("turn") or 0, timeout=180, kind="cmd.approve_land")
             workers._deliver_later(repo)
             done.said.append(("out", tr(
                 f"{tid}: merge approved ({short_sha} -> {base}); delegated to worker hc:{term} (async)",
@@ -476,9 +501,11 @@ class Landing:
         return done
 
     def _helper_fields(self, prompt_text: str, hname: str, req: Any, repo: str, tid: str, *,
-                       timeout: int) -> dict[str, Any]:
-        """The `pm.py helper start` options of a PM-delegated exec helper working for task `tid`."""
+                       timeout: int, parent_pm: bool = False) -> dict[str, Any]:
+        """The `pm.py helper start` options of a PM-delegated exec helper working for task `tid` (`parent_pm`:
+        started from no terminal, beside the project's PM)."""
         return {
+            **({"parent_pm": True} if parent_pm else {}),
             "prompt": prompt_text, "brief": None, "name": hname,
             "profile": req.profile, "kind": req.kind, "model": req.model, "effort": req.effort,
             "advisor": req.advisor, "codex_profile": req.codex_profile,

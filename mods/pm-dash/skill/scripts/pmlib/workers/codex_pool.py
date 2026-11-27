@@ -301,7 +301,7 @@ def _codex_fast_impl(ctx: Context, term: str, spec: Any, *, tries: int = 20) -> 
         return ctx.config.tr(f"fast already on: {line}", f"fast 已开：{line}")
     if not line:
         return ctx.config.tr("warning: no codex status line came up; /fast not sent", "注意：没等到 codex 状态栏，没发 /fast")
-    ctx.hc.send(term, "/fast")
+    ctx.hc.init_session_flag(term, "/fast")
     for _ in range(6):
         ctx.clock.sleep(2)
         line = _codex_status_line_for(ctx, term)

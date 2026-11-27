@@ -358,6 +358,35 @@ export const STRINGS = {
     diff: 'See the changes', close: 'Close',
     resizePanel: 'Drag to resize the side panel; double-click for its default width',
     sending: 'Sending…', queued: 'Queued', queuedTip: 'Waiting for PM to be ready — will send automatically',
+    queuedReasonStarting: 'PM session is starting',
+    queuedReasonInflight: 'Waiting for previous message',
+    queuedReasonFifo: 'Waiting for earlier queued messages',
+    queuedReasonBlocked: 'PM terminal is waiting on a prompt',
+    queuedReasonError: 'PM terminal reported an error',
+    queuedReasonDraft: 'Queued (unsent draft in terminal)',
+    queuedReasonWorking: 'Waiting for PM turn to finish',
+    queuedReasonOffline: 'Waiting for PM session',
+    queuedReasonDisconnected: 'Waiting for remote machine reconnect',
+    queuedReasonTimeout: 'Reconciling delivery status',
+    queuedReasonNewSession: 'Sending again to the new PM session',
+    queuedReasonTypist: 'Waiting for another message to finish typing',
+    queuedReasonCarried: 'Carried over from before the update',
+    queuedReasonRetryUnstarted: 'Sending again: the PM did not start on it',
+    queuedReasonRetryInterrupted: 'Sending again: its turn was interrupted',
+    queuedReasonRetryErrored: 'Sending again: its turn hit an error',
+    queuedReasonUnsupported: 'This PM cannot receive this kind of message',
+    queuedReasonOther: 'Waiting to be sent',
+    turnInterrupted: 'its turn was interrupted',
+    turnErrored: 'its turn hit an error',
+    bubbleStateAccepted: 'Queued',
+    bubbleStateSending: 'Sending…',
+    bubbleStateTyped: 'Delivered',
+    bubbleStateTypedStep: 'Delivered, it reads it after this step',
+    bubbleStateTypedTurn: 'Delivered, it reads it after this turn',
+    bubbleStateConsumed: 'Read',
+    bubbleStateAnswered: 'Answered',
+    bubbleStateFailed: 'Failed',
+    pmUndeliveredMessages: (n, dur, detail) => `${n} ${n === 1 ? 'message' : 'messages'} not typed into the PM for ${dur}${detail ? ` (${detail})` : ''}`,
     queuedSummary: n => n === 1 ? '1 message queued, will send automatically' : `${n} messages queued, will send automatically`,
     pmQueuedOnly: n => n === 1 ? '1 message queued — will send when PM can receive' : `${n} messages queued — will send when PM can receive`,
     pmBlockedQuestion: 'PM is waiting on a terminal question dialog',
@@ -369,7 +398,9 @@ export const STRINGS = {
     pmBlockedQuota: 'PM hit a rate limit or quota prompt in its terminal',
     pmBlockedDraft: 'PM terminal has an unsent draft — clear or send it there',
     pmBlockedUnknown: 'PM terminal is waiting on an interactive prompt',
-    // A bubble `hc send` put into the PM's terminal that the conversation never recorded; and one whose
+    pmUndelivered: (n, dur, detail) => `${n} pending ${n === 1 ? 'event' : 'events'} undelivered for ${dur}${detail ? ` (${detail})` : ''}`,
+    delivererStopped: 'deliverer not running',
+    // A bubble the send put into the PM's terminal that the conversation never recorded; and one whose
     // send never finished (stuck, or the view reloaded mid-send), so nobody knows whether it went.
     unconfirmedSend: 'Delivered to the PM terminal, but it never showed up in the conversation',
     unsureSend: 'Sending never finished; the PM may not have it',
@@ -377,13 +408,62 @@ export const STRINGS = {
     pmOfflineFailed: 'PM session stopped before receiving this message — click to resend',
     retrySend: 'Resend',
     pmTurnThinking: dur => `Thinking · ${dur}`,
+    pmTurnPreamble: (text, dur) => `${text} · ${dur}`,
+    pmTurnLongGen: dur => `Writing a long piece · ${dur}`,
     pmTurnTool: (summary, dur) => `Running ${summary} · ${dur}`,
+    pmTurnToolSlow: (summary, dur) => summary ? `Foreground command running for ${dur}: ${summary}` : `Foreground command running for ${dur}`,
+    pmTurnToolSuspect: summary => summary ? `Command may be waiting for input: ${summary}` : 'Command may be waiting for input',
+    pmTurnRetrying: attempt => attempt ? `Model service retrying (attempt ${attempt})` : 'Model service retrying',
+    pmTurnBlocked: kind => kind ? `Waiting for you in the terminal: ${kind}` : 'Waiting for you in the terminal',
+    pmTurnRecovering: step => step ? `Recovering: ${step}` : 'Recovering…',
+    incidentRecovering: step => step ? `Auto-recovering: ${step}` : 'Auto-recovering…',
+    incidentRecovered: detail => detail ? `Recovered · ${detail}` : 'Recovered',
+    incidentFolded: detail => detail ? `Auto-recovered · ${detail}` : 'Auto-recovered',
+    incidentNotified: detail => detail ? `Needs your attention: ${detail}` : 'Needs your attention',
+    recoveryStep_interrupt_tool: 'interrupting hung command',
+    recoveryStep_interrupt_turn: 'interrupting current step',
+    recoveryStep_continue_turn: 'resuming turn',
+    recoveryStep_nudge_enter: 'nudging terminal',
+    recoveryStep_retype_submitted: 'resending message',
+    recoveryStep_restart_seat: 'restarting PM session',
+    recoveryStep_switch_profile: 'switching fallback model',
+    recoveryStep_classify_screen: 'checking terminal screen',
+    recoveryStep_waiting_draft: 'waiting for draft to clear',
+    recoveryStep_notify_user: 'waiting for you',
+    recoveryStep_unblock_safe_dialog: 'dismissing terminal prompt',
     pmTurnSlow: (detail, dur) => detail ? `Waiting on ${detail} · ${dur}` : `Still working · ${dur}`,
     pmTurnStalled: (detail, dur) => detail ? `Unresponsive for ${dur} · ${detail}` : `Unresponsive for ${dur}`,
+    pmTurnStalledEvidence: (dur, evidence) => evidence ? `Unresponsive for ${dur} (${evidence})` : `Unresponsive for ${dur}`,
+    pmEvidencePtyFrozen: 'screen unchanged for 45s',
+    pmEvidenceNoStep: 'no new step for 4m',
+    pmEvidenceToolHard: 'foreground command exceeded hard budget',
+    pmEvidenceToolInput: 'command may be waiting for input',
+    pmEvidenceSubmitted: 'turn did not start after submit',
+    pmEvidenceUpstream: 'model service timed out',
+    pmTurnTotalTip: dur => `Total turn duration: ${dur}`,
+    openPmBgShells: n => `Open PM terminal (${n} background ${n === 1 ? 'command' : 'commands'})`,
+    pmBusyTimingStep: 'this step',
+    pmBusyTimingTurn: 'this turn',
+    pmBusyActThinking: 'thinking',
+    pmBusyActLongGen: 'writing a long piece',
+    pmBusyActRetrying: 'waiting on model service retry',
+    pmBusyActRunning: summary => `running ${summary}`,
+    pmBusyComposer: (activity, timing) => `Coordinator is ${activity}; your message will be seen after ${timing}`,
+    pmBusyComposerQueued: (activity, timing, n) => `Coordinator is ${activity}; ${n > 1 ? `${n} queued messages` : 'queued message'} will be seen after ${timing}`,
+    pmPreemptAction: 'Interrupt and handle this first',
+    pmPreemptQueuedAction: 'Interrupt and handle queued message',
+    pmTurnUnknown: 'Status unknown, reconnecting…',
     interruptPmTip: 'Interrupt current step (keeps PM session)',
     interruptingPmTip: 'Interrupting…',
+    interruptStopped: 'Interrupted current step',
+    interruptStillWorking: 'Interrupt did not stop the current step',
+    interruptExited: 'PM process exited',
+    interruptUnknown: 'Interrupt sent (outcome unknown)',
+    interruptFailed: error => `Interrupt failed: ${error}`,
     rotatePmTip: 'Start a fresh PM session from handover',
     rotatingPmTip: 'Switching to a fresh PM session…',
+    rotateSucceeded: 'Switched to a fresh PM session',
+    rotateFailed: error => `Switch session failed: ${error}`,
     failed: error => `Not sent: ${error}`, decision: 'Decision',
     pick: 'Pick a project in the PM list to open its conversation.', noProject: 'This PM is no longer in the ledger.',
     remoteLoading: machine => `Reading the project from ${machine}…`,
@@ -416,6 +496,7 @@ export const STRINGS = {
     libraryTab: 'Library',
     memoryTab: 'Memory',
     showSidePanel: 'Show side panel', hideSidePanel: 'Hide side panel',
+    windowMinimize: 'Minimize', windowMaximize: 'Maximize', windowRestore: 'Restore', windowClose: 'Close',
     searchLibrary: 'Search Library…', searchMemory: 'Search Memory…', searchThreads: 'Search Threads…', clearSearch: 'Clear search',
     threadsSearching: 'Searching threads…',
     threadsNoMatches: 'No matching threads.',
@@ -468,6 +549,11 @@ export const STRINGS = {
     docLoading: 'Reading document…',
     docNotText: 'Binary or image file; not shown as text here.',
     docTooLarge: 'File exceeds 1 MB and is not read whole here.',
+    imageOpenPreview: 'Open image preview',
+    imageLoading: 'Loading image…',
+    imageLoadFailed: 'Image preview unavailable',
+    imageTooLarge: 'Image is too large to preview here.',
+    imageDimensions: (w, h) => `${w} × ${h}`,
     docNotFound: 'Document is no longer in Library.',
     memNotFound: 'Memory is no longer found.',
     docReadError: error => `Could not read document: ${error}`,
@@ -542,6 +628,9 @@ export const STRINGS = {
     toolRunOther: n => `Used ${n} ${n === 1 ? 'other tool' : 'other tools'}`,
     toolRunTools: n => `Used ${n} ${n === 1 ? 'tool' : 'tools'}`,
     toolErrors: n => `${n} failed`,
+    sessionQuestionLabel: 'Question',
+    sessionQuestionTerminalHint: 'Waiting on a terminal prompt? Switch to terminal in the top-right to respond.',
+    sessionQuestionAnswered: 'Response',
     workedHours: (h, m) => `Worked ${h}h ${m}m`,
     workedMinutes: (m, s) => `Worked ${m}m ${s}s`,
     workedSeconds: s => `Worked ${s}s`,
@@ -588,6 +677,23 @@ export const STRINGS = {
     quoteAuthorQuestion: 'Question',
     quoteCount: n => `${n} ${n === 1 ? 'quote' : 'quotes'}`,
     quoteSelectionAction: 'Quote selection',
+    closeSidePanel: 'Close side panel',
+    resetPanelWidthTip: 'Drag to resize; double-click to reset this view’s width',
+    sideTabsIndex: 'Browse Threads / Library / Memory',
+    sideTabsAll: n => `${n} open tabs`,
+    sideTabClose: 'Close tab',
+    sideTabCloseOthers: 'Close other tabs',
+    sideTabCloseRight: 'Close tabs to the right',
+    sideTabCloseAll: 'Close all tabs',
+    sideTabDirtyHint: name => `Unsaved changes in ${name}`,
+    sideTabDirtyWarning: 'Unsaved changes will be lost on close.',
+    sideTabSaveAndClose: 'Save & close',
+    sideTabDiscardAndClose: 'Discard & close',
+    sideTabCancelClose: 'Cancel (Esc)',
+    sideTabLimitDirty: 'All 12 open tabs have unsaved edits; save or close one first.',
+    sideTabOpened: 'Open',
+    sideTabCopyPath: 'Copy path',
+    sideTabMissing: 'No longer exists',
     ...CHANGE_STRINGS.en,
     ...SEARCH_STRINGS.en,
   },
@@ -633,6 +739,35 @@ export const STRINGS = {
     diff: '看改动', close: '收起',
     resizePanel: '拖动调整侧栏宽度，双击恢复默认宽度',
     sending: '正在发送…', queued: '排队中', queuedTip: '等待 PM 可接收后自动送达',
+    queuedReasonStarting: 'PM 会话正在启动',
+    queuedReasonInflight: '等待上一条消息送达',
+    queuedReasonFifo: '等待前面的排队消息',
+    queuedReasonBlocked: 'PM 终端正停在交互提示上',
+    queuedReasonError: 'PM 终端报告了错误',
+    queuedReasonDraft: '排队中（终端有未发草稿）',
+    queuedReasonWorking: '等待 PM 当前轮次结束',
+    queuedReasonOffline: '等待 PM 会话恢复',
+    queuedReasonDisconnected: '等待远程机器重连',
+    queuedReasonTimeout: '正在核对投递状态',
+    queuedReasonNewSession: '换了 PM 会话，重新发送',
+    queuedReasonTypist: '等另一条消息打完',
+    queuedReasonCarried: '更新前没送出，接着发送',
+    queuedReasonRetryUnstarted: 'PM 没接住，重新发送',
+    queuedReasonRetryInterrupted: '那一轮被打断，重新发送',
+    queuedReasonRetryErrored: '那一轮出错，重新发送',
+    queuedReasonUnsupported: '这个 PM 收不了这类消息',
+    queuedReasonOther: '等待发送',
+    turnInterrupted: '那一轮被打断',
+    turnErrored: '那一轮出错',
+    bubbleStateAccepted: '排队中',
+    bubbleStateSending: '发送中',
+    bubbleStateTyped: '已送达',
+    bubbleStateTypedStep: '已送达，等它做完这一步',
+    bubbleStateTypedTurn: '已送达，等它答完这一轮',
+    bubbleStateConsumed: '已读到',
+    bubbleStateAnswered: '已回复',
+    bubbleStateFailed: '发送失败',
+    pmUndeliveredMessages: (n, dur, detail) => `${n} 条消息已等待 ${dur}未打进 PM 终端${detail ? `（${detail}）` : ''}`,
     queuedSummary: n => `${n} 条消息排队中，恢复后自动送达`,
     pmQueuedOnly: n => `${n} 条消息排队中，PM 可接收时自动送达`,
     pmBlockedQuestion: 'PM 正停在终端提问对话框上',
@@ -644,19 +779,70 @@ export const STRINGS = {
     pmBlockedQuota: 'PM 遇到了配额或限流提示',
     pmBlockedDraft: 'PM 终端里有未发送的草稿，清掉或发完后会自动送达',
     pmBlockedUnknown: 'PM 终端正停在交互提示上',
+    pmUndelivered: (n, dur, detail) => `${n} 条事件已等待 ${dur}未能送达 PM${detail ? `（${detail}）` : ''}`,
+    delivererStopped: '投递器未运行',
     unconfirmedSend: '已送到 PM 终端，但对话里一直没记下这条',
     unsureSend: '发送没有结束，PM 可能没收到',
     checkingSent: '正在核对 PM 是否已收到…',
     pmOfflineFailed: 'PM 会话已停止，未能收到此消息，点此重发',
     retrySend: '重新发送',
     pmTurnThinking: dur => `正在思考 · ${dur}`,
+    pmTurnPreamble: (text, dur) => `${text} · ${dur}`,
+    pmTurnLongGen: dur => `正在生成较长内容 · ${dur}`,
     pmTurnTool: (summary, dur) => `正在运行 ${summary} · ${dur}`,
+    pmTurnToolSlow: (summary, dur) => summary ? `前台命令已运行 ${dur}：${summary}` : `前台命令已运行 ${dur}`,
+    pmTurnToolSuspect: summary => summary ? `命令可能在等输入：${summary}` : '命令可能在等输入',
+    pmTurnRetrying: attempt => attempt ? `模型服务重试中（第 ${attempt} 次）` : '模型服务重试中',
+    pmTurnBlocked: kind => kind ? `等你在终端确认：${kind}` : '等你在终端确认',
+    pmTurnRecovering: step => step ? `正在自动恢复：${step}` : '正在自动恢复…',
+    incidentRecovering: step => step ? `正在自动恢复：${step}` : '正在自动恢复…',
+    incidentRecovered: detail => detail ? `已自动恢复 · ${detail}` : '已自动恢复',
+    incidentFolded: detail => detail ? `已自动恢复 · ${detail}` : '已自动恢复',
+    incidentNotified: detail => detail ? `需要你介入：${detail}` : '需要你介入',
+    recoveryStep_interrupt_tool: '打断卡住的前台命令',
+    recoveryStep_interrupt_turn: '打断当前步骤',
+    recoveryStep_continue_turn: '续上本轮',
+    recoveryStep_nudge_enter: '轻推终端启动',
+    recoveryStep_retype_submitted: '重发本条消息',
+    recoveryStep_restart_seat: '重启 PM 会话',
+    recoveryStep_switch_profile: '切换到备用模型',
+    recoveryStep_classify_screen: '检查终端屏幕',
+    recoveryStep_waiting_draft: '等待终端草稿清空',
+    recoveryStep_notify_user: '等待你处理',
+    recoveryStep_unblock_safe_dialog: '处理安全终端提示',
     pmTurnSlow: (detail, dur) => detail ? `等待返回：${detail} · ${dur}` : `仍在处理 · ${dur}`,
     pmTurnStalled: (detail, dur) => detail ? `已连续 ${dur} 无响应 · ${detail}` : `已连续 ${dur} 无响应`,
+    pmTurnStalledEvidence: (dur, evidence) => evidence ? `无响应 ${dur}（依据：${evidence}）` : `无响应 ${dur}`,
+    pmEvidencePtyFrozen: '屏幕 45 秒未变',
+    pmEvidenceNoStep: '4 分钟没有新的一步',
+    pmEvidenceToolHard: '前台命令超过硬预算',
+    pmEvidenceToolInput: '命令可能在等输入',
+    pmEvidenceSubmitted: '发出后未开始执行',
+    pmEvidenceUpstream: '模型服务超时',
+    pmTurnTotalTip: dur => `本轮总耗时：${dur}`,
+    openPmBgShells: n => `打开 PM 终端（${n} 个后台命令）`,
+    pmBusyTimingStep: '做完这一步',
+    pmBusyTimingTurn: '答完这一轮',
+    pmBusyActThinking: '思考',
+    pmBusyActLongGen: '生成较长内容',
+    pmBusyActRetrying: '等待模型服务重试',
+    pmBusyActRunning: summary => `运行 ${summary}`,
+    pmBusyComposer: (activity, timing) => `协调者正在${activity}；这条消息会在它${timing}后被看到`,
+    pmBusyComposerQueued: (activity, timing, n) => `协调者正在${activity}；${n > 1 ? `${n} 条排队消息` : '排队消息'}会在它${timing}后被看到`,
+    pmPreemptAction: '打断它，先处理这条',
+    pmPreemptQueuedAction: '打断它，先处理排队消息',
+    pmTurnUnknown: '状态未知，正在重连…',
     interruptPmTip: '打断当前耗时操作（保留 PM 会话）',
     interruptingPmTip: '正在打断…',
+    interruptStopped: '已打断当前操作',
+    interruptStillWorking: '打断没有生效（仍在运行）',
+    interruptExited: 'PM 进程已退出',
+    interruptUnknown: '已发送打断（结果未知）',
+    interruptFailed: error => `打断失败：${error}`,
     rotatePmTip: '换新会话从台账接手',
     rotatingPmTip: '正在切换新会话接手…',
+    rotateSucceeded: '已切换新会话接手',
+    rotateFailed: error => `换新会话失败：${error}`,
     failed: error => `没发出去：${error}`, decision: '决定',
     pick: '在 PM 列表里点一个项目，打开它的对话。', noProject: '台账里已经没有这个 PM。',
     remoteLoading: machine => `正在从 ${machine} 读取这个项目…`,
@@ -688,6 +874,7 @@ export const STRINGS = {
     libraryTab: 'Library',
     memoryTab: 'Memory',
     showSidePanel: '显示侧栏', hideSidePanel: '收起侧栏',
+    windowMinimize: '最小化', windowMaximize: '最大化', windowRestore: '还原', windowClose: '关闭',
     searchLibrary: '搜索 Library…', searchMemory: '搜索 Memory…', searchThreads: '搜索线程…', clearSearch: '清除搜索',
     threadsSearching: '正在搜索线程…',
     threadsNoMatches: '没有匹配的线程。',
@@ -740,6 +927,11 @@ export const STRINGS = {
     docLoading: '正在读取文档…',
     docNotText: '二进制或图片文件，不在面板内按文本展开。',
     docTooLarge: '文件超过 1 MB，不在面板内整篇读取。',
+    imageOpenPreview: '打开原图预览',
+    imageLoading: '正在加载图片…',
+    imageLoadFailed: '无法加载图片预览',
+    imageTooLarge: '图片过大，无法在此预览。',
+    imageDimensions: (w, h) => `${w} × ${h}`,
     docNotFound: '这份资料已经不在 Library 里。',
     memNotFound: '这条记忆已经不存在。',
     docReadError: error => `读取文档失败：${error}`,
@@ -814,6 +1006,9 @@ export const STRINGS = {
     toolRunOther: n => `用了 ${n} 次别的工具`,
     toolRunTools: n => `用了 ${n} 次工具`,
     toolErrors: n => `${n} 处报错`,
+    sessionQuestionLabel: '向你提问',
+    sessionQuestionTerminalHint: '若停在终端交互菜单，可点右上角切到终端操作。',
+    sessionQuestionAnswered: '回复',
     workedHours: (h, m) => `干了 ${h} 小时 ${m} 分`,
     workedMinutes: (m, s) => `干了 ${m} 分 ${s} 秒`,
     workedSeconds: s => `干了 ${s} 秒`,
@@ -860,6 +1055,23 @@ export const STRINGS = {
     quoteAuthorQuestion: '提问',
     quoteCount: n => `${n} 段引用`,
     quoteSelectionAction: '引用所选',
+    closeSidePanel: '关闭侧栏',
+    resetPanelWidthTip: '拖动调整分栏宽度，双击恢复当前视图默认宽度',
+    sideTabsIndex: '浏览线程 / Library / Memory',
+    sideTabsAll: n => `已打开 ${n} 个标签页`,
+    sideTabClose: '关闭标签页',
+    sideTabCloseOthers: '关闭其他标签页',
+    sideTabCloseRight: '关闭右侧标签页',
+    sideTabCloseAll: '关闭全部标签页',
+    sideTabDirtyHint: name => `${name} 有未保存的修改`,
+    sideTabDirtyWarning: '未保存的修改将在关闭后丢失。',
+    sideTabSaveAndClose: '保存并关闭',
+    sideTabDiscardAndClose: '放弃修改并关闭',
+    sideTabCancelClose: '取消（Esc）',
+    sideTabLimitDirty: '已打开的 12 个标签页均含未保存修改，请先保存或关闭一个。',
+    sideTabOpened: '已打开',
+    sideTabCopyPath: '复制路径',
+    sideTabMissing: '文件已不存在',
     ...CHANGE_STRINGS.zh,
     ...SEARCH_STRINGS.zh,
   },
@@ -1058,7 +1270,7 @@ export function terminalAction(terminal, task, busy = false, parts = 0) {
 }
 
 // `pm.py reattach <id>` as the project view runs it: without this app's terminal identity, so the
-// ledger records the user as the one who reattached (as sendArgv does for a send). Pass through
+// ledger records the user as the one who reattached (as a send does). Pass through
 // withoutTerminalEnv (and on Windows, prefer execPython instead of a bare `python3`).
 export function reattachArgv(script, id) {
   return ['python3', script, 'reattach', id];
@@ -1198,9 +1410,20 @@ function bubbleMatchesCausalId(p, obj) {
   return false;
 }
 
+// True when `obj` explicitly belongs to a different `msg_id` / `msg_ids` than `p.msgId` (MSG-6).
+function hasDifferentCausalId(p, obj) {
+  const id = p?.msgId ? String(p.msgId) : '';
+  if (!id || !obj || typeof obj !== 'object') return false;
+  if (obj.msg_id) return String(obj.msg_id) !== id;
+  if (Array.isArray(obj.msg_ids) && obj.msg_ids.length > 0) {
+    return !obj.msg_ids.some(x => String(x) === id);
+  }
+  return false;
+}
+
 // Messages sent from the view show at once and give way to the same message in the log:
 // 1) Causal `msg_id` / `msg_ids` match (zero clock assumptions across any timezone);
-// 2) 1-to-1 text/attachment match within UTC-calibrated window (`eventTimeUtcMs`);
+// 2) 1-to-1 text/attachment match within UTC-calibrated window (`eventTimeUtcMs`), skipping events carrying a different `msg_id`;
 // 3) N-to-1 ordered line-partition match when an agent coalesced 2+ queued messages into one user turn.
 export function settlePending(pending, events, { clockOffsetMs = 0 } = {}) {
   const src = Array.isArray(pending) ? pending : [];
@@ -1217,7 +1440,7 @@ export function settlePending(pending, events, { clockOffsetMs = 0 } = {}) {
     let matchedAny = false;
     for (const p of src) {
       if (!p || settledSet.has(p)) continue;
-      if ((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend)) continue;
+      if ((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend && !p.serverQueued)) continue;
       if (bubbleMatchesCausalId(p, e)) {
         settledSet.add(p);
         matchedAny = true;
@@ -1227,13 +1450,13 @@ export function settlePending(pending, events, { clockOffsetMs = 0 } = {}) {
     if (matchedAny) usedEvents.add(n);
   }
 
-  // Pass 2: 1-to-1 text + UTC timestamp match.
+  // Pass 2: 1-to-1 text + UTC timestamp match (never match an event carrying a different `msg_id`, MSG-6).
   for (const p of src) {
     if (!p || settledSet.has(p)) continue;
-    if ((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend)) continue;
+    if ((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend && !p.serverQueued)) continue;
     const minAt = pendingMinAtMs(p);
-    const i = evList.findIndex((e, n) => !usedEvents.has(n) && e?.type === 'user' && sameMessage(e.text, p.text) &&
-      eventTimeUtcMs(e, clockOffsetMs) >= minAt);
+    const i = evList.findIndex((e, n) => !usedEvents.has(n) && e?.type === 'user' && !hasDifferentCausalId(p, e) &&
+      sameMessage(e.text, p.text) && eventTimeUtcMs(e, clockOffsetMs) >= minAt);
     if (i < 0) continue;
     usedEvents.add(i);
     settledSet.add(p);
@@ -1250,7 +1473,8 @@ export function settlePending(pending, events, { clockOffsetMs = 0 } = {}) {
       if (!(evMs > 0)) continue;
       const eligible = src.filter(p =>
         p && !settledSet.has(p) &&
-        !((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend)) &&
+        !((p.failed && !p.timedOut) || (p.queued && !p.requeuedFromSend && !p.serverQueued)) &&
+        !hasDifferentCausalId(p, e) &&
         evMs >= pendingMinAtMs(p),
       );
       if (eligible.length < 2) continue;
@@ -1801,7 +2025,8 @@ export const askKey = id => `${ASK}${id}`;
 // before it: a note on a question asked earlier (`pm.py log`) is no new question. pm: the project's
 // name: only its tasks count so (tasks of other projects can share a title). The same rule as pm.py's
 // answered_tasks.
-export function timeline(events, tasks = [], { pending = [], typing = false, today = '', pastes = [], pm = '', pmPane = '', taskNumbers = null, clockOffsetMs = 0 } = {}) {
+export function timeline(events, tasks = [], { pending = [], typing = false, today = '', pastes = [], pm = '', pmPane = '', taskNumbers = null, clockOffsetMs = 0, inbox = [] } = {}) {
+  const inboxRows = inboxByMsgId(inbox);
   const byId = new Map((tasks || []).map(t => [t.id, t]));
   const numOf = (id, ev) => taskNumber(byId.get(id)) || taskNumber(ev) || taskNumber(taskNumbers?.[id]);
   const newest = new Map();
@@ -1821,7 +2046,7 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
     nowCache.set(id, cached);
     return cached;
   };
-  const items = [], shown = new Set(), asked = new Set(), before = new Map(), keys = new Map(), questions = [], questionMeta = new Map();
+  const items = [], shown = new Set(), asked = new Set(), before = new Map(), keys = new Map(), questions = [], questionMeta = new Map(), incidentsByKey = new Map();
   const hasPastes = Array.isArray(pastes) && pastes.length > 0;
   const carried = hasPastes
     ? new Set([...events.filter(e => e.type === 'user'), ...(pending || [])]
@@ -1907,7 +2132,8 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
     const answers = p.question || addressed(squash(p.text))?.key;
     const { text, files } = splitMessage(p.text);
     items.push({ kind: 'user', key: `pending:${p.id}`, text, pending: !p.failed && !p.queued && !p.received,
-      ...(p.queued ? { queued: true } : {}), ...(p.received ? { received: true } : {}), failed: p.failed || '',
+      ...(p.queued ? { queued: true } : {}), ...(p.queuedReason ? { queuedReason: String(p.queuedReason) } : {}),
+      ...(p.received ? { received: true } : {}), failed: p.failed || '',
       // unconfirmed: it may well have arrived (see unconfirmedSend), so no "not sent" before it;
       // checking: a resend checking the log first (reconcilePendingSends).
       ...(p.failed && p.timedOut ? { unconfirmed: true } : {}), ...(p.verifying && !p.failed ? { checking: true } : {}),
@@ -1976,6 +2202,15 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
         const { text, files } = splitMessage(said);
         if (files.length) { item.text = text; item.files = files; }
         else if (pasted.has(e)) { item.text = FILES_ONLY.includes(text) ? '' : text; item.files = pasted.get(e); }
+        // Where it is in the PM's mailbox (§3.9): logged at accept, so the log line alone does not say it was sent.
+        const row = e.msg_id ? inboxRows.get(String(e.msg_id)) : undefined;
+        const rowState = String(row?.state || '');
+        if (row && rowState && !['answered', 'superseded', 'expired'].includes(rowState)) {
+          item.delivery = {
+            state: rowState, hold_reason: String(row.hold_reason || ''), last_error: String(row.last_error || ''),
+            sending: Boolean(row.sending), attempts: Number(row.attempts) || 0,
+          };
+        }
       }
       if (e.type === 'pm') {
         const opening = lead(item.text);
@@ -1987,6 +2222,38 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
       if (decText) {
         if (anchoredIdx < anchoredPending.length) flushPendingBefore(e);
         push(e, { kind: 'decision', key: key(e, 'decision'), text: decText, quote: squash(e.quote) });
+      }
+    } else if (e.type === 'event' && e.source === 'pm-incident') {
+      const incKey = String(e.key || e.incident_id || '').trim() || key(e, 'incident');
+      const fields = {
+        incidentClass: String(e.incident_class || e.class || ''),
+        status: String(e.status || 'open'),
+        stage: Number(e.stage) || 0,
+        step: String(e.step || ''),
+        folded: Boolean(e.folded),
+        reason: String(e.reason || ''),
+        error: String(e.error || ''),
+        suggestedProfile: String(e.suggested_profile || ''),
+        text: squash(e.text || ''),
+      };
+      const existing = incidentsByKey.get(incKey);
+      if (existing) {
+        Object.assign(existing, {
+          at: e.at || existing.at,
+          ...(Number(e.at_ms) > 0 ? { at_ms: Number(e.at_ms) } : {}),
+          ...fields,
+          count: (existing.count || 1) + 1,
+        });
+      } else {
+        if (anchoredIdx < anchoredPending.length) flushPendingBefore(e);
+        const incItem = push(e, {
+          kind: 'incident',
+          key: `incident:${incKey}`,
+          incidentKey: incKey,
+          count: 1,
+          ...fields,
+        });
+        incidentsByKey.set(incKey, incItem);
       }
     } else if (e.type === 'thread' && e.task) {
       if (anchoredIdx < anchoredPending.length) flushPendingBefore(e);
@@ -2083,7 +2350,7 @@ export function turns(items, pmPane = '') {
   const out = [];
   items.forEach((item, index) => {
     const last = out[out.length - 1];
-    if (item.kind === 'day' || item.kind === 'user') out.push({ ...item, index: [index] });
+    if (item.kind === 'day' || item.kind === 'user' || item.kind === 'incident') out.push({ ...item, index: [index] });
     else if (last?.kind === 'turn' && !last.said && item.kind !== 'typing') {
       last.parts.push(item); last.index.push(index); last.said = item.kind === 'pm';
     } else {
@@ -2162,16 +2429,55 @@ export const FINISHED_LIMIT = 6;
 export const OPEN_GROUPS = ['waiting', 'working', 'offline', 'paused', 'parked'];
 const GROUP = { blocked: 'waiting', review: 'working', in_progress: 'working', paused: 'paused' };
 
-// The tasks whose own worker is at work now: a live terminal on this computer labeled with the task
-// and reporting `working`. Only these move on screen (dots in the conversation, the arc in the panel).
+const termStatusWord = s => (typeof s === 'string' ? s : (s && typeof s === 'object' ? String(s.state || '') : ''));
+
+// The tasks whose own worker or task-serving helper is at work now: a live terminal on this computer
+// labeled with the task (`task`, `helper.task`, or a worker's `helper.of`) and reporting `working`.
+// Only these move on screen (dots in the conversation, the arc in the panel).
 export function workingTasks(terms = [], live = []) {
   const ids = new Set();
   for (const term of terms || []) {
-    const task = term.labels?.task;
-    if (!task || term.state !== 'live' || !term.address || term.address.includes('/')) continue;
-    if (((live || []).find(a => a.address === term.address)?.status || term.status) === 'working') ids.add(task);
+    if (!term || term.state !== 'live' || !term.address || term.address.includes('/')) continue;
+    const lb = term.labels;
+    const helperOf = lb?.['helper.of'];
+    const task = lb?.task || lb?.['helper.task'] || (helperOf && !String(helperOf).startsWith('pm-') ? helperOf : '');
+    if (!task) continue;
+    const liveEntry = (live || []).find(a => a.address === term.address);
+    const status = termStatusWord(liveEntry?.status) || termStatusWord(term.status);
+    if (status === 'working') ids.add(task);
   }
   return ids;
+}
+
+// True when a task has an actively working worker or helper right now (by label, pane, helper list,
+// or state fallback when no live terminal record is present).
+function taskWorking(task, atWork, terms = [], live = []) {
+  if (!task || typeof task !== 'object') return false;
+  if (atWork?.has(task.id)) return true;
+  const term = terminalFor(taskRow(task), terms || []);
+  if (term && !String(term.address || '').includes('/')) {
+    const liveEntry = (live || []).find(a => a.address === term.address);
+    const status = termStatusWord(liveEntry?.status) || termStatusWord(term.status);
+    if (status === 'working') return true;
+  } else if (!term && task.worker === 'working') {
+    return true;
+  }
+  if (Array.isArray(task.helpers)) {
+    for (const h of task.helpers) {
+      if (!h || typeof h !== 'object' || h.status !== 'running' || h.offline || h.live_state === 'offline') continue;
+      const hAddr = String(h.terminal || h.pane || '').replace(/^hc:/, '');
+      const hTerm = hAddr ? (terms || []).find(x => x?.address === hAddr) : null;
+      if (hTerm) {
+        if (hTerm.state !== 'live' || String(hTerm.address || '').includes('/')) continue;
+        const liveEntry = (live || []).find(a => a.address === hTerm.address);
+        const status = termStatusWord(liveEntry?.status) || termStatusWord(hTerm.status);
+        if (status === 'working') return true;
+      } else if (h.live_state === 'working') {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 // True when a task in review has a live reviewer actively working right now.
@@ -2192,7 +2498,8 @@ export function reviewWorking(task, terms = [], live = []) {
   };
   const rTerm = terminalFor(rRow, terms || []);
   if (rTerm) {
-    const status = (live || []).find(a => a.address === rTerm.address)?.status || rTerm.status;
+    const liveEntry = (live || []).find(a => a.address === rTerm.address);
+    const status = termStatusWord(liveEntry?.status) || termStatusWord(rTerm.status);
     return status === 'working';
   }
   return r.worker === 'working';
@@ -2230,7 +2537,7 @@ const openRow = (t, lang, atWork, terms = [], live = []) => {
     ...(steps?.hasPlan ? { plan: { done: steps.done, total: steps.total, progress: steps.progress, pill: steps.pill, postGate: steps.postGate } } : {}),
     latest: logText(lang, t.latest), updated: String(t.updated || ''), ...(!postGate && t.offline ? { offline: true } : {}),
     ...(closed ? { closed } : {}),
-    branch: String(t.branch || ''), working: !isOffline && atWork.has(t.id),
+    branch: String(t.branch || ''), working: !isOffline && group === 'working' && taskWorking(t, atWork, terms, live),
     ...(ctx ? { contextTokens: ctx } : {}) };
 };
 
@@ -2243,10 +2550,11 @@ export function subThreads(tasks, id, terms = [], live = [], lang = 'en', retire
   if (!id) return [];
   const atWork = workingTasks(terms, live);
   const seen = new Set();
-  const parts = [...(Array.isArray(tasks) ? tasks : []), ...(Array.isArray(retired) ? retired : [])]
+  const allTasks = [...(Array.isArray(tasks) ? tasks : []), ...(Array.isArray(retired) ? retired : [])];
+  const parts = allTasks
     .filter(t => t?.id && t.id !== id && t.parent === id && !seen.has(t.id) && seen.add(t.id));
   const newest = (a, b) => String(b.updated || '').localeCompare(String(a.updated || ''));
-  const open = parts.filter(t => !CLOSED.includes(t.status)).sort((a, b) => openRank(a) - openRank(b) || newest(a, b))
+  const open = sortChildTasks(parts.filter(t => !CLOSED.includes(t.status)), allTasks)
     .map(t => openRow(t, lang, atWork, terms, live));
   const over = parts.filter(t => CLOSED.includes(t.status)).sort(newest)
     .map(t => {
@@ -2636,11 +2944,33 @@ export function shortPath(path, home) {
   return home && (p === home || p.startsWith(home + '/')) ? '~' + p.slice(home.length) : p;
 }
 
-// The send argv: `hc send …`. Run through withoutTerminalEnv so the PM's hook records the text as
-// the user's turn, not as another agent's. `--` keeps a text starting with "-" (a Markdown list)
-// from parsing as an option.
-export function sendArgv(address, text) {
-  return ['hc', 'send', '--', address, text];
+// The pm.py argv of the thread box and the agent window: the user's own words into a worker, reviewer
+// or helper terminal (`address` as the project's machine names it). `pm.py send --as-user` queues
+// them in that terminal's mailbox and its one typist types them as written (no `[from …]` line);
+// nothing here types into a terminal itself. `task`: the thread it belongs to (a send that does not
+// go in is noted there). A long text goes as `fromFile`. `--` keeps a text starting with "-" (a
+// Markdown list) from parsing as an option.
+// `asUser: false`: for a pm.py older than `--as-user` on the project's machine (the words then go with its
+// `[from …]` line). `wait`: typed before pm.py answers (no thread to note a later failure on), so an
+// error comes back to the caller; `--timeout` bounds the hc send.
+export function terminalSendArgv(address, { text = null, fromFile = null, task = '', asUser = true, wait = false } = {}) {
+  const args = ['send'];
+  if (asUser) args.push('--as-user');
+  if (task) args.push('--task', String(task));
+  if (wait) args.push('--wait', '--timeout', String(SEND_WAIT_SECONDS));
+  if (fromFile != null) return [...args, '--file', String(fromFile), '--', String(address)];
+  return [...args, '--', String(address), String(text ?? '')];
+}
+
+export const SEND_WAIT_SECONDS = 60;
+
+// Whether pm.py refused an option it does not know (argparse: "unrecognized arguments: --as-user"): a
+// machine whose pm.py is older than this app.
+export function rejectsOption(result, option) {
+  if (!result || result.code === 0) return false;
+  const text = `${result.stderr || ''}\n${result.stdout || ''}`;
+  const at = text.search(/unrecognized arguments:/i);
+  return at >= 0 && text.slice(at).split('\n')[0].split(/\s+/).includes(String(option));
 }
 
 export function makeClientMsgId(now = Date.now(), seq = 1) {
@@ -2650,17 +2980,18 @@ export function makeClientMsgId(now = Date.now(), seq = 1) {
   return `u-${ts}-${s}-${rand}`;
 }
 
+// Put optional positional `target` before flags and pass payload via `--text=`/`--from=` (no `--`) so
+// both newer `pm.py` and older Python <3.12 argparse `project send` subparsers accept normal and `-`-prefixed text.
 export function projectSendArgv(slug, { msgId, target = '', text = null, fromFile = null, question = '' } = {}) {
-  const args = ['project', 'send', String(slug), '--msg-id', String(msgId)];
+  const args = ['project', 'send', String(slug)];
+  if (target) args.push(String(target));
+  args.push('--msg-id', String(msgId));
   if (question) args.push('--question', String(question));
   if (fromFile != null) {
     args.push(`--from=${String(fromFile)}`);
-    if (target) args.push('--', String(target));
     return args;
   }
-  args.push('--');
-  if (target) args.push(String(target));
-  args.push(String(text ?? ''));
+  args.push(`--text=${String(text ?? '')}`);
   return args;
 }
 
@@ -2686,12 +3017,19 @@ export function pmLiveStatus(pmTerm, live = []) {
 
 // True when the PM's foreground agent turn is actively running (excluding background-shell-only
 // status reports like "1 shell still running" or `pm.turn.phase === 'idle'` with `bg_shells > 0`).
+// When the live PM terminal reports no status at all, fall back to pm.py's turn record (`pm-turn.json`).
 export function pmTurnWorking(pmTerm, live = [], turn = null) {
-  if (pmLiveStatus(pmTerm, live) !== 'working') return false;
-  const msg = String(pmTerm?.report?.msg || '');
-  if (/\bshells?\s+still\s+running\b/i.test(msg)) return false;
-  if (turn && typeof turn === 'object' && turn.phase === 'idle' && Number(turn.bg_shells) > 0) return false;
-  return true;
+  const liveStatus = pmLiveStatus(pmTerm, live);
+  if (liveStatus === 'working') {
+    const msg = String(pmTerm?.report?.msg || '');
+    if (/\bshells?\s+still\s+running\b/i.test(msg)) return false;
+    if (turn && typeof turn === 'object' && turn.phase === 'idle' && Number(turn.bg_shells) > 0) return false;
+    return true;
+  }
+  if (pmTerm?.address && !liveStatus && turn && typeof turn === 'object') {
+    return turn.phase === 'working' || turn.phase === 'stalled';
+  }
+  return false;
 }
 
 export const PM_SOFT_STALL_MS = 90_000;
@@ -2708,69 +3046,540 @@ export function formatTurnDuration(ms) {
   return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
 }
 
-// Pure view-model for the quiet single-line coordinator activity indicator at the bottom of the timeline.
+export const PM_SNAPSHOT_STALE_MS = 15_000;
+
+function clipSingleLine(text, maxLen = 72) {
+  const flat = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!flat) return '';
+  return flat.length > maxLen ? `${flat.slice(0, maxLen - 1)}…` : flat;
+}
+
+function stallEvidenceLabel(lang, healthReason, detail) {
+  const r = String(healthReason || '').trim().toLowerCase();
+  if (r === 'pty_frozen') return word(lang, 'pmEvidencePtyFrozen');
+  if (r === 'no_step_timeout') return word(lang, 'pmEvidenceNoStep');
+  if (r === 'tool_hard_budget') return word(lang, 'pmEvidenceToolHard');
+  if (r === 'tool_waiting_input') return word(lang, 'pmEvidenceToolInput');
+  if (r === 'submitted_timeout') return word(lang, 'pmEvidenceSubmitted');
+  if (r === 'upstream_timeout') return word(lang, 'pmEvidenceUpstream');
+  return clipSingleLine(detail || healthReason || '', 52);
+}
+
+function extractRetryAttempt(act, healthReason) {
+  const sources = [
+    String(act?.summary || ''),
+    String(healthReason || ''),
+  ];
+  for (const src of sources) {
+    const m = src.match(/(?:retry\s*[:#]?\s*|attempt\s*|第\s*)(\d+)/i);
+    if (m) return Number(m[1]) || 0;
+  }
+  return 0;
+}
+
+function agentSteersMidTurn(agentKind) {
+  const norm = String(agentKind || '').trim().toLowerCase();
+  return norm === 'claude' || norm === 'claude-code' || norm === 'codex';
+}
+
+export function recoveryStepLabel(lang, rawStep) {
+  const step = clipSingleLine(rawStep || '', 56);
+  if (!step) return '';
+  const strKey = `recoveryStep_${step}`;
+  if (Object.prototype.hasOwnProperty.call(STRINGS.en, strKey)) return word(lang, strKey);
+  return step;
+}
+
+const INCIDENT_PREFIX_RE = /^(?:auto-recovered\s*(?:\(|·)|recovered\s+(?:from\b|·)|recovery stopped\s*\(|needs your attention[:\s]|auto-recovering[:\s]|recovering\s*(?:\(|:)|已自动恢复|已从「|自动恢复需要|需要你介入|正在自动恢复)/i;
+
+export function incidentRowView(lang, item) {
+  const status = String(item?.status || 'open').trim().toLowerCase();
+  const folded = status === 'resolved' && Boolean(item?.folded);
+  const stepLabel = recoveryStepLabel(lang, item?.step || '');
+  const rawDetail = String(item?.text || '').trim()
+    || [item?.incidentClass, item?.reason, item?.error].filter(Boolean).join(' · ');
+  const detail = clipSingleLine(rawDetail, 120);
+  const hasPrefix = INCIDENT_PREFIX_RE.test(detail);
+  if (folded) {
+    return { label: hasPrefix ? detail : word(lang, 'incidentFolded', detail), detail, tone: 'muted', folded: true, icon: 'check' };
+  }
+  if (status === 'resolved') {
+    return { label: hasPrefix ? detail : word(lang, 'incidentRecovered', detail), detail, tone: 'resolved', folded: false, icon: 'check' };
+  }
+  if (status === 'notified') {
+    return { label: hasPrefix ? detail : word(lang, 'incidentNotified', detail), detail, tone: 'alert', folded: false, icon: 'bell' };
+  }
+  return {
+    label: stepLabel
+      ? word(lang, 'incidentRecovering', stepLabel)
+      : (hasPrefix ? detail : word(lang, 'incidentRecovering', detail)),
+    detail,
+    tone: 'recovering',
+    folded: false,
+    icon: 'refresh',
+  };
+}
+
+// Pure view-model for the quiet single-line coordinator activity indicator at the bottom of the timeline (§3.9).
+// Maps backend `turn2` + `supervised` + snapshot age strictly to the §3.9 table; zero local threshold invention (FS-13).
 export function pmActivityView(lang, {
   turn = null,
+  turn2 = null,
+  supervised = undefined,
   working = false,
   pendingSending = false,
   nowMs = Date.now(),
   serverNowMs = 0,
   receivedAtMs = 0,
+  snapshotAgeMs = null,
+  agentKind = '',
 } = {}) {
-  const active = Boolean(working || pendingSending);
-  if (!active) {
-    return { active: false, mode: 'idle', label: '', slow: false, stalled: false, canInterrupt: false, canRotate: false };
+  const v2Turn = turn2?.turn && typeof turn2.turn === 'object' ? turn2.turn : null;
+  const effTurn = turn && typeof turn === 'object' ? turn : null;
+  const effPhase = String(v2Turn?.phase || effTurn?.phase || '');
+  const effHealth = String(v2Turn?.health || effTurn?.health || '');
+  const bgShells = Number(turn2?.bg_shells?.count ?? effTurn?.bg_shells ?? 0) || 0;
+  const resolvedKind = String(turn2?.session?.agent_kind || agentKind || '').trim().toLowerCase();
+  const steersMidTurn = agentSteersMidTurn(resolvedKind);
+
+  const base = {
+    active: false,
+    mode: 'idle',
+    label: '',
+    preamble: '',
+    tooltip: '',
+    tone: 'neutral',
+    slow: false,
+    stalled: false,
+    unknown: false,
+    canInterrupt: false,
+    canRotate: false,
+    canOpenTerminal: false,
+    bgShells,
+    steersMidTurn,
+    activityShort: '',
+  };
+
+  // §3.9 Row 1: `supervised: false` or snapshot > 15s stale -> Status unknown, reconnecting… (openTerminal icon).
+  const isSupervised = supervised === false || turn2?.supervised === false ? false : true;
+  const computedAgeMs = Number.isFinite(snapshotAgeMs)
+    ? Math.max(0, Number(snapshotAgeMs))
+    : (Number(receivedAtMs) > 0 && Number(nowMs) > Number(receivedAtMs)
+      ? Math.max(0, Number(nowMs) - Number(receivedAtMs))
+      : (Number.isFinite(turn2?.beat_age_ms) ? Number(turn2.beat_age_ms) : 0));
+  const snapshotStale = computedAgeMs > PM_SNAPSHOT_STALE_MS;
+
+  if ((!isSupervised || effHealth === 'unknown' || snapshotStale) && effPhase !== 'offline') {
+    return {
+      ...base,
+      active: true,
+      mode: 'unknown',
+      label: word(lang, 'pmTurnUnknown'),
+      tone: 'muted',
+      unknown: true,
+      canOpenTerminal: true,
+    };
   }
-  if (!turn || typeof turn !== 'object' || turn.phase === 'idle' || turn.phase === 'offline') {
-    return { active: true, mode: 'dots', label: '', slow: false, stalled: false, canInterrupt: false, canRotate: false };
+
+  // §3.9 Row 13: `idle` with background shells -> hide activity row (bgShells surfaced in header terminal tooltip).
+  if (effPhase === 'idle' && !pendingSending) {
+    return { ...base, active: false, mode: 'idle', bgShells };
   }
+
+  // §3.9 Row 10: `blocked` (even when `working` is false) -> Waiting for you in the terminal + openTerminal.
+  if (effPhase === 'blocked') {
+    const kindText = clipSingleLine(v2Turn?.activity?.summary || v2Turn?.health_reason || '', 48);
+    return {
+      ...base,
+      active: true,
+      mode: 'blocked',
+      label: word(lang, 'pmTurnBlocked', kindText),
+      tone: 'warn',
+      canOpenTerminal: true,
+    };
+  }
+
+  // §3.9 Row 11: `recovering` -> Recovering: <step> + openTerminal.
+  if (effPhase === 'recovering') {
+    const rawStep = v2Turn?.activity?.summary || turn2?.incident?.step_name || v2Turn?.health_reason || '';
+    const stepText = recoveryStepLabel(lang, rawStep);
+    return {
+      ...base,
+      active: true,
+      mode: 'recovering',
+      label: word(lang, 'pmTurnRecovering', stepText),
+      tone: 'neutral',
+      canOpenTerminal: true,
+    };
+  }
+
+  const active = Boolean(working || pendingSending || (v2Turn && ['submitted', 'generating', 'tool', 'waiting_upstream'].includes(effPhase)));
+  if (!active || effPhase === 'offline' || effPhase === 'starting') {
+    return { ...base, active: false, mode: 'idle', bgShells };
+  }
+
+  // §3.9 Row 2: `submitted` -> dots only, no icons.
+  if (effPhase === 'submitted') {
+    if (effHealth === 'stalled') {
+      const refNowSub = Number(serverNowMs) > 0
+        ? Number(serverNowMs) + (Number(receivedAtMs) > 0 ? Math.max(0, nowMs - Number(receivedAtMs)) : 0)
+        : nowMs;
+      const sinceMs = Number(v2Turn?.phase_since_ms || v2Turn?.started_ms) || 0;
+      const dur = formatTurnDuration(sinceMs > 0 ? Math.max(0, refNowSub - sinceMs) : 0);
+      const evidence = stallEvidenceLabel(lang, v2Turn?.health_reason, '');
+      return {
+        ...base,
+        active: true,
+        mode: 'stalled',
+        label: word(lang, 'pmTurnStalledEvidence', dur, evidence),
+        tone: 'stalled',
+        stalled: true,
+        canInterrupt: true,
+        canRotate: true,
+        canOpenTerminal: true,
+      };
+    }
+    return { ...base, active: true, mode: 'dots', label: '', canInterrupt: false };
+  }
+
+  if (!effTurn && !v2Turn) {
+    return { ...base, active: true, mode: 'dots', label: '', canInterrupt: Boolean(working) };
+  }
+
+  const srcTurn = v2Turn || effTurn;
   const refNow = Number(serverNowMs) > 0
     ? Number(serverNowMs) + (Number(receivedAtMs) > 0 ? Math.max(0, nowMs - Number(receivedAtMs)) : 0)
     : nowMs;
-  const startedMs = Number(turn.started_ms) || 0;
-  const lastActMs = Number(turn.last_activity_ms) || startedMs;
-  const elapsedMs = startedMs > 0 ? Math.max(Number(turn.elapsed_ms) || 0, refNow - startedMs) : (Number(turn.elapsed_ms) || 0);
-  const idleForMs = lastActMs > 0 ? Math.max(Number(turn.idle_for_ms) || 0, refNow - lastActMs) : (Number(turn.idle_for_ms) || 0);
-  const act = turn.activity && typeof turn.activity === 'object' ? turn.activity : null;
-  const rawSummary = act ? String(act.summary || act.tool || '').trim() : '';
-  const detail = rawSummary.length > 52 ? `${rawSummary.slice(0, 51)}…` : rawSummary;
-  const stalled = Boolean(turn.stalled || turn.phase === 'stalled' || idleForMs >= PM_HARD_STALL_MS);
-  const slow = !stalled && Boolean(turn.slow || idleForMs >= PM_SOFT_STALL_MS);
-  if (!stalled && !slow && elapsedMs < 3000 && !detail) {
-    return { active: true, mode: 'dots', label: '', slow: false, stalled: false, canInterrupt: false, canRotate: false };
-  }
-  const dur = formatTurnDuration(stalled || slow ? Math.max(elapsedMs, idleForMs) : elapsedMs);
+  const startedMs = Number(v2Turn?.started_ms ?? effTurn?.started_ms) || 0;
+  const phaseSinceMs = Number(v2Turn?.phase_since_ms ?? startedMs) || startedMs;
+  const lastProgressMs = Number(v2Turn?.last_progress_ms ?? effTurn?.last_activity_ms) || startedMs;
+  const elapsedMs = startedMs > 0
+    ? Math.max(Number(effTurn?.elapsed_ms) || 0, refNow - startedMs)
+    : (Number(effTurn?.elapsed_ms) || 0);
+  const idleForMs = lastProgressMs > 0
+    ? Math.max(Number(effTurn?.idle_for_ms) || 0, refNow - lastProgressMs)
+    : (Number(effTurn?.idle_for_ms) || 0);
+  const totalTip = elapsedMs > 0 ? word(lang, 'pmTurnTotalTip', formatTurnDuration(elapsedMs)) : '';
+
+  const act = (v2Turn?.activity && typeof v2Turn.activity === 'object' ? v2Turn.activity : null)
+    || (effTurn?.activity && typeof effTurn.activity === 'object' ? effTurn.activity : null);
+  const isToolPhase = effPhase === 'tool'
+    || (!v2Turn && Boolean(act && (act.kind === 'tool' || (!act.kind && (act.tool || act.summary)))));
+  const rawSummary = isToolPhase ? String(act?.summary || act?.tool || '').trim() : '';
+  const detail = clipSingleLine(rawSummary, 52);
+  const preamble = clipSingleLine(act?.preamble || '', 80);
+
+  // FS-13: Trust backend `stalled` / `slow` / `suspect` strictly; never extrapolate past thresholds locally.
+  const stalled = Boolean(effHealth === 'stalled' || effTurn?.stalled || effPhase === 'stalled');
+  const suspect = !stalled && effHealth === 'suspect';
+  const slow = !stalled && !suspect && Boolean(effHealth === 'slow' || effTurn?.slow);
+
+  // §3.9 Row 12: `health: stalled` -> Unresponsive <dur> (<evidence>) + interrupt, rotate, openTerminal.
   if (stalled) {
+    const dur = formatTurnDuration(idleForMs);
+    const evidence = stallEvidenceLabel(lang, v2Turn?.health_reason, detail);
     return {
+      ...base,
       active: true,
       mode: 'stalled',
-      label: word(lang, 'pmTurnStalled', detail, dur),
-      slow: false,
+      label: word(lang, 'pmTurnStalledEvidence', dur, evidence),
+      preamble,
+      tooltip: totalTip,
+      tone: 'stalled',
       stalled: true,
-      canInterrupt: Boolean(working),
+      canInterrupt: true,
       canRotate: true,
+      canOpenTerminal: true,
+      activityShort: detail ? word(lang, 'pmBusyActRunning', clipSingleLine(rawSummary, 32)) : word(lang, 'pmBusyActThinking'),
     };
   }
-  if (slow) {
+
+  // §3.9 Row 9: `waiting_upstream` -> Model service retrying (attempt N) + interrupt.
+  if (effPhase === 'waiting_upstream') {
+    const attempt = extractRetryAttempt(act, v2Turn?.health_reason);
     return {
+      ...base,
+      active: true,
+      mode: 'waiting_upstream',
+      label: word(lang, 'pmTurnRetrying', attempt),
+      preamble,
+      tooltip: totalTip,
+      tone: 'neutral',
+      slow: true,
+      canInterrupt: true,
+      activityShort: word(lang, 'pmBusyActRetrying'),
+    };
+  }
+
+  // §3.9 Rows 6, 7, 8: `tool` phase (ok / slow / suspect). Duration is THIS command's duration!
+  if (isToolPhase) {
+    const cmdSinceMs = Number(act?.since_ms) || (v2Turn ? phaseSinceMs : 0) || startedMs;
+    const cmdElapsedMs = v2Turn
+      ? (cmdSinceMs > 0 ? Math.max(0, refNow - cmdSinceMs) : elapsedMs)
+      : (slow ? idleForMs : elapsedMs);
+    const cmdDur = formatTurnDuration(cmdElapsedMs);
+    const actShort = detail ? word(lang, 'pmBusyActRunning', clipSingleLine(rawSummary, 32)) : word(lang, 'pmBusyActThinking');
+    if (suspect) {
+      return {
+        ...base,
+        active: true,
+        mode: 'suspect',
+        label: word(lang, 'pmTurnToolSuspect', detail),
+        preamble,
+        tooltip: totalTip,
+        tone: 'neutral',
+        slow: true,
+        canInterrupt: true,
+        canOpenTerminal: true,
+        activityShort: actShort,
+      };
+    }
+    if (slow) {
+      return {
+        ...base,
+        active: true,
+        mode: 'slow',
+        label: word(lang, 'pmTurnToolSlow', detail, cmdDur),
+        preamble,
+        tooltip: totalTip,
+        tone: 'neutral',
+        slow: true,
+        canInterrupt: true,
+        canOpenTerminal: true,
+        activityShort: actShort,
+      };
+    }
+    return {
+      ...base,
+      active: true,
+      mode: 'working',
+      label: detail ? word(lang, 'pmTurnTool', detail, cmdDur) : word(lang, 'pmTurnThinking', cmdDur),
+      preamble,
+      tone: 'neutral',
+      canInterrupt: true,
+      activityShort: actShort,
+    };
+  }
+
+  // §3.9 Row 5: `generating`, `slow` -> Writing a long piece · <dur> (neutral color, interrupt).
+  if (slow) {
+    const dur = formatTurnDuration(idleForMs);
+    return {
+      ...base,
       active: true,
       mode: 'slow',
-      label: word(lang, 'pmTurnSlow', detail, dur),
+      label: word(lang, 'pmTurnLongGen', dur),
+      preamble,
+      tooltip: totalTip,
+      tone: 'neutral',
       slow: true,
-      stalled: false,
-      canInterrupt: Boolean(working),
-      canRotate: false,
+      canInterrupt: true,
+      activityShort: word(lang, 'pmBusyActLongGen'),
     };
   }
+
+  // §3.9 Rows 3 & 4: `generating`, `ok` (< 3s -> dots + interrupt; >= 3s or preamble -> preamble/Thinking · dur + interrupt).
+  const genDurMs = v2Turn && phaseSinceMs > 0 ? Math.max(0, refNow - phaseSinceMs) : elapsedMs;
+  if (genDurMs < 3000 && !preamble) {
+    return {
+      ...base,
+      active: true,
+      mode: 'dots',
+      label: '',
+      preamble: '',
+      tone: 'neutral',
+      canInterrupt: true,
+      activityShort: word(lang, 'pmBusyActThinking'),
+    };
+  }
+  const dur = formatTurnDuration(genDurMs);
   return {
+    ...base,
     active: true,
     mode: 'working',
-    label: detail ? word(lang, 'pmTurnTool', detail, dur) : word(lang, 'pmTurnThinking', dur),
-    slow: false,
-    stalled: false,
-    canInterrupt: false,
-    canRotate: false,
+    label: preamble ? word(lang, 'pmTurnPreamble', preamble, dur) : word(lang, 'pmTurnThinking', dur),
+    preamble,
+    tone: 'neutral',
+    canInterrupt: true,
+    activityShort: preamble ? clipSingleLine(preamble, 36) : word(lang, 'pmBusyActThinking'),
   };
+}
+
+// Pure view-model for the compact busy-coordinator bar above the main composer (§3.8 O-e, D3).
+// Shown only when the coordinator is busy AND there is either an unsent draft in the composer
+// or at least one queued/waiting user message (client pending queue or server mailbox).
+export function pmBusyComposerView(lang, {
+  actView = null,
+  turn2 = null,
+  working = false,
+  interrupting = false,
+  agentKind = '',
+  hasDraft = false,
+  queuedCount = 0,
+} = {}) {
+  const mode = String(actView?.mode || '');
+  const busy = Boolean(
+    actView?.active
+    && !actView?.unknown
+    && mode !== 'idle'
+    && mode !== 'blocked'
+    && mode !== 'recovering'
+    && (actView?.canInterrupt || working)
+  );
+  if (!busy) return null;
+  const inboxQueued = Array.isArray(turn2?.inbox)
+    ? turn2.inbox.filter(row => {
+      if (!row || typeof row !== 'object' || row.kind !== 'user') return false;
+      const st = String(row.state || 'accepted').toLowerCase();
+      return st === 'accepted' || st === 'typed';
+    }).length
+    : 0;
+  const totalQueued = Math.max(0, Number(queuedCount) || 0) + inboxQueued;
+  const draft = Boolean(hasDraft);
+  if (!draft && totalQueued === 0) return null;
+  const resolvedKind = String(turn2?.session?.agent_kind || agentKind || '').trim().toLowerCase();
+  const steers = resolvedKind ? agentSteersMidTurn(resolvedKind) : Boolean(actView?.steersMidTurn);
+  const timing = word(lang, steers ? 'pmBusyTimingStep' : 'pmBusyTimingTurn');
+  const activity = String(actView?.activityShort || '').trim() || word(lang, 'pmBusyActThinking');
+  return {
+    text: draft
+      ? word(lang, 'pmBusyComposer', activity, timing)
+      : word(lang, 'pmBusyComposerQueued', activity, timing, totalQueued),
+    actionLabel: word(lang, interrupting ? 'interruptingPmTip' : (draft ? 'pmPreemptAction' : 'pmPreemptQueuedAction')),
+    steersMidTurn: steers,
+    interrupting: Boolean(interrupting),
+    hasDraft: draft,
+    queuedCount: totalQueued,
+  };
+}
+
+// Human-readable bilingual label for why `pm.py project send` returned `status: "queued"` (MSG-5, §3.9).
+export function queuedReasonText(lang, reason = '') {
+  const raw = String(reason || '').trim();
+  if (!raw) return '';
+  const low = raw.toLowerCase();
+  if (low === 'starting') return word(lang, 'queuedReasonStarting');
+  if (low === 'inflight' || low === 'typing') return word(lang, 'queuedReasonInflight');
+  if (low === 'fifo') return word(lang, 'queuedReasonFifo');
+  if (low === 'waiting_quiet_or_draft') return word(lang, 'queuedReasonDraft');
+  if (low === 'blocked_prompt' || low === 'pm is blocked') return word(lang, 'queuedReasonBlocked');
+  if (low === 'pm is error') return word(lang, 'queuedReasonError');
+  if (low === 'pm_working' || low === 'blackbox_cooldown' || low === 'mid_turn_buffered' || low === 'held') {
+    return word(lang, 'queuedReasonWorking');
+  }
+  if (low === 'endpoint_gone' || low === 'no_endpoint') return word(lang, 'queuedReasonOffline');
+  if (low === 'machine_disconnected') return word(lang, 'queuedReasonDisconnected');
+  if (low === 'timeout_uncertain') return word(lang, 'queuedReasonTimeout');
+  // The mailbox's own codes (pmlib/messaging, events/supervisor): never shown raw under a message.
+  if (low === 'waiting_turn_leave_working') return word(lang, 'queuedReasonWorking');
+  if (low === 'epoch_requeued') return word(lang, 'queuedReasonNewSession');
+  if (low === 'typist_busy') return word(lang, 'queuedReasonTypist');
+  if (low === 'migrated_inflight' || low === 'migrated_outbox' || low === 'recovered') return word(lang, 'queuedReasonCarried');
+  if (low === 'retry_unstarted') return word(lang, 'queuedReasonRetryUnstarted');
+  if (low === 'retry_after_interrupted') return word(lang, 'queuedReasonRetryInterrupted');
+  if (low === 'retry_after_errored') return word(lang, 'queuedReasonRetryErrored');
+  if (low === 'unsupported') return word(lang, 'queuedReasonUnsupported');
+  if (low === 'turn_interrupted') return word(lang, 'turnInterrupted');
+  if (low === 'turn_errored') return word(lang, 'turnErrored');
+  const dialog = classifyPmDialog('', raw, '');
+  if (dialog?.labelKey) return word(lang, dialog.labelKey);
+  // Any other bare code (lower_snake_case) is internal: say it waits, not what the code is called. Words (an hc
+  // error message) are shown as they are.
+  if (/^[a-z0-9_.:-]+$/.test(raw) && !/\s/.test(raw)) return word(lang, 'queuedReasonOther');
+  return raw;
+}
+
+// §3.9 bubble states: where a logged user message is in the PM's mailbox, as the thin line under it.
+// sending → queued (why) → delivered, waiting for it to finish this step / this turn → read → (gone once
+// answered: the reply is right below). Only `failed` is red. `pmWorking`/`steersMidTurn` pick the delivered
+// wording: an agent that reads mid-turn (Claude Code) reads it after the current step, one that does not (agy)
+// after the turn.
+export function bubbleLifecycleView(lang, item = {}, { pmWorking = false, steersMidTurn = true } = {}) {
+  const state = String(item?.state || 'accepted').toLowerCase();
+  const reason = String(item?.hold_reason || item?.reason || item?.queuedReason || '').trim();
+  if (state === 'failed') {
+    const detail = queuedReasonText(lang, String(item?.last_error || reason || ''));
+    return { state: 'failed', label: detail ? `${word(lang, 'bubbleStateFailed')}: ${detail}` : word(lang, 'bubbleStateFailed'), failed: true };
+  }
+  if (state === 'answered' || state === 'superseded' || state === 'expired') {
+    return { state: 'answered', label: word(lang, 'bubbleStateAnswered'), settled: true };
+  }
+  if (state === 'consumed') {
+    return { state: 'consumed', label: word(lang, 'bubbleStateConsumed'), read: true };
+  }
+  if (state === 'typed') {
+    const key = pmWorking ? (steersMidTurn ? 'bubbleStateTypedStep' : 'bubbleStateTypedTurn') : 'bubbleStateTyped';
+    return { state: 'typed', label: word(lang, key), typed: true };
+  }
+  const detail = queuedReasonText(lang, reason);
+  if (reason.toLowerCase() === 'waiting_quiet_or_draft') {
+    return { state: 'queued', label: detail, queued: true, hasDraft: true };
+  }
+  if (item?.sending) {
+    return { state: 'sending', label: word(lang, 'bubbleStateSending'), sending: true };
+  }
+  return {
+    state: 'queued',
+    label: detail ? `${word(lang, 'bubbleStateAccepted')} · ${detail}` : word(lang, 'bubbleStateAccepted'),
+    queued: true,
+    hasDraft: false,
+  };
+}
+
+// The line under a logged user message (`item.delivery` from `timeline`), worded for the PM's agent kind.
+export function deliveryLineView(lang, delivery, { pmWorking = false, agentKind = '' } = {}) {
+  if (!delivery || typeof delivery !== 'object') return null;
+  const view = bubbleLifecycleView(lang, delivery, {
+    pmWorking: Boolean(pmWorking),
+    steersMidTurn: agentKind ? agentSteersMidTurn(agentKind) : true,
+  });
+  return view.settled ? null : view;
+}
+
+// The mailbox rows (`turn2.inbox`) of user messages by msg_id, for `timeline({ inbox })`.
+export function inboxByMsgId(inbox) {
+  const map = new Map();
+  for (const row of Array.isArray(inbox) ? inbox : []) {
+    if (!row || typeof row !== 'object' || row.kind !== 'user') continue;
+    const id = String(row.id || '').trim();
+    if (id) map.set(id, row);
+  }
+  return map;
+}
+
+// A cheap signature of the rows that change what the timeline shows (cache key in resolveTimelineData).
+export function inboxSignature(inbox) {
+  let sig = '';
+  for (const row of Array.isArray(inbox) ? inbox : []) {
+    if (!row || row.kind !== 'user') continue;
+    sig += `\x1e${row.id || ''}\x1f${row.state || ''}\x1f${row.hold_reason || row.reason || ''}\x1f${row.sending ? 1 : 0}`;
+  }
+  return sig;
+}
+
+// Format bilingual user-visible feedback for interrupt / rotate recovery actions (RS-1).
+export function formatPmActionFeedback(lang, action, { code = 0, stdout = '', stderr = '', error = '' } = {}) {
+  const act = action === 'rotate' ? 'rotate' : 'interrupt';
+  const errText = String(error || '').trim() || (code !== 0 ? (String(stderr || stdout || '').trim() || `exit ${code}`) : '');
+  if (errText) {
+    return {
+      tone: 'error',
+      text: word(lang, act === 'rotate' ? 'rotateFailed' : 'interruptFailed', errText),
+    };
+  }
+  if (act === 'rotate') {
+    return { tone: 'info', text: word(lang, 'rotateSucceeded') };
+  }
+  let parsed = null;
+  const out = String(stdout || '').trim();
+  if (out.startsWith('{')) {
+    try { parsed = JSON.parse(out); } catch (_) { parsed = null; }
+  }
+  const outcome = String(parsed?.outcome || 'unknown').toLowerCase();
+  if (outcome === 'stopped') return { tone: 'info', text: word(lang, 'interruptStopped') };
+  if (outcome === 'still_working') return { tone: 'warn', text: word(lang, 'interruptStillWorking') };
+  if (outcome === 'exited') return { tone: 'warn', text: word(lang, 'interruptExited') };
+  return { tone: 'info', text: word(lang, 'interruptUnknown') };
 }
 
 // Bounded async gate preventing hung HostModule `exec` Promises (e.g. across layout switches or dropped
@@ -2840,7 +3649,7 @@ function noticeTargetAddr(by) {
   return raw.startsWith('hc:') ? raw.slice(3) : raw;
 }
 
-// Whether the PM terminal can accept a new `hc send` right now (not blocked on a dialog or error).
+// Whether the PM terminal can accept a new message right now (not blocked on a dialog or error).
 export function pmCanReceive(status) {
   return status !== 'blocked' && status !== 'error';
 }
@@ -2905,7 +3714,28 @@ export function sameReceiptMessage(receipt, sent) {
   return splitMessage(sent).files.length > 0 && wordsOf(sent).startsWith(wordsOf(rText));
 }
 
-// Merge receipts from `pm.py state` and `pm.py project events`, deduplicating identical entries.
+// Project `turn2.inbox` entries (`consumed` / `answered` `chat.user` items) into synthetic PM receipts
+// so UserPromptSubmit / consumption confirms bubbles immediately without relying on `receipts.json`.
+export function receiptsFromTurn2Inbox(turn2) {
+  const inbox = Array.isArray(turn2?.inbox) ? turn2.inbox : [];
+  const out = [];
+  for (const item of inbox) {
+    if (!item || typeof item !== 'object') continue;
+    if (item.kind !== 'user') continue;
+    if (item.state !== 'consumed' && item.state !== 'answered') continue;
+    const msgId = String(item.id || '').trim();
+    if (!msgId) continue;
+    const rawMs = Number(item.consumed_ms || item.answered_ms || item.typed_ms || item.accepted_ms || 0);
+    out.push({
+      msg_id: msgId,
+      at_ms: Number.isFinite(rawMs) && rawMs > 0 ? rawMs : 0,
+      from_inbox: true,
+    });
+  }
+  return out;
+}
+
+// Merge receipts from `turn2.inbox`, `pm.py state`, and `pm.py project events`, deduplicating identical entries.
 export function mergeReceipts(a = [], b = []) {
   const out = [];
   const seen = new Set();
@@ -2913,7 +3743,7 @@ export function mergeReceipts(a = [], b = []) {
     if (!Array.isArray(list)) continue;
     for (const r of list) {
       if (!r || typeof r !== 'object') continue;
-      const key = `${receiptTime(r)}\0${r.digest || r.text || ''}`;
+      const key = r.msg_id ? `id:${r.msg_id}` : `${receiptTime(r)}\0${r.digest || r.text || ''}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(r);
@@ -2984,6 +3814,7 @@ export function findReceiptMatch(bubble, receipts = [], used = null, { clockOffs
     const r = receipts[i];
     if (!r || typeof r !== 'object') continue;
     const causalHit = bubbleMatchesCausalId(bubble, r);
+    if (!causalHit && hasDifferentCausalId(bubble, r)) continue;
     if (!causalHit && !sameReceiptMessage(r, bubble.text)) continue;
     const hasMs = Number.isFinite(Number(r.at_ms)) && Number(r.at_ms) > 0;
     const rMs = hasMs ? Number(r.at_ms) : eventTimeUtcMs(r, clockOffsetMs);
@@ -3008,7 +3839,8 @@ export function findCoalescedReceiptMatches(bubbles = [], receipts = [], used = 
     const hasMs = Number.isFinite(Number(r.at_ms)) && Number(r.at_ms) > 0;
     const rMs = hasMs ? Number(r.at_ms) : eventTimeUtcMs(r, clockOffsetMs);
     const eligible = bubbles.filter(b => {
-      if (!b || hits.has(b) || b.received || b.upload || (b.failed && !b.timedOut) || (b.queued && !b.requeuedFromSend)) return false;
+      if (!b || hits.has(b) || b.received || b.upload || (b.failed && !b.timedOut) || (b.queued && !b.requeuedFromSend && !b.serverQueued)) return false;
+      if (hasDifferentCausalId(b, r)) return false;
       const sentAt = Number(b.sentAt) || 0;
       if (sentAt <= 0) return true;
       const minAt = hasMs ? sentAt : Math.floor(sentAt / 1000) * 1000;
@@ -3054,9 +3886,9 @@ export function confirmReceiptBubble(p, atMs = 0, now = Date.now()) {
 // delivery confirmation timeouts:
 // - Logged `user` events settle matching bubbles (including bubbles previously marked `timedOut` or `received`,
 //   so a late log write never leaves a duplicate failed bubble beside the real message).
-// - PM receipts (`receipts.json`, written at UserPromptSubmit before conversation.jsonl) immediately confirm
-//   matching bubbles (`received: true`), preventing timeout/swap requeue/manual resend duplicates even when
-//   conversation.jsonl has not flushed or refreshed yet.
+// - `turn2.inbox` (`consumed` / `answered` items, with 1-version `receipts` compatibility fallback)
+//   immediately confirms matching bubbles (`received: true`), preventing timeout/swap requeue/manual resend
+//   duplicates even when `conversation.jsonl` has not flushed or refreshed yet.
 // - Unconfirmed bubbles sent to a PM terminal/session that swapped before logging re-queue for the
 //   new PM once `logReady` confirms the outgoing PM did not write them to `conversation.jsonl`.
 // - Unconfirmed bubbles wait while the PM is actively working on a foreground turn (e.g. queued in
@@ -3080,6 +3912,7 @@ export function reconcilePendingSends(pending, events = [], {
   lang = 'en',
   logFreshFrom = 0,
   receipts = [],
+  turn2 = null,
   clockOffsetMs = 0,
   confirmIdleMs = remote ? SEND_CONFIRM_REMOTE_IDLE_MS : SEND_CONFIRM_IDLE_MS,
   swapWaitMs = PM_SWAP_WAIT_MS,
@@ -3092,7 +3925,10 @@ export function reconcilePendingSends(pending, events = [], {
   const confirmed = [];
   const requeued = [];
   const failed = [];
-  const receiptList = Array.isArray(receipts) ? receipts : [];
+  const inboxReceipts = receiptsFromTurn2Inbox(turn2);
+  const receiptList = inboxReceipts.length
+    ? mergeReceipts(inboxReceipts, receipts)
+    : (Array.isArray(receipts) ? receipts : []);
   const usedReceipts = settledReceiptIndices(receiptList, events, { clockOffsetMs });
   if (receiptList.length > 0) {
     for (const p of base) {
@@ -3111,8 +3947,8 @@ export function reconcilePendingSends(pending, events = [], {
 
     // Receipt confirmation: if PM already recorded receipt for this sent bubble, confirm it at once
     // and never time out, swap-requeue, or resend (even if conversation.jsonl has not caught up yet).
-    // Never swallow unsent queued bubbles or non-timeout send failures (`hc send` exited non-zero).
-    const canConfirmByReceipt = !p.upload && !(p.failed && !p.timedOut) && (!p.queued || Boolean(p.requeuedFromSend));
+    // Never swallow unsent queued bubbles or non-timeout send failures (`pm.py project send` exited non-zero).
+    const canConfirmByReceipt = !p.upload && !(p.failed && !p.timedOut) && (!p.queued || Boolean(p.requeuedFromSend) || Boolean(p.serverQueued));
     if (canConfirmByReceipt && receiptList.length > 0) {
       const hit = coalescedHits.get(p) || findReceiptMatch(p, receiptList, usedReceipts, { clockOffsetMs });
       if (hit) {
@@ -3207,7 +4043,7 @@ export function reconcilePendingSends(pending, events = [], {
       return p;
     }
 
-    // 3. Sent (`hc send` exited 0), awaiting `user` event confirmation in `conversation.jsonl`.
+    // 3. Sent (`pm.py project send` exited 0), awaiting `user` event confirmation in `conversation.jsonl`.
     const deliveredAt = Number(p.deliveredAt) || 0;
     if (!(deliveredAt > 0)) return p;
 
@@ -3308,7 +4144,7 @@ export function reconcilePendingSends(pending, events = [], {
 }
 
 // Classify why a PM terminal is currently unable to receive from its active bottom screen lines
-// (never stale scrollback) and/or the latest `hc send` error. Returns `{ kind, labelKey }` or null.
+// (never stale scrollback) and/or the latest send error. Returns `{ kind, labelKey }` or null.
 const BOX_BORDER_RE = /^[\s─━═│┃╭╮╰╯┌┐└┘├┤┬┴┼]+$/;
 const PM_QUOTA_RE = /(rate.?limit|quota.?exceeded|insufficient_quota|usage.?limit|hit your limit|too many requests|\b429\b|credits? exhausted|out of credits|billing limit|overloaded_error|capacity exceeded|配额|限流)/i;
 const PM_AUTH_RE = /(not logged in|please log ?in|authentication failed|invalid api key|unauthorized|\b401\b|token expired|sign in to continue|login required|未登录|鉴权失败)/i;
@@ -3352,13 +4188,37 @@ export function pmBlockedBannerText(lang, dialog, queuedCount = 0) {
   return queuedCount > 0 ? word(lang, 'pmQueuedOnly', queuedCount) : '';
 }
 
+// The banner over the conversation when something waits too long for the PM (`pm.undelivered` from state):
+// a batch of events, and/or mailbox messages past their delivery SLA (`messages`, the `alert.undelivered`
+// route's ui outlet).
+export function undeliveredBannerText(lang, undelivered) {
+  if (!undelivered || typeof undelivered !== 'object') return '';
+  const count = Number(undelivered.count) || 0;
+  const messages = Number(undelivered.messages) || 0;
+  if (count <= 0 && messages <= 0) return '';
+  const secs = Math.max(60, Number(undelivered.waiting_seconds) || 0);
+  const dur = age(secs * 1000, lang);
+  const state = String(undelivered.state || '').trim();
+  const parts = [];
+  if (state) parts.push(lang === 'zh' ? `状态=${state}` : `state=${state}`);
+  if (undelivered.deliverer_running === false) parts.push(word(lang, 'delivererStopped'));
+  const sep = lang === 'zh' ? '，' : ', ';
+  const out = [];
+  if (count > 0) out.push(word(lang, 'pmUndelivered', count, dur, parts.join(sep)));
+  if (messages > 0) {
+    const why = queuedReasonText(lang, String(undelivered.message_reason || ''));
+    out.push(word(lang, 'pmUndeliveredMessages', messages, dur, (count > 0 ? [why] : [why, ...parts]).filter(Boolean).join(sep)));
+  }
+  return out.join(lang === 'zh' ? '；' : '; ');
+}
+
 // Persistent storage for the project composer's messages that are not settled yet
 // (`localStorage[QUEUE_KEY]`), keyed by PM name, so a mod reload or app restart neither loses nor
 // re-sends them. Every bubble short of failed is kept, with where it got to:
 //   queued     not sent yet: delivers once the PM can receive
-//   inFlight   `hc send` had started (inFlightTo/inFlightSession: where to); whether it finished is
+//   inFlight   the send had started (inFlightTo/inFlightSession: where to); whether it finished is
 //              unknown after a reload, so it comes back as sent and unsure, never sent again blindly
-//   delivered  `hc send` exited 0 (deliveredAt, sentTo, sentSession): waits for the log as before
+//   delivered  the send exited 0 (deliveredAt, sentTo, sentSession): waits for the log as before
 //   verifying  a resend asked for after a timeout, waiting on a fresh log read (reconcilePendingSends)
 // A failed bubble is not kept: its words went back to the box's draft.
 export const QUEUE_KEY = 'queued_sends';
@@ -3416,6 +4276,8 @@ export function readQueuedSends(text) {
           question: item.question ? String(item.question) : undefined,
           draftKey: String(item.draftKey ?? ''),
           ...(item.requeuedFromSend ? { requeuedFromSend: true } : {}),
+          ...(item.serverQueued ? { serverQueued: true } : {}),
+          ...(item.queuedReason ? { queuedReason: String(item.queuedReason) } : {}),
           stage,
           ...stageFields(stage, item),
           queued: stage === 'queued',
@@ -3451,6 +4313,8 @@ export function keepQueuedSends(stored, pmName, pending) {
         ...(p.question ? { question: p.question } : {}),
         draftKey: p.draftKey ?? '',
         ...(p.requeuedFromSend ? { requeuedFromSend: true } : {}),
+        ...(p.serverQueued ? { serverQueued: true } : {}),
+        ...(p.queuedReason ? { queuedReason: String(p.queuedReason) } : {}),
         stage,
         ...stageFields(stage, p),
         queued: stage === 'queued',
@@ -3658,6 +4522,85 @@ export function engineLabel(task) {
   return name + (e.effort ? `·${e.effort}` : '') + (e.advisor ? `+${modelName(e.advisor).split(' ')[0]}` : '');
 }
 
+const EFFORT_SHORT = {
+  xhigh: 'xhigh',
+  'extra-high': 'xhigh',
+  extra_high: 'xhigh',
+  max: 'max',
+  high: 'high',
+  medium: 'med',
+  med: 'med',
+  low: 'low',
+  minimal: 'min',
+  min: 'min',
+};
+const EFFORT_SUFFIX_RE = /[-_](xhigh|extra-high|extra_high|max|high|medium|med|low|minimal|min)$/i;
+const GENERIC_PROFILES = new Set(['light', 'standard', 'hard', 'deep']);
+
+function normalizeShortEffort(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s || s === 'default') return '';
+  return EFFORT_SHORT[s] || s;
+}
+
+function stripEffortSuffix(raw) {
+  const s = String(raw || '').trim();
+  const m = EFFORT_SUFFIX_RE.exec(s);
+  if (!m) return { base: s, effort: '' };
+  return { base: s.slice(0, m.index), effort: normalizeShortEffort(m[1]) };
+}
+
+function compactModelShortName(rawModel) {
+  const cleaned = String(rawModel || '').trim().replace(/\[.*\]$/, '');
+  if (!cleaned) return '';
+  const leaf = cleaned.replace(/^[^/]+\//, '').replace(/^(?:us|eu|global)\.[a-z0-9_-]+\./i, '');
+  const low = leaf.toLowerCase();
+  if (/(?:^|[-_.])orchestrator(?:[-_.]|$)/.test(low)) return 'Orchestrator';
+  const claude = low.match(/^(?:claude-)?(opus|sonnet|haiku|fable)(?:-\d{1,2})*(?:-\d{8})?(?:-v\d+(?::\d+)?)?$/);
+  if (claude) return cap(claude[1]);
+  const codename = low.match(/^(?:gemini(?:-[\d.]+)?-)?(neon|carbon)$/);
+  if (codename) return cap(codename[1]);
+  const gemini = low.match(/^gemini(?:-[\d.]+)?-(pro|flash(?:-lite)?|ultra)$/);
+  if (gemini) return gemini[1].startsWith('flash') ? gemini[1].split('-').map(cap).join(' ') : `Gemini ${cap(gemini[1])}`;
+  const gpt = low.match(/^gpt-([a-z0-9.]+(?:-[a-z0-9.]+)?)$/);
+  if (gpt) return `GPT-${gpt[1]}`;
+  if (/^o\d+(?:-[a-z0-9]+)?$/.test(low)) return low;
+  return cap(leaf);
+}
+
+// Compact readable model + effort formatter for Threads inline badges and compact agent sub-rows:
+// Opus·xhigh, Neon·high, Neon·med, Carbon·high, Sonnet·med, GPT-5·high, Orchestrator.
+// Extracts effort from explicit `effort`, model suffix (e.g. `gemini-4-neon-high`, `claude-opus-5-5-medium`),
+// or profile suffix (e.g. `opus-high`, `neon-medium`), with graceful fallback to profile or kind.
+export function formatAgentModelEffort(source, fallbackKind = '') {
+  const isDirect = source && typeof source === 'object' && !Array.isArray(source) &&
+    !('engine' in source) && !('worker' in source) &&
+    ['profile', 'kind', 'model', 'effort', 'advisor'].some(k => source[k]);
+  const e = isDirect ? source : taskEngine(source);
+  const kind = String(e?.kind || fallbackKind || '').trim();
+  const profile = String(e?.profile || '').trim();
+  const rawModel = String(e?.model || '').trim().replace(/\[.*\]$/, '');
+
+  let effort = normalizeShortEffort(e?.effort);
+  let baseModel = rawModel;
+  const fromModel = stripEffortSuffix(rawModel);
+  if (fromModel.effort) {
+    baseModel = fromModel.base;
+    if (!effort) effort = fromModel.effort;
+  }
+  const fromProfile = stripEffortSuffix(profile);
+  if (!effort && fromProfile.effort) effort = fromProfile.effort;
+
+  let model = compactModelShortName(baseModel);
+  if (!model && fromProfile.base && !GENERIC_PROFILES.has(fromProfile.base.toLowerCase())) {
+    model = compactModelShortName(fromProfile.base);
+  }
+  if (!model && kind) model = cap(kind);
+  if (!model && profile) model = cap(profile);
+  if (!model) return { model: '', effort: '', label: '' };
+  return { model, effort, label: effort ? `${model}·${effort}` : model };
+}
+
 // The task's escalations ({from, to, why, at}), in order; anything not shaped so is left out.
 export function escalations(task) {
   return (Array.isArray(task?.escalations) ? task.escalations : []).filter(x => x && (x.from || x.to));
@@ -3742,6 +4685,12 @@ const LOG_FIELD_END = new RegExp(`[,，]\\s*(?=(?:${LOG_FIELDS})\\s*=)|[;；]\\s
 const FIELD_ZH = { title: '标题', status: '状态改为', owner: '负责', workspace: '工作区', pane: '终端', agent: 'agent',
   branch: '分支', worktree: '工作树', base: '基线', brief: '任务书', commit: '提交', release: '发布', parent: '属于' };
 const RETIRED_ZH = { terminal: '终端', worktree: '工作树', branch: '分支' };
+export function compactLogLine(text) {
+  return typeof text === 'string'
+    ? text.replace(/\r?\n+/g, ' ').replace(/\s{2,}/g, ' ').trim()
+    : '';
+}
+
 export function logText(lang, text, whole = false) {
   const zh = lang === 'zh';
   let rest = typeof text === 'string' ? text.trim() : '';
@@ -3834,6 +4783,138 @@ export function focusPlan(address, terms, paned, home = '') {
   }
   return home && has.has(home) ? { focus: home, peek: address } : none;
 }
+
+const normDir = path => (typeof path === 'string' && path ? path.replace(/\/+$/, '') || '/' : '');
+const inDir = (path, root) => {
+  const p = normDir(path), r = normDir(root);
+  return Boolean(p && r && (p === r || p.startsWith(r === '/' ? '/' : `${r}/`)));
+};
+
+// Which open space belongs to this project on `machine`, or null when none does.
+// Never falls back to another project's space (even the currently active one):
+// terminal.keep on an unrelated space would put the PM tab into that project and expose it.
+export function projectSpaceFor(pm, spaceList, paneList = [], machine = '', pmTerm = null) {
+  const wantMachine = String(machine || '');
+  const same = (spaceList || []).filter(s => s && s.id && String(s.machine || '') === wantMachine);
+  if (!same.length) return null;
+  const labelled = String(pmTerm?.labels?.['herdr.space'] || '').trim();
+  if (labelled) {
+    const qualified = onMachine(labelled, wantMachine);
+    const hit = same.find(s => s.id === qualified || s.id === labelled);
+    if (hit) return hit;
+  }
+  const repo = normDir(pm?.repo);
+  const worktrees = normDir(pm?.worktrees);
+  if (repo) {
+    const byFolder = same.find(s => normDir(s.folder) === repo);
+    if (byFolder) return byFolder;
+  }
+  if (repo || worktrees) {
+    const tabToSpace = new Map();
+    for (const s of same) {
+      for (const tab of s.tabs || []) {
+        if (tab?.id) tabToSpace.set(tab.id, s);
+      }
+    }
+    if (repo) {
+      for (const p of paneList || []) {
+        if (p?.tab && normDir(p.cwd) === repo && tabToSpace.has(p.tab)) return tabToSpace.get(p.tab);
+      }
+    }
+    for (const p of paneList || []) {
+      if (p?.tab && tabToSpace.has(p.tab) && (inDir(p.cwd, repo) || inDir(p.cwd, worktrees))) {
+        return tabToSpace.get(p.tab);
+      }
+    }
+    const bySubFolder = same.find(s => inDir(s.folder, repo) || inDir(s.folder, worktrees));
+    if (bySubFolder) return bySubFolder;
+  }
+  const names = new Set([pm?.space_name, pm?.project].map(v => String(v || '').trim()).filter(Boolean));
+  if (names.size) {
+    const byName = same.find(s => names.has(String(s.name || '').trim())
+      && (!s.folder || !repo || inDir(s.folder, repo)));
+    if (byName) return byName;
+  }
+  return null;
+}
+
+export function pmTabNameFor(pm) {
+  const base = String(pm?.project || '').trim()
+    || normDir(pm?.repo).split('/').filter(Boolean).pop()
+    || '';
+  return base ? `PM-${base}` : '';
+}
+
+// Recovery plan when focusing this project's live PM terminal that currently has no pane.
+// Returns Herdr commands (`[name, args]`) to put it in a tab of THIS project's own space and
+// switch to work — never exposing another project's space — or [] when not applicable.
+// Note: `terminal.keep` applies asynchronously (`pending: true`), so `pane.focus`, `tab.rename`,
+// and closing any default empty shell tab from `space.new` run in `pmKeepFollowUp` once the pane lands.
+export function pmKeepPlan(address, { pm = null, pmTerminal = null, machine = '', spaces = [], panes = [] } = {}) {
+  const target = onMachine(address, machine);
+  const pmAddr = onMachine(pmTerminal?.address || '', machine);
+  if (!target || !pmAddr || target !== pmAddr) return [];
+  const space = projectSpaceFor(pm, spaces, panes, machine, pmTerminal);
+  if (space) {
+    return [
+      ['space.select', { id: space.id }],
+      ['terminal.keep', { terminal: pmAddr, place: 'tab' }],
+      ['layout.select', { stack: 'pm-stage', child: 'work' }],
+    ];
+  }
+  const name = String(pm?.space_name || pm?.project || '').trim();
+  const folder = String(pm?.repo || '').trim();
+  if (!name && !folder) return [];
+  const spaceArgs = { machine: String(machine || '') };
+  if (name) spaceArgs.name = name;
+  if (folder) spaceArgs.folder = folder;
+  return [
+    ['space.new', spaceArgs],
+    ['terminal.keep', { terminal: pmAddr, place: 'tab' }],
+    ['layout.select', { stack: 'pm-stage', child: 'work' }],
+  ];
+}
+
+// Follow-up commands once an async `terminal.keep` pane appears in `panes()`:
+// rename the newly created unnamed tab to `PM-<project>`, focus the PM pane, and—when `space.new`
+// was just issued to host this PM—close the empty default shell tab `space.new` spawned alongside it.
+// Returns null while the PM pane has not yet landed.
+export function pmKeepFollowUp(pending, spaceList = [], paneList = []) {
+  if (!pending?.terminal) return null;
+  const pmPane = (paneList || []).find(p => p?.terminal === pending.terminal);
+  if (!pmPane) return null;
+  const cmds = [];
+  const allSpaces = spaceList || [];
+  let hostSpace = null;
+  let pmTab = null;
+  for (const sp of allSpaces) {
+    for (const tab of sp?.tabs || []) {
+      if (tab?.id && tab.id === pmPane.tab) {
+        hostSpace = sp;
+        pmTab = tab;
+        break;
+      }
+    }
+    if (pmTab) break;
+  }
+  if (pending.tabName && pmPane.tab && (!pmTab || (!pmTab.named && pmTab.name !== pending.tabName))) {
+    cmds.push(['tab.rename', { id: pmPane.tab, name: pending.tabName }]);
+  }
+  cmds.push(['pane.focus', { terminal: pending.terminal }]);
+  if (pending.createdSpace && hostSpace && !pending.prevSpaceIds?.has(hostSpace.id)) {
+    const tabs = hostSpace.tabs || [];
+    if (tabs.length === 2) {
+      const other = tabs.find(t => t?.id && t.id !== pmPane.tab);
+      if (other && !other.named && other.panes === 1) {
+        const otherPanes = (paneList || []).filter(p => p?.tab === other.id);
+        if (otherPanes.length === 1 && otherPanes[0]?.program?.shell === true) {
+          cmds.push(['tab.close', { id: other.id }]);
+        }
+      }
+    }
+  }
+  return cmds;
+}
 export function withAlpha(color, opacity) {
   const hex = color.slice(1), rgb = hex.length === 3 ? [...hex].map(c => c + c).join('') : hex.slice(0, 6);
   const alpha = hex.length === 8 ? parseInt(hex.slice(6), 16) : 255;
@@ -3874,9 +4955,11 @@ export function escapeStep({
   mentionSub = false,
   mention = false,
   projectSearch = false,
+  tabMenu = false,
   selectionBar = false,
   answering = false,
   confirmDelete = false,
+  confirmCloseDirty = false,
   typing = false,
   editing = false,
   retopic = false,
@@ -3886,6 +4969,7 @@ export function escapeStep({
   history = false,
   bringBack = false,
   change = false,
+  activeTab = false,
   detail = false,
   doc = false,
   listOpen = false,
@@ -3893,9 +4977,11 @@ export function escapeStep({
   if (mentionSub) return 'mentionSub';
   if (mention) return 'mention';
   if (projectSearch) return 'projectSearch';
+  if (tabMenu) return 'tabMenu';
   if (selectionBar) return 'selectionBar';
   if (answering) return 'answer';
   if (confirmDelete) return 'confirmDelete';
+  if (confirmCloseDirty) return 'confirmCloseDirty';
   if (typing) return 'blur';
   if (editing) return 'edit';
   if (retopic) return 'retopic';
@@ -3905,6 +4991,7 @@ export function escapeStep({
   if (history) return 'history';
   if (bringBack) return 'bringBack';
   if (change) return 'change';
+  if (activeTab) return 'activeTab';
   if (detail) return 'detail';
   if (doc) return 'doc';
   if (listOpen) return 'list';
@@ -3936,6 +5023,157 @@ export function readPanelWidth(text) {
   if (text == null || String(text).trim() === '') return null;
   const n = Number(text);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+}
+
+// Dual-mode adaptive split layout (compact list vs split reader/detail/diff).
+export const SPLIT_WIDE_MIN = 1080;
+export const SPLIT_MEDIUM_MIN = 700;
+export const SPLIT_CARD_MARGIN_R = 10;
+export const SPLIT_GRIP_OVERHANG = 5;
+export const SPLIT_RATIO_MIN = 0.30;
+export const SPLIT_RATIO_MAX = 0.66;
+
+function clampPanel(value, min, max) {
+  if (max < min) return max;
+  return Math.max(min, Math.min(value, max));
+}
+
+export function resolvePanelMode({
+  tabCount = 0,
+  detail = false,
+  activeDoc = false,
+  editingDoc = false,
+  historyView = false,
+  changeOpen = false,
+} = {}) {
+  return (Number(tabCount) > 0 || detail || activeDoc || editingDoc || historyView || changeOpen) ? 'split' : 'compact';
+}
+
+export function readPanelSizes(jsonText, legacyWidthText = null) {
+  if (jsonText != null && String(jsonText).trim() !== '') {
+    try {
+      const parsed = JSON.parse(String(jsonText));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const rawCompact = Number(parsed.compactPx);
+        const compactPx = parsed.compactPx != null && Number.isFinite(rawCompact) && rawCompact > 0
+          ? Math.round(clampPanel(rawCompact, PANEL_MIN, 500))
+          : null;
+        const rawRatio = Number(parsed.splitRatio);
+        const splitRatio = parsed.splitRatio != null && Number.isFinite(rawRatio) && rawRatio > 0 && rawRatio < 1
+          ? Math.round(clampPanel(rawRatio, SPLIT_RATIO_MIN, SPLIT_RATIO_MAX) * 10000) / 10000
+          : null;
+        return { compactPx, splitRatio };
+      }
+    } catch (_) { /* fall through to legacy migration */ }
+  }
+  const legacy = readPanelWidth(legacyWidthText);
+  if (legacy != null) {
+    if (legacy <= 400) {
+      return { compactPx: Math.max(PANEL_MIN, legacy), splitRatio: null };
+    }
+    const migratedRatio = clampPanel(legacy / 1200, 0.34, 0.62);
+    return { compactPx: null, splitRatio: Math.round(migratedRatio * 10000) / 10000 };
+  }
+  return { compactPx: null, splitRatio: null };
+}
+
+export function updatePanelSizes(sizes, mode, draggedPx, viewWidth = 0) {
+  const prev = sizes && typeof sizes === 'object' ? sizes : { compactPx: null, splitRatio: null };
+  const px = Number(draggedPx);
+  if (!Number.isFinite(px) || px <= 0) {
+    return { compactPx: prev.compactPx ?? null, splitRatio: prev.splitRatio ?? null };
+  }
+  const v = Number.isFinite(viewWidth) && viewWidth > 0 ? viewWidth : 1200;
+  const maxByView = Math.max(PANEL_MIN, Math.round(v - 380));
+  if (mode === 'split') {
+    const maxPx = Math.min(880, maxByView);
+    const minPx = Math.min(360, maxPx);
+    const clampedPx = Math.round(clampPanel(px, minPx, maxPx));
+    const ratio = clampPanel(clampedPx / v, SPLIT_RATIO_MIN, SPLIT_RATIO_MAX);
+    return {
+      compactPx: prev.compactPx ?? null,
+      splitRatio: Math.round(ratio * 10000) / 10000,
+    };
+  }
+  const maxPx = Math.min(500, maxByView);
+  const clampedPx = Math.round(clampPanel(px, PANEL_MIN, maxPx));
+  return {
+    compactPx: clampedPx,
+    splitRatio: prev.splitRatio ?? null,
+  };
+}
+
+export function resetPanelModeSize(sizes, mode) {
+  const prev = sizes && typeof sizes === 'object' ? sizes : { compactPx: null, splitRatio: null };
+  if (mode === 'split') {
+    return { compactPx: prev.compactPx ?? null, splitRatio: null };
+  }
+  return { compactPx: null, splitRatio: prev.splitRatio ?? null };
+}
+
+export function resolveSplitLayout({
+  mode = 'compact',
+  sizes = null,
+  viewWidth = 0,
+  wideOverride = null,
+} = {}) {
+  const hasView = Number.isFinite(viewWidth) && viewWidth > 0;
+  const v = hasView ? viewWidth : 1280;
+  const wide = wideOverride != null ? Boolean(wideOverride) : (hasView ? v >= SPLIT_WIDE_MIN : true);
+
+  if (hasView && v < SPLIT_MEDIUM_MIN) {
+    const maxSheet = Math.max(200, Math.round(v - 16));
+    const cardWidth = Math.min(maxSheet, Math.max(240, Math.min(Math.round(v - 48), 460)));
+    const conversationPadX = v >= 520 ? 20 : 16;
+    return {
+      layoutKind: 'sheet',
+      cardWidth,
+      slotWidth: cardWidth,
+      conversationPadX,
+      wide: false,
+    };
+  }
+
+  const maxByView = Math.max(PANEL_MIN, Math.round(v - 380));
+  let cardWidth;
+  if (mode === 'split') {
+    const savedRatio = sizes && Number.isFinite(Number(sizes.splitRatio)) && Number(sizes.splitRatio) > 0
+      ? clampPanel(Number(sizes.splitRatio), SPLIT_RATIO_MIN, SPLIT_RATIO_MAX)
+      : null;
+    if (savedRatio != null) {
+      const maxPx = Math.min(880, maxByView);
+      const minPx = Math.min(360, maxPx);
+      cardWidth = Math.round(clampPanel(Math.round(v * savedRatio), minPx, maxPx));
+    } else if (v >= SPLIT_WIDE_MIN) {
+      cardWidth = Math.min(760, Math.max(440, Math.min(Math.round(v * 0.47), Math.round(v - 520))));
+    } else {
+      cardWidth = Math.round(clampPanel(Math.round(v * 0.48), 380, maxByView));
+    }
+  } else {
+    const savedCompact = sizes && Number.isFinite(Number(sizes.compactPx)) && Number(sizes.compactPx) > 0
+      ? Math.round(Number(sizes.compactPx))
+      : null;
+    if (savedCompact != null) {
+      const maxPx = Math.min(500, maxByView);
+      cardWidth = Math.round(clampPanel(savedCompact, PANEL_MIN, maxPx));
+    } else if (v >= SPLIT_WIDE_MIN) {
+      cardWidth = Math.round(clampPanel(Math.round(v * 0.27), 320, 368));
+    } else {
+      cardWidth = Math.round(clampPanel(Math.round(v * 0.27), 280, Math.min(340, maxByView)));
+    }
+  }
+
+  const slotWidth = cardWidth + SPLIT_CARD_MARGIN_R + SPLIT_GRIP_OVERHANG;
+  const leftWidth = hasView ? Math.max(0, Math.round(v - slotWidth)) : 760;
+  const conversationPadX = leftWidth >= 760 ? 28 : leftWidth >= 520 ? 20 : 16;
+
+  return {
+    layoutKind: 'inline',
+    cardWidth,
+    slotWidth,
+    conversationPadX,
+    wide,
+  };
 }
 
 // The page's block has window_drag: a left press that reaches it moves the window, and a double-click
@@ -4335,6 +5573,16 @@ export const REMOTE_MKTEMP_ARGV = ['sh', ['-c', 'd="${TMPDIR:-/tmp}"; mktemp "${
 export function remoteAppendChunkArgv(tmpPath, chunk) {
   return ['sh', ['-c', 'printf "%s" "$2" >> "$1"', 'sh', String(tmpPath), String(chunk)]];
 }
+export function utf8ByteLength(text) {
+  const s = String(text ?? '');
+  let bytes = 0;
+  for (let i = 0; i < s.length;) {
+    const cp = s.codePointAt(i);
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+    i += cp > 0xffff ? 2 : 1;
+  }
+  return bytes;
+}
 export function chunkUtf8Text(text, maxBytes = REMOTE_CHUNK_BYTES) {
   const s = String(text ?? '');
   if (!s) return [];
@@ -4376,7 +5624,8 @@ export const INTERNAL_PROJECT_FILES = new Set([
   'conversation.jsonl', 'receipts.json', 'receipts.lock', 'delivered.json', 'delivered.lock', 'deliver.lock',
   'turn-cause.json', 'taken-in.json', 'takeover.json', 'pm-settings.json',
   'schedules.json', 'dudu-attachments.json', 'task-seq.json', 'agy-transcript.json',
-  'pm-turn.json', 'pm-turn.lock',
+  'pm-turn.json', 'pm-turn.lock', 'pm-turn-journal.jsonl', 'pm-turn-journal.1.jsonl', 'pm-turn.beat',
+  'applied-reports.json', 'applied-reports.lock', 'applied-reports.jsonl', 'applied-reports.0001.jsonl', 'mailboxes',
 ]);
 
 function splitProjectRel(raw, ledgerHome, slug) {
@@ -4476,7 +5725,8 @@ export function isContextRelevantChange(root, paths, { ledgerHome = '', slug = '
       if (parts.some(seg => seg.startsWith('.'))) return false;
       const lastLow = parts[parts.length - 1].toLowerCase();
       if (lastLow === 'conversation.jsonl' || lastLow.endsWith('.lock') || lastLow.endsWith('.tmp')) return false;
-      if (parts[0].toLowerCase() === 'attachments') return false;
+      if (parts[0].toLowerCase() === 'attachments' || parts[0].toLowerCase() === 'mailboxes') return false;
+      if (/^(?:applied-reports|pm-turn-journal)\./i.test(lastLow)) return false;
       if (parts.length === 1 && INTERNAL_PROJECT_FILES.has(parts[0].toLowerCase())) return false;
       return true;
     });
@@ -5954,6 +7204,76 @@ export function briefPreview(text, maxChars = 320, maxLines = 6) {
   return { preview: `${cut.trimEnd()}…`, long: true };
 }
 
+const QUESTION_TOOL_RE = /^(?:AskUserQuestion|request_user_input|ask_user|ask_question)$/i;
+
+export function isQuestionTool(name) {
+  return QUESTION_TOOL_RE.test(String(name || '').trim());
+}
+
+function normalizeQuestionItem(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const header = String(raw.header ?? raw.title ?? '').trim();
+  const question = String(raw.question ?? raw.prompt ?? '').trim();
+  const rawOpts = Array.isArray(raw.options) ? raw.options : [];
+  const options = [];
+  for (const o of rawOpts) {
+    if (typeof o === 'string') {
+      const label = o.trim();
+      if (label) options.push({ label, description: '' });
+    } else if (o && typeof o === 'object') {
+      const label = String(o.label ?? o.title ?? o.text ?? '').trim();
+      const description = String(o.description ?? o.why ?? '').trim();
+      if (label) options.push({ label, description });
+    }
+  }
+  if (!header && !question && !options.length) return null;
+  return { header, question: question || header, options };
+}
+
+function unescapeJsonFragment(s) {
+  return String(s || '').replace(/\\(["\\/nrt])/g, (_, ch) => (
+    ch === 'n' ? '\n' : ch === 'r' ? '\r' : ch === 't' ? '\t' : ch
+  ));
+}
+
+export function extractToolQuestions(item) {
+  if (!item || typeof item !== 'object') return [];
+  if (Array.isArray(item.questions) && item.questions.length) {
+    const out = item.questions.map(normalizeQuestionItem).filter(Boolean);
+    if (out.length) return out;
+  }
+  const rawInput = String(item.input || '').trim();
+  if (!rawInput) return [];
+  if (rawInput.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(rawInput);
+      if (parsed && typeof parsed === 'object') {
+        const list = Array.isArray(parsed.questions) && parsed.questions.length ? parsed.questions : [parsed];
+        const out = list.map(normalizeQuestionItem).filter(Boolean);
+        if (out.length) return out;
+      }
+    } catch (_) {
+      // Truncated JSON from an older remote pm.py (300-char SUMMARY_MAX): extract visible fields best-effort.
+      const headerMatch = rawInput.match(/"(?:header|title)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      const qMatch = rawInput.match(/"(?:question|prompt)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      const opts = [];
+      const optRe = /"(?:label|text)"\s*:\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"(?:description|why)"\s*:\s*"((?:[^"\\]|\\.)*)")?/g;
+      let m;
+      while ((m = optRe.exec(rawInput)) !== null) {
+        const label = unescapeJsonFragment(m[1]).trim();
+        const description = m[2] ? unescapeJsonFragment(m[2]).trim() : '';
+        if (label) opts.push({ label, description });
+      }
+      const header = headerMatch ? unescapeJsonFragment(headerMatch[1]).trim() : '';
+      const question = qMatch ? unescapeJsonFragment(qMatch[1]).trim() : '';
+      if (header || question || opts.length) {
+        return [{ header, question: question || header, options: opts }];
+      }
+    }
+  }
+  return [{ header: '', question: rawInput, options: [] }];
+}
+
 export function toolsSummary(lang, calls) {
   const list = Array.isArray(calls) ? calls : [];
   if (!list.length) return '';
@@ -6042,6 +7362,18 @@ export function sessionTurns(items, { lang = 'en', sent = [] } = {}) {
       return;
     }
     if (item.type === 'tool') {
+      if (isQuestionTool(item.name)) {
+        last.parts.push({
+          kind: 'question',
+          key: `q:${itemId}`,
+          id: String(item.id || `${itemId}`),
+          name: String(item.name || 'AskUserQuestion'),
+          questions: extractToolQuestions(item),
+          output: String(item.output || ''),
+          error: Boolean(item.error),
+        });
+        return;
+      }
       const call = {
         id: String(item.id || `${itemId}`),
         name: String(item.name || 'tool'),
@@ -6272,6 +7604,569 @@ export function parseRefLink(url, ctx = null) {
   return null;
 }
 
+// ---- Inline image preview parsing, safe path resolution & staging ----
+const PREVIEWABLE_IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+export const INLINE_IMAGE_MAX_PER_MSG = 6;
+export const INLINE_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
+export const INLINE_IMAGE_REMOTE_MAX_BYTES = 6 * 1024 * 1024;
+export const INLINE_IMAGE_CACHE_DIR = 'cache/pm-images';
+
+export const isPreviewableImage = path => PREVIEWABLE_IMAGE_EXT.test(String(path || '').trim());
+
+// Maps a parsed library/file ref into a strictly-contained { key, root, path, baseDir, relPath, ext }
+// descriptor for image staging, or null if disallowed or outside project/Library/repo.
+export function resolveImageTarget(ref, ctx = null) {
+  if (!ref || typeof ref !== 'object' || !ctx || typeof ctx !== 'object') return null;
+  const root = ref.kind === 'file' ? 'repo' : String(ref.root || '').trim();
+  const path = String(ref.path || ref.target || '').trim();
+  if (!root || !path || !isPreviewableImage(path)) return null;
+  const extMatch = /\.([a-z0-9]+)$/i.exec(path);
+  const ext = extMatch ? extMatch[1].toLowerCase() : '';
+  if (!ext) return null;
+
+  const ledgerHome = inferLedgerHome(ctx);
+  const slug = String(ctx.slug || '').trim();
+  const validSlug = Boolean(slug && !slug.includes('/') && !slug.includes('\\') && !slug.includes('..') && slug !== '.');
+
+  if (root === 'docs') {
+    if (!ledgerHome || !validSlug) return null;
+    const parts = validRelParts(path);
+    if (!parts || parts.some(p => p.startsWith('.')) || parts[0].toLowerCase() === 'research') return null;
+    const normPath = parts.join('/');
+    return {
+      key: `docs/${normPath}`,
+      root: 'docs',
+      path: normPath,
+      baseDir: `${ledgerHome}/projects/${slug}/docs`,
+      relPath: normPath,
+      ext,
+    };
+  }
+  if (root === 'project') {
+    if (!ledgerHome || !validSlug) return null;
+    const parts = validRelParts(path);
+    if (!parts || parts.some(p => p.startsWith('.')) || parts[0] !== 'docs' || parts.length < 2) return null;
+    const normPath = parts.join('/');
+    return {
+      key: `docs/${parts.slice(1).join('/')}`,
+      root: 'docs',
+      path: parts.slice(1).join('/'),
+      baseDir: `${ledgerHome}/projects/${slug}`,
+      relPath: normPath,
+      ext,
+    };
+  }
+  if (root === 'research') {
+    if (!ledgerHome || !validSlug) return null;
+    const parts = validRelParts(path);
+    if (!parts || parts.some(p => p.startsWith('.')) || parts[0] !== 'docs' || parts[1]?.toLowerCase() !== 'research' || parts.length < 3) return null;
+    const normPath = parts.join('/');
+    return {
+      key: `research/${normPath}`,
+      root: 'research',
+      path: normPath,
+      baseDir: `${ledgerHome}/projects/${slug}/docs/research`,
+      relPath: parts.slice(2).join('/'),
+      ext,
+    };
+  }
+  if (root === 'repo' || root === 'repo_docs') {
+    const repo = normalizeFsPath(ctx.repo || '');
+    if (!repo) return null;
+    const parts = validRelParts(path, { allowGit: true });
+    if (!parts || parts.includes('.git')) return null;
+    const normPath = parts.join('/');
+    return {
+      key: `${root}/${normPath}`,
+      root,
+      path: normPath,
+      baseDir: repo,
+      relPath: normPath,
+      ext,
+    };
+  }
+  return null;
+}
+
+function stripMarkdownLinkTarget(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  if (s.startsWith('<')) {
+    const close = s.indexOf('>');
+    if (close > 1) return s.slice(1, close).trim();
+  }
+  // Drop optional markdown link title: (url "title") or (url 'title')
+  const titleMatch = /^(\S+)\s+["'(]/.exec(s);
+  if (titleMatch) s = titleMatch[1];
+  return s;
+}
+
+const MD_IMAGE_OR_LINK_RE = /(!?)\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g;
+const BARE_IMAGE_REF_RE = /\b((?:library|doc|file):[^\s)\]>,"'`]+)/gi;
+
+// Extracts deduplicated, safely-resolved inline image references from markdown text
+// (PM replies and question card bodies), skipping fenced code blocks and inline code spans.
+export function extractInlineImageRefs(markdown, ctx = null, { limit = INLINE_IMAGE_MAX_PER_MSG } = {}) {
+  const src = String(markdown || '');
+  if (!src || !ctx || typeof ctx !== 'object') return [];
+  const cap = Math.max(0, Number(limit) || 0);
+  if (cap === 0) return [];
+
+  const byKey = new Map();
+  const order = [];
+  const pushCandidate = (rawUrl, altText, isMarkdownImage) => {
+    const url = stripMarkdownLinkTarget(rawUrl);
+    if (!url) return;
+    const parsed = parseRefLink(url, ctx);
+    if (!parsed || (parsed.kind !== 'library' && parsed.kind !== 'file')) return;
+    const target = resolveImageTarget(parsed, ctx);
+    if (!target) return;
+    const label = String(altText || '').trim();
+    const existing = byKey.get(target.key);
+    if (existing) {
+      if (!existing.alt && label) existing.alt = label;
+      if (isMarkdownImage) existing.isMarkdownImage = true;
+      return;
+    }
+    if (order.length >= cap) return;
+    const item = {
+      ...target,
+      url,
+      alt: label,
+      name: fileName(target.path),
+      isMarkdownImage: Boolean(isMarkdownImage),
+    };
+    byKey.set(target.key, item);
+    order.push(item);
+  };
+
+  const scanProse = chunk => {
+    const covered = [];
+    MD_IMAGE_OR_LINK_RE.lastIndex = 0;
+    let m;
+    while ((m = MD_IMAGE_OR_LINK_RE.exec(chunk)) !== null) {
+      covered.push([m.index, m.index + m[0].length]);
+      pushCandidate(m[3], m[2], m[1] === '!');
+    }
+    BARE_IMAGE_REF_RE.lastIndex = 0;
+    while ((m = BARE_IMAGE_REF_RE.exec(chunk)) !== null) {
+      const start = m.index, end = start + m[0].length;
+      if (covered.some(([a, b]) => start >= a && end <= b)) continue;
+      const cleaned = m[1].replace(/[.,;:!?。，；：！？）)]+$/, '');
+      pushCandidate(cleaned, '', false);
+    }
+  };
+
+  let inFence = false, fence = '';
+  for (const line of src.split('\n')) {
+    const fMatch = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fMatch) {
+      if (!inFence) { inFence = true; fence = fMatch[1][0]; }
+      else if (fMatch[1][0] === fence) { inFence = false; fence = ''; }
+      continue;
+    }
+    if (inFence) continue;
+    const parts = line.split(/(`[^`]*`)/g);
+    for (let i = 0; i < parts.length; i += 2) {
+      if (parts[i]) scanProse(parts[i]);
+    }
+  }
+  return order;
+}
+
+// Rewrites `![alt](library:...|file:...)` for previewable images into clickable `[alt || name](url)`
+// links so GPUI TextView.markdown renders clean prose while the inline preview renders below.
+export function rewriteMarkdownImagesForDisplay(markdown, ctx = null) {
+  const src = String(markdown || '');
+  if (!src.includes('![') || !ctx || typeof ctx !== 'object') return src;
+  const rewriteChunk = chunk => chunk.replace(/!\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g, (full, alt, rawTarget) => {
+    const url = stripMarkdownLinkTarget(rawTarget);
+    const parsed = parseRefLink(url, ctx);
+    if (!parsed || (parsed.kind !== 'library' && parsed.kind !== 'file')) return full;
+    const target = resolveImageTarget(parsed, ctx);
+    if (!target) return full;
+    const label = String(alt || '').trim() || fileName(target.path);
+    return `[${label}](${url})`;
+  });
+  let out = '', inFence = false, fence = '';
+  for (const line of src.split('\n')) {
+    const fMatch = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fMatch) {
+      if (!inFence) { inFence = true; fence = fMatch[1][0]; }
+      else if (fMatch[1][0] === fence) { inFence = false; fence = ''; }
+      out += (out ? '\n' : '') + line;
+      continue;
+    }
+    if (inFence) { out += (out ? '\n' : '') + line; continue; }
+    const parts = line.split(/(`[^`]*`)/g);
+    const rewritten = parts.map((p, i) => (i % 2 === 1 ? p : rewriteChunk(p))).join('');
+    out += (out ? '\n' : '') + rewritten;
+  }
+  return out;
+}
+
+// Computes aspect-ratio-preserving display dimensions inside (maxWidth, maxHeight) without upscaling.
+export function fitImageBox(naturalW, naturalH, { maxWidth = 480, maxHeight = 280 } = {}) {
+  const mw = Math.max(48, Math.floor(Number(maxWidth) || 480));
+  const mh = Math.max(48, Math.floor(Number(maxHeight) || 280));
+  const nw = Number(naturalW) || 0;
+  const nh = Number(naturalH) || 0;
+  if (nw <= 0 || nh <= 0) {
+    return { width: Math.min(mw, 240), height: Math.min(mh, 140) };
+  }
+  const scale = Math.min(1, mw / nw, mh / nh);
+  return {
+    width: Math.max(1, Math.round(nw * scale)),
+    height: Math.max(1, Math.round(nh * scale)),
+  };
+}
+
+const IMAGE_PROBE_PY_COMMON = `
+import os, sys, stat, json, hashlib, struct, base64
+
+ALLOWED = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
+
+def fail(msg):
+  print(json.dumps({'ok': False, 'error': msg}, ensure_ascii=False))
+  sys.exit(0)
+
+def walk_safe(base_dir, rel_path):
+  if not base_dir or not rel_path or '\\x00' in rel_path or '\\\\' in rel_path:
+    fail('invalid path')
+  parts = [p for p in rel_path.split('/') if p]
+  if not parts or rel_path.startswith('/') or any(p in ('.', '..') or p == '.git' for p in parts):
+    fail('invalid path')
+  ext = os.path.splitext(parts[-1])[1].lower()
+  if ext not in ALLOWED:
+    fail('unsupported image format')
+  base_real = os.path.realpath(base_dir)
+  cur = base_dir
+  if hasattr(os, 'O_NOFOLLOW'):
+    dir_fd = os.open(base_dir, os.O_RDONLY)
+    try:
+      for seg in parts[:-1]:
+        nxt = os.open(seg, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        os.close(dir_fd)
+        dir_fd = nxt
+        if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+          fail('not a file')
+      fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_BINARY', 0), dir_fd=dir_fd)
+    finally:
+      os.close(dir_fd)
+    return fd, ext
+  for seg in parts:
+    cur = os.path.join(cur, seg)
+    if os.path.islink(cur):
+      fail('symlink refused')
+  cur_real = os.path.realpath(cur)
+  if cur_real != base_real and not cur_real.startswith(base_real + os.sep):
+    fail('outside root')
+  fd = os.open(cur_real, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+  return fd, ext
+
+def probe_dims(data, ext):
+  n = len(data)
+  if data.startswith(b'\\x89PNG\\r\\n\\x1a\\n') and n >= 24:
+    w, h = struct.unpack('>II', data[16:24])
+    return (w, h) if w > 0 and h > 0 else None
+  if (data.startswith(b'GIF87a') or data.startswith(b'GIF89a')) and n >= 10:
+    w, h = struct.unpack('<HH', data[6:10])
+    return (w, h) if w > 0 and h > 0 else None
+  if data.startswith(b'RIFF') and n >= 30 and data[8:12] == b'WEBP':
+    tag = data[12:16]
+    if tag == b'VP8 ' and n >= 30:
+      w = struct.unpack('<H', data[26:28])[0] & 0x3FFF
+      h = struct.unpack('<H', data[28:30])[0] & 0x3FFF
+      return (w, h) if w > 0 and h > 0 else None
+    if tag == b'VP8L' and n >= 25:
+      bits = struct.unpack('<I', data[21:25])[0]
+      w = (bits & 0x3FFF) + 1
+      h = ((bits >> 14) & 0x3FFF) + 1
+      return (w, h) if w > 0 and h > 0 else None
+    if tag == b'VP8X' and n >= 30:
+      w = 1 + int.from_bytes(data[24:27], 'little')
+      h = 1 + int.from_bytes(data[27:30], 'little')
+      return (w, h) if w > 0 and h > 0 else None
+    return None
+  if data.startswith(b'\\xff\\xd8'):
+    i = 2
+    while i + 4 <= n:
+      while i < n and data[i] == 0xFF:
+        i += 1
+      if i >= n:
+        break
+      marker = data[i]
+      i += 1
+      if marker in (0xD8, 0xD9, 0x01) or (0xD0 <= marker <= 0xD7):
+        continue
+      if i + 2 > n:
+        break
+      seg_len = struct.unpack('>H', data[i:i+2])[0]
+      if seg_len < 2 or i + seg_len > n:
+        break
+      if (0xC0 <= marker <= 0xCF) and marker not in (0xC4, 0xC8, 0xCC) and seg_len >= 7:
+        h, w = struct.unpack('>HH', data[i+3:i+7])
+        return (w, h) if w > 0 and h > 0 else None
+      i += seg_len
+    return None
+  return None
+
+def read_verified(base_dir, rel_path, max_bytes):
+  try:
+    fd, ext = walk_safe(base_dir, rel_path)
+  except OSError:
+    fail('not found')
+  try:
+    with os.fdopen(fd, 'rb') as f:
+      st = os.fstat(f.fileno())
+      if not stat.S_ISREG(st.st_mode):
+        fail('not a file')
+      if st.st_size > max_bytes:
+        fail('too large')
+      data = f.read(max_bytes + 1)
+  except OSError:
+    fail('read error')
+  if len(data) > max_bytes:
+    fail('too large')
+  dims = probe_dims(data, ext)
+  if not dims:
+    fail('invalid image')
+  h = hashlib.sha256(data).hexdigest()[:20]
+  return data, ext, dims[0], dims[1], h
+
+def write_cache(cache_dir, rel_prefix, h, ext, data, max_keep=80):
+  os.makedirs(cache_dir, exist_ok=True)
+  name = h + ext
+  dst = os.path.join(cache_dir, name)
+  if not os.path.exists(dst):
+    tmp = os.path.join(cache_dir, f'.tmp-{os.getpid()}-{name}')
+    with open(tmp, 'wb') as f:
+      f.write(data)
+    os.replace(tmp, dst)
+  else:
+    try:
+      os.utime(dst, None)
+    except OSError:
+      pass
+  try:
+    items = []
+    for entry in os.scandir(cache_dir):
+      if entry.name.startswith('.') or not entry.is_file():
+        continue
+      items.append((entry.stat().st_mtime, entry.path))
+    if len(items) > max_keep:
+      items.sort()
+      for _, old in items[:-max_keep]:
+        try:
+          os.unlink(old)
+        except OSError:
+          pass
+  except OSError:
+    pass
+  return f'{rel_prefix}/{name}'
+`.trim();
+
+const STAGE_LOCAL_IMAGE_PY = `${IMAGE_PROBE_PY_COMMON}
+base_dir, rel_path, cache_dir, rel_prefix, max_bytes = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+data, ext, w, h, digest = read_verified(base_dir, rel_path, max_bytes)
+rel = write_cache(cache_dir, rel_prefix, digest, ext, data)
+print(json.dumps({'ok': True, 'rel': rel, 'width': w, 'height': h, 'size': len(data), 'hash': digest}, ensure_ascii=False))
+`;
+
+const READ_REMOTE_IMAGE_PY = `${IMAGE_PROBE_PY_COMMON}
+base_dir, rel_path, max_bytes = sys.argv[1], sys.argv[2], int(sys.argv[3])
+data, ext, w, h, digest = read_verified(base_dir, rel_path, max_bytes)
+print(json.dumps({'ok': True, 'ext': ext, 'width': w, 'height': h, 'size': len(data), 'hash': digest, 'b64': base64.b64encode(data).decode('ascii')}, ensure_ascii=False))
+`;
+
+const WRITE_STAGED_IMAGE_PY = `${IMAGE_PROBE_PY_COMMON}
+cache_dir, rel_prefix, digest, ext, b64_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+try:
+  with open(b64_file, 'r', encoding='ascii') as f:
+    raw = base64.b64decode(f.read().strip(), validate=True)
+finally:
+  try:
+    os.unlink(b64_file)
+  except OSError:
+    pass
+dims = probe_dims(raw, ext)
+if not dims:
+  fail('invalid image')
+rel = write_cache(cache_dir, rel_prefix, digest, ext, raw)
+print(json.dumps({'ok': True, 'rel': rel, 'width': dims[0], 'height': dims[1], 'size': len(raw), 'hash': digest}, ensure_ascii=False))
+`;
+
+export function stageLocalImageArgv(baseDir, relPath, cacheDir, { relPrefix = INLINE_IMAGE_CACHE_DIR, maxBytes = INLINE_IMAGE_MAX_BYTES } = {}) {
+  return ['-c', STAGE_LOCAL_IMAGE_PY, String(baseDir), String(relPath), String(cacheDir), String(relPrefix), String(maxBytes)];
+}
+
+export function readRemoteImageArgv(baseDir, relPath, { maxBytes = INLINE_IMAGE_REMOTE_MAX_BYTES } = {}) {
+  return ['python3', ['-c', READ_REMOTE_IMAGE_PY, String(baseDir), String(relPath), String(maxBytes)]];
+}
+
+export function writeStagedImageArgv(cacheDir, digest, ext, b64File, { relPrefix = INLINE_IMAGE_CACHE_DIR } = {}) {
+  return ['-c', WRITE_STAGED_IMAGE_PY, String(cacheDir), String(relPrefix), String(digest), String(ext), String(b64File)];
+}
+
+// ---- Auto-open right side tab for newly arriving PM replies / open questions ----
+const AUTO_OPEN_LIB_ROOTS = new Set(['docs', 'repo_docs', 'research', 'project']);
+
+export function autoOpenEventKey(ev) {
+  if (!ev || typeof ev !== 'object') return '';
+  if (ev.msg_id) return `msg:${String(ev.msg_id)}`;
+  if (ev.seq !== undefined && ev.seq !== null && Number.isFinite(Number(ev.seq))) {
+    return `seq:${Number(ev.seq)}`;
+  }
+  const type = String(ev.type || '');
+  const at = String(ev.at || '');
+  const task = String(ev.task || '');
+  const text = String(ev.text || '').slice(0, 80);
+  return `ev:${type}|${at}|${task}|${text}`;
+}
+
+// Extracts previewable images and Library documents referenced in a PM message or question card,
+// skipping code blocks and inline code spans and enforcing parseRefLink containment.
+export function extractAutoOpenDocRefs(markdown, ctx = null, { limit = INLINE_IMAGE_MAX_PER_MSG } = {}) {
+  const src = String(markdown || '');
+  if (!src || !ctx || typeof ctx !== 'object') return [];
+  const cap = Math.max(0, Number(limit) || 0);
+  if (cap === 0) return [];
+
+  const byKey = new Map();
+  const order = [];
+  const pushUrl = rawUrl => {
+    const url = stripMarkdownLinkTarget(rawUrl);
+    if (!url) return;
+    const parsed = parseRefLink(url, ctx);
+    if (!parsed || (parsed.kind !== 'library' && parsed.kind !== 'file')) return;
+    if (isPreviewableImage(parsed.path)) {
+      const target = resolveImageTarget(parsed, ctx);
+      if (!target) return;
+      if (byKey.has(target.key) || order.length >= cap) return;
+      const item = { tab: 'library', root: target.root, path: target.path, key: target.key, kind: 'image', name: fileName(target.path) };
+      byKey.set(target.key, item);
+      order.push(item);
+      return;
+    }
+    if (parsed.kind === 'library' && AUTO_OPEN_LIB_ROOTS.has(parsed.root)) {
+      const root = parsed.root === 'project' && parsed.path.startsWith('docs/') ? 'docs' : parsed.root;
+      const path = parsed.root === 'project' && parsed.path.startsWith('docs/') ? parsed.path.slice('docs/'.length) : parsed.path;
+      const key = `${root}/${path}`;
+      if (byKey.has(key) || order.length >= cap) return;
+      const item = { tab: 'library', root, path, key, kind: 'doc', name: fileName(path) };
+      byKey.set(key, item);
+      order.push(item);
+    }
+  };
+
+  const scanProse = chunk => {
+    const covered = [];
+    MD_IMAGE_OR_LINK_RE.lastIndex = 0;
+    let m;
+    while ((m = MD_IMAGE_OR_LINK_RE.exec(chunk)) !== null) {
+      covered.push([m.index, m.index + m[0].length]);
+      pushUrl(m[3]);
+    }
+    BARE_IMAGE_REF_RE.lastIndex = 0;
+    while ((m = BARE_IMAGE_REF_RE.exec(chunk)) !== null) {
+      const start = m.index, end = start + m[0].length;
+      if (covered.some(([a, b]) => start >= a && end <= b)) continue;
+      const cleaned = m[1].replace(/[.,;:!?。，；：！？）)]+$/, '');
+      pushUrl(cleaned);
+    }
+  };
+
+  let inFence = false, fence = '';
+  for (const line of src.split('\n')) {
+    const fMatch = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fMatch) {
+      if (!inFence) { inFence = true; fence = fMatch[1][0]; }
+      else if (fMatch[1][0] === fence) { inFence = false; fence = ''; }
+      continue;
+    }
+    if (inFence) continue;
+    const parts = line.split(/(`[^`]*`)/g);
+    for (let i = 0; i < parts.length; i += 2) {
+      if (parts[i]) scanProse(parts[i]);
+    }
+  }
+  return order;
+}
+
+// Computes the baseline watermark (seen keys + highest seq/timestamp) from initial conversation events.
+export function seedAutoOpenState(events) {
+  const seen = new Set();
+  let minSeq = 0;
+  let minAt = '';
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (!ev || typeof ev !== 'object') continue;
+    const k = autoOpenEventKey(ev);
+    if (k) seen.add(k);
+    const seq = Number(ev.seq);
+    if (Number.isFinite(seq) && seq > minSeq) minSeq = seq;
+    const at = String(ev.at || '');
+    if (at && at > minAt) minAt = at;
+  }
+  return { seen, minSeq, minAt };
+}
+
+// Records prepended historical events ("load earlier") into `seen` so they never trigger auto-open.
+export function markAutoOpenHistory(state, events) {
+  if (!state || !(state.seen instanceof Set)) return;
+  for (const ev of Array.isArray(events) ? events : []) {
+    const k = autoOpenEventKey(ev);
+    if (k) state.seen.add(k);
+  }
+}
+
+// Picks the auto-open side-tab target for newly arrived PM replies or open question cards.
+// Guardrails: ignores events in `seenKeys` (baseline history + already auto-opened once),
+// ignores historical events at/before baseline `minSeq`/`minAt` (e.g. prepended via "load earlier"),
+// skips auto-opening while `editingDirty` is true, and prefers image refs over doc refs.
+export function pickAutoOpenTarget(events, ctx, { seenKeys = null, minSeq = 0, minAt = '', tasks = [], editingDirty = false } = {}) {
+  const list = Array.isArray(events) ? events : [];
+  const seen = seenKeys instanceof Set ? seenKeys : new Set();
+  const seqFloor = Number.isFinite(Number(minSeq)) ? Number(minSeq) : 0;
+  const atFloor = String(minAt || '');
+  const taskById = new Map();
+  for (const t of Array.isArray(tasks) ? tasks : []) {
+    if (t?.id) taskById.set(t.id, t);
+  }
+  const newKeys = [];
+  let chosen = null;
+
+  for (const ev of list) {
+    if (!ev || typeof ev !== 'object') continue;
+    const isPm = ev.type === 'pm';
+    const isBlockedQuestion = (ev.type === 'question') || (ev.type === 'thread' && ev.status === 'blocked');
+    if (!isPm && !isBlockedQuestion) continue;
+    const key = autoOpenEventKey(ev);
+    if (!key || seen.has(key)) continue;
+    const evSeq = (ev.seq !== undefined && ev.seq !== null && Number.isFinite(Number(ev.seq))) ? Number(ev.seq) : null;
+    const evAt = String(ev.at || '');
+    const olderBySeq = evSeq !== null && seqFloor > 0 && evSeq <= seqFloor;
+    const olderByAt = evSeq === null && atFloor && evAt && evAt <= atFloor;
+    if (olderBySeq || olderByAt) {
+      newKeys.push(key);
+      continue;
+    }
+    if (isBlockedQuestion && ev.task) {
+      const t = taskById.get(ev.task);
+      if (t && t.status && t.status !== 'blocked') {
+        newKeys.push(key);
+        continue;
+      }
+    }
+    newKeys.push(key);
+    if (editingDirty) continue;
+    const refs = extractAutoOpenDocRefs(ev.text || '', ctx);
+    if (!refs.length) continue;
+    const preferred = refs.find(r => r.kind === 'image') || refs[0];
+    chosen = { eventKey: key, target: preferred };
+  }
+  return { eventKey: chosen?.eventKey || '', target: chosen?.target || null, newKeys };
+}
+
 export function parseMentionSpans(text) {
   const str = String(text ?? '');
   if (!str.includes('[@')) return [];
@@ -6464,6 +8359,7 @@ export function buildMentionMenu({
   query = '',
   threads = { open: [], sessions: [], finished: [] },
   tasks = [],
+  extraThreads = [],
   taskNumbers = null,
   libraryFiles = [],
   repoFiles = [],
@@ -6472,12 +8368,15 @@ export function buildMentionMenu({
   filesError = '',
   libraryLoading = false,
   libraryError = '',
+  threadsLoading = false,
 } = {}) {
   const byTask = new Map((Array.isArray(tasks) ? tasks : []).filter(t => t?.id).map(t => [t.id, t]));
   const threadItems = [];
   const activeThreads = [];
+  const seenThreadIds = new Set();
   for (const r of Array.isArray(threads?.open) ? threads.open : []) {
-    if (!r?.task || (excludeThread && r.task === excludeThread)) continue;
+    if (!r?.task || seenThreadIds.has(r.task) || (excludeThread && r.task === excludeThread)) continue;
+    seenThreadIds.add(r.task);
     const task = byTask.get(r.task);
     const num = taskNumber(task) || taskNumber(r) || taskNumber(taskNumbers?.[r.task]);
     const engine = task ? engineLabel(task) : '';
@@ -6529,32 +8428,53 @@ export function buildMentionMenu({
     threadItems.push(item);
     if (active) activeThreads.push(item);
   }
-  for (const r of Array.isArray(threads?.finished) ? threads.finished : []) {
-    if (!r?.task || (excludeThread && r.task === excludeThread)) continue;
-    const task = byTask.get(r.task);
-    const num = taskNumber(task) || taskNumber(r) || taskNumber(taskNumbers?.[r.task]);
+  const pushHistoricalThread = raw => {
+    if (!raw || typeof raw !== 'object' || raw.review_of) return;
+    const id = String(raw.task || raw.id || '').trim();
+    if (!id || seenThreadIds.has(id) || (excludeThread && id === excludeThread)) return;
+    const task = byTask.get(id);
+    const status = String(raw.status || task?.status || '');
+    if (status === GIVEN_UP) return;
+    seenThreadIds.add(id);
+    const num = taskNumber(task) || taskNumber(raw) || taskNumber(taskNumbers?.[id]);
     const numTag = formatTaskNumber(num);
+    const title = String(raw.title || task?.title || id);
+    const branch = String(raw.branch || task?.branch || '');
     const item = buildMentionCandidate({
-      key: `thread:${r.task}`,
+      key: `thread:${id}`,
       category: 'threads',
       kind: 'thread',
-      target: r.task,
+      target: id,
       ...(num ? { number: num } : {}),
-      label: r.title || r.task,
-      subtitle: [numTag, r.task].filter(Boolean).join(' · '),
+      label: title,
+      subtitle: [numTag, id].filter(Boolean).join(' · '),
       typeLabel: word(lang, 'mentionTypeThread'),
       icon: 'hook',
       tone: 'quiet',
       group: 'finished',
       working: false,
-      status: r.status || 'done',
+      status: status || 'done',
       dimmed: true,
       active: false,
       tieRank: 4,
-      searchPrimary: numTag ? `${numTag} ${r.title || r.task}` : (r.title || r.task),
-      searchSecondary: `${num ? `${num} #${num} ` : ''}${r.task}`,
+      searchPrimary: numTag ? `${numTag} ${title}` : title,
+      searchSecondary: `${num ? `${num} #${num} ` : ''}${id}${branch ? ` ${branch}` : ''}`,
     });
     threadItems.push(item);
+  };
+  for (const r of Array.isArray(threads?.finished) ? threads.finished : []) {
+    pushHistoricalThread(r);
+  }
+  const extraFinishedFromTasks = (Array.isArray(tasks) ? tasks : [])
+    .filter(t => t?.id && !t.review_of && CLOSED.includes(t.status) && t.status !== GIVEN_UP)
+    .sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+  for (const t of extraFinishedFromTasks) {
+    pushHistoricalThread(t);
+  }
+  for (const raw of Array.isArray(extraThreads) ? extraThreads : []) {
+    if (!raw || typeof raw !== 'object' || raw.review_of) continue;
+    const norm = raw.task ? raw : normalizeProjectTaskRow(raw);
+    if (norm) pushHistoricalThread(norm);
   }
 
   const libList = validLibraryPayload(libraryFiles).files.filter(f => f.kind !== 'folder' && !(f.archive && f.hidden));
@@ -6650,9 +8570,6 @@ export function buildMentionMenu({
   };
   if (activeCat !== 'all') {
     const title = word(lang, activeCat === 'threads' ? 'mentionThreads' : activeCat === 'library' ? 'mentionLibrary' : 'mentionFiles');
-    const loading = activeCat === 'files' ? Boolean(filesLoading && !indexedFiles.length)
-      : activeCat === 'library' ? Boolean(libraryLoading && !libraryItems.length)
-      : false;
     const error = activeCat === 'files' ? String(filesError || '')
       : activeCat === 'library' ? String(libraryError || '')
       : '';
@@ -6685,6 +8602,14 @@ export function buildMentionMenu({
         items = hits.slice(0, 50).map(h => h.it);
       }
     }
+    const loading = activeCat === 'files' ? Boolean(filesLoading && !indexedFiles.length)
+      : activeCat === 'library' ? Boolean(libraryLoading && !libraryItems.length)
+      : activeCat === 'threads' ? Boolean(threadsLoading && !items.length)
+      : false;
+    const loadingText = !loading ? ''
+      : activeCat === 'files' ? word(lang, 'mentionLoadingFiles')
+      : activeCat === 'threads' ? word(lang, 'threadsSearching')
+      : word(lang, 'libraryLoading');
     const emptyKey = qRaw
       ? 'mentionEmpty'
       : activeCat === 'threads'
@@ -6699,6 +8624,7 @@ export function buildMentionMenu({
       items,
       dividerBefore: -1,
       loading,
+      loadingText,
       error,
       emptyText: items.length || loading || error ? '' : word(lang, emptyKey),
     };
@@ -6724,14 +8650,24 @@ export function buildMentionMenu({
   }
   scored.sort((a, b) => b.score - a.score || a.tie - b.tie || a.order - b.order);
   const top = scored.slice(0, 30).map(h => h.item || buildFileItem(h.f));
-  const loading = Boolean((filesLoading && !indexedFiles.length) || (libraryLoading && !libraryItems.length));
+  const anyLoading = Boolean(
+    (filesLoading && !indexedFiles.length)
+    || (libraryLoading && !libraryItems.length)
+    || threadsLoading
+  );
+  const loading = !top.length && anyLoading;
+  const loadingText = !loading ? ''
+    : threadsLoading ? word(lang, 'threadsSearching')
+    : (filesLoading && !indexedFiles.length) ? word(lang, 'mentionLoadingFiles')
+    : word(lang, 'libraryLoading');
   return {
     mode: 'search',
     category: 'all',
     title: '',
     items: top,
     dividerBefore: -1,
-    loading: !top.length && loading,
+    loading,
+    loadingText,
     error: '',
     emptyText: top.length || loading ? '' : word(lang, 'mentionEmpty'),
   };
@@ -7856,6 +9792,124 @@ export function taskDependencies(task, allTasks = [], { terms = [], live = [] } 
 
 // ---- Thread sub-agents (`worker`, `review`, `helpers`) & default small-window mode --------
 
+export const AGENT_NAMES = [
+  'Milo', 'Nora', 'Kira', 'Leo', 'Maya', 'Owen', 'Iris', 'Rex',
+  'Ada', 'Toby', 'Zoe', 'Finn', 'Sage', 'Nova', 'Ezra', 'Luna',
+  'Jude', 'Cleo', 'Otto', 'Vera', 'Theo', 'Nyx', 'Gale', 'Wren',
+];
+
+function hashAgentSeed(seed) {
+  const s = String(seed || '');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+// Deterministic friendly short name per agent instance; when `usedNames` (a Set) is given,
+// linearly probes the pool so agents under the same task never share a name.
+export function agentDisplayName(seed, usedNames = null) {
+  const baseIdx = hashAgentSeed(seed) % AGENT_NAMES.length;
+  const used = usedNames instanceof Set ? usedNames : null;
+  if (!used) return AGENT_NAMES[baseIdx];
+  for (let step = 0; step < AGENT_NAMES.length; step++) {
+    const cand = AGENT_NAMES[(baseIdx + step) % AGENT_NAMES.length];
+    if (!used.has(cand)) {
+      used.add(cand);
+      return cand;
+    }
+  }
+  let suffix = 2;
+  while (used.has(`${AGENT_NAMES[baseIdx]} ${suffix}`)) suffix++;
+  const fallback = `${AGENT_NAMES[baseIdx]} ${suffix}`;
+  used.add(fallback);
+  return fallback;
+}
+
+export const AGENT_ACTIONS = {
+  code: { zh: '编码', en: { doing: 'Coding', done: 'Coded', base: 'Code' } },
+  review: { zh: '审查', en: { doing: 'Reviewing', done: 'Reviewed', base: 'Review' } },
+  merge: { zh: '合入', en: { doing: 'Merging', done: 'Merged', base: 'Merge' } },
+  triage: { zh: '排查', en: { doing: 'Triaging', done: 'Triaged', base: 'Triage' } },
+  probe: { zh: '调研', en: { doing: 'Probing', done: 'Probed', base: 'Probe' } },
+  design: { zh: '设计', en: { doing: 'Designing', done: 'Designed', base: 'Design' } },
+  install: { zh: '安装', en: { doing: 'Installing', done: 'Installed', base: 'Install' } },
+  cleanup: { zh: '清理', en: { doing: 'Cleaning', done: 'Cleaned', base: 'Cleanup' } },
+  test: { zh: '测试', en: { doing: 'Testing', done: 'Tested', base: 'Test' } },
+  fix: { zh: '修复', en: { doing: 'Fixing', done: 'Fixed', base: 'Fix' } },
+  docs: { zh: '文档', en: { doing: 'Documenting', done: 'Documented', base: 'Docs' } },
+};
+
+const ACTION_RULES = [
+  ['review', /(?:^|[\s/:_-])(?:review|reviewer|audit|code[\s-]*review)(?:$|[\s/:_-])|审查|评审|复审/i],
+  ['merge', /(?:^|[\s/:_-])(?:merge|merging|land|landing|cherry-pick)(?:$|[\s/:_-])|合入|合并|并入/i],
+  ['triage', /(?:^|[\s/:_-])(?:triage|diagnos\w*|debug\w*|troubleshoot\w*)(?:$|[\s/:_-])|排查|诊断|定位根因|根因/i],
+  ['install', /(?:^|[\s/:_-])(?:install\w*|deploy\w*|release\w*|publish\w*|upgrade\w*)(?:$|[\s/:_-])|安装|部署|发版|升级/i],
+  ['cleanup', /(?:^|[\s/:_-])(?:cleanup|clean[\s-]*up|clean|prune|retire|gc|remove[\s-]*old)(?:$|[\s/:_-])|清理|回收|删旧/i],
+  ['probe', /(?:^|[\s/:_-])(?:probe|research\w*|survey|investigat\w*|explor\w*|inspect\w*|scan\w*)(?:$|[\s/:_-])|调研|探查|查\s*mod|摸底|考察/i],
+  ['design', /(?:^|[\s/:_-])(?:design\w*|mock\w*|mockup|wireframe|spec|architect\w*|prototype|comparison)(?:$|[\s/:_-])|设计|对比图|原型|草图|方案对比/i],
+  ['test', /(?:^|[\s/:_-])(?:smoke|e2e|benchmark|verify|verif\w*|unittest|test(?:s|ing)?)(?:$|[\s/:_-])|冒烟|验证|单测|测试/i],
+  ['docs', /(?:^|[\s/:_-])(?:docs?|readme|changelog|guide|manual)(?:$|[\s/:_-])|文档|手册|说明文档/i],
+  ['fix', /(?:^|[\s/:_-])(?:fix|bugfix|hotfix|patch|repair)(?:$|[\s/:_-])|修复|修正|解决.*bug/i],
+  ['code', /(?:^|[\s/:_-])(?:code|coding|impl\w*|build\w*|scaffold\w*|refactor\w*|feat)(?:$|[\s/:_-])|编码|实现|开发|重构/i],
+];
+
+function classifyActionText(text, { preferCodeOverTest = false, skipReview = false } = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const hasCode = preferCodeOverTest && /(?:实现|开发|重构|新增|支持|内联|\bfeat\b|\bimpl\w*|\bbuild\w*)/i.test(raw);
+  for (const [key, re] of ACTION_RULES) {
+    if (skipReview && key === 'review') continue;
+    if (key === 'test' && hasCode) continue;
+    if (re.test(raw)) return key;
+  }
+  return '';
+}
+
+function activePlanStepText(task) {
+  const cur = parsePlanItems(task?.subplan).find(item => item.state === 'doing');
+  return cur ? String(cur.text || '').trim() : '';
+}
+
+// Infer a concise action key (`code`, `review`, `merge`, `triage`, `probe`, `design`, `install`, `cleanup`, `test`, `fix`, `docs`)
+// from the agent's role, helper purpose/name, active plan/subplan step, or task metadata.
+export function inferAgentAction({ role = 'worker', purpose = '', helperName = '', helperPrompt = '', task = null } = {}) {
+  if (role === 'review') return 'review';
+  if (role === 'helper') {
+    if (purpose === 'land') return 'merge';
+    if (purpose === 'triage') return 'triage';
+    return classifyActionText(helperName) || classifyActionText(helperPrompt) || 'probe';
+  }
+  const stepText = activePlanStepText(task);
+  const fromStep = classifyActionText(stepText);
+  if (fromStep) return fromStep;
+  const titleText = [task?.title, task?.branch, task?.id].filter(Boolean).join(' ');
+  const fromTask = classifyActionText(titleText, { preferCodeOverTest: true, skipReview: true });
+  return fromTask || 'code';
+}
+
+// English verb tense by agent state:
+// - working / running -> present participle ('doing': Coding / Reviewing / Merging …)
+// - done / merged -> past participle ('done': Coded / Reviewed / Merged …)
+// - idle / blocked / paused / queued / other -> base form ('base': Code / Review / Merge …)
+export function agentActionTense(status, { ended = false, taskStatus = '' } = {}) {
+  const s = String(status || '').trim().toLowerCase();
+  const ts = String(taskStatus || '').trim().toLowerCase();
+  if (!ended && (s === 'working' || s === 'running')) return 'doing';
+  if (s === 'done' || s === 'merged') return 'done';
+  if (ended && (ts === 'done' || ts === 'merged')) return 'done';
+  return 'base';
+}
+
+export function agentActionLabel(lang, action, status = '', opts = {}) {
+  const entry = AGENT_ACTIONS[action] || AGENT_ACTIONS.code;
+  if (lang === 'zh') return entry.zh;
+  const tense = agentActionTense(status, opts);
+  return entry.en[tense] || entry.en.base;
+}
+
 export function agentDefaultMode(agent) {
   const role = agent?.role || 'worker';
   const kind = String(agent?.kind || '').toLowerCase();
@@ -7968,6 +10022,7 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
 
   const active = [];
   const ended = [];
+  const usedNames = new Set();
   const pushAgent = (entry, isActive) => {
     if (isActive) active.push(entry);
     else ended.push(entry);
@@ -7976,7 +10031,7 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
   const taskOver = CLOSED.includes(task.status);
   const taskPaused = task.status === 'paused';
 
-  // 1. Primary worker (even a single-worker thread gets 1 compact row; container epics have none).
+  // 1. Primary worker (container epics have none; single-worker display is resolved via threadAgentLayout).
   if (!container) {
     const wTerm = terminalFor(taskRow(task), termList);
     const wEngine = taskEngine(task);
@@ -7992,10 +10047,17 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
       const programKey = String(wTerm?.program?.key || kind || '').toLowerCase();
       const program = resolveAgentProgram(wTerm, liveOf(wTerm), kind, programCatalog);
       const address = isActive ? wTerm.address : '';
+      const badge = formatAgentModelEffort(wEngine, kind);
+      const key = `worker:${task.id}`;
+      const status = isActive ? liveStatus(wTerm) : (taskOver ? (task.status === 'merged' ? 'merged' : task.status === 'done' ? 'done' : 'ended') : 'ended');
+      const action = inferAgentAction({ role: 'worker', task });
       const entry = {
-        key: `worker:${task.id}`,
+        key,
         role: 'worker',
         roleLabel: word(lang, 'agentRole_worker'),
+        displayName: agentDisplayName(key, usedNames),
+        action,
+        actionLabel: agentActionLabel(lang, action, status, { ended: !isActive, taskStatus: task.status }),
         taskId: task.id,
         ...(taskNumber(task) ? { threadNumber: taskNumber(task) } : {}),
         targetId: task.id,
@@ -8003,12 +10065,15 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
         nameSuffix: '',
         threadTitle: task.title || task.id,
         address,
-        status: isActive ? liveStatus(wTerm) : 'ended',
+        status: isActive ? status : 'ended',
         ended: !isActive,
         kind,
         programKey,
         program,
         model: shortModel(wEngine, kind),
+        modelShort: badge.model,
+        effort: badge.effort,
+        modelBadge: badge.label,
         up: wasEscalated(task),
         contextTokens: ctx,
         contextLabel: contextShort(ctx),
@@ -8034,10 +10099,17 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
     const programKey = String(rTerm?.program?.key || kind || '').toLowerCase();
     const program = resolveAgentProgram(rTerm, liveOf(rTerm), kind, programCatalog);
     const address = isActive ? rTerm.address : '';
+    const badge = formatAgentModelEffort(rEngine, kind);
+    const key = `review:${r.id}`;
+    const status = isActive ? liveStatus(rTerm) : (rOver ? 'done' : 'ended');
+    const action = inferAgentAction({ role: 'review', task: r });
     const entry = {
-      key: `review:${r.id}`,
+      key,
       role: 'review',
       roleLabel: word(lang, 'agentRole_review'),
+      displayName: agentDisplayName(key, usedNames),
+      action,
+      actionLabel: agentActionLabel(lang, action, status, { ended: !isActive, taskStatus: r.status }),
       taskId: task.id,
       ...(taskNumber(task) ? { threadNumber: taskNumber(task) } : {}),
       targetId: r.id,
@@ -8045,12 +10117,15 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
       nameSuffix: '',
       threadTitle: task.title || task.id,
       address,
-      status: isActive ? liveStatus(rTerm) : (rOver ? 'done' : 'ended'),
+      status,
       ended: !isActive,
       kind,
       programKey,
       program,
       model: shortModel(rEngine, kind),
+      modelShort: badge.model,
+      effort: badge.effort,
+      modelBadge: badge.label,
       up: wasEscalated(r),
       contextTokens: ctx,
       contextLabel: contextShort(ctx),
@@ -8095,10 +10170,17 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
     const activeAddr = isActive ? (liveAddr || hAddr) : '';
     const rawLive = term ? liveStatus(term) : (['working', 'blocked', 'done', 'idle'].includes(h.live_state) ? h.live_state : 'working');
     const purpose = helperPurpose(h);
+    const badge = formatAgentModelEffort(hEngine, kind);
+    const key = addr ? `helper:${task.id}:${addr}` : `helper:${task.id}:${hName || 'helper'}#${idx}`;
+    const status = isActive ? rawLive : (h.status === 'done' ? 'done' : 'ended');
+    const action = inferAgentAction({ role: 'helper', purpose, helperName: hName, helperPrompt: h.prompt, task });
     const entry = {
-      key: addr ? `helper:${task.id}:${addr}` : `helper:${task.id}:${hName || 'helper'}#${idx}`,
+      key,
       role: 'helper',
       roleLabel: word(lang, 'agentRole_helper'),
+      displayName: agentDisplayName(key, usedNames),
+      action,
+      actionLabel: agentActionLabel(lang, action, status, { ended: !isActive, taskStatus: h.status }),
       taskId: task.id,
       ...(taskNumber(task) ? { threadNumber: taskNumber(task) } : {}),
       targetId: hName || addr || task.id,
@@ -8107,12 +10189,15 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
       ...(purpose ? { purpose } : {}),
       threadTitle: task.title || task.id,
       address: activeAddr,
-      status: isActive ? rawLive : (h.status === 'done' ? 'done' : 'ended'),
+      status,
       ended: !isActive,
       kind,
       programKey,
       program,
       model: shortModel(hEngine, kind),
+      modelShort: badge.model,
+      effort: badge.effort,
+      modelBadge: badge.label,
       up: false,
       contextTokens: ctx,
       contextLabel: contextShort(ctx),
@@ -8135,10 +10220,17 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
     const ctx = contextTokens(term.context_tokens);
     const program = resolveAgentProgram(term, liveOf(term), kind, programCatalog);
     const purpose = helperPurpose({ name: term.labels?.helper });
+    const badge = formatAgentModelEffort(null, kind);
+    const key = `helper:${task.id}:${term.address}`;
+    const status = liveStatus(term);
+    const action = inferAgentAction({ role: 'helper', purpose, helperName: String(term.labels?.helper || ''), task });
     const entry = {
-      key: `helper:${task.id}:${term.address}`,
+      key,
       role: 'helper',
       roleLabel: word(lang, 'agentRole_helper'),
+      displayName: agentDisplayName(key, usedNames),
+      action,
+      actionLabel: agentActionLabel(lang, action, status, { ended: false }),
       taskId: task.id,
       ...(taskNumber(task) ? { threadNumber: taskNumber(task) } : {}),
       targetId: hName,
@@ -8147,12 +10239,15 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
       ...(purpose ? { purpose } : {}),
       threadTitle: task.title || task.id,
       address: term.address,
-      status: liveStatus(term),
+      status,
       ended: false,
       kind,
       programKey: kind.toLowerCase(),
       program,
       model: kind ? cap(kind) : '',
+      modelShort: badge.model,
+      effort: badge.effort,
+      modelBadge: badge.label,
       up: false,
       contextTokens: ctx,
       contextLabel: contextShort(ctx),
@@ -8177,6 +10272,192 @@ export function threadAgents(task, { terms = [], live = [], pmPane = '', lang = 
     endedCount: ended.length,
     endedSummary,
   };
+}
+
+// Single-worker inline vs multi-agent compact sub-rows (Option 1):
+// - Exactly 1 active agent and it is the primary worker -> inline clickable capsule on the task row.
+// - >=2 active agents (e.g. worker + review or worker + helper) or a single active non-worker -> compact sub-rows.
+export function threadAgentLayout(agents) {
+  const active = Array.isArray(agents?.active) ? agents.active : [];
+  const ended = Array.isArray(agents?.ended) ? agents.ended : [];
+  const inlineWorker = active.length === 1 && active[0]?.role === 'worker' ? active[0] : null;
+  const subAgents = inlineWorker ? [] : active;
+  return { inlineWorker, subAgents, ended };
+}
+
+// Responsive parts inside the inline single-worker capsule:
+// - Wide/normal panel (effective width >= 340px): name · action · model·effort (e.g. Milo · 编码 · Opus·xhigh)
+// - Narrower panel (300..339px): name · modelShort (e.g. Milo · Opus)
+// - Compact panel (270..299px): name only (e.g. Milo)
+// - Tight panel (< 270px): empty (icon-only, always keeping the clickable agent icon)
+export function inlineAgentBadgeParts(agent, width = 0, { inEpic = false } = {}) {
+  const name = String(agent?.displayName || '').trim();
+  const action = String(agent?.actionLabel || '').trim();
+  const fullModel = String(agent?.modelBadge || agent?.model || '').trim();
+  const shortModel = String(agent?.modelShort || agent?.model || '').trim();
+  const w = Number(width) || 0;
+  const eff = w > 0 ? w - (inEpic ? 28 : 0) : 999;
+  if (eff < 270) return { name: '', action: '', model: '' };
+  if (eff < 300) {
+    if (name) return { name, action: '', model: '' };
+    return { name: '', action: '', model: shortModel || fullModel };
+  }
+  if (eff < 340) return { name, action: '', model: shortModel || fullModel };
+  return { name, action, model: fullModel || shortModel };
+}
+
+export function inlineAgentBadgeText(agent, width = 0, opts = {}) {
+  const p = inlineAgentBadgeParts(agent, width, opts);
+  return [p.name, p.action, p.model].filter(Boolean).join(' · ');
+}
+
+function rawDepIds(task) {
+  const rawList = Array.isArray(task?.deps) && task.deps.length
+    ? task.deps
+    : (Array.isArray(task?.depends_on) ? task.depends_on : []);
+  const out = [];
+  for (const raw of rawList) {
+    const depId = typeof raw === 'string' ? raw.trim() : String(raw?.id || '').trim();
+    if (depId) out.push(depId);
+  }
+  return out;
+}
+
+// Stable wave-based topological sort for sibling child tasks under a parent:
+// - Keeps status rank ordering (active tasks before proposed).
+// - Within each rank bucket, orders prerequisites before dependents.
+// - For proposed tasks (rank 7), orders ready tasks (no unmet deps) ahead of waiting ones,
+//   and breaks same-wave ties by number ascending, then created ascending, then updated ascending.
+// - Safely degrades on dependency cycles without infinite loops.
+export function sortChildTasks(items, allTasks = [], metaOf = t => ({ task: t, rank: openRank(t), updated: String(t?.updated || '') })) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length <= 1) return [...list];
+
+  const byRank = new Map();
+  list.forEach((item, index) => {
+    const meta = metaOf(item) || {};
+    const task = meta.task || item;
+    const rank = Number.isFinite(meta.rank) ? meta.rank : openRank(task || {});
+    const updated = String(meta.updated ?? task?.updated ?? '');
+    let bucket = byRank.get(rank);
+    if (!bucket) { bucket = []; byRank.set(rank, bucket); }
+    bucket.push({ item, task, rank, updated, index });
+  });
+
+  const sortedRanks = [...byRank.keys()].sort((a, b) => a - b);
+  const result = [];
+
+  for (const rank of sortedRanks) {
+    const entries = byRank.get(rank);
+    if (entries.length <= 1) {
+      if (entries.length === 1) result.push(entries[0].item);
+      continue;
+    }
+
+    const isProposed = rank === 7;
+    if (isProposed) {
+      for (const e of entries) {
+        const deps = taskDependencies(e.task, allTasks);
+        e.ready = !deps || deps.allMet;
+      }
+    }
+
+    const n = entries.length;
+    const findSiblingIndex = (depId, taskMachine) => {
+      const namespaced = taskMachine ? `${taskMachine}/${depId}` : depId;
+      for (let i = 0; i < n; i++) {
+        const t = entries[i].task;
+        if (!t) continue;
+        if (t.id === depId || t.id === namespaced || ((t.machine || '') === taskMachine && t.sourceId === depId)) {
+          return i;
+        }
+      }
+      return -1;
+    };
+
+    const adj = Array.from({ length: n }, () => []);
+    const inDegree = new Int32Array(n);
+    for (let v = 0; v < n; v++) {
+      const task = entries[v].task;
+      const taskMachine = task?.machine || '';
+      const seenEdges = new Set();
+      for (const depId of rawDepIds(task)) {
+        const u = findSiblingIndex(depId, taskMachine);
+        if (u < 0 || u === v || seenEdges.has(u)) continue;
+        seenEdges.add(u);
+        adj[u].push(v);
+        inDegree[v]++;
+      }
+    }
+
+    const compare = isProposed
+      ? (a, b) => {
+          if (a.ready !== b.ready) return a.ready ? -1 : 1;
+          const aNum = taskNumber(a.task);
+          const bNum = taskNumber(b.task);
+          if (aNum !== null && bNum !== null && aNum !== bNum) return aNum - bNum;
+          const aCreated = String(a.task?.created || '');
+          const bCreated = String(b.task?.created || '');
+          if (aCreated && bCreated && aCreated !== bCreated) return aCreated.localeCompare(bCreated);
+          if (a.updated !== b.updated) return a.updated.localeCompare(b.updated);
+          return a.index - b.index;
+        }
+      : (a, b) => b.updated.localeCompare(a.updated) || (a.index - b.index);
+
+    const placed = new Uint8Array(n);
+    let placedCount = 0;
+
+    const drainWaves = initialWave => {
+      let wave = initialWave;
+      while (wave.length > 0) {
+        wave.sort((i, j) => compare(entries[i], entries[j]));
+        const nextWave = [];
+        for (const u of wave) {
+          if (placed[u]) continue;
+          placed[u] = 1;
+          placedCount++;
+          result.push(entries[u].item);
+          for (const v of adj[u]) {
+            if (placed[v]) continue;
+            inDegree[v]--;
+            if (inDegree[v] === 0) nextWave.push(v);
+          }
+        }
+        wave = nextWave;
+      }
+    };
+
+    const startWave = [];
+    for (let i = 0; i < n; i++) {
+      if (inDegree[i] === 0) startWave.push(i);
+    }
+    drainWaves(startWave);
+
+    // Safe cycle fallback: break remaining cycles deterministically without infinite loops.
+    while (placedCount < n) {
+      let best = -1;
+      for (let i = 0; i < n; i++) {
+        if (placed[i]) continue;
+        if (best < 0 || inDegree[i] < inDegree[best] ||
+            (inDegree[i] === inDegree[best] && compare(entries[i], entries[best]) < 0)) {
+          best = i;
+        }
+      }
+      if (best < 0) break;
+      placed[best] = 1;
+      placedCount++;
+      result.push(entries[best].item);
+      const unlocked = [];
+      for (const v of adj[best]) {
+        if (placed[v]) continue;
+        inDegree[v]--;
+        if (inDegree[v] <= 0) unlocked.push(v);
+      }
+      if (unlocked.length) drainWaves(unlocked);
+    }
+  }
+
+  return result;
 }
 
 // ---- Threads task tree (container epics + sub-threads + sub-agents) -----------------------
@@ -8248,9 +10529,14 @@ export function taskTree(pm, tasks, events = [], { terms = [], live = [], tabs =
   }
   for (const list of finishedByParent.values()) list.sort(newest);
 
+  const allTasksForDeps = retiredList.length ? [...folded, ...retiredList] : folded;
   const buildNode = task => {
     const rawChildren = childrenById.get(task.id) || [];
-    const children = rawChildren.map(buildNode).sort((a, b) => a._rank - b._rank || String(b._updated).localeCompare(String(a._updated)));
+    const children = sortChildTasks(rawChildren.map(buildNode), allTasksForDeps, node => ({
+      task: openById.get(node.task),
+      rank: node._rank,
+      updated: String(node._updated || ''),
+    }));
     const finishedChildren = finishedByParent.get(task.id) || [];
     const hasChildren = children.length > 0 || finishedChildren.length > 0;
     const ownLiveTerm = terminalFor(taskRow(task), terms);
@@ -8415,6 +10701,9 @@ export function toggleAgentWindow(windows, spec, { max = AGENT_WINDOW_MAX } = {}
     overlayId: String(spec.overlayId || ''),
     role: String(spec.role || 'worker'),
     roleLabel: String(spec.roleLabel || ''),
+    displayName: String(spec.displayName || ''),
+    action: String(spec.action || ''),
+    actionLabel: String(spec.actionLabel || ''),
     taskId: String(spec.taskId || ''),
     targetId: String(spec.targetId || ''),
     name: String(spec.name || ''),
@@ -8990,7 +11279,7 @@ export function pendingSignature(pending) {
   for (let i = 0; i < pending.length; i++) {
     const p = pending[i];
     if (!p) { sig += '\x1e'; continue; }
-    sig += `\x1e${p.id ?? ''}\x1f${p.msgId || ''}\x1f${p.failed || ''}\x1f${p.queued ? 1 : 0}${p.timedOut ? 1 : 0}${p.verifying ? 1 : 0}${p.inFlight ? 1 : 0}${p.upload ? 1 : 0}${p.received ? 1 : 0}\x1f${p.receiptAt || 0}\x1f${p.deliveredAt || 0}\x1f${p.sentAt || 0}\x1f${p.question || ''}\x1f${p.text || ''}`;
+    sig += `\x1e${p.id ?? ''}\x1f${p.msgId || ''}\x1f${p.failed || ''}\x1f${p.queued ? 1 : 0}${p.serverQueued ? 1 : 0}${p.timedOut ? 1 : 0}${p.verifying ? 1 : 0}${p.inFlight ? 1 : 0}${p.upload ? 1 : 0}${p.received ? 1 : 0}\x1f${p.queuedReason || ''}\x1f${p.receiptAt || 0}\x1f${p.deliveredAt || 0}\x1f${p.sentAt || 0}\x1f${p.question || ''}\x1f${p.text || ''}`;
   }
   return sig;
 }
@@ -9028,4 +11317,647 @@ export function hostLiveSignature(terms = [], live = [], tabs = []) {
     }
   }
   return sig;
+}
+
+export function windowControlButtons(win, { overlay = false } = {}) {
+  if (overlay || win?.buttons !== true) return [];
+  const isWindows = win.platform === 'windows';
+  const maximized = win.maximized === true;
+  return [
+    {
+      id: 'win-minimize',
+      command: 'window.minimize',
+      icon: isWindows ? 'mods/tabs/win-min.svg' : null,
+      glyph: isWindows ? '' : '−',
+      iconSize: 16,
+      danger: false,
+      labelKey: 'windowMinimize',
+    },
+    {
+      id: 'win-maximize',
+      command: 'window.maximize',
+      icon: isWindows ? (maximized ? 'mods/tabs/win-restore.svg' : 'mods/tabs/win-max.svg') : null,
+      glyph: isWindows ? '' : '□',
+      iconSize: 16,
+      danger: false,
+      labelKey: maximized ? 'windowRestore' : 'windowMaximize',
+    },
+    {
+      id: 'win-close',
+      command: 'window.close',
+      icon: isWindows ? 'mods/tabs/win-close.svg' : 'mods/pane/close.svg',
+      glyph: '',
+      iconSize: isWindows ? 16 : 13,
+      danger: true,
+      labelKey: 'windowClose',
+    },
+  ];
+}
+
+// ---- Right Sidebar Multi-Tab Workspace (docs/design/sidebar-multi-tabs.md) ---------------
+
+export const SIDE_TABS_KEY = 'sideTabs';
+export const SIDE_TABS_MAX = 12;
+export const SIDE_TABS_MAX_PROJECTS = 20;
+
+export function sideTabKey(spec) {
+  if (!spec || typeof spec !== 'object') return '';
+  if (spec.kind === 'doc') {
+    const root = String(spec.root || '').trim();
+    const path = String(spec.path || '').trim();
+    return root && path ? `doc:${root}/${path}` : '';
+  }
+  if (spec.kind === 'thread') {
+    const taskId = String(spec.taskId || '').trim();
+    return taskId ? `thread:${taskId}` : '';
+  }
+  if (spec.kind === 'draft') {
+    if (typeof spec.key === 'string' && spec.key.startsWith('draft:')) return spec.key;
+    const id = String(spec.id ?? '').trim();
+    const tab = String(spec.tab || 'library').trim();
+    return id ? `draft:${tab}:${id}` : '';
+  }
+  return '';
+}
+
+export function createSideTabsState() {
+  return {
+    tabs: [],
+    activeId: null,
+    lastActiveId: null,
+    seq: 0,
+  };
+}
+
+function normalizeTabState(state) {
+  if (!state || typeof state !== 'object') return createSideTabsState();
+  return {
+    tabs: Array.isArray(state.tabs) ? state.tabs : [],
+    activeId: state.activeId ?? null,
+    lastActiveId: state.lastActiveId ?? null,
+    seq: Number.isFinite(Number(state.seq)) ? Number(state.seq) : 0,
+  };
+}
+
+function pickNextActiveAfterClose(remaining, removedIdx) {
+  if (!remaining.length) return null;
+  let best = null;
+  let bestAt = -1;
+  for (const t of remaining) {
+    const at = Number(t.lastActiveAt) || 0;
+    if (at > bestAt) {
+      bestAt = at;
+      best = t;
+    }
+  }
+  if (best && bestAt > 0) return best.id;
+  if (removedIdx < remaining.length) return remaining[removedIdx].id;
+  return remaining[remaining.length - 1].id;
+}
+
+export function openSideTab(rawState, spec, {
+  now = Date.now(),
+  insertAdjacent = false,
+  maxTabs = SIDE_TABS_MAX,
+} = {}) {
+  const state = normalizeTabState(rawState);
+  if (!spec || typeof spec !== 'object') {
+    return { state, tab: null, opened: false, activated: false, evicted: null, blocked: false };
+  }
+  const kind = spec.kind === 'thread' ? 'thread' : spec.kind === 'draft' ? 'draft' : 'doc';
+  const nextSeq = state.seq + 1;
+  const key = kind === 'draft'
+    ? (spec.key || sideTabKey({ kind: 'draft', tab: spec.tab || 'library', id: spec.id ?? nextSeq }))
+    : sideTabKey({ ...spec, kind });
+  if (!key) {
+    return { state, tab: null, opened: false, activated: false, evicted: null, blocked: false };
+  }
+
+  const existingIdx = state.tabs.findIndex(t => t.key === key);
+  if (existingIdx >= 0) {
+    const existing = state.tabs[existingIdx];
+    const updated = {
+      ...existing,
+      ...(spec.title ? { title: String(spec.title) } : {}),
+      ...(spec.threadTab ? { threadTab: spec.threadTab } : {}),
+      ...(spec.mode ? { mode: spec.mode } : {}),
+      missing: false,
+      lastActiveAt: now,
+    };
+    const nextTabs = state.tabs.slice();
+    nextTabs[existingIdx] = updated;
+    return {
+      state: {
+        ...state,
+        tabs: nextTabs,
+        activeId: updated.id,
+        lastActiveId: updated.id,
+      },
+      tab: updated,
+      opened: false,
+      activated: true,
+      evicted: null,
+      blocked: false,
+    };
+  }
+
+  let nextTabs = state.tabs.slice();
+  let evicted = null;
+  const limit = Math.max(1, Number(maxTabs) || SIDE_TABS_MAX);
+  if (nextTabs.length >= limit) {
+    // Evict oldest clean non-active tab (LRU). If none, fall back to any clean tab.
+    let evictIdx = -1;
+    let oldestAt = Infinity;
+    for (let i = 0; i < nextTabs.length; i++) {
+      const t = nextTabs[i];
+      if (t.dirty || t.id === state.activeId) continue;
+      const at = Number(t.lastActiveAt) || 0;
+      if (at < oldestAt) {
+        oldestAt = at;
+        evictIdx = i;
+      }
+    }
+    if (evictIdx < 0) {
+      for (let i = 0; i < nextTabs.length; i++) {
+        const t = nextTabs[i];
+        if (t.dirty) continue;
+        const at = Number(t.lastActiveAt) || 0;
+        if (at < oldestAt) {
+          oldestAt = at;
+          evictIdx = i;
+        }
+      }
+    }
+    if (evictIdx < 0) {
+      return { state, tab: null, opened: false, activated: false, evicted: null, blocked: true };
+    }
+    evicted = nextTabs[evictIdx];
+    nextTabs.splice(evictIdx, 1);
+  }
+
+  const id = `tab-${nextSeq}`;
+  const baseTab = {
+    id,
+    key,
+    kind,
+    title: String(spec.title || (kind === 'thread' ? spec.taskId : spec.path ? fileName(spec.path) : '')),
+    dirty: Boolean(spec.dirty),
+    missing: false,
+    lastActiveAt: now,
+  };
+  let newTab;
+  if (kind === 'thread') {
+    newTab = {
+      ...baseTab,
+      taskId: String(spec.taskId || ''),
+      threadTab: spec.threadTab === 'session' ? 'session' : 'log',
+      change: spec.change || createChangeState(),
+      logExpanded: Boolean(spec.logExpanded),
+    };
+  } else if (kind === 'draft') {
+    newTab = {
+      ...baseTab,
+      tab: spec.tab === 'memory' ? 'memory' : 'library',
+      root: spec.root || (spec.tab === 'memory' ? 'memory' : 'docs'),
+      path: '',
+      mode: 'edit',
+      shownBytes: DOC_INITIAL_BYTES,
+      find: { open: false, query: '', jumpQuery: '', matchPos: 0 },
+      editDraft: spec.editDraft || null,
+      history: null,
+    };
+  } else {
+    const docTab = spec.tab || (spec.root === 'memory' || spec.root === 'personal' ? 'memory' : 'library');
+    newTab = {
+      ...baseTab,
+      tab: docTab,
+      root: String(spec.root || ''),
+      path: String(spec.path || ''),
+      mode: spec.mode || 'read',
+      shownBytes: Number(spec.shownBytes) > 0 ? Number(spec.shownBytes) : DOC_INITIAL_BYTES,
+      find: spec.find || { open: false, query: '', jumpQuery: '', matchPos: 0 },
+      editDraft: spec.editDraft || null,
+      history: spec.history || null,
+    };
+  }
+
+  if (insertAdjacent && state.activeId) {
+    const activeIdx = nextTabs.findIndex(t => t.id === state.activeId);
+    if (activeIdx >= 0) nextTabs.splice(activeIdx + 1, 0, newTab);
+    else nextTabs.push(newTab);
+  } else {
+    nextTabs.push(newTab);
+  }
+
+  return {
+    state: {
+      tabs: nextTabs,
+      activeId: newTab.id,
+      lastActiveId: newTab.id,
+      seq: nextSeq,
+    },
+    tab: newTab,
+    opened: true,
+    activated: true,
+    evicted,
+    blocked: false,
+  };
+}
+
+export function activateSideTab(rawState, tabId, { now = Date.now() } = {}) {
+  const state = normalizeTabState(rawState);
+  const idx = state.tabs.findIndex(t => t.id === tabId);
+  if (idx < 0) return { state, tab: null, activated: false };
+  const updated = { ...state.tabs[idx], lastActiveAt: now };
+  const nextTabs = state.tabs.slice();
+  nextTabs[idx] = updated;
+  return {
+    state: {
+      ...state,
+      tabs: nextTabs,
+      activeId: updated.id,
+      lastActiveId: updated.id,
+    },
+    tab: updated,
+    activated: true,
+  };
+}
+
+export function showSideIndex(rawState) {
+  const state = normalizeTabState(rawState);
+  if (state.activeId === null) return { state };
+  return {
+    state: {
+      ...state,
+      activeId: null,
+      lastActiveId: state.activeId || state.lastActiveId,
+    },
+  };
+}
+
+export function toggleSideIndex(rawState, { now = Date.now() } = {}) {
+  const state = normalizeTabState(rawState);
+  if (state.activeId !== null) return showSideIndex(state);
+  if (!state.tabs.length) return { state };
+  const targetId = state.tabs.some(t => t.id === state.lastActiveId)
+    ? state.lastActiveId
+    : pickNextActiveAfterClose(state.tabs, 0);
+  if (!targetId) return { state };
+  return activateSideTab(state, targetId, { now });
+}
+
+export function closeSideTab(rawState, tabId, { force = false, now = Date.now() } = {}) {
+  const state = normalizeTabState(rawState);
+  const idx = state.tabs.findIndex(t => t.id === tabId);
+  if (idx < 0) return { state, closed: null, needsConfirm: null };
+  const target = state.tabs[idx];
+  if (target.dirty && !force) {
+    const act = activateSideTab(state, tabId, { now });
+    return { state: act.state, closed: null, needsConfirm: tabId };
+  }
+  const nextTabs = state.tabs.slice();
+  nextTabs.splice(idx, 1);
+  let nextActiveId = state.activeId;
+  if (state.activeId === tabId) {
+    nextActiveId = pickNextActiveAfterClose(nextTabs, idx);
+  }
+  let nextLastActiveId = state.lastActiveId;
+  if (nextLastActiveId === tabId) {
+    nextLastActiveId = nextActiveId || pickNextActiveAfterClose(nextTabs, idx);
+  }
+  return {
+    state: {
+      ...state,
+      tabs: nextTabs,
+      activeId: nextActiveId,
+      lastActiveId: nextLastActiveId,
+    },
+    closed: target,
+    needsConfirm: null,
+  };
+}
+
+export function closeOtherSideTabs(rawState, keepTabId) {
+  const state = normalizeTabState(rawState);
+  const kept = [];
+  const closed = [];
+  const skippedDirtyIds = [];
+  for (const t of state.tabs) {
+    if (t.id === keepTabId) {
+      kept.push(t);
+    } else if (t.dirty) {
+      kept.push(t);
+      skippedDirtyIds.push(t.id);
+    } else {
+      closed.push(t);
+    }
+  }
+  const hasActive = kept.some(t => t.id === state.activeId);
+  const hasKeep = kept.some(t => t.id === keepTabId);
+  const nextActiveId = hasActive ? state.activeId : (hasKeep ? keepTabId : (kept[0]?.id ?? null));
+  const nextLastActiveId = kept.some(t => t.id === state.lastActiveId) ? state.lastActiveId : nextActiveId;
+  return {
+    state: {
+      ...state,
+      tabs: kept,
+      activeId: nextActiveId,
+      lastActiveId: nextLastActiveId,
+    },
+    closed,
+    skippedDirtyIds,
+  };
+}
+
+export function closeRightSideTabs(rawState, fromTabId) {
+  const state = normalizeTabState(rawState);
+  const fromIdx = state.tabs.findIndex(t => t.id === fromTabId);
+  if (fromIdx < 0) return { state, closed: [], skippedDirtyIds: [] };
+  const kept = [];
+  const closed = [];
+  const skippedDirtyIds = [];
+  for (let i = 0; i < state.tabs.length; i++) {
+    const t = state.tabs[i];
+    if (i <= fromIdx) {
+      kept.push(t);
+    } else if (t.dirty) {
+      kept.push(t);
+      skippedDirtyIds.push(t.id);
+    } else {
+      closed.push(t);
+    }
+  }
+  const hasActive = kept.some(t => t.id === state.activeId);
+  const nextActiveId = hasActive ? state.activeId : fromTabId;
+  const nextLastActiveId = kept.some(t => t.id === state.lastActiveId) ? state.lastActiveId : nextActiveId;
+  return {
+    state: {
+      ...state,
+      tabs: kept,
+      activeId: nextActiveId,
+      lastActiveId: nextLastActiveId,
+    },
+    closed,
+    skippedDirtyIds,
+  };
+}
+
+export function closeAllSideTabs(rawState) {
+  const state = normalizeTabState(rawState);
+  const kept = [];
+  const closed = [];
+  const skippedDirtyIds = [];
+  for (const t of state.tabs) {
+    if (t.dirty) {
+      kept.push(t);
+      skippedDirtyIds.push(t.id);
+    } else {
+      closed.push(t);
+    }
+  }
+  const hasActive = kept.some(t => t.id === state.activeId);
+  const nextActiveId = hasActive ? state.activeId : (kept.length ? pickNextActiveAfterClose(kept, 0) : null);
+  const nextLastActiveId = kept.some(t => t.id === state.lastActiveId) ? state.lastActiveId : nextActiveId;
+  return {
+    state: {
+      ...state,
+      tabs: kept,
+      activeId: nextActiveId,
+      lastActiveId: nextLastActiveId,
+    },
+    closed,
+    skippedDirtyIds,
+  };
+}
+
+export function updateSideTab(rawState, tabId, patch) {
+  const state = normalizeTabState(rawState);
+  const idx = state.tabs.findIndex(t => t.id === tabId);
+  if (idx < 0) return { state, tab: null };
+  const prev = state.tabs[idx];
+  const nextPatch = typeof patch === 'function' ? patch(prev) : patch;
+  if (!nextPatch || typeof nextPatch !== 'object') return { state, tab: prev };
+  const updated = { ...prev, ...nextPatch };
+  const nextTabs = state.tabs.slice();
+  nextTabs[idx] = updated;
+  return {
+    state: { ...state, tabs: nextTabs },
+    tab: updated,
+  };
+}
+
+export function upgradeDraftTab(rawState, draftTabId, { root, path, tab, title, now = Date.now() } = {}) {
+  const state = normalizeTabState(rawState);
+  const draftIdx = state.tabs.findIndex(t => t.id === draftTabId);
+  const docTab = tab || (root === 'memory' || root === 'personal' ? 'memory' : 'library');
+  const nextKey = sideTabKey({ kind: 'doc', root, path });
+  if (draftIdx < 0 || !nextKey) {
+    return { state, tab: null, mergedInto: null, removedDraftId: null };
+  }
+  const existingIdx = state.tabs.findIndex(t => t.id !== draftTabId && t.key === nextKey);
+  if (existingIdx >= 0) {
+    const existing = state.tabs[existingIdx];
+    const merged = {
+      ...existing,
+      tab: docTab,
+      root,
+      path,
+      title: title || existing.title || fileName(path),
+      mode: 'read',
+      dirty: false,
+      editDraft: null,
+      missing: false,
+      lastActiveAt: now,
+    };
+    const nextTabs = state.tabs
+      .filter(t => t.id !== draftTabId)
+      .map(t => (t.id === existing.id ? merged : t));
+    return {
+      state: {
+        ...state,
+        tabs: nextTabs,
+        activeId: merged.id,
+        lastActiveId: merged.id,
+      },
+      tab: merged,
+      mergedInto: merged.id,
+      removedDraftId: draftTabId,
+    };
+  }
+  const prev = state.tabs[draftIdx];
+  const upgraded = {
+    ...prev,
+    kind: 'doc',
+    key: nextKey,
+    tab: docTab,
+    root,
+    path,
+    title: title || fileName(path),
+    mode: 'read',
+    dirty: false,
+    editDraft: null,
+    missing: false,
+    lastActiveAt: now,
+  };
+  const nextTabs = state.tabs.slice();
+  nextTabs[draftIdx] = upgraded;
+  return {
+    state: {
+      ...state,
+      tabs: nextTabs,
+      activeId: upgraded.id,
+      lastActiveId: upgraded.id,
+    },
+    tab: upgraded,
+    mergedInto: null,
+    removedDraftId: null,
+  };
+}
+
+export function cycleSideTab(rawState, delta = 1, { now = Date.now() } = {}) {
+  const state = normalizeTabState(rawState);
+  const len = state.tabs.length;
+  if (!len) return { state, tab: null, activated: false };
+  const curIdx = state.tabs.findIndex(t => t.id === state.activeId);
+  const nextIdx = curIdx < 0
+    ? (delta >= 0 ? 0 : len - 1)
+    : ((curIdx + delta) % len + len) % len;
+  return activateSideTab(state, state.tabs[nextIdx].id, { now });
+}
+
+export function readSideTabsStore(jsonText) {
+  const empty = { v: 1, projects: {} };
+  if (jsonText == null || String(jsonText).trim() === '') return empty;
+  try {
+    const parsed = JSON.parse(String(jsonText));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return empty;
+    const rawProjects = parsed.projects;
+    if (!rawProjects || typeof rawProjects !== 'object' || Array.isArray(rawProjects)) return empty;
+    return { v: 1, projects: { ...rawProjects } };
+  } catch (_) {
+    return empty;
+  }
+}
+
+export function hydrateProjectTabs(store, pmName, { maxTabs = SIDE_TABS_MAX, now = Date.now() } = {}) {
+  const empty = createSideTabsState();
+  if (!pmName || !store?.projects || typeof store.projects !== 'object') return empty;
+  const entry = store.projects[pmName];
+  if (!entry || typeof entry !== 'object' || !Array.isArray(entry.tabs)) return empty;
+  const limit = Math.max(1, Number(maxTabs) || SIDE_TABS_MAX);
+  const seen = new Set();
+  const tabs = [];
+  let seq = 0;
+  for (const raw of entry.tabs) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (raw.kind === 'draft' || raw.missing === true) continue;
+    const kind = raw.kind === 'thread' ? 'thread' : raw.kind === 'doc' ? 'doc' : '';
+    if (!kind) continue;
+    const key = kind === 'thread'
+      ? sideTabKey({ kind: 'thread', taskId: raw.taskId })
+      : sideTabKey({ kind: 'doc', root: raw.root, path: raw.path });
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    seq += 1;
+    const id = `tab-${seq}`;
+    if (kind === 'thread') {
+      tabs.push({
+        id,
+        key,
+        kind: 'thread',
+        taskId: String(raw.taskId || ''),
+        title: String(raw.title || raw.taskId || ''),
+        threadTab: raw.threadTab === 'session' ? 'session' : 'log',
+        change: createChangeState(),
+        logExpanded: false,
+        dirty: false,
+        missing: false,
+        lastActiveAt: now - (entry.tabs.length - seq),
+      });
+    } else {
+      const root = String(raw.root || '');
+      const path = String(raw.path || '');
+      const docTab = raw.tab || (root === 'memory' || root === 'personal' ? 'memory' : 'library');
+      tabs.push({
+        id,
+        key,
+        kind: 'doc',
+        tab: docTab,
+        root,
+        path,
+        title: String(raw.title || fileName(path)),
+        mode: 'read',
+        shownBytes: DOC_INITIAL_BYTES,
+        find: { open: false, query: '', jumpQuery: '', matchPos: 0 },
+        editDraft: null,
+        history: null,
+        dirty: false,
+        missing: false,
+        lastActiveAt: now - (entry.tabs.length - seq),
+      });
+    }
+    if (tabs.length >= limit) break;
+  }
+  const activeKey = typeof entry.activeKey === 'string' ? entry.activeKey : null;
+  const activeTab = activeKey ? tabs.find(t => t.key === activeKey) : null;
+  const activeId = activeTab ? activeTab.id : null;
+  const lastActiveId = activeId || (tabs.length ? tabs[tabs.length - 1].id : null);
+  return { tabs, activeId, lastActiveId, seq };
+}
+
+export function serializeProjectTabs(store, pmName, rawState, {
+  now = Date.now(),
+  maxTabs = SIDE_TABS_MAX,
+  maxProjects = SIDE_TABS_MAX_PROJECTS,
+} = {}) {
+  const base = store && typeof store === 'object' && store.projects && typeof store.projects === 'object'
+    ? { ...store.projects }
+    : {};
+  const state = normalizeTabState(rawState);
+  if (pmName) {
+    const limit = Math.max(1, Number(maxTabs) || SIDE_TABS_MAX);
+    const persisted = [];
+    for (const t of state.tabs) {
+      if (!t || t.kind === 'draft') continue;
+      if (t.kind === 'thread') {
+        persisted.push({
+          key: t.key,
+          kind: 'thread',
+          taskId: t.taskId,
+          title: t.title || t.taskId,
+          threadTab: t.threadTab === 'session' ? 'session' : 'log',
+          ...(t.missing ? { missing: true } : {}),
+        });
+      } else if (t.kind === 'doc') {
+        persisted.push({
+          key: t.key,
+          kind: 'doc',
+          tab: t.tab,
+          root: t.root,
+          path: t.path,
+          title: t.title || fileName(t.path),
+          ...(t.missing ? { missing: true } : {}),
+        });
+      }
+      if (persisted.length >= limit) break;
+    }
+    if (persisted.length === 0) {
+      delete base[pmName];
+    } else {
+      const activeTab = state.tabs.find(t => t.id === state.activeId && t.kind !== 'draft');
+      base[pmName] = {
+        activeKey: activeTab ? activeTab.key : null,
+        updatedAt: now,
+        tabs: persisted,
+      };
+    }
+  }
+  const projLimit = Math.max(1, Number(maxProjects) || SIDE_TABS_MAX_PROJECTS);
+  const entries = Object.entries(base);
+  if (entries.length > projLimit) {
+    entries.sort((a, b) => (Number(b[1]?.updatedAt) || 0) - (Number(a[1]?.updatedAt) || 0));
+    const pruned = {};
+    for (const [k, v] of entries.slice(0, projLimit)) pruned[k] = v;
+    return JSON.stringify({ v: 1, projects: pruned });
+  }
+  return JSON.stringify({ v: 1, projects: base });
 }

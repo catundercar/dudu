@@ -272,10 +272,13 @@ class ManagerFakeHc(FakeHc):
             self.on_app_do(command, payload)
         if not self.app_available:
             raise FileNotFoundError("herdr-app")
-        if isinstance(self.app_reply, Exception):
-            raise self.app_reply
+        reply = self.app_reply(command, payload) if callable(self.app_reply) else self.app_reply
+        if isinstance(reply, Exception):
+            raise reply
+        if isinstance(reply, subprocess.CompletedProcess):
+            return reply
         return subprocess.CompletedProcess(
-            ["herdr-app", "do", command, encoded], 0, json.dumps(self.app_reply), ""
+            ["herdr-app", "do", command, encoded], 0, json.dumps(reply), ""
         )
 
 
@@ -522,15 +525,168 @@ class ProjectLifecycle(unittest.TestCase):
         self.assertEqual((rec["terminal"], rec["agent"], rec["space_name"], rec["seat"]),
                          ("t60", "codex", "家里网络", True))
         self.ctx.home.registration(project_slug(self.repo)).unlink()
-        # current, from a terminal without a space: a bare terminal, as start did before --space.
+        # current, from a terminal without a space: bare hc run, then terminal.keep gives it a tab and names it.
         self.hc.ops.clear()
+        self.hc.tab_calls.clear()
         self.quiet(manager_cmds.cmd_start, argparse.Namespace(repo=self.repo, kind="pi", model=None, name=None,
                                                               space="current"))
-        self.assertFalse([c for c in self.hc.ops if c[:2] == ("herdr-app", "do")])
+        app_cmds = [(c[2], json.loads(c[3])) for c in self.hc.ops if c[:2] == ("herdr-app", "do")]
+        self.assertEqual(app_cmds, [("terminal.keep", {"terminal": "t50", "place": "tab"})])
+        self.assertTrue(any(c["fn"] == "name_tab" and c["terminal"] == "t50" and c["name"] == f"PM-{self.name}"
+                            for c in self.hc.tab_calls))
         rec2 = ProjectRegistry(self.ctx).pm_record(self.repo)
         assert rec2 is not None
         self.assertEqual((rec2["terminal"], rec2["seat"]), ("t50", True))
         self.assertNotIn("space_name", rec2)
+
+    def test_start_fallback_attaches_tab_when_app_reachable_and_warns_when_unreachable(self) -> None:
+        # 1. space.new exits non-0, fallback hc run creates t50, then terminal.keep retries past 0ms core sync
+        #    race ("no running terminal") and renames the tab.
+        keep_attempts = {"n": 0}
+
+        def fail_space_keep_retry(command: str, payload: Mapping[str, Any]) -> Any:
+            if command == "space.new":
+                return subprocess.CompletedProcess(["herdr-app", "do", command], 1, '{"error":"busy"}', "")
+            if command == "terminal.keep":
+                keep_attempts["n"] += 1
+                if keep_attempts["n"] == 1:
+                    return subprocess.CompletedProcess(["herdr-app", "do", command], 1, '{"error":"no running terminal \\"t50\\""}', "")
+            return {"pending": True}
+
+        self.hc.app_reply = fail_space_keep_retry
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            manager_cmds.cmd_start(argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"),
+                                   ctx=self.ctx)
+        app_cmds = [(c[2], json.loads(c[3])) for c in self.hc.ops if c[:2] == ("herdr-app", "do")]
+        self.assertEqual([c for c, _ in app_cmds], ["space.new", "terminal.keep", "terminal.keep"])
+        self.assertEqual(app_cmds[-1][1], {"terminal": "t50", "place": "tab"})
+        self.assertTrue(any(c["fn"] == "name_tab" and c["terminal"] == "t50" and c["name"] == f"PM-{self.name}"
+                            for c in self.hc.tab_calls))
+        self.assertNotIn("without a desktop tab", out.getvalue())
+
+        # 1b. Multiple spaces open (other project active, this project inactive): selects this project's space
+        #     before terminal.keep so the PM does not land in the wrong active space.
+        self.ctx.home.registration(project_slug(self.repo)).unlink()
+        self.hc.terminals.pop("t50", None)
+        self.hc.ops.clear()
+        self.hc.tab_calls.clear()
+        self.hc.spaces = [
+            {"id": "sp-other", "name": "other", "folder": "/other/repo", "active": True, "tabs": []},
+            {"id": "sp-mine", "name": self.name, "folder": self.repo, "active": False, "tabs": []},
+        ]
+        self.hc.app_reply = lambda cmd, _p: (
+            subprocess.CompletedProcess(["herdr-app", "do", cmd], 1, '{"error":"busy"}', "")
+            if cmd == "space.new" else {"ok": True}
+        )
+        out_multi = io.StringIO()
+        with contextlib.redirect_stdout(out_multi):
+            manager_cmds.cmd_start(argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"),
+                                   ctx=self.ctx)
+        multi_cmds = [(c[2], json.loads(c[3])) for c in self.hc.ops if c[:2] == ("herdr-app", "do")]
+        self.assertEqual(multi_cmds, [
+            ("space.new", multi_cmds[0][1]),
+            ("space.select", {"id": "sp-mine"}),
+            ("terminal.keep", {"terminal": "t50", "place": "tab"}),
+        ])
+        self.assertNotIn("without a desktop tab", out_multi.getvalue())
+
+        # 1c. Only another project's space is open (no space for this repo): adopts via fresh herdr.space/herdr.tab
+        #     labels + space.rename instead of bare terminal.keep into the unrelated active space.
+        self.ctx.home.registration(project_slug(self.repo)).unlink()
+        self.hc.terminals.pop("t50", None)
+        self.hc.ops.clear()
+        self.hc.tab_calls.clear()
+        self.hc.spaces = [
+            {"id": "sp-other", "name": "other", "folder": "/other/repo", "active": True, "tabs": []},
+        ]
+        out_other = io.StringIO()
+        with contextlib.redirect_stdout(out_other):
+            manager_cmds.cmd_start(argparse.Namespace(repo=self.repo, kind="claude", model=None, name="自定义名", space="new"),
+                                   ctx=self.ctx)
+        other_cmds = [(c[2], json.loads(c[3])) for c in self.hc.ops if c[:2] == ("herdr-app", "do")]
+        self.assertNotIn("terminal.keep", [c for c, _ in other_cmds])
+        self.assertTrue(any(c == "space.rename" and p.get("name") == "自定义名" for c, p in other_cmds))
+        t50_labels = self.hc.terminals["t50"]["labels"]
+        self.assertTrue(str(t50_labels.get("herdr.space", "")).startswith("sp"))
+        self.assertTrue(str(t50_labels.get("herdr.tab", "")).startswith("tb"))
+        self.assertNotIn("without a desktop tab", out_other.getvalue())
+        self.hc.spaces = []
+
+        # 2. Both space.new and terminal.keep return non-0: start still succeeds but explicitly explains how to attach.
+        self.ctx.home.registration(project_slug(self.repo)).unlink()
+        self.hc.terminals.pop("t50", None)
+        self.hc.ops.clear()
+        self.hc.app_reply = subprocess.CompletedProcess(["herdr-app", "do"], 1, '{"error":"no window"}', "")
+        out2 = io.StringIO()
+        with contextlib.redirect_stdout(out2):
+            manager_cmds.cmd_start(argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"),
+                                   ctx=self.ctx)
+        self.assertIn("without a desktop tab", out2.getvalue())
+        self.assertIn("terminal.keep", out2.getvalue())
+        self.assertIn('"terminal":"t50"', out2.getvalue())
+
+        # 3. app_do raises OSError (herdr-app missing): skips redundant terminal.keep and prints guidance (zh too).
+        self.ctx.home.registration(project_slug(self.repo)).unlink()
+        self.hc.terminals.pop("t50", None)
+        self.hc.ops.clear()
+        self.hc.app_available = False
+        self.ctx.home.config.write_text(json.dumps({"lang": "zh"}), encoding="utf-8")
+        out3 = io.StringIO()
+        with contextlib.redirect_stdout(out3):
+            manager_cmds.cmd_start(argparse.Namespace(repo=self.repo, kind="claude", model=None, name="", space="new"),
+                                   ctx=self.ctx)
+        self.assertEqual([c[2] for c in self.hc.ops if c[:2] == ("herdr-app", "do")], ["space.new"])
+        self.assertIn("没有桌面标签页", out3.getvalue())
+        self.assertIn("terminal.keep", out3.getvalue())
+        self.assertIn('"terminal":"t50"', out3.getvalue())
+
+    def test_rotate_legacy_to_seat_fallback_attaches_or_warns(self) -> None:
+        self.register()
+        self.ctx.store.change_registration(project_slug(self.repo), lambda cur: {**(cur or {}), "seat": False})
+        self.hc.terminals["t7"] = {
+            "state": "live",
+            "labels": {"pm": self.name, "herdr.space": "sp-1"},
+            "argv": ["claude", "--model", "opus"],
+            "foreground": {"argv": ["claude", "--model", "opus"]},
+        }
+        # 1. tab.new returns non-0, terminal.keep succeeds and gives t50 a named tab.
+        def fail_tab_keep_ok(command: str, payload: Mapping[str, Any]) -> Any:
+            if command == "tab.new":
+                return subprocess.CompletedProcess(["herdr-app", "do", command], 1, '{"error":"space gone"}', "")
+            return {"ok": True}
+
+        self.hc.app_reply = fail_tab_keep_ok
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            manager_cmds.cmd_rotate(argparse.Namespace(repo=self.repo, notes="swap", reason="test", model=None,
+                                                       transcript=None), ctx=self.ctx)
+        app_cmds = [(c[2], json.loads(c[3])) for c in self.hc.ops if c[:2] == ("herdr-app", "do")]
+        self.assertEqual([c for c, _ in app_cmds], ["tab.new", "terminal.keep"])
+        self.assertEqual(app_cmds[1][1], {"terminal": "t50", "place": "tab"})
+        self.assertTrue(any(c["fn"] == "name_tab" and c["terminal"] == "t50" and c["name"] == f"PM-{self.name}"
+                            for c in self.hc.tab_calls))
+        self.assertNotIn("without a desktop tab", out.getvalue())
+
+        # 2. app_do raises OSError on rotate: warns clearly with terminal.keep recovery command.
+        self.hc.terminals.pop("t50", None)
+        self.hc.terminals["t7"] = {
+            "state": "live",
+            "labels": {"pm": self.name, "herdr.space": "sp-1"},
+            "argv": ["claude", "--model", "opus"],
+            "foreground": {"argv": ["claude", "--model", "opus"]},
+        }
+        self.ctx.store.change_registration(project_slug(self.repo), lambda cur: {
+            **(cur or {}), "pane": "hc:t7", "terminal": "t7", "seat": False,
+        })
+        self.hc.ops.clear()
+        self.hc.app_available = False
+        out2 = io.StringIO()
+        with contextlib.redirect_stdout(out2):
+            manager_cmds.cmd_rotate(argparse.Namespace(repo=self.repo, notes="swap", reason="test", model=None,
+                                                       transcript=None), ctx=self.ctx)
+        self.assertIn("without a desktop tab", out2.getvalue())
+        self.assertIn("terminal.keep", out2.getvalue())
 
     def test_start_refuses_a_missing_folder_or_a_file(self) -> None:
         missing = str(Path(self.repo) / "nope")
@@ -1482,7 +1638,10 @@ class PMSeatAndAdopt(unittest.TestCase):
     `pm.py adopt <task> [--confirmed]`."""
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory(prefix="pm-seat-", ignore_cleanup_errors=osutil.WINDOWS)
+        self._tmp = tempfile.TemporaryDirectory(
+            prefix="pm-seat-",
+            **({"ignore_cleanup_errors": True} if osutil.WINDOWS else {}),
+        )
         self.tmp = Path(self._tmp.name)
         repo_dir = self.tmp / "seattest"
         repo_dir.mkdir()

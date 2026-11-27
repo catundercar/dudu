@@ -8,6 +8,7 @@ import datetime
 import re
 from typing import Any, Iterator
 
+from ..project.turn_reducer import Endpoint, record_endpoint
 from ..store import valid_task_number
 
 
@@ -260,10 +261,14 @@ def started_by_pm(task: Any) -> bool:
     return bool(raw and (raw.get("dispatched") or raw.get("review_of") or raw.get("escalations")))
 
 
+def task_endpoint(task: Any) -> Endpoint | None:
+    """Resolve the structured `Endpoint` for a task record (reading `endpoint` or legacy `pane`)."""
+    return record_endpoint(_raw_dict(task))
+
+
 def hc_terminal_of(task: Any) -> str:
-    raw = _raw_dict(task)
-    pane = (raw.get("pane") or "") if raw is not None else ""
-    return pane[3:] if pane.startswith("hc:") else ""
+    ep = task_endpoint(task)
+    return ep.hc_target if ep is not None else ""
 
 
 def created_at(task: Any) -> float:

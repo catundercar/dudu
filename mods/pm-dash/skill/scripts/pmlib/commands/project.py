@@ -1,4 +1,6 @@
 """Project, Library/Memory editing, and ledger-home migration commands (`project`, `home`). Layer 4."""
+from __future__ import annotations
+
 import contextlib
 import datetime
 import json
@@ -10,6 +12,7 @@ import sys
 from ..context import Context
 from ..errors import IdentityError, NotFound, Refused
 from ..events.deliver import Delivery
+from ..events.supervisor import read_pm_turn_view
 from ..homemove import (
     HomeMover,
     _format_bytes,
@@ -39,6 +42,7 @@ from ..memory.layer import (
 from ..osutil import WINDOWS, unfailing
 from ..project.project import ProjectRegistry
 from ..project.readmodel import NotFoundError, Projects
+from ..project.turn_reducer import sanitize_journal_entries, summarize_turns
 from ..project.turn_state import TurnTracker
 from ..store import (
     DOCUMENT_ROOTS,
@@ -421,7 +425,33 @@ def cmd_project(a, ctx=None):
             if a.before is None:
                 pm_reg = ctx.store.registration(slug)
                 if pm_reg is not None:
-                    out["turn"] = TurnTracker(ctx, slug).live_snapshot(pm_reg)
+                    pane_val = str(pm_reg.get("pane") or "")
+                    term_addr = str(pm_reg.get("terminal") or (pane_val[3:] if pane_val.startswith("hc:") else ""))
+                    term_info = None
+                    live_pm = None
+                    if term_addr and (pm_reg.get("runtime") == "hc" or pane_val.startswith("hc:")):
+                        raw_info = ctx.hc.get_raw(term_addr, errors=True)
+                        if isinstance(raw_info, dict) and not raw_info.get("error") and raw_info.get("state") == "live":
+                            term_info = raw_info
+                            raw_s = raw_info.get("status")
+                            st_str = str(raw_s.get("state") or "") if isinstance(raw_s, dict) else str(raw_s or "")
+                            live_pm = {"agent_status": st_str, "name": pm_reg.get("name")}
+                        elif isinstance(raw_info, dict) and (
+                            raw_info.get("state") in ("exited", "finished", "removed")
+                            or (isinstance(raw_info.get("error"), dict) and raw_info["error"].get("kind") == "not_found")
+                        ):
+                            live_pm = {"agent_status": "offline", "name": pm_reg.get("name")}
+                    turn_view = read_pm_turn_view(
+                        ctx,
+                        slug,
+                        pm_reg,
+                        term_info=term_info,
+                        live_pm=live_pm,
+                        revive=True,
+                    )
+                    out["turn"] = turn_view["turn"]
+                    out["turn2"] = turn_view["turn2"]
+                    out["supervised"] = turn_view["supervised"]
         elif a.project_cmd == "send":
             slug = reg.resolve_project_slug(a.slug)
             pm_reg = ctx.store.registration(slug)
@@ -619,3 +649,150 @@ def register_home_command(sub):
     hm.add_argument("--backup-dir", help="with --migrate: where to save the pre-migration backup archive "
                                          "(default: ~/.claude/pm-backups)")
     hm.add_argument("--json", action="store_true", help="print status or migration plan/result as JSON")
+
+
+def _parse_since_ms(raw: str | None, now_ms: int) -> int | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        val = int(text)
+        return val * 1000 if val < 10_000_000_000 else val
+    unit_mult = {"s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
+    if len(text) >= 2 and text[-1].lower() in unit_mult and text[:-1].replace(".", "", 1).isdigit():
+        return max(0, now_ms - int(float(text[:-1]) * unit_mult[text[-1].lower()]))
+    iso = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return int(dt.timestamp() * 1000)
+    except ValueError as err:
+        raise ValueError(f"invalid --since value: {raw!r}") from err
+
+
+def cmd_turn_journal(a, ctx=None):
+    """Export sanitized observation journal slices usable as replay test fixtures (`pm.py turn-journal export`)."""
+    ctx = Context.from_env() if ctx is None else ctx
+    reg = ProjectRegistry(ctx)
+    try:
+        if a.turn_journal_cmd != "export":
+            raise ValueError(f"unknown turn-journal command: {a.turn_journal_cmd}")
+        slug = reg.resolve_project_slug(a.slug)
+        if not SLUG_RE.match(slug):
+            raise NotFoundError(f"no project {a.slug}")
+        pm_reg = ctx.store.registration(slug) or {}
+        repo = str(pm_reg.get("repo") or "")
+        now_ms = int(ctx.clock.time() * 1000)
+        since_ms = _parse_since_ms(a.since, now_ms)
+        tracker = TurnTracker(ctx, slug)
+        raw_entries = tracker.read_journal_entries(since_ms=since_ms, limit=max(1, int(a.limit or 2000)))
+        sanitized = sanitize_journal_entries(
+            raw_entries,
+            home_dir=str(Path.home()),
+            repo=repo,
+        )
+        lines = [json.dumps(row, ensure_ascii=False) for row in sanitized]
+        if a.out:
+            out_path = Path(a.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+            ctx.out.line(json.dumps({"ok": True, "slug": slug, "count": len(lines), "out": str(out_path)}, ensure_ascii=False))
+            return
+        for line in lines:
+            ctx.out.line(line)
+    except (NotFound, Refused, NotFoundError, ValueError, FileNotFoundError) as e:
+        sys.exit(str(e).strip("'\""))
+
+
+def register_turn_journal_command(sub):
+    tj = sub.add_parser("turn-journal", help="inspect and export sanitized PM turn observation journal slices")
+    within = tj.add_subparsers(dest="turn_journal_cmd", required=True)
+    ex = within.add_parser("export", help="export a redacted observation journal slice as JSONL for replay tests")
+    ex.add_argument("slug", help="project slug, PM name or folder")
+    ex.add_argument("--since", help="duration (30m, 2h, 1d), ISO timestamp, or epoch ms")
+    ex.add_argument("--limit", type=int, default=2000, help="max entries to export (default 2000)")
+    ex.add_argument("--out", help="optional output .jsonl file path (default: stdout)")
+
+
+def _fmt_dur_s(ms: int) -> str:
+    sec = max(0.0, float(ms) / 1000.0)
+    if sec < 60.0:
+        return f"{sec:.1f}s" if sec < 10.0 and sec != int(sec) else f"{round(sec)}s"
+    mins = int(sec // 60)
+    rem = round(sec % 60)
+    if rem == 60:
+        mins += 1
+        rem = 0
+    return f"{mins}m {rem}s" if rem else f"{mins}m"
+
+
+def cmd_turns(a, ctx=None):
+    """Show coordinator turn duration distribution and top time-consuming actions (`pm.py turns <slug>`)."""
+    ctx = Context.from_env() if ctx is None else ctx
+    reg = ProjectRegistry(ctx)
+    try:
+        slug = reg.resolve_project_slug(a.slug)
+        if not SLUG_RE.match(slug):
+            raise NotFoundError(f"no project {a.slug}")
+        pm_reg = ctx.store.registration(slug) or {}
+        repo = str(pm_reg.get("repo") or "")
+        now_ms = int(ctx.clock.time() * 1000)
+        since_raw = a.since if a.since is not None else "24h"
+        since_ms = _parse_since_ms(since_raw, now_ms)
+        tracker = TurnTracker(ctx, slug)
+        raw_entries = tracker.read_journal_entries(since_ms=since_ms, limit=10_000)
+        sanitized = sanitize_journal_entries(
+            raw_entries,
+            home_dir=str(Path.home()),
+            repo=repo,
+        )
+        cfg = tracker.turn_config()
+        report = summarize_turns(sanitized, cfg=cfg)
+        report["slug"] = slug
+        report["since"] = since_raw
+        if a.json:
+            ctx.out.line(json.dumps(report, ensure_ascii=False, indent=2))
+            return
+        tr = ctx.config.tr
+        if report["total_turns"] == 0:
+            ctx.out.line(tr(
+                f"{slug} (since {since_raw}): no completed turns recorded.",
+                f"{slug}（最近 {since_raw}）：暂无已完成的轮次记录。",
+            ))
+            return
+        soft_s = round(report["budget"]["soft_ms"] / 1000)
+        hard_s = round(report["budget"]["hard_ms"] / 1000)
+        u = report["user"]
+        all_s = report["all"]
+        ctx.out.line(tr(
+            f"Coordinator turns for {slug} (since {since_raw}; budget soft={soft_s}s / over={hard_s}s):",
+            f"{slug} 协调者轮次耗时统计（最近 {since_raw}；软预算 {soft_s}s / 越界 {hard_s}s）：",
+        ))
+        ctx.out.line(tr(
+            f"  All turns ({all_s['count']}): p50={_fmt_dur_s(all_s['p50_ms'])}  p90={_fmt_dur_s(all_s['p90_ms'])}  "
+            f"max={_fmt_dur_s(all_s['max_ms'])}  over_soft={all_s['over_soft']}  over_hard={all_s['over_hard']}",
+            f"  全部轮次（{all_s['count']} 轮）：p50={_fmt_dur_s(all_s['p50_ms'])}  p90={_fmt_dur_s(all_s['p90_ms'])}  "
+            f"max={_fmt_dur_s(all_s['max_ms'])}  超软预算={all_s['over_soft']}  越界={all_s['over_hard']}",
+        ))
+        if u["count"] > 0:
+            ctx.out.line(tr(
+                f"  User turns ({u['count']}): p50={_fmt_dur_s(u['p50_ms'])}  p90={_fmt_dur_s(u['p90_ms'])}  "
+                f"max={_fmt_dur_s(u['max_ms'])}  over_soft={u['over_soft']}  over_hard={u['over_hard']}",
+                f"  用户轮次（{u['count']} 轮）：p50={_fmt_dur_s(u['p50_ms'])}  p90={_fmt_dur_s(u['p90_ms'])}  "
+                f"max={_fmt_dur_s(u['max_ms'])}  超软预算={u['over_soft']}  越界={u['over_hard']}",
+            ))
+        if report["top_actions"]:
+            ctx.out.line(tr("  Top time-consuming categories:", "  最耗时动作类别："))
+            for act in report["top_actions"][:5]:
+                pct = round(float(act["share"]) * 100)
+                ctx.out.line(f"    - {act['category']}: {_fmt_dur_s(act['total_ms'])} ({pct}%)")
+    except (NotFound, Refused, NotFoundError, ValueError, FileNotFoundError) as e:
+        sys.exit(str(e).strip("'\""))
+
+
+def register_turns_command(sub):
+    t = sub.add_parser("turns", help="show coordinator turn duration distribution and top time-consuming actions")
+    t.add_argument("slug", help="project slug, PM name or folder")
+    t.add_argument("--since", default="24h", help="window duration (e.g. 24h, 7d, 30m), ISO timestamp, or epoch ms (default: 24h)")
+    t.add_argument("--json", action="store_true", help="print turn metrics summary as JSON")

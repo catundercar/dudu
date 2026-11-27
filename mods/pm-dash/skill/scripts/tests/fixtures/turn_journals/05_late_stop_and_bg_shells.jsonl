@@ -1,0 +1,5 @@
+{"seq": 1, "t": 1795600000000, "src": "hook", "kind": "hook_prompt", "endpoint": {"runtime": "hc", "machine": null, "terminal": "t12", "workspace": "ws_1", "session_id": "sess_1", "agent_kind": "claude", "fg_pid": 48291, "epoch": 1}, "cause": "deliver", "batch": [0, 120], "hc_turn": 50}
+{"seq": 2, "t": 1795600005000, "src": "hook", "kind": "hook_prompt", "cause": "user", "msg_ids": ["u-2"], "hc_turn": 51}
+{"seq": 3, "t": 1795600005200, "src": "hook", "kind": "hook_stop", "expected_seq": 1, "has_reply": true}
+{"seq": 4, "t": 1795600010000, "src": "hook", "kind": "hook_stop", "expected_seq": 2, "has_reply": true}
+{"seq": 5, "t": 1795600010100, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "working", "status_msg": "1 shell still running", "status_ms": 1795600010050, "turn": 52, "reported": true}

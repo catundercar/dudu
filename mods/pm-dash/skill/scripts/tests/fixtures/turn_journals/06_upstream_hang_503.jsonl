@@ -1,0 +1,5 @@
+{"seq": 1, "t": 1795600000000, "src": "supervisor", "kind": "hc_state", "endpoint": {"runtime": "hc", "machine": null, "terminal": "t12", "workspace": "ws_1", "session_id": "sess_1", "agent_kind": "agy", "fg_pid": 48291, "epoch": 1}, "state": "live", "status": "working", "status_ms": 1795600000000, "turn": 60, "reported": true}
+{"seq": 2, "t": 1795600005000, "src": "watcher:agy", "kind": "hook_prompt", "cause": "user"}
+{"seq": 3, "t": 1795600015000, "src": "probe:pty", "kind": "pty_probe", "changed": true, "digest": "spin1", "hint": ""}
+{"seq": 4, "t": 1795600245000, "src": "probe:pty", "kind": "pty_probe", "changed": true, "digest": "spin2", "hint": ""}
+{"seq": 5, "t": 1795600250000, "src": "watcher:agy", "kind": "step_error", "message": "stream idle timeout (10m0s); 503 No capacity available, retrying attempt 1"}

@@ -8,7 +8,7 @@ import sys
 from ..context import Context
 from ..errors import IdentityError, NotFound, PmError, Refused, StoreError
 from ..events.deliver import Delivery
-from ..events.policy import wake_fields
+from ..messaging.router import wake_fields
 from ..homemove import (
     HomeMover,
     _default_backfill_backup_dir,
@@ -27,7 +27,7 @@ from ..ledger.transition import FIELDS, UpdateRequest, plan_input
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
-from ..reactions import Updates
+from ..reports import LocalFacts, ReportClient, task_update_report
 from ..workers.sessions import remember_session_for
 from .emit import exit_with, sayer
 
@@ -163,12 +163,14 @@ def cmd_new(a, ctx=None):
 
 
 def cmd_update(a, ctx=None):
-    """`pm.py update`: the request through `Updates` (validation, the locked transition, its reactions), each line
-    written as it is said."""
+    """`pm.py update`: a `report.task_update` envelope from this session, applied here (`ReportClient` ->
+    `LocalReportTransport` -> `ReportApplier` -> `Updates`: who may report it, validation, the locked transition
+    with the report's idempotency key, its reactions), each line written as it is said; a refusal printed as
+    before, with its exit code."""
     ctx = Context.from_env() if ctx is None else ctx
     req = UpdateRequest.from_args(a)
     try:
-        Updates(ctx).update(req, say=sayer(ctx))
+        ReportClient(ctx).submit(task_update_report(ctx, req), local=LocalFacts(say=sayer(ctx), request=req))
     except (StoreError, IdentityError):
         raise
     except PmError as err:

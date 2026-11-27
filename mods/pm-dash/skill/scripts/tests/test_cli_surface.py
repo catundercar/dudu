@@ -102,8 +102,9 @@ class CliSurfaceTest(unittest.TestCase):
     def test_golden_lists_every_command(self):
         # The contract names 60 commands; a golden file written from a broken parser would not.
         tree = json.loads(GOLDEN.read_text(encoding="utf-8"))
-        self.assertEqual(len(tree["subcommands"]), 60)
+        self.assertEqual(len(tree["subcommands"]), 62)
         self.assertEqual(len(tree["subcommands"]["project"]["subcommands"]), 21)
+        self.assertEqual(sorted(tree["subcommands"]["turn-journal"]["subcommands"]), ["export"])
         self.assertEqual(sorted(tree["subcommands"]["helper"]["subcommands"]), ["done", "ls", "start", "stop", "wait"])
         self.assertEqual(sorted(tree["subcommands"]["dream"]["subcommands"]), ["apply", "run", "status", "undo"])
 

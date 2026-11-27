@@ -59,7 +59,7 @@ class SendLaterGuardTest(unittest.TestCase):
         real_popen = subprocess.Popen
 
         def no_send_popen(argv, **kw):
-            if "_deliver-send" in argv or "_deliver-ready" in argv:
+            if "_drain-endpoint" in argv or "_deliver-ready" in argv:
                 raise AssertionError(f"real background send Popen must not be called: {argv}")
             return real_popen(argv, **kw)
 
@@ -81,7 +81,7 @@ class SendLaterGuardTest(unittest.TestCase):
             )
             Workers(ctx).send_ready_later("t2", "/tmp/fake.md", kind="claude", task_id="t-guard", repo=str(self.repo))
 
-        send_spawns = [s for s in ctx.procs.spawned if s["args"][:1] == ["_deliver-send"]]
+        send_spawns = [s for s in ctx.procs.spawned if s["args"][:1] == ["_drain-endpoint"]]
         ready_spawns = [s for s in ctx.procs.spawned if s["args"][:1] == ["_deliver-ready"]]
         self.assertEqual(len(send_spawns), 3, ctx.procs.spawned)
         self.assertEqual(len(ready_spawns), 1, ctx.procs.spawned)

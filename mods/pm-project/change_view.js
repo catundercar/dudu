@@ -36,8 +36,15 @@ export function renderThreadChangeView({
   task,
   scrollHandle,
   actions,
+  inTabBar = false,
 }) {
-  const { div, svg, v_flex, h_flex, icon, iconButton, SPINNER, withTip } = ui;
+  const { div, svg, v_flex, h_flex, icon, iconButton, splitIconBtn, lockScrollBody, SPINNER, withTip } = ui;
+  const btnSize = inTabBar ? 13 : 14;
+  const topBtn = (id, name, tipText, action, size = btnSize, tipOpts = null) => (
+    splitIconBtn
+      ? splitIconBtn(id, name, tipText, action, t, size, false, tipOpts || { panel: true, placement: 'below-right' })
+      : iconButton(id, name, tipText, action, t, size, tipOpts || { panel: true, placement: 'below-right' })
+  );
   const tip = (key, el, text, opts) => (withTip && text ? withTip(key, el, text, opts) : el);
   const st = state || {};
   const level = st.level || 'commits';
@@ -76,25 +83,30 @@ export function renderThreadChangeView({
   const foldedMap = st.foldedHunks || {};
   const allFolded = hunks.length > 0 && hunks.every(h => Boolean(foldedMap[h.id]));
 
-  const topBar = h_flex().flex_none().px(14).pt(6).pb(6).gap(4).items_center().border_b(1).border_color(t.border)
-    .child(iconButton('change-back', 'back', backTip, actions.onBack, t, 15, { panel: true, placement: 'below-left' }))
-    .child(tip('change-header-title', div().id('change-header-title').w_full().truncate().text_size(13.5).font_semibold().text_color(t.foreground)
+  const topBar = h_flex().id('change-topbar').h(inTabBar ? 36 : 44).flex_none().px(12).gap(6).items_center()
+    .bg(t.background)
+    .border_b(1).border_color(withAlpha(t.border, inTabBar ? 0.5 : 0.7))
+    .child(topBtn('change-back', 'back', backTip, actions.onBack, btnSize, { panel: true, placement: 'below-left' }))
+    .child(tip('change-header-title', div().id('change-header-title').w_full().truncate().text_size(inTabBar ? 12.5 : 13.5).font_semibold().text_color(t.foreground)
       .child(headerTitle), headerTitle, { panel: true, placement: 'below-left', wrap: true, flex1: true }))
-    .when(level === 'diff' && hunks.length > 0, el => el.child(iconButton(
-      'change-toggle-all',
-      allFolded ? 'expand' : 'collapse',
-      word(lang, allFolded ? 'changeExpandAll' : 'changeCollapseAll'),
-      cx => actions.onToggleAllHunks(hunks, cx),
-      t,
-      14,
-      { panel: true, placement: 'below-right' },
-    )))
-    .child(loadingNow
-      ? tip('change-refresh-busy', h_flex().id('change-refresh-busy').size(32).flex_none().items_center().justify_center()
-          .accessibility_label(word(lang, 'changeRefresh'))
-          .child(svg(SPINNER).size(14).flex_none().text_color(t.muted).spin(900)),
-          word(lang, 'changeRefresh'), { panel: true, placement: 'below-right' })
-      : iconButton('change-refresh', 'refresh', word(lang, 'changeRefresh'), actions.onRefresh, t, 14, { panel: true, placement: 'below-right' }));
+    .child(h_flex().flex_none().gap(2).items_center()
+      .when(level === 'diff' && hunks.length > 0, el => el.child(topBtn(
+        'change-toggle-all',
+        allFolded ? 'expand' : 'collapse',
+        word(lang, allFolded ? 'changeExpandAll' : 'changeCollapseAll'),
+        cx => actions.onToggleAllHunks(hunks, cx),
+        btnSize,
+        { panel: true, placement: 'below-right' },
+      )))
+      .child(loadingNow
+        ? tip('change-refresh-busy', h_flex().id('change-refresh-busy').size(inTabBar ? 26 : 28).flex_none().rounded(7).items_center().justify_center()
+            .accessibility_label(word(lang, 'changeRefresh'))
+            .child(svg(SPINNER).size(btnSize).flex_none().text_color(t.muted).spin(900)),
+            word(lang, 'changeRefresh'), { panel: true, placement: 'below-right' })
+        : topBtn('change-refresh', 'refresh', word(lang, 'changeRefresh'), actions.onRefresh, btnSize, { panel: true, placement: 'below-right' }))
+      .when(!inTabBar && Boolean(actions.onClose), el => el.child(div().w(4).flex_none()).child(
+        topBtn('split-close', 'close', word(lang, 'closeSidePanel'), actions.onClose, 14, { panel: true, placement: 'below-right' }),
+      )));
 
   const renderCounts = (ins, dels, size = 11.5) => {
     const sc = statCounts(ins, dels, t, size);
@@ -407,10 +419,11 @@ export function renderThreadChangeView({
     }
   }
 
-  return v_flex().id('thread-change-view').w(width).h_full().flex_none()
-    .bg(t.chrome).border_l(1).border_color(t.border)
+  const scrollBody = v_flex().id('change-body').flex_1().min_h(0).px(16).pt(10).pb(20).gap(8).overflow_y_scrollbar()
+    .when(Boolean(scrollHandle), el => el.track_scroll(scrollHandle))
+    .children(bodyChildren);
+
+  return v_flex().id('thread-change-view').w_full().h_full().min_w(0).bg(t.background)
     .child(topBar)
-    .child(v_flex().id('change-body').flex_1().min_h(0).px(16).pt(10).pb(20).gap(8).overflow_y_scrollbar()
-      .when(Boolean(scrollHandle), el => el.track_scroll(scrollHandle))
-      .children(bodyChildren));
+    .child(lockScrollBody ? lockScrollBody(scrollBody) : scrollBody);
 }

@@ -27,6 +27,11 @@ except ImportError:
 from .. import osutil
 from ..agents.base import READY_MARKS, is_seat_argv, unwrap_seat_argv
 from ..context import Context
+from ..events.supervisor import deliver_under_typist_lock
+from ..home import project_slug
+from ..messaging.address import LogicalAddress, parse_legacy_endpoint
+from ..messaging.envelope import P0_CONTROL, Envelope, new_env_id
+from ..messaging.principal import Principal
 from ..project.conversation import Conversation
 from ..store import lock_file, replace_task_file, unlock_file, write_atomic
 from ..terminals import hc as hc_mod
@@ -141,13 +146,16 @@ def outgoing_agent_args(repo: str | Path, term: Mapping[str, Any], kind: str, *,
 
 
 def swap_reason_text(a: Any = None, *, reason: str | None = None, model: str | None = None,
-                     ctx: Context | None = None) -> str:
+                     profile: str | None = None, ctx: Context | None = None) -> str:
     """Human-readable reason for replacing the PM session (recorded in the project conversation)."""
     c = Context.from_env() if ctx is None else ctx
     tr = c.config.tr
     explicit = (reason if reason is not None else (getattr(a, "reason", None) or "")).strip()
     if explicit:
         return explicit
+    eff_profile = (profile if profile is not None else (getattr(a, "profile", None) or "")).strip()
+    if eff_profile:
+        return tr(f"switch profile to {eff_profile}", f"切换档位至 {eff_profile}")
     eff_model = (model if model is not None else (getattr(a, "model", None) or "")).strip()
     if eff_model:
         return tr(f"switch model to {eff_model}", f"切换模型至 {eff_model}")
@@ -374,10 +382,12 @@ def _seat_prompt_sender(
     kind: str,
     prompt: str,
     *,
+    repo: str | Path = "",
     ctx: Context | None = None,
 ) -> threading.Thread:
     """Type `prompt` into `term` once the child agent is ready, aborting immediately if `proc` exits."""
     c = Context.from_env() if ctx is None else ctx
+    prompt_key = f"seat_opening:{term}:{new_env_id(int(float(c.clock.time()) * 1000))}"
 
     def _run() -> None:
         for attempt in range(20):
@@ -395,10 +405,31 @@ def _seat_prompt_sender(
             if not ready and kind and not (status or {}).get("state"):
                 marked = any(m in c.hc.read(term) for m in READY_MARKS.get(kind, ()))
             if ready or marked:
-                sent = c.hc.send(term, prompt) or {}
-                if (sent.get("started") or (not status and "started" in sent and sent.get("status") is None)
-                        or (marked and sent and not sent.get("error"))):
-                    return
+                now_ms = int(float(c.clock.time()) * 1000)
+                ep = parse_legacy_endpoint(term, runtime_hint="hc")
+                if ep is not None:
+                    proj = project_slug(repo) if repo else "seat"
+                    env = Envelope(
+                        env_id=new_env_id(now_ms),
+                        idempotency_key=prompt_key,
+                        schema_version=1,
+                        created_ms=now_ms,
+                        kind="cmd.send",
+                        sender=Principal.supervisor(proj),
+                        recipient=LogicalAddress.pm(proj),
+                        project=proj,
+                        # Its sender retries a send whose turn never started: keep it typed for that (not closed).
+                        cause={"kind": "seat_opening_prompt", "retry_unstarted": True},
+                        priority=P0_CONTROL,
+                        body={"text": prompt},
+                    )
+                    # The same envelope on every attempt: typed but its turn never started (and the terminal has
+                    # not moved on since) is typed again, as before mailboxes; a late start is not retyped.
+                    out = deliver_under_typist_lock(
+                        c, ep, env, repo=repo, if_idle=False, attempts=attempt + 1, retry_unstarted=True
+                    )
+                    if out is not None and out.status == "typed" and (out.started_turn is True or not status or marked):
+                        return
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()

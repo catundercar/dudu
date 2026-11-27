@@ -1,4 +1,4 @@
-"""The rules of pmlib/events/policy.py on literal records: who wrote an entry and whether it wakes the PM (wake_rule),
+"""The rules of pmlib/messaging/router.py (once events/policy.py) on literal records: who wrote an entry and whether it wakes the PM (wake_rule),
 whether an entry in the log is news (is_news), and which entries a batch carries (pending_items). No ledger, no
 terminal: these rules take what was already read (docs/design/pm-py-refactor.md, sections 5.2-5.3)."""
 import datetime
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pmlib.events import policy  # noqa: E402
+from pmlib.messaging import router as policy  # noqa: E402
 
 REPO = "/p"
 PMS = {"hc:tPM", "hc:tOLD"}  # the PM's terminal and the one it took over from

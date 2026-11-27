@@ -147,6 +147,170 @@ class TakenIn(unittest.TestCase):
     def project_dir(self):
         return self.ctx.home.project_for(self.repo).ensure()
 
+    # What a Claude coordinator reads mid-turn (a queued_command row; no UserPromptSubmit) is caught up by the
+    # Stop hook and belongs to the turn ending then: that turn's closure settles it (G5), not the next turn's.
+    def mid_turn_pm(self):
+        """An app PM in hc:t7 that reports status, for the mid-turn read tests below."""
+        self.hc = FakeHc(terminals={"t7": {"address": "t7", "state": "live", "agent": "claude",
+                                           "status": {"state": "idle"}, "turn": 1}})
+        self.ctx = self.make()
+        rec = json.loads(self.reg.read_text())
+        rec.update({"terminal": "t7", "runtime": "hc", "app_pm": True, "seat": True, "agent": "claude",
+                    "endpoint": {"runtime": "hc", "machine": None, "terminal": "t7", "epoch": 1}, "epoch": 1})
+        self.reg.write_text(json.dumps(rec))
+
+    def mid_tracker(self):
+        from pmlib.project.turn_state import TurnTracker
+        return TurnTracker(self.make(), self.repo)
+
+    def mid_drive(self):
+        from pmlib.events.supervisor import EndpointDriver
+        reg = self.ctx.store.registration(project_slug(self.repo)) or {}
+        EndpointDriver(self.make(), self.repo).drive_pm_endpoint(reg, self.hc.get_raw("t7"))
+
+    def mid_send(self, msg_id, text):
+        env_id = self.mid_tracker().send_user_message(msg_id=msg_id, text=text)["env_id"]
+        self.mid_drive()
+        return env_id
+
+    def mid_state(self, env_id):
+        return self.mid_tracker().pm_mailbox.get(env_id).state
+
+    def test_a_message_read_mid_turn_is_answered_when_that_turn_closes(self):
+        self.mid_turn_pm()
+        e1 = self.mid_send("u-1", "first question")
+        path = self.write([self.prompt(0, "first question")])
+        self.hook("UserPromptSubmit", prompt="first question", transcript_path=path)
+        e2 = self.mid_send("u-2", "and one more thing")  # typed while the turn works: read at a tool boundary
+        self.write([self.reply(1), self.queued(2, "and one more thing"), self.reply(3, "answers to both")], append=True)
+        self.hook("Stop", last_assistant_message="answers to both", transcript_path=path)
+        self.assertEqual((self.mid_state(e1), self.mid_state(e2)), ("answered", "answered"))
+        self.assertEqual([it.envelope.body.get("text") for it in self.mid_tracker().pm_mailbox.unanswered_user_items()], [])
+        self.assertIn(("user", "and one more thing"), self.said())
+
+    def test_the_supervisor_closing_the_turn_before_the_stop_hook_still_settles_it(self):
+        self.mid_turn_pm()
+        from pmlib.events.supervisor import ProjectSupervisor
+        self.mid_send("u-1", "first question")
+        path = self.write([self.prompt(0, "first question")])
+        self.hook("UserPromptSubmit", prompt="first question", transcript_path=path)
+        e2 = self.mid_send("u-2", "and one more thing")
+        reg = self.ctx.store.registration(project_slug(self.repo)) or {}
+        sup = ProjectSupervisor(self.make(), self.repo)
+        row = self.hc._mutable_dict("t7")
+        row.update({"status": {"state": "working"}, "status_ms": 2_000})
+        sup.observe_and_reduce(reg, self.hc.get_raw("t7"))
+        row.update({"status": {"state": "idle"}, "turn": 2, "status_ms": 5_000})
+        sup.observe_and_reduce(reg, self.hc.get_raw("t7"))  # hc idle closes the turn first
+        self.assertEqual(self.mid_state(e2), "typed")  # not read yet: no hook has seen it
+        self.write([self.reply(1), self.queued(2, "and one more thing"), self.reply(3, "answers to both")], append=True)
+        self.hook("Stop", last_assistant_message="answers to both", transcript_path=path)
+        self.assertEqual(self.mid_state(e2), "answered")
+
+    def test_a_batch_read_mid_turn_is_settled_with_that_turn_not_the_next(self):
+        self.mid_turn_pm()
+        from pmlib.events.deliver import Delivery
+        from pmlib.messaging.address import LogicalAddress
+        from pmlib.messaging.envelope import P4_BATCH, Envelope, new_env_id
+        from pmlib.messaging.principal import Principal
+        slug = project_slug(self.repo)
+        self.mid_send("u-1", "first question")
+        path = self.write([self.prompt(0, "first question")])
+        self.hook("UserPromptSubmit", prompt="first question", transcript_path=path)
+        self.record("event", by="worker-1", text="task #7 finished", source="worker", wake=True)
+        dlv = Delivery(self.make(), self.repo, settle=0)
+        start, end, items = dlv.pending_batch()
+        now_ms = int(self.ctx.clock.time() * 1000)
+        env_id = new_env_id(now_ms)
+        text = dlv.batch_text(start, end, items, env_id=env_id)
+        self.mid_tracker().pm_mailbox.enqueue(Envelope(
+            env_id=env_id, idempotency_key=f"batch:{slug}:{start}-{end}", schema_version=1, created_ms=now_ms,
+            kind="event.batch", sender=Principal.supervisor(slug), recipient=LogicalAddress.pm(slug), project=slug,
+            cause={"kind": "deliver_batch"}, priority=P4_BATCH, body={"text": text, "start": start, "end": end},
+            require_reply=True,
+        ), initial_state="typed")
+        self.write([self.reply(1), self.queued(2, text), self.reply(3, "noted #7")], append=True)
+        self.hook("Stop", last_assistant_message="noted #7", transcript_path=path)
+        self.assertEqual(self.mid_state(env_id), "answered")  # an interrupt of the next turn cannot send it back now
+        item = self.mid_tracker().pm_mailbox.get(env_id)
+        self.assertEqual(item.meta.get("turn_outcome"), "replied")
+
+    def mid_turn_stopped_by_the_user(self, closed_by_supervisor):
+        """A turn that read "and one more thing" mid-turn and was then stopped with Esc: no Stop hook comes."""
+        self.mid_turn_pm()
+        from pmlib.events.supervisor import ProjectSupervisor
+        self.mid_send("u-1", "first question")
+        path = self.write([self.prompt(0, "first question")])
+        self.hook("UserPromptSubmit", prompt="first question", transcript_path=path)
+        e2 = self.mid_send("u-2", "and one more thing")
+        self.write([self.reply(1), self.queued(2, "and one more thing")], append=True)
+        if closed_by_supervisor:
+            reg = self.ctx.store.registration(project_slug(self.repo)) or {}
+            sup = ProjectSupervisor(self.make(), self.repo)
+            row = self.hc._mutable_dict("t7")
+            row.update({"status": {"state": "working"}, "status_ms": 2_000})
+            sup.observe_and_reduce(reg, self.hc.get_raw("t7"))
+            row.update({"status": {"state": "idle"}, "turn": 2, "status_ms": 5_000})
+            sup.observe_and_reduce(reg, self.hc.get_raw("t7"))
+        self.assertEqual(self.mid_state(e2), "typed")  # no hook has seen it read
+        return path, e2
+
+    def settled_at_the_next_prompt(self, closed_by_supervisor):
+        # The next UserPromptSubmit catches up with what the stopped turn read: it belongs to that turn, which has
+        # closed (the supervisor saw hc idle, or the new turn's start closes it), not to the turn starting now.
+        path, e2 = self.mid_turn_stopped_by_the_user(closed_by_supervisor)
+        self.write([self.prompt(4, "typed in the terminal")], append=True)
+        self.hook("UserPromptSubmit", prompt="typed in the terminal", transcript_path=path)
+        self.assertEqual(self.mid_tracker().read().get("phase"), "working")  # the new turn is running
+        self.assertEqual(self.mid_state(e2), "answered")
+        self.assertIn(("user", "and one more thing"), self.said())
+
+    def test_what_a_turn_with_no_stop_hook_read_is_settled_at_the_next_prompt(self):
+        self.settled_at_the_next_prompt(closed_by_supervisor=True)
+
+    def test_what_a_turn_nobody_closed_read_is_settled_when_the_next_prompt_closes_it(self):
+        self.settled_at_the_next_prompt(closed_by_supervisor=False)
+
+    def test_a_message_that_starts_the_next_turn_is_not_settled_with_the_turn_that_just_closed(self):
+        # Typed while the turn worked but not read by it: Claude Code submits it as the next prompt. Catching up
+        # with the closed turn at that prompt must leave it for the turn it starts.
+        self.mid_turn_pm()
+        e1 = self.mid_send("u-1", "first question")
+        path = self.write([self.prompt(0, "first question")])
+        self.hook("UserPromptSubmit", prompt="first question", transcript_path=path)
+        e2 = self.mid_send("u-2", "and one more thing")
+        self.write([self.reply(1, "answer one")], append=True)
+        self.hook("Stop", last_assistant_message="answer one", transcript_path=path)
+        self.assertEqual((self.mid_state(e1), self.mid_state(e2)), ("answered", "typed"))
+        self.write([self.prompt(2, "and one more thing")], append=True)
+        self.hook("UserPromptSubmit", prompt="and one more thing", transcript_path=path)
+        self.assertEqual(self.mid_state(e2), "consumed")  # read, and its turn is still working
+        self.assertEqual([it.envelope.env_id for it in self.mid_tracker().pm_mailbox.unanswered_user_items()], [e2])
+        self.write([self.reply(3, "answer two")], append=True)
+        self.hook("Stop", last_assistant_message="answer two", transcript_path=path)
+        self.assertEqual(self.mid_state(e2), "answered")
+
+    def test_a_stop_hook_that_comes_after_a_newer_turn_closed_still_settles_what_its_turn_read(self):
+        # The Stop hook is async. A session resumed in a transcript of its own runs a whole turn before the old
+        # session's Stop hook catches up: the old turn's own outcome is gone by then, so what it read is closed.
+        self.mid_turn_pm()
+        self.mid_send("u-1", "first question")
+        path = self.write([self.prompt(0, "first question")])
+        self.hook("UserPromptSubmit", prompt="first question", transcript_path=path, session_id="s-old")
+        e2 = self.mid_send("u-2", "and one more thing")
+        self.write([self.reply(1), self.queued(2, "and one more thing"), self.reply(3, "answers to both")], append=True)
+        resumed = self.write([self.prompt(4, "typed in the terminal")], name="resumed.jsonl")
+        self.hook("UserPromptSubmit", prompt="typed in the terminal", transcript_path=resumed, session_id="s-new")
+        self.write([self.reply(5, "done")], name="resumed.jsonl", append=True)
+        self.hook("Stop", last_assistant_message="done", transcript_path=resumed, session_id="s-new")
+        st = self.mid_tracker().read()
+        self.assertEqual((st.get("turn_seq"), (st.get("last_turn") or {}).get("seq")), (2, 2))
+        self.assertEqual(self.mid_state(e2), "typed")  # the newer turn's closure did not see it read
+        self.hook("Stop", last_assistant_message="answers to both", transcript_path=path, session_id="s-old")
+        self.assertEqual(self.mid_state(e2), "answered")
+        self.assertEqual(self.mid_tracker().pm_mailbox.get(e2).meta.get("turn_outcome"), "closed")
+        self.assertEqual(self.mid_tracker().read().get("turn_seq"), 2)  # the late Stop did not touch the newer turn
+
     def test_what_came_in_mid_turn_stands_before_the_reply_as_the_prompt_rule_says(self):
         path = self.write([self.prompt(0, "先做看板")])
         self.hook("UserPromptSubmit", prompt="先做看板", transcript_path=path)
@@ -1045,12 +1209,108 @@ class PmQuestionCardsAndStaleBlockedTest(unittest.TestCase):
             "cwd": self.repo,
             "tool_input": {"questions": [{"header": "Q", "question": "Proceed?", "options": [{"label": "Yes"}]}]},
         }
-        # Worker terminal is not the registered PM: hook stays silent and allows through.
+        # Ordinary non-dispatched terminal (not PM and no active worker task): hook stays silent and allows through.
         self.assertEqual(self.run_pre_tool(ask, pane="hc:t22", hc_term="t22"), "")
         # Non-question tool in PM session: hook stays silent.
         self.assertEqual(self.run_pre_tool({
             "hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": self.repo, "tool_input": {"command": "ls"},
         }), "")
+
+    def test_pre_tool_hook_denies_ask_user_question_in_dispatched_worker_and_redirects_to_update_blocked(self):
+        tid = "repo-i18n-311"
+        Ledger(self.ctx).save({
+            "id": tid,
+            "title": "08-i18n",
+            "project": "repo",
+            "repo": self.repo,
+            "status": "in_progress",
+            "owner": "pm",
+            "pane": "hc:t311",
+            "dispatched": True,
+            "base": "main",
+            "created": self.ctx.clock.now(),
+            "log": [],
+        })
+        self.hc.terminals["t311"] = {"state": "live", "labels": {"task": tid}}
+        ask_payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "cwd": self.repo,
+            "tool_input": {
+                "questions": [{
+                    "header": "i18n fallback",
+                    "question": "缺少翻译键时应回退到英文还是保留原键名？",
+                    "options": [
+                        {"label": "回退到英文（推荐）", "description": "与现有界面行为一致"},
+                        {"label": "保留原键名", "description": "便于开发期暴露漏译"},
+                    ],
+                }],
+            },
+        }
+        raw = self.run_pre_tool(ask_payload, pane="hc:t311", hc_term="t311", lang="zh")
+        resp = json.loads(raw)
+        hso = resp["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PreToolUse")
+        self.assertEqual(hso["permissionDecision"], "deny")
+        reason = hso["permissionDecisionReason"]
+        self.assertIn("AskUserQuestion", reason)
+        self.assertIn(f"update {tid} --status blocked", reason)
+        self.assertIn("--note", reason)
+        self.assertIn("缺少翻译键时应回退到英文还是保留原键名？", reason)
+        self.assertIn("--option", reason)
+        self.assertIn("回退到英文", reason)
+        self.assertNotIn("（推荐）", reason.split("--option")[1].split("--why")[0])
+        self.assertIn("--why", reason)
+        self.assertIn("--recommend", reason)
+        self.assertNotIn(" new ", reason)
+
+        # Codex request_user_input & ask_user are also intercepted for active dispatched workers.
+        for tool_name in ("request_user_input", "ask_user"):
+            codex_payload = {
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+                "cwd": self.repo,
+                "tool_input": {
+                    "questions": [{
+                        "header": "Locale file",
+                        "question": "Split locale files by module?",
+                        "options": [
+                            {"label": "Single file"},
+                            {"label": "Split by module (Recommended)", "description": "smaller diffs"},
+                        ],
+                    }],
+                },
+            }
+            c_resp = json.loads(self.run_pre_tool(codex_payload, pane="hc:t311", hc_term="t311", lang="en"))
+            self.assertEqual(c_resp["hookSpecificOutput"]["permissionDecision"], "deny")
+            c_reason = c_resp["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn(tool_name, c_reason)
+            self.assertIn(f"update {tid} --status blocked", c_reason)
+            self.assertIn("Split by module (Recommended)", c_reason)
+
+        # Fallback by pane + dispatched=True (e.g. without hc task label) also intercepts active worker.
+        self.hc.terminals.pop("t311", None)
+        fallback_resp = json.loads(self.run_pre_tool(ask_payload, pane="hc:t311", hc_term="t311", lang="en"))
+        self.assertEqual(fallback_resp["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn(f"update {tid} --status blocked", fallback_resp["hookSpecificOutput"]["permissionDecisionReason"])
+
+        # Non-in_progress worker tasks (blocked/review/done) are not intercepted.
+        self.hc.terminals["t311"] = {"state": "live", "labels": {"task": tid}}
+        for st in ("blocked", "review", "done"):
+            Ledger(self.ctx).save({
+                "id": tid,
+                "title": "08-i18n",
+                "project": "repo",
+                "repo": self.repo,
+                "status": st,
+                "owner": "pm",
+                "pane": "hc:t311",
+                "dispatched": True,
+                "base": "main",
+                "created": self.ctx.clock.now(),
+                "log": [],
+            })
+            self.assertEqual(self.run_pre_tool(ask_payload, pane="hc:t311", hc_term="t311", lang="en"), "")
 
     def load(self, tid):
         return Ledger(self.ctx).load(tid)
@@ -1086,8 +1346,8 @@ class PmQuestionCardsAndStaleBlockedTest(unittest.TestCase):
             self.assertNotIn(gone, done)
 
     def sends(self):
-        """How many background sends (send_async_later: `pm.py _deliver-send ...`) were started so far."""
-        return len([s for s in self.procs.spawned if s["args"][:1] == ["_deliver-send"]])
+        """How many background sends (send_async_later: `pm.py _drain-endpoint ...`) were started so far."""
+        return len([s for s in self.procs.spawned if s["args"][:1] == ["_drain-endpoint"]])
 
     def test_pm_send_and_update_send_unblock_worker_blocked_task_and_mark_handled_by_pm(self):
         tid = "repo-at"
@@ -1148,8 +1408,9 @@ class PmQuestionCardsAndStaleBlockedTest(unittest.TestCase):
 
 
 class UserPromptReceiptTests(unittest.TestCase):
-    """PM writes an atomic receipt in projects/<slug>/receipts.json immediately when UserPromptSubmit fires,
-    before conversation.jsonl is appended, and exposes receipts via `pm.py state` and `pm.py project events`."""
+    """Phase 5 (§4.6): coordinator hooks no longer write legacy `receipts.json` or `turns.log`; user prompts
+    are recorded in `pm-turn-journal.jsonl` / `pm-turn.json` and `pm_mailbox`, while `receipts.json` stays
+    in `INTERNAL_PROJECT_FILES`."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="pm-hooks-receipt-")
@@ -1158,7 +1419,7 @@ class UserPromptReceiptTests(unittest.TestCase):
         self.git = GitRepo(worktree_base=self.base / "worktrees")
         self.repo = self.git.project_root(tempfile.mkdtemp(dir=self.base))
         self.slug = project_slug(self.repo)
-        self.hc = FakeHc()
+        self.hc = FakeHc(terminals={"t182": {"state": "live", "status": {"state": "working"}, "turn": 1}})
         self.ctx = make_ctx(self.base, pane="hc:t182", hc=self.hc, git=self.git, clock=SystemClock(), out=StdOutput())
         self.ctx.hc_terminal = "t182"
         self.ctx.caller = Caller(self.ctx)
@@ -1176,17 +1437,14 @@ class UserPromptReceiptTests(unittest.TestCase):
         with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
             hooks.cmd_hook_turn(argparse.Namespace(), ctx=ctx)
 
-    def test_receipt_written_before_conversation_append_and_survives_log_failure(self):
-        """Even if conversation.jsonl append fails or hasn't happened yet, the receipt is already on disk
-        and visible through both `pm.py state` and `pm.py project events`."""
-        receipt_path = self.ctx.home.project(self.slug).receipts
-        seen_receipt_before_log = []
+    def test_user_prompt_writes_journal_not_legacy_receipts_or_turns_log(self):
+        """Even if conversation.jsonl append fails, pm-turn-journal.jsonl records the turn and legacy
+        `receipts.json` / `turns.log` are not created."""
+        from pmlib.project.turn_state import TurnTracker
 
-        real_append = self.ctx.store.append_event
+        receipt_path = self.ctx.home.project(self.slug).receipts
 
         def failing_append(slug, event, *, timeout=None):
-            # At the moment conversation.jsonl append is attempted, receipts.json must already exist on disk!
-            seen_receipt_before_log.extend(read_receipts(receipt_path))
             raise OSError("simulated conversation.jsonl lock failure")
 
         with mock.patch.object(self.ctx.store, "append_event", side_effect=failing_append):
@@ -1197,56 +1455,23 @@ class UserPromptReceiptTests(unittest.TestCase):
                 "prompt": "帮我看下这个竞态问题",
             })
 
-        self.assertEqual(len(seen_receipt_before_log), 1, "receipt must be written before conversation.jsonl append")
-        self.assertEqual(seen_receipt_before_log[0]["text"], "帮我看下这个竞态问题")
-        self.assertEqual(seen_receipt_before_log[0]["pane"], "hc:t182")
-        self.assertEqual(seen_receipt_before_log[0]["session"], "sess-pm-1")
-        self.assertGreater(seen_receipt_before_log[0]["at_ms"], 0)
-        self.assertTrue(seen_receipt_before_log[0]["digest"])
-        # conversation.jsonl was never written because append_event raised OSError.
-        self.assertEqual(Conversation(self.ctx, self.repo).events(), [])
+        self.assertFalse(receipt_path.exists())
+        self.assertFalse(self.ctx.home.turn_log.exists())
+        tracker = TurnTracker(self.ctx, self.slug)
+        entries = tracker.read_journal_entries()
+        self.assertTrue(any(e.get("kind") == "hook_prompt" and e.get("cause") == "user" for e in entries))
 
-        # Both `pm.py project events` and `pm.py state` expose the receipt immediately.
         proj_events = Projects(self.ctx.store).events(self.slug)
         self.assertEqual(proj_events["events"], [])
-        self.assertEqual(len(proj_events["receipts"]), 1)
-        self.assertEqual(proj_events["receipts"][0]["text"], "帮我看下这个竞态问题")
-
-        # Paging backward (`before=...`) omits receipts.
-        older_page = Projects(self.ctx.store).events(self.slug, before=0)
-        self.assertNotIn("receipts", older_page)
+        self.assertNotIn("receipts", proj_events)
 
         state = state_view.dash_state(ctx=self.ctx)
         pm_row = next(p for p in state["pms"] if p["repo"] == self.repo)
-        self.assertEqual(len(pm_row["receipts"]), 1)
-        self.assertEqual(pm_row["receipts"][0]["text"], "帮我看下这个竞态问题")
+        self.assertNotIn("receipts", pm_row)
+        self.assertEqual(pm_row["turn"]["phase"], "working")
 
-        # Restore real append and verify non-user prompts do NOT write receipts.
-        self.ctx.store.append_event = real_append
-        for raw in (
-            "<hc from=\"t9\">worker ping</hc>",
-            "[from pm.py rotate] handover",
-            "/compact",
-            "<task-notification>done</task-notification>",
-        ):
-            self.run_hook({"hook_event_name": "UserPromptSubmit", "cwd": self.repo, "prompt": raw})
-        self.assertEqual(len(read_receipts(receipt_path)), 1, "non-user prompts must not add receipts")
-
-    def test_receipt_cap_and_long_text_truncation(self):
-        conv = Conversation(self.ctx, self.repo)
-        for i in range(RECEIPT_LIMIT + 10):
-            conv.record_receipt(f"msg-{i}")
-        got = conv.receipts()
-        self.assertEqual(len(got), RECEIPT_LIMIT)
-        self.assertEqual(got[0]["text"], "msg-10")
-        self.assertEqual(got[-1]["text"], f"msg-{RECEIPT_LIMIT + 9}")
-
-        long_text = "😀" * (RECEIPT_TEXT_LIMIT + 250)
-        entry = conv.record_receipt(long_text)
-        self.assertTrue(entry["truncated"])
-        self.assertEqual(len(entry["text"]), RECEIPT_TEXT_LIMIT)
-        self.assertEqual(entry["len"], len(long_text))
-        # receipts.json is an internal project file and must not appear in project documents.
+        # `receipts.json` remains an internal project file so pre-existing legacy files stay hidden.
+        receipt_path.write_text(json.dumps({"receipts": [{"at": "2026-11-26 10:00:00", "text": "old"}]}))
         doc_paths = [d.get("path") for d in self.ctx.store.documents(self.slug)]
         self.assertNotIn("receipts.json", doc_paths)
 
@@ -1337,6 +1562,85 @@ class WorkerSubplanReminder(unittest.TestCase):
         }))
         self.save_task("repo-pm", pane="hc:t7", dispatched=True)
         self.assertEqual(self.fire_pre_tool("Edit", pane="hc:t7"), "")
+
+
+class PmSlowCommandGuardTests(unittest.TestCase):
+    """Phase 2 (`O-d`, D2): `PreToolUse` slow foreground command guard in coordinator sessions."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="pm-hooks-slow-")
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve()
+        self.repo = str((self.base / "repo").resolve())
+        Path(self.repo).mkdir(parents=True)
+        self.hc = FakeHc()
+
+    def make(self, *, pane="hc:t7", config=None):
+        ctx = make_ctx(self.base / "ledger", pane=pane, hc=self.hc, out=StdOutput())
+        ctx.hc_terminal = pane[3:] if pane.startswith("hc:") else ""
+        ctx.env = {**dict(ctx.env), "HC_TERMINAL_ID": ctx.hc_terminal}
+        ctx.caller = Caller(ctx)
+        if config is not None:
+            ctx.home.config.parent.mkdir(parents=True, exist_ok=True)
+            ctx.home.config.write_text(json.dumps(config), encoding="utf-8")
+        ctx.home.registrations.mkdir(parents=True, exist_ok=True)
+        ctx.home.registration(project_slug(self.repo)).write_text(json.dumps({
+            "name": pm_name(self.repo), "pane": "hc:t7", "project": "repo", "repo": self.repo,
+        }), encoding="utf-8")
+        return ctx
+
+    def fire_bash(self, command, *, pane="hc:t7", tool_name="Bash", run_in_background=False, config=None):
+        ctx = self.make(pane=pane, config=config)
+        out = io.StringIO()
+        tool_input = {"command": command}
+        if run_in_background:
+            tool_input["run_in_background"] = True
+        payload = json.dumps({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "cwd": self.repo,
+        })
+        with mock.patch.object(sys, "stdin", io.StringIO(payload)), contextlib.redirect_stdout(out):
+            hooks.cmd_hook_pre_tool(argparse.Namespace(), ctx=ctx)
+        return out.getvalue().strip()
+
+    def test_default_warn_mode_catches_all_slow_categories_without_blocking(self):
+        slow_cmds = [
+            "python3 tests/run_checks.py",
+            "python3 install.py --desktop",
+            "ssh mbp 'ls -la'",
+            "python3 pm.py land dudu-1",
+            "hc wait t9 --until idle",
+            "python3 pm.py wait dudu-1",
+            "sleep 30",
+        ]
+        for cmd in slow_cmds:
+            raw = self.fire_bash(cmd)
+            self.assertTrue(raw, f"expected warning for {cmd!r}")
+            hso = json.loads(raw)["hookSpecificOutput"]
+            self.assertEqual(hso["hookEventName"], "PreToolUse")
+            self.assertNotIn("permissionDecision", hso)
+            self.assertIn("additionalContext", hso)
+
+    def test_deny_mode_blocks_slow_foreground_command_and_off_mode_allows(self):
+        raw_deny = self.fire_bash("python3 pm.py land dudu-1", config={"pm": {"slow_cmd_guard": "deny"}, "lang": "zh"})
+        hso = json.loads(raw_deny)["hookSpecificOutput"]
+        self.assertEqual(hso["permissionDecision"], "deny")
+        self.assertIn("pm.py approve", hso["permissionDecisionReason"])
+
+        raw_off = self.fire_bash("python3 tests/run_checks.py", config={"pm": {"slow_cmd_guard": "off"}})
+        self.assertEqual(raw_off, "")
+
+    def test_skips_fast_commands_background_flag_quoted_mentions_and_non_pm_workers(self):
+        self.assertEqual(self.fire_bash("python3 pm.py status"), "")
+        self.assertEqual(self.fire_bash("python3 pm.py land dudu-1 --delegate"), "")
+        self.assertEqual(self.fire_bash("python3 mods/pm-dash/setup.py --status"), "")
+        self.assertEqual(self.fire_bash("sleep 2"), "")
+        self.assertEqual(self.fire_bash('python3 pm.py log dudu-1 "fixed ssh timeout and sleep 60"'), "")
+        self.assertEqual(self.fire_bash("python3 tests/run_checks.py", run_in_background=True), "")
+        # Non-PM worker pane is NOT guarded.
+        self.assertEqual(self.fire_bash("python3 tests/run_checks.py", pane="hc:t99"), "")
 
 
 if __name__ == "__main__":

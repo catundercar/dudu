@@ -167,7 +167,7 @@ class TerminalInfoAndHcHostTest(unittest.TestCase):
         self.assertEqual(host.send(addr, "go", if_state="idle"), {"ok": True, "started": True})
         self.assertEqual(host.keys(addr, "enter"), {"ok": True})
         self.assertEqual(host.keep(addr), {"ok": True})
-        self.assertEqual(host.interrupt(addr, timeout=10), {"ok": True})
+        self.assertEqual(host.interrupt(addr, timeout=10), {"ok": True, "outcome": "stopped"})
         self.assertIn(("interrupt", addr, "--timeout", "10"), fake.calls)
         self.assertEqual(host.read("t10"), "line 1\nline 2\nline 3")
         self.assertEqual(screen_mod.screen_of("t10", host=host), "line 1\nline 2\nline 3")
@@ -258,6 +258,28 @@ class TerminalInfoAndHcHostTest(unittest.TestCase):
         self.assertEqual(w_info.label("parent"), "demo-0")
         self.assertEqual(w_info.label("herdr.space"), "sp-5")
         self.assertTrue(w_info.label("herdr.tab").startswith("tb"))
+
+    def test_hc_host_app_bin_resolves_local_bin_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake_home = Path(td) / "home"
+            local_bin = fake_home / ".local" / "bin"
+            local_bin.mkdir(parents=True)
+            app_path = local_bin / "herdr-app"
+            app_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            app_path.chmod(0o755)
+            host = hc_mod.HcHost()
+            # Explicit config wins.
+            self.assertEqual(hc_mod.HcHost({"herdr_app": "/custom/herdr-app"}).app_bin(), "/custom/herdr-app")
+            # On PATH: stays "herdr-app".
+            with mock.patch.object(hc_mod.shutil, "which", return_value="/usr/local/bin/herdr-app"):
+                self.assertEqual(host.app_bin(), "herdr-app")
+            # Missing from PATH: falls back to ~/.local/bin/herdr-app when present and executable.
+            with mock.patch.object(hc_mod.shutil, "which", return_value=None), \
+                    mock.patch.object(hc_mod.Path, "home", return_value=fake_home), \
+                    mock.patch.object(hc_mod.osutil, "WINDOWS", False):
+                self.assertEqual(host.app_bin(), str(app_path))
+                app_path.unlink()
+                self.assertEqual(host.app_bin(), "herdr-app")
 
     def test_tabs_module_has_no_context_globals_and_accepts_explicit_cfg(self):
         with tempfile.TemporaryDirectory() as td:

@@ -12,9 +12,13 @@ from ..agents.profiles import LADDER, worker_summary
 from ..caller import Caller
 from ..context import Context
 from ..errors import Refused
+from ..home import project_slug
 from ..ledger.ledger import Change, Ledger
 from ..ledger.question import QUESTION_FIELDS
 from ..ledger.task import Task
+from ..messaging.address import Endpoint, LogicalAddress
+from ..messaging.principal import resolve_local_principal
+from ..messaging.typist import interrupt_endpoint
 from ..osutil import clip
 from ..terminals.tabs import tab_title
 from .brief import report_section_for
@@ -28,7 +32,7 @@ from .dispatch import (
     worker_placement_for,
 )
 from .lifecycle import end_terminal_for
-from .send import send_when_ready_for
+from .send import deliver_now_for, send_when_ready_for, terminal_envelope, worker_endpoint
 from .sessions import _worker_caller
 
 
@@ -330,8 +334,9 @@ def tui_tab_agent(workspace: str, cwd: str | Path, name: str, kind: str, argv: l
 
 
 def tui_prompt_for(ctx: Context, name: str, pane: str, text: str) -> str:
-    """Give a herdr TUI agent its first text."""
-    prompted = ctx.tui.agent_prompt(name, text)
+    """Give a herdr TUI agent its first text: a `cmd.brief` envelope typed under the agent's typist lease."""
+    env = terminal_envelope(ctx, text, kind="cmd.brief", target=name)
+    prompted = deliver_now_for(ctx, Endpoint(runtime="tui", terminal=name), env, timeout_s=70.0).status == "typed"
     if prompted and ctx.tui.agent_wait(name, "--until", "working", "--timeout", "20000"):
         return ""
     if tui_agent_gone_for(ctx, pane):
@@ -397,10 +402,17 @@ def _quiet_old_worker_impl(ctx: Context, task: Any, pane: str, ours: bool, workt
                 "Let it finish or stop it, then escalate again.",
                 f"{pane} 还在 {worktree} 里干活，又不是 escalate 能停的 worker；什么都没改。等它做完或停下后再升级。",
             ))
-        if pane.startswith("hc:"):
-            ctx.hc.interrupt(pane[3:], timeout=10)
-        else:
-            ctx.tui.agent_send_keys(pane, "esc")
+        # A `ctrl.interrupt` envelope (P0) through the worker's transport: hc Esc (ctrl+c where the program
+        # reports no status), TUI esc.
+        raw = task.raw if isinstance(task, Task) else task
+        slug = project_slug(raw.get("repo")) if raw.get("repo") else ""
+        ep = worker_endpoint(pane[3:]) if pane.startswith("hc:") else Endpoint(runtime="tui", terminal=pane)
+        if ep is not None:
+            interrupt_endpoint(
+                ctx, ep, sender=resolve_local_principal(ctx, slug),
+                recipient=LogicalAddress.worker(str(raw.get("id") or pane), slug), project=slug,
+                cause={"kind": "escalate", "task_id": str(raw.get("id") or "")}, timeout_s=10,
+            )
         interrupted = True
         for _ in range(QUIET_TRIES):
             if not worker_busy_for(ctx, pane):

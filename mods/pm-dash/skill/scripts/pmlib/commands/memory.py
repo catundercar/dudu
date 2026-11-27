@@ -21,6 +21,7 @@ from ..memory.layer import (
 )
 from ..osutil import clip
 from ..project.conversation import Conversation
+from ..reports import LocalFacts, ReportClient, memory_report
 from . import workers
 from .emit import exit_with
 
@@ -33,24 +34,20 @@ def cmd_remember(a, ctx=None):
         sys.exit(f"{a.repo} is not a directory")
     try:
         body = Path(a.body_file).read_text(encoding="utf-8") if a.body_file else ""
-        layer = MemoryLayer(ctx, None if a.personal else repo)
-        m, notes = layer.remember(
-            a.text,
-            writer=ctx.caller.memory_writer(repo),
-            kind=a.type,
-            name=a.name,
-            quote=a.quote or "",
-            verified=a.verified or "",
-            body=body,
-            expires=a.expires or "",
-            new=a.new,
-            topic=getattr(a, "topic", None),
-            project_repo=repo,
+        # A `report.memory_write` envelope, applied here; the writer is this session as its caller resolves it.
+        env = memory_report(
+            ctx, repo, personal=a.personal, text=a.text, type=a.type, name=a.name, quote=a.quote or "",
+            verified=a.verified or "", body=body, expires=a.expires or "", new=a.new, topic=getattr(a, "topic", None),
         )
+        got = ReportClient(ctx).submit(env, local=LocalFacts(memory_writer=ctx.caller.memory_writer(repo)))
     except (StoreError, IdentityError):
         raise
     except (MemoryRefused, OSError) as e:
         sys.exit(str(e))
+    except PmError as e:
+        exit_with(ctx, e)
+    m = {"name": str(got.result.get("name") or "")}
+    notes = [str(n) for n in (got.result.get("notes") or [])]
     ctx.out.line(tr(f"remembered ({'personal' if a.personal else 'project'}): {m['name']}",
                     f"记住了（{'个人' if a.personal else '项目'}）：{m['name']}"))
     for line in notes:

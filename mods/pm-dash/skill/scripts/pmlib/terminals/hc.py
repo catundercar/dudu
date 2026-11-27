@@ -50,6 +50,20 @@ def is_shell_terminal(info: TerminalInfo | Mapping[str, Any] | None) -> bool:
     return prog in SHELL_NAMES and not agents_base.is_seat_argv(info.get("argv") or [])
 
 
+def send_succeeded(sent: Mapping[str, Any] | None, info: Mapping[str, Any] | None = None) -> bool:
+    """Whether an `hc send` reply means the target accepted the message.
+
+    A terminal that reports `status` (claude, codex, agy, ...) must report `started: True`;
+    only a terminal with no status at all accepts `started` present with `status is None` and no error.
+    """
+    if not isinstance(sent, Mapping) or sent.get("error"):
+        return False
+    if sent.get("started"):
+        return True
+    has_status = bool((info or {}).get("status"))
+    return (not has_status) and ("started" in sent) and (sent.get("status") is None)
+
+
 @dataclass(frozen=True)
 class TerminalInfo:
     """Typed view over an `hc get` or `hc ls` terminal row."""
@@ -424,9 +438,31 @@ class HcHost:
         args: list[str] = ["send"]
         if if_state:
             args.extend(("--if", if_state))
-        args.extend((term, text))
+        # `hc send [OPTIONS] <TERMINAL> <TEXT>`: the positionals after `--`, so a text that starts with "-" (a
+        # Markdown list item, "--x") is the text and not an unknown option (`call` puts `--json` before the `--`).
+        args.extend(("--", term, text))
         res = self.call(*args, timeout=timeout, errors=errors)
         return res if isinstance(res, dict) else None
+
+    def bootstrap_shell_exec(
+        self,
+        term: str,
+        cmd: str,
+        *,
+        timeout: float = 60,
+    ) -> dict[str, Any] | None:
+        """Wave 1 shell-bootstrap primitive: type `exec ...` into an existing interactive shell terminal."""
+        return self.send(term, cmd, timeout=timeout)
+
+    def init_session_flag(
+        self,
+        term: str,
+        flag_cmd: str,
+        *,
+        timeout: float = 60,
+    ) -> dict[str, Any] | None:
+        """Wave 1 session-init primitive: send a slash toggle (e.g. `/fast`) immediately after spawn."""
+        return self.send(term, flag_cmd, timeout=timeout)
 
     def keys(self, term: str, *keys: str) -> dict[str, Any] | None:
         res = self.call("keys", term, *keys)
@@ -470,22 +506,35 @@ class HcHost:
         res = self.call("rm", term)
         return res if isinstance(res, dict) else None
 
-    def interrupt(self, term: str, *, timeout: float | None = None) -> dict[str, Any] | None:
+    def interrupt(self, term: str, *, timeout: float | None = None, errors: bool = False) -> dict[str, Any] | None:
         args: list[str] = ["interrupt", term]
         if timeout is not None:
             t_val = int(timeout) if float(timeout).is_integer() else timeout
             args.extend(("--timeout", str(t_val)))
-        res = self.call(*args)
+        res = self.call(*args, errors=errors)
         return res if isinstance(res, dict) else None
 
     def server_status(self) -> dict[str, Any] | None:
         res = self.call("server", "status")
         return res if isinstance(res, dict) else None
 
+    def app_bin(self) -> str:
+        """The herdr-app CLI: config.json's "herdr_app", else `herdr-app` on PATH, else `~/.local/bin/herdr-app`."""
+        configured = str(self._cfg_dict().get("herdr_app") or "").strip()
+        if configured:
+            return _exec_bin(configured)
+        if shutil.which("herdr-app"):
+            return _exec_bin("herdr-app")
+        if not osutil.WINDOWS:
+            candidate = Path.home() / ".local" / "bin" / "herdr-app"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        return "herdr-app"
+
     def _run_app(self, *args: str, timeout: float = 30) -> subprocess.CompletedProcess[str]:
         if self._app_runner is not None:
             return self._app_runner(*args, timeout=timeout)
-        return subprocess.run(["herdr-app", *args], capture_output=True, text=True, timeout=timeout)
+        return subprocess.run([self.app_bin(), *args], capture_output=True, text=True, timeout=timeout)
 
     def app_spaces(self) -> list[dict[str, Any]]:
         """The spaces of the open desktop window (`herdr-app ls`), or [] without one."""
@@ -546,6 +595,8 @@ class HcHost:
                     if any(t.get("terminal") == terminal for t in tab.get("terminals") or []):
                         if only_if is not None and tab.get("name") != only_if:
                             return False
+                        if tab.get("name") == name:
+                            return True
                         self._run_app("do", "tab.rename", json.dumps({"id": tab["id"], "name": name}), timeout=30)
                         return True
             except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):

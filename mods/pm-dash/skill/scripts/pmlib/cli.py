@@ -4,8 +4,10 @@ Every command, view and hook module is imported eagerly at startup so a long-run
 on one version from start to end rather than importing new modules after an install replaces files under it.
 """
 import argparse
+import sys
 
 from . import caller, context, discord, hooks
+from . import reports as reports_mod  # noqa: F401
 from .commands import (
     dispatch as dispatch_cmd,
     dream as dream_cmd,
@@ -57,7 +59,7 @@ COMMANDS = {
     "approve": (review_cmd, "cmd_approve"),
     "triage": (review_cmd, "cmd_triage"),
     "send": (workers_cmd, "cmd_send"),
-    "_deliver-send": (workers_cmd, "cmd__deliver_send"),
+    "_drain-endpoint": (workers_cmd, "cmd__drain_endpoint"),
     "_deliver-ready": (workers_cmd, "cmd__deliver_ready"),
     "land": (review_cmd, "cmd_land"),
     "review": (review_cmd, "cmd_review"),
@@ -87,6 +89,8 @@ COMMANDS = {
     "end-session": (manager_cmd, "cmd_end_session"),
     "name-agent": (manager_cmd, "cmd_name_agent"),
     "home": (project_cmd, "cmd_home"),
+    "turn-journal": (project_cmd, "cmd_turn_journal"),
+    "turns": (project_cmd, "cmd_turns"),
     "backfill-numbers": (ledger_cmd, "cmd_backfill_numbers"),
     "hook-session-start": (hooks, "cmd_hook_session_start"),
     "hook-pre-compact": (hooks, "cmd_hook_pre_compact"),
@@ -124,14 +128,62 @@ def build_parser():
     memory_cmd.register_context_command(sub)
     manager_cmd.register_manager_session_commands(sub)
     project_cmd.register_home_command(sub)
+    project_cmd.register_turn_journal_command(sub)
+    project_cmd.register_turns_command(sub)
     ledger_cmd.register_backfill_numbers_command(sub)
     hooks.register_hook_commands(sub)
     return p
 
 
+_PROJECT_SEND_VALUE_FLAGS = frozenset({"--msg-id", "--question", "--text", "--from"})
+
+
+def _parse_cli_args(parser: argparse.ArgumentParser, argv):
+    """Parse CLI arguments, preserving `--` tails and leading-`-` payloads on `project send`."""
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if len(raw) >= 2 and raw[0] == "project" and raw[1] == "send":
+        if "--" in raw:
+            idx = raw.index("--")
+            head, tail = raw[:idx], raw[idx + 1:]
+        else:
+            head, tail = raw, []
+        has_msg_id = any(x == "--msg-id" or x.startswith("--msg-id=") for x in head[2:])
+        cleaned_head = ["project", "send"]
+        extra_words = []
+        i = 2
+        while i < len(head):
+            tok = head[i]
+            if tok in _PROJECT_SEND_VALUE_FLAGS:
+                if i + 1 < len(head):
+                    cleaned_head.append(f"{tok}={head[i + 1]}")
+                    i += 2
+                    continue
+                cleaned_head.append(tok)
+                i += 1
+                continue
+            if any(tok.startswith(f"{flag}=") for flag in _PROJECT_SEND_VALUE_FLAGS):
+                cleaned_head.append(tok)
+                i += 1
+                continue
+            if tok in ("-h", "--help") and not has_msg_id:
+                cleaned_head.append(tok)
+                i += 1
+                continue
+            if tok.startswith("-") and tok != "-":
+                extra_words.append(tok)
+                i += 1
+                continue
+            cleaned_head.append(tok)
+            i += 1
+        ns = parser.parse_args(cleaned_head)
+        ns.words = list(getattr(ns, "words", ()) or ()) + extra_words + list(tail)
+        return ns
+    return parser.parse_args(raw)
+
+
 def main(argv=None, ctx=None):
     p = build_parser()
-    a = p.parse_args(argv)
+    a = _parse_cli_args(p, argv)
     run_ctx = context.Context.from_env() if ctx is None else ctx
     try:
         mod, fn_name = COMMANDS[a.cmd]

@@ -31,6 +31,9 @@ def _request_from_args(a: Any) -> DispatchRequest:
         label=getattr(a, "label", None),
         path=getattr(a, "path", None),
         brief=getattr(a, "brief", None),
+        ask=getattr(a, "ask", None),
+        attach=list(getattr(a, "attach", None) or ()) or None,
+        note=getattr(a, "note", None),
         name=getattr(a, "name", None),
         task=getattr(a, "task", None),
         here=bool(getattr(a, "here", False)),
@@ -154,6 +157,10 @@ def register_dispatch_command(sub):
     d.add_argument("--path", help="worktree path (default: herdr's choice; in the desktop app ~/.herdr/worktrees/…); "
                                   "with --here: the folder to work in (default: the project's checkout)")
     d.add_argument("--brief", help="brief file (optional with --task when the ledger task already records one)")
+    d.add_argument("--ask", help="thin dispatch: user's verbatim words or one-line intent; harness assembles the brief automatically")
+    d.add_argument("--attach", action="append", metavar="FILE",
+                   help="with --ask: attach a file path to the assembled thin brief (repeat for multiple files)")
+    d.add_argument("--note", help="with --ask: short PM note (a few lines at most) added to the thin brief")
     d.add_argument("--name", help="the terminal's name, 1-32 of a-z 0-9 - _ (default: from --label)")
     d.add_argument("--task", help="take up this open ledger task (registered with `new`) instead of a new one")
     d.add_argument("--here", action="store_true", help="no worktree: the worker works in the project's checkout "

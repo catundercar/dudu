@@ -269,7 +269,7 @@ class FakesAndIsolationTest(unittest.TestCase):
         )
 
         # workers/escalate.py:274 -> hc("interrupt", pane[3:], "--timeout", "10")
-        self.assertEqual(hc("interrupt", "t1", "--timeout", "10"), {"ok": True})
+        self.assertEqual(hc("interrupt", "t1", "--timeout", "10"), {"ok": True, "outcome": "stopped"})
         self.assertTrue(hc("get", "t1")["interrupted"])
 
         # terminals/hc.py:58 + workers/dispatch.py:132 -> placement bool flags before --, child flags after --

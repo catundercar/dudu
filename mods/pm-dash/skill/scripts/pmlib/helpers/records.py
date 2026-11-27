@@ -16,9 +16,11 @@ from ..events.deliver import Delivery
 from ..home import project_slug
 from ..ledger.ledger import Change, Ledger, slugify
 from ..ledger.task import Task, hc_terminal_of
+from ..messaging.envelope import P4_BATCH
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..store import lock_file, replace_task_file, unlock_file, write_atomic
+from ..workers.send import queue_send_for, terminal_envelope
 from .config import HELPER_SCREEN_LINES, HELPER_TIMEOUT, HELPER_WAIT_MAX_PRINT, _positive_int
 
 
@@ -337,7 +339,12 @@ def _send_to_worker_if_active_for(ctx: Context, owner_id: str, entry: dict[str, 
     info = ctx.hc.get_raw(current_term) or {}
     if info.get("state") != "live":
         return False
-    return bool(ctx.hc.send(current_term, msg))
+    # An `event.helper_done` envelope in the worker terminal's mailbox, typed by a detached drain under its typist
+    # lease (never into a terminal another sender is typing into; never blocking whoever harvested the helper).
+    env = terminal_envelope(ctx, msg, kind="event.helper_done", task_id=owner_id, repo=str(task.get("repo") or ""),
+                            target=current_term, priority=P4_BATCH, cause={"helper": str(entry.get("name") or "")})
+    queue_send_for(ctx, current_term, env)
+    return True
 
 
 def _notify_helper_owner_for(

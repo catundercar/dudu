@@ -498,19 +498,23 @@ class Commands(unittest.TestCase):
         self.assertEqual(agents_base.terminal_kind({"foreground": {"argv": ["other"]}}), "other")
 
     def test_turn_hook_notes_pm_turns_only(self):
+        from pmlib.project.turn_state import TurnTracker
+
         ctx_base = self._ctx()
+        repo_dir = self.root / "proj-t"
+        repo_dir.mkdir(parents=True, exist_ok=True)
         ctx_base.home.registrations.mkdir(parents=True, exist_ok=True)
         (ctx_base.home.registrations / "t.json").write_text(
-            json.dumps({"name": "pm-t", "pane": "hc:t9", "project": "t", "repo": "/x"})
+            json.dumps({"name": "pm-t", "pane": "hc:t9", "project": "t", "repo": str(repo_dir)})
         )
-        turn_log = ctx_base.home.turn_log
         for who, prompt in (("hc:t9", "hello"), ("hc:t9", "[from hc:t3] done"), ("hc:t8", "hello")):
             ctx = make_ctx(self.root / "ctx", pane=who, out=StdOutput())
             with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'hook_event_name': 'UserPromptSubmit', 'prompt': prompt}))):
                 hooks_mod.cmd_hook_mirror(None, ctx=ctx)  # the earlier name still works
-        lines = turn_log.read_text().splitlines()
-        self.assertEqual(len(lines), 1)
-        self.assertTrue(state_view.TURN_LINE.match(lines[0]))
+        self.assertFalse(ctx_base.home.turn_log.exists())
+        entries = TurnTracker(ctx_base, str(repo_dir)).read_journal_entries()
+        user_prompts = [e for e in entries if e.get("kind") == "hook_prompt" and e.get("cause") == "user"]
+        self.assertEqual(len(user_prompts), 1)
 
     def test_worker_defaults_come_from_config_unless_given(self):
         ctx1 = make_ctx(self.root / "wd1", config={"worker": {"model": "m1", "effort": "high"}})
@@ -2016,6 +2020,109 @@ class DeepPreapproval(unittest.TestCase):
         )
         self.assertEqual(task["status"], "in_progress")
         self.assertIn("deep.confirmed", task["log"][0]["text"])
+
+
+class ThinDispatchAskTests(unittest.TestCase):
+    """Phase 2 (`O-b`, D4): `pm.py dispatch --ask` thin dispatch brief assembly and `--dry-run`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="pm-thin-ask-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        raw_repo = make_repo(self.root)
+        self.repo = str(raw_repo[0] if isinstance(raw_repo, tuple) else raw_repo)
+        self.clock = FakeClock("2026-11-26 09:00:00")
+        self.hc = FakeHc(clock=self.clock)
+        self.ctx = make_ctx(self.root / "ledger", pane="hc:t1", hc=self.hc, clock=self.clock, out=StdOutput())
+        self.ctx.git = GitRepo(worktree_base=self.root / "worktrees")
+        # Record a project memory and recent conversation so thin brief includes pointers + memory.
+        Conversation(self.ctx, self.repo).record("user", text="这个 @ 弹层找不到历史线程")
+        Conversation(self.ctx, self.repo).record("pm", text="我派一个线程排查 @ 弹层的来源。")
+        mem_dir = self.ctx.home.memory_dir(self.repo)
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        (mem_dir / "sample-rule.md").write_text(
+            "---\nname: sample-rule\ndescription: Always verify thin briefs\ntype: project\ntopic: architecture\n---\nBody\n",
+            encoding="utf-8",
+        )
+
+    def test_thin_dispatch_dry_run_assembles_brief_with_verbatim_words_attachments_note_and_pointers(self):
+        att_file = self.root / "screenshot-evidence.png"
+        att_file.write_bytes(b"\x89PNG\r\n")
+        a = cli.build_parser().parse_args([
+            "dispatch", "Fix @ mention lookup",
+            "--repo", self.repo,
+            "--branch", "dev/mention-fix",
+            "--ask", "这个 @ 的时候找不到 {history} 线程",
+            "--attach", str(att_file),
+            "--note", "Focus on model.js mention indexing.",
+            "--dry-run",
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dispatch_cmd.cmd_dispatch(a, ctx=self.ctx)
+        plan = json.loads(out.getvalue())
+        self.assertTrue(plan["thin_brief"])
+        preview = plan["brief_preview"]
+        self.assertIn("这个 @ 的时候找不到 {history} 线程", preview)
+        self.assertIn(str(att_file.resolve()), preview)
+        self.assertIn("Focus on model.js mention indexing.", preview)
+        self.assertIn("conversation.jsonl", preview)
+        self.assertIn("这个 @ 弹层找不到历史线程", preview)
+        self.assertIn("Investigate the codebase", preview)
+        self.assertIn("report `blocked`", preview)
+        # Dry run writes no thin-*.md file into sent/.
+        self.assertEqual(list(self.ctx.home.sent_dir.glob("thin-*.md")), [])
+
+    def test_thin_dispatch_real_run_appends_report_and_memory_sections_and_supports_zh(self):
+        self.ctx.home.config.parent.mkdir(parents=True, exist_ok=True)
+        self.ctx.home.config.write_text(json.dumps({"lang": "zh"}), encoding="utf-8")
+        att_file = self.root / "trace.log"
+        att_file.write_text("trace line\n", encoding="utf-8")
+        a = cli.build_parser().parse_args([
+            "dispatch",
+            "--repo", self.repo,
+            "--branch", "dev/zh-thin",
+            "--ask", "修一下活动行计时不刷新",
+            "--attach", str(att_file),
+            "--note", "先查 main.js 的 1 秒定时器",
+            "--async",
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dispatch_cmd.cmd_dispatch(a, ctx=self.ctx)
+        task_id = out.getvalue().strip().splitlines()[0]
+        task = Ledger(self.ctx).load(task_id).raw
+        self.assertEqual(task["title"], "修一下活动行计时不刷新")
+        self.assertTrue(Path(task["brief"]).is_file())
+        sent_text = self.ctx.home.sent(task_id).read_text(encoding="utf-8")
+        self.assertIn("修一下活动行计时不刷新", sent_text)
+        self.assertIn(str(att_file.resolve()), sent_text)
+        self.assertIn("先查 main.js 的 1 秒定时器", sent_text)
+        self.assertIn("先从第一性原理查清代码与现场", sent_text)
+        self.assertIn("汇报（任务", sent_text)
+        self.assertIn("sample-rule", sent_text)
+
+    def test_thin_dispatch_rejects_mixing_brief_and_ask_or_orphan_note(self):
+        brief = self.root / "b.md"
+        brief.write_text("existing brief\n", encoding="utf-8")
+        with self.assertRaises(Refused):
+            Workers(self.ctx).dispatch(
+                dispatch_cmd._request_from_args(
+                    cli.build_parser().parse_args([
+                        "dispatch", "Mix", "--repo", self.repo, "--branch", "dev/m",
+                        "--brief", str(brief), "--ask", "do thing", "--dry-run",
+                    ])
+                )
+            )
+        with self.assertRaises(Refused):
+            Workers(self.ctx).dispatch(
+                dispatch_cmd._request_from_args(
+                    cli.build_parser().parse_args([
+                        "dispatch", "NoAsk", "--repo", self.repo, "--branch", "dev/n",
+                        "--brief", str(brief), "--note", "orphan note", "--dry-run",
+                    ])
+                )
+            )
 
 
 if __name__ == "__main__":

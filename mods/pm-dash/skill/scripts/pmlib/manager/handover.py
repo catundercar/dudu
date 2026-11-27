@@ -19,6 +19,7 @@ from ..memory.layer import MemoryLayer
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry, pm_name
+from ..project.turn_state import TurnTracker
 from ..workers.wait import waited_tasks_for
 
 
@@ -52,6 +53,25 @@ HANDOVER_DECISION_WIDTH = 200  # characters per decision line in handover
 HANDOVER_LATEST = 600    # characters of the newest ledger entry per open task
 HANDOVER_USER = 400      # characters of each thing the user said in the last exchanges
 HANDOVER_REPLY = 400     # characters of each PM reply there
+
+
+def _merge_unanswered_with_mailbox(c: Context, repo: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    waiting = unanswered(events)
+    seen_ids = {str(e.get("msg_id") or "") for e in waiting if e.get("msg_id")}
+    seen_texts = {str(e.get("text") or "").strip() for e in waiting if e.get("text")}
+    tracker = TurnTracker(c, repo)
+    if tracker.files.pm_mailbox.is_dir():
+        for it in tracker.pm_mailbox.unanswered_user_items():
+            b = it.envelope.body if isinstance(it.envelope.body, dict) else {}
+            txt = str(b.get("text") or "").strip()
+            mid = str(b.get("msg_id") or "")
+            if not txt or (mid and mid in seen_ids) or txt in seen_texts:
+                continue
+            waiting.append({"type": "user", "at": c.clock.now(), "msg_id": mid, "text": txt, "state": it.state})
+            if mid:
+                seen_ids.add(mid)
+            seen_texts.add(txt)
+    return waiting
 
 
 def unanswered(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -165,9 +185,9 @@ def handover_compact_text(repo: str, *, ctx: Context | None = None) -> str:
         shown = decisions[-HANDOVER_COMPACT_DECISIONS:]
         out += ["", f"## Recent one-off / unremembered decisions ({len(shown)} of {len(decisions)})"]
         out += [clip(QUOTED.sub("", line), HANDOVER_DECISION_WIDTH) for line in shown]
-    waiting = unanswered(Conversation(c, repo).events())
+    waiting = _merge_unanswered_with_mailbox(c, repo, Conversation(c, repo).events())
     if waiting:
-        out += ["", "## Not answered yet: the user said this after the PM's latest reply",
+        out += ["", "## Not answered yet: the user said this after the PM's latest reply (Unanswered user messages)",
                 *[f"{e.get('at', '')} {tr('User', '用户')}: {clip(str(e.get('text') or ''), 2000)}" for e in waiting]]
     out += handover_waits(tasks, rec, ctx=c)
     return "\n".join(out)
@@ -200,9 +220,9 @@ def handover_talk(
         out += ["", "## The last exchanges with the user (shortened; `pm.py conversation --last 40` shows more)"]
         for t in tail:
             out += [f"{tr('User', '用户')}: {t['user']}", f"PM: {t['pm'] or '(no final text)'}"] + ([] if reply_width else [""])
-    waiting = unanswered(conv.events())
+    waiting = _merge_unanswered_with_mailbox(c, repo, conv.events())
     if waiting:
-        out += ["", "## Not answered yet: the user said this after the PM's latest reply",
+        out += ["", "## Not answered yet: the user said this after the PM's latest reply (Unanswered user messages)",
                 *[f"{e.get('at', '')} {tr('User', '用户')}: {clip(str(e.get('text') or ''), 2000)}" for e in waiting],
                 "Answer it once you have taken over, as the previous PM would have."]
     return out

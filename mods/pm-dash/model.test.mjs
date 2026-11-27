@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { setupState, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, tooltipLayout, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, focusPlan, pmId, taskId, counts, eventText, word, label, taskSteps, taskDependencies, taskNumber, formatTaskNumber, DROPPED, disconnected, isClosedTask, taskStatusText, pmColor, wireFlows, reviewWorking, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText, scopeState, projectCards, projectCounts, countChips, pageTotals, unclaimedBlocked, startArgv, folderName, ledgerOpen, lastPmLine, boardGroups, endedList, endedDays, endedTime, previousDay } from './model.js';
+import { setupState, shouldRecheckSetup, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, tooltipLayout, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, focusPlan, pmId, taskId, counts, eventText, word, label, taskSteps, taskDependencies, taskNumber, formatTaskNumber, DROPPED, disconnected, isClosedTask, taskStatusText, pmColor, wireFlows, reviewWorking, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText, scopeState, projectCards, projectCounts, countChips, pageTotals, unclaimedBlocked, startArgv, folderName, ledgerOpen, lastPmLine, boardGroups, endedList, endedDays, endedTime, previousDay } from './model.js';
 import { renderStepsCard, renderDepsCard } from './steps.js';
 
 const setupSummary = (installed = [], ready = [], outdated = []) =>
@@ -32,6 +32,89 @@ test('setup is ready when one agent is complete and no installed copy is outdate
     assert.ok(!word(lang, 'setupDescription').includes('~/.claude'));
     assert.ok(!word(lang, 'setupDone').includes('Claude'));
   }
+});
+
+test('shouldRecheckSetup only rechecks while missing or outdated and neither busy nor already checking', () => {
+  assert.equal(shouldRecheckSetup('missing'), true);
+  assert.equal(shouldRecheckSetup('outdated'), true);
+  assert.equal(shouldRecheckSetup('missing', false, false), true);
+  assert.equal(shouldRecheckSetup('outdated', false, false), true);
+  for (const status of [null, undefined, '', 'ready', 'unknown']) {
+    assert.equal(shouldRecheckSetup(status), false, String(status));
+    assert.equal(shouldRecheckSetup(status, false, false), false, String(status));
+  }
+  for (const status of ['missing', 'outdated']) {
+    assert.equal(shouldRecheckSetup(status, true, false), false, `${status} busy`);
+    assert.equal(shouldRecheckSetup(status, false, true), false, `${status} checking`);
+    assert.equal(shouldRecheckSetup(status, true, true), false, `${status} busy+checking`);
+  }
+});
+
+test('recheckSetupIfNeeded auto-updates when external install completes and stops once ready', async () => {
+  const calls = [], commands = [];
+  let status = setupSummary(), refreshed = 0, notified = 0;
+  let releaseCheck = null;
+  const board = modWithIO('./main.js', {
+    appHome: () => '/app home', home: () => '/test home', setupState, shouldRecheckSetup, word,
+    run: name => commands.push(name),
+    exec: async (program, args) => {
+      calls.push({ program, args });
+      if (releaseCheck) await new Promise(resolve => { releaseCheck = resolve; });
+      return { code: 0, stdout: JSON.stringify(status) };
+    },
+  });
+  board.state = { lang: 'en' };
+  board.setupStatus = null; board.setupBusy = false; board.setupChecking = false;
+  board.refresh = () => { refreshed++; };
+  const { cx, drain } = asyncContext();
+  cx.notify = () => { notified++; };
+
+  // Null/loading: no subprocess.
+  board.recheckSetupIfNeeded(cx);
+  await drain();
+  assert.equal(calls.length, 0);
+
+  // Missing and unchanged: checks once, does not refresh/notify/broadcast.
+  board.setupStatus = 'missing';
+  board.recheckSetupIfNeeded(cx);
+  await drain();
+  assert.equal(calls.length, 1);
+  assert.equal(board.setupStatus, 'missing');
+  assert.equal(board.setupChecking, false);
+  assert.equal(refreshed, 0);
+  assert.equal(notified, 0);
+  assert.deepEqual(commands, []);
+
+  // Guard against overlapping runs while a check is in flight.
+  releaseCheck = () => {};
+  status = setupSummary(['claude'], ['claude']);
+  board.recheckSetupIfNeeded(cx);
+  board.recheckSetupIfNeeded(cx);
+  assert.equal(board.setupChecking, true);
+  assert.equal(calls.length, 2);
+  releaseCheck();
+  releaseCheck = null;
+  await drain();
+  assert.equal(board.setupStatus, 'ready');
+  assert.equal(board.setupChecking, false);
+  assert.equal(refreshed, 1);
+  assert.equal(notified, 1);
+  assert.deepEqual(commands, ['pm-nav.setup-changed']);
+
+  // Once ready: zero subprocess overhead.
+  board.recheckSetupIfNeeded(cx);
+  await drain();
+  assert.equal(calls.length, 2);
+
+  // Outdated -> ready also refreshes, notifies, and informs pm-nav.
+  board.setupStatus = 'outdated';
+  board.recheckSetupIfNeeded(cx);
+  await drain();
+  assert.equal(calls.length, 3);
+  assert.equal(board.setupStatus, 'ready');
+  assert.equal(refreshed, 2);
+  assert.equal(notified, 2);
+  assert.deepEqual(commands, ['pm-nav.setup-changed', 'pm-nav.setup-changed']);
 });
 
 // Exercise async setup/IO decisions without starting Herdr or executing Python.
@@ -1580,14 +1663,24 @@ test('board status and project cards distinguish closed-can-reattach from discon
   assert.equal(lostSummary('en', lost), 'PM and 1 agent did not come back');
   const cards = projectCards({
     pms: [
-      { name: 'pm-dudu', project: 'dudu', lost },
-      { name: 'pm-old', project: 'old', archived: '2026-11-01', lost },
+      { name: 'pm-dudu', project: 'dudu', lost, undelivered: { count: 2, waiting_seconds: 900, state: 'unknown', deliverer_running: true } },
+      { name: 'pm-old', project: 'old', archived: '2026-11-01', lost, undelivered: { count: 1, waiting_seconds: 900, state: 'offline', deliverer_running: false } },
     ],
     tasks: [],
     events: [],
   });
   assert.deepEqual(cards.active[0].lost, lost);
   assert.equal(cards.archived[0].lost, undefined);
+  assert.equal(cards.active[0].undelivered.count, 2);
+  assert.equal(cards.archived[0].undelivered, undefined);
+  const { undeliveredSummary } = await import('./model.js');
+  assert.equal(undeliveredSummary('en', cards.active[0].undelivered), '2 undelivered (15m)');
+  assert.equal(undeliveredSummary('zh', cards.active[0].undelivered), '2 条未送达（15 分钟）');
+  assert.equal(undeliveredSummary('en', null), '');
+  // A user message past its SLA with no batch waiting (`count` 0) still shows; both add up.
+  assert.equal(undeliveredSummary('en', { count: 0, messages: 1, waiting_seconds: 180, message_reason: 'blocked_prompt' }),
+    '1 undelivered (3m)');
+  assert.equal(undeliveredSummary('en', { count: 2, messages: 1, waiting_seconds: 900 }), '3 undelivered (15m)');
 });
 
 test('board bundles merge review and answered tasks into Working ordered by post-gate -> review -> answered -> in_progress', async () => {
@@ -2153,4 +2246,203 @@ test('pm-dash tooltipMaxWidth, wrapTooltipText, clampTooltipRect, and tooltipLay
   assert.equal(clamped.placement, 'below-right');
   assert.ok(clamped.x >= m.TOOLTIP_MARGIN && clamped.x + clamped.w <= 380 - m.TOOLTIP_MARGIN);
   assert.ok(clamped.y >= 30);
+});
+
+test('pm-dash windowControlButtons maps Windows/Linux/macOS and overlay states', async () => {
+  const m = await import('./model.js');
+  // macOS or missing buttons: empty list
+  assert.deepEqual(m.windowControlButtons(null), []);
+  assert.deepEqual(m.windowControlButtons(undefined), []);
+  assert.deepEqual(m.windowControlButtons({ platform: 'macos', buttons: false, maximized: false }), []);
+  assert.deepEqual(m.windowControlButtons({ platform: 'windows', buttons: true, maximized: false }, { overlay: true }), []);
+
+  // Windows unmaximized
+  const winNorm = m.windowControlButtons({ platform: 'windows', buttons: true, maximized: false });
+  assert.equal(winNorm.length, 3);
+  assert.deepEqual(winNorm.map(b => [b.id, b.command, b.icon, b.danger, b.labelKey]), [
+    ['win-minimize', 'window.minimize', 'mods/tabs/win-min.svg', false, 'windowMinimize'],
+    ['win-maximize', 'window.maximize', 'mods/tabs/win-max.svg', false, 'windowMaximize'],
+    ['win-close', 'window.close', 'mods/tabs/win-close.svg', true, 'windowClose'],
+  ]);
+
+  // Windows maximized switches to win-restore.svg
+  const winMax = m.windowControlButtons({ platform: 'windows', buttons: true, maximized: true });
+  assert.equal(winMax[1].icon, 'mods/tabs/win-restore.svg');
+  assert.equal(winMax[1].labelKey, 'windowRestore');
+
+  // Linux fallback glyphs and pane close icon
+  const linuxNorm = m.windowControlButtons({ platform: 'linux', buttons: true, maximized: false });
+  assert.deepEqual(linuxNorm.map(b => [b.id, b.command, b.icon, b.glyph, b.iconSize]), [
+    ['win-minimize', 'window.minimize', null, '−', 16],
+    ['win-maximize', 'window.maximize', null, '□', 16],
+    ['win-close', 'window.close', 'mods/pane/close.svg', '', 13],
+  ]);
+  const linuxMax = m.windowControlButtons({ platform: 'linux', buttons: true, maximized: true });
+  assert.equal(linuxMax[1].labelKey, 'windowRestore');
+
+  for (const lang of ['en', 'zh']) {
+    for (const k of ['windowMinimize', 'windowMaximize', 'windowRestore', 'windowClose']) {
+      assert.ok(m.word(lang, k) && m.word(lang, k) !== k);
+    }
+  }
+});
+
+test('pm-dash renders window controls on Windows/Linux headers (Board/Projects/Archived/Setup) and omits them on macOS and overlays', async () => {
+  const m = await import('./model.js');
+  const makeEl = (tag, init = {}) => {
+    const node = { tag, id: null, children: [], handlers: {}, hoverStyle: null, ...init };
+    const proxy = new Proxy(node, {
+      get(target, prop) {
+        if (prop === '__node') return target;
+        if (prop === 'id') return v => { target.id = v; return proxy; };
+        if (prop === 'child') return c => { if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (c != null) target.children.push(c?.__node ?? c); return proxy; };
+        if (prop === 'when') return (cond, fn) => (cond ? fn(proxy) : proxy);
+        if (prop === 'on_click') return fn => { target.handlers.click = fn; return proxy; };
+        if (prop === 'on_mouse_down') return (btn, fn) => { target.handlers[`mousedown:${btn}`] = fn; return proxy; };
+        if (prop === 'hover') return fn => {
+          const style = {};
+          const sp = new Proxy(style, {
+            get(st, p) { return v => { st[p] = v; return sp; }; },
+          });
+          fn(sp);
+          target.hoverStyle = style;
+          return proxy;
+        };
+        if (prop in target) return target[prop];
+        return () => proxy;
+      },
+    });
+    return proxy;
+  };
+  const findById = (n, id) => {
+    if (!n || typeof n !== 'object') return null;
+    if (n.id === id) return n;
+    for (const c of n.children || []) {
+      const f = findById(c, id);
+      if (f) return f;
+    }
+    return null;
+  };
+  const collectSvgs = (n, out = []) => {
+    if (!n || typeof n !== 'object') return out;
+    if (n.tag === 'svg' && n.src) out.push(n.src);
+    for (const c of n.children || []) collectSvgs(c, out);
+    return out;
+  };
+
+  let curWin = { platform: 'windows', buttons: true, maximized: false };
+  let curProps = {};
+  const ran = [];
+  const projectsSrc = readFileSync(new URL('./projects.js', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;\s*$/gm, '')
+    .replace(/^export\s+/gm, '')
+    + '\nreturn { pageHeader, projectHeader, pageView, windowControlsBar, keepPress };';
+  const pBindings = {
+    ...m,
+    div: () => makeEl('div'),
+    h_flex: () => makeEl('h_flex'),
+    v_flex: () => makeEl('v_flex'),
+    svg: src => makeEl('svg', { src }),
+    InputState: { new: () => ({ on() {}, value: () => '', set_value() {} }) },
+    Input: { new: () => makeEl('input') },
+    Scrollbar: { new: () => makeEl('scrollbar') },
+    home: () => '/Users/me',
+    appHome: () => '/app',
+    exec: async () => ({ code: 0, stdout: '{}' }),
+    execPython: async () => ({ code: 0, stdout: '{}' }),
+    run: cmd => ran.push(cmd),
+    props: () => curProps,
+    closeOverlay: () => {},
+    layout: () => ({ id: 'pm-stage', children: [] }),
+    shared: () => ({}),
+    setShared: () => {},
+    spaces: () => [],
+    pickFolder: async () => '',
+    notify: () => {},
+    appWindow: () => curWin,
+  };
+  const proj = new Function(...Object.keys(pBindings), projectsSrc)(...Object.values(pBindings));
+  const theme = {
+    canvas: '#111', surface: '#1b1b1f', raised: '#27272d', border: '#333', hover: '#2a2a32',
+    foreground: '#fff', muted: '#aaa', dim: '#666', blocked: '#e55', accent: '#6cf',
+  };
+  const fakeView = {
+    state: { lang: 'en' },
+    allState: { pms: [], tasks: [], events: [] },
+    lines: {},
+    today: () => '2026-11-24',
+    keys: { focus() {} },
+    openNew() {},
+  };
+
+  // 1. Windows unmaximized: pageHeader (board/list), projectHeader, archived pageView all show controls
+  const boardHdr = proj.pageHeader(fakeView, 'board', theme).__node;
+  const ctrl = findById(boardHdr, 'pm-window-controls');
+  assert.ok(ctrl, 'pageHeader renders pm-window-controls on Windows');
+  const minBtn = findById(ctrl, 'win-minimize');
+  const maxBtn = findById(ctrl, 'win-maximize');
+  const closeBtn = findById(ctrl, 'win-close');
+  assert.ok(minBtn && maxBtn && closeBtn);
+  assert.deepEqual(collectSvgs(ctrl), ['mods/tabs/win-min.svg', 'mods/tabs/win-max.svg', 'mods/tabs/win-close.svg']);
+  assert.equal(closeBtn.hoverStyle?.bg, '#e81123');
+  assert.equal(closeBtn.hoverStyle?.text_color, '#ffffff');
+
+  // Mouse down stops propagation (prevents window_drag); click invokes window.* commands
+  let stopped = 0;
+  const fakeCx = { stop_propagation() { stopped++; } };
+  minBtn.handlers['mousedown:left']({}, fakeCx);
+  minBtn.handlers.click({}, fakeCx);
+  maxBtn.handlers.click({}, fakeCx);
+  closeBtn.handlers.click({}, fakeCx);
+  assert.equal(stopped, 4);
+  assert.deepEqual(ran, ['window.minimize', 'window.maximize', 'window.close']);
+
+  // 2. Windows maximized: icon switches to win-restore.svg on projectHeader & archived view
+  curWin = { platform: 'windows', buttons: true, maximized: true };
+  const projHdr = proj.projectHeader(fakeView, { name: 'pm-dudu', project: 'dudu', repo: '/work/dudu' }, theme).__node;
+  assert.ok(collectSvgs(findById(projHdr, 'pm-window-controls')).includes('mods/tabs/win-restore.svg'));
+  const archView = proj.pageView(fakeView, 'archived', theme).__node;
+  assert.ok(findById(archView, 'pm-archived-header'));
+  assert.ok(findById(archView, 'pm-window-controls'));
+
+  // 3. Setup view in main.js renders setup-header with window controls on Windows
+  const dash = modWithIO('./main.js', {
+    ...pBindings,
+    windowControlsBar: proj.windowControlsBar,
+    keepPress: proj.keepPress,
+    Popup: { new: () => makeEl('popup') },
+    PathBuilder: { stroke: () => ({ move_to() {}, cubic_bezier_to() {}, build: () => ({}) }) },
+    FlowLayer: class {},
+    boardVisible: () => true,
+    renderStepsCard: () => makeEl('div'),
+    renderDepsCard: () => makeEl('div'),
+    theme: () => theme,
+    readTextFile: async () => '',
+    watchFolder: () => new Promise(() => {}),
+    terminals: () => [],
+    agents: () => [],
+    panes: () => [],
+    openOverlay: () => {},
+    desktopLayout: () => ({}),
+  });
+  dash.state = { lang: 'en', pms: [], tasks: [], events: [] };
+  dash.setupStatus = 'missing';
+  dash.keys = { focus() {} };
+  const setupWin = dash.setupView(theme).__node;
+  assert.ok(findById(setupWin, 'setup-header'));
+  assert.ok(findById(setupWin, 'pm-window-controls'));
+
+  // 4. macOS (buttons: false): zero window controls rendered anywhere
+  curWin = { platform: 'macos', buttons: false, maximized: false };
+  assert.equal(findById(proj.pageHeader(fakeView, 'board', theme).__node, 'pm-window-controls'), null);
+  assert.equal(findById(proj.projectHeader(fakeView, { name: 'pm-dudu' }, theme).__node, 'pm-window-controls'), null);
+  assert.equal(findById(proj.pageView(fakeView, 'archived', theme).__node, 'pm-archived-header'), null);
+  assert.equal(findById(dash.setupView(theme).__node, 'setup-header'), null);
+
+  // 5. Overlay mode on Windows: omitted
+  curWin = { platform: 'windows', buttons: true, maximized: false };
+  curProps = { overlay: 'ov-1' };
+  assert.equal(findById(proj.pageHeader(fakeView, 'board', theme).__node, 'pm-window-controls'), null);
+  assert.equal(findById(dash.setupView(theme).__node, 'setup-header'), null);
 });

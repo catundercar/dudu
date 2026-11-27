@@ -55,7 +55,8 @@ def write_fake_hc(bin_dir: Path, terminals: list | None = None) -> Path:
 
 class HomeMoveTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="pm-homemove-", ignore_cleanup_errors=(os.name == "nt"))
+        td_kw = {"ignore_cleanup_errors": True} if os.name == "nt" and sys.version_info >= (3, 10) else {}
+        self.tmp = tempfile.TemporaryDirectory(prefix="pm-homemove-", **td_kw)
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name) / "home"
         self.home.mkdir()

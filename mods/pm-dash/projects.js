@@ -2,10 +2,10 @@
 // opens as overlays of itself: props {dialog: 'new'} and {dialog: 'archive', pm: <PM name>}.
 import { div, svg } from 'gpui-kit';
 import { v_flex, h_flex, InputState, Input, Scrollbar } from 'gpui-base';
-import { home, appHome, exec, run, props, closeOverlay, layout, shared, setShared, spaces, pickFolder, notify } from 'herdr';
+import { home, appHome, exec, run, props, closeOverlay, layout, shared, setShared, spaces, pickFolder, notify, window as appWindow } from 'herdr';
 import {
   word, withAlpha, solidText, countChips, projectCards, pageTotals, unclaimedBlocked, archiveThreads, archivedDay, age, folderName,
-  ledgerOpen, startArgv, projectName, agentName, KINDS, lastPmLine, lostSummary, formatTaskNumber,
+  ledgerOpen, startArgv, projectName, agentName, KINDS, lastPmLine, lostSummary, undeliveredSummary, formatTaskNumber, windowControlButtons,
 } from './model.js';
 import { execPython } from './python.js';
 
@@ -95,9 +95,36 @@ const badge = (n, t) => h_flex().flex_none().min_w(18).h(18).px(5).rounded(9).it
 
 // ---- the page header -------------------------------------------------------------
 
+export function windowControlsBar(v, t, { divider = true } = {}) {
+  let win = null;
+  try { win = appWindow?.(); } catch (_) { win = null; }
+  let overlay = false;
+  try { overlay = Boolean(props?.()?.overlay); } catch (_) { overlay = false; }
+  const buttons = typeof windowControlButtons === 'function'
+    ? windowControlButtons(win, { overlay })
+    : [];
+  if (!Array.isArray(buttons) || !buttons.length) return null;
+  const lang = v?.state?.lang;
+  const stop = (_e, cx) => { v?.keys?.focus?.(); cx.stop_propagation(); };
+  const row = h_flex().id('pm-window-controls').flex_none().gap(2).items_center();
+  if (divider) row.child(div().w(1).h(16).mx(4).flex_none().bg(t.border));
+  for (const b of buttons) {
+    const label = word(lang, b.labelKey);
+    const content = b.icon ? svg(b.icon).size(b.iconSize).flex_none() : b.glyph;
+    row.child(h_flex().id(b.id).w(30).h(28).flex_none().rounded(6).items_center().justify_center()
+      .cursor_pointer().text_color(t.muted).accessibility_label(label)
+      .hover(s => (b.danger ? s.bg('#e81123').text_color('#ffffff') : s.bg(t.hover).text_color(t.foreground)))
+      .on_mouse_down('left', stop)
+      .on_click((_e, cx) => { cx.stop_propagation(); run(b.command); })
+      .child(content));
+  }
+  return row;
+}
+
 export function pageHeader(v, view, t) {
   const lang = v.state.lang, text = (k, ...a) => word(lang, k, ...a);
-  return h_flex().flex_none().w_full().px(44).pt(28).pb(view === 'board' ? 12 : 0).gap(6).items_center()
+  const winControls = windowControlsBar(v, t, { divider: true });
+  return h_flex().flex_none().w_full().pl(44).pr(winControls ? 14 : 44).pt(28).pb(view === 'board' ? 12 : 0).gap(6).items_center()
     .child(div().flex_1().min_w(0).text_size(24).font_semibold().child(text('projectsTitle')))
     .child(keepPress(v, segmented('page-view', [
       ['list', 'list', text('listView'), () => showPage('list')],
@@ -107,19 +134,22 @@ export function pageHeader(v, view, t) {
       .bg(t.foreground).text_color(t.canvas).hover(s => s.opacity(.88))
       .accessibility_label(text('newProject'))
       .on_click(() => v.openNew())
-      .child(icon('plus', 16)), text('newProject'), t, { placement: 'below-right' })));
+      .child(icon('plus', 16)), text('newProject'), t, { placement: 'below-right' })))
+    .when(Boolean(winControls), el => el.child(winControls));
 }
 
 // The header over one project's board: its name and folder, and the way back to its conversation.
 export function projectHeader(v, pm, t) {
   const lang = v.state.lang;
-  return h_flex().h(56).flex_none().px(28).gap(10).items_center().border_b(1).border_color(t.border)
+  const winControls = windowControlsBar(v, t, { divider: true });
+  return h_flex().h(56).flex_none().pl(28).pr(winControls ? 14 : 28).gap(10).items_center().border_b(1).border_color(t.border)
     .child(div().flex_none().text_size(15).font_semibold().child(projectName(pm) || 'PM'))
     .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(12).text_color(t.dim).child(shortPath(pm?.repo)))
     .child(keepPress(v, segmented('project-view', [
       ['chat', 'chat', word(lang, 'chatView'), () => openProject(pm.name, pm.machine)],
       ['board', 'board', word(lang, 'boardView'), () => {}],
-    ], 'board', t)));
+    ], 'board', t)))
+    .when(Boolean(winControls), el => el.child(winControls));
 }
 
 // ---- the list ------------------------------------------------------------------------
@@ -140,12 +170,14 @@ function card(v, c, t, now) {
   const lang = v.state.lang, hovered = v.hoverCard === c.key, local = !c.machine;
   const chips = countChips(c.counts);
   const lostText = lostSummary(lang, c.lost);
+  const undelText = undeliveredSummary(lang, c.undelivered);
   const meta = h_flex().gap(12).items_center().text_size(12).text_color(t.dim)
     .when(Boolean(c.agent), el => el.child(div().child(c.agent)))
     .when(Boolean(c.machine), el => el.child(div().font_family('monospace').child(c.machine)))
     .when(Boolean(lostText), el => el.child(div().id(`lost-${c.key}`).text_color(t.ansi3 ?? t.accent).child(lostText)))
+    .when(Boolean(undelText), el => el.child(div().id(`undelivered-${c.key}`).text_color(t.ansi3 ?? t.blocked).child(undelText)))
     .children(chips.map(([k, n]) => div().when(k === 'waiting', el => el.text_color(t.blocked)).child(word(lang, `count_${k}`, n))))
-    .when(!chips.length && !lostText && c.line.length > 0, el => el.child(div().child(word(lang, 'noOpen'))));
+    .when(!chips.length && !lostText && !undelText && c.line.length > 0, el => el.child(div().child(word(lang, 'noOpen'))));
   const right = h_flex().flex_none().gap(8).items_center().text_size(12).text_color(t.dim)
     .when(hovered && local, el => el.child(h_flex().gap(2).p(2).rounded(9).bg(t.raised)
       .child(iconButton(v, `open-${c.key}`, 'open', word(lang, 'openProject'), () => openProject(c.key), t))
@@ -235,6 +267,12 @@ export function pageView(v, view, t) {
   }
   const root = v_flex().id('pm-projects').size_full().min_w(0).min_h(0).bg(t.canvas).text_color(t.foreground).text_size(14);
   if (view !== 'archived') root.child(pageHeader(v, 'list', t).pb(6));
+  else {
+    const winControls = windowControlsBar(v, t, { divider: false });
+    if (winControls) {
+      root.child(h_flex().id('pm-archived-header').h(42).w_full().flex_none().pr(14).items_center().justify_end().child(winControls));
+    }
+  }
   return root.child(keepPress(v, div().relative().flex_1().min_h(0).w_full())
     .child(div().id('projects-scroll').size_full().overflow_y_scroll().child(body))
     .child(Scrollbar.new('projects-scroll').absolute().inset_0()));

@@ -47,11 +47,11 @@ Exit code 2 still blocks the merge, with a message distinguishing "could not jud
 
 ### 1. Isolation: Never Touch the User's Own Herdr
 
-- **Private app home**: creates a fresh `HERDR_APP_HOME` inside the run directory populated with copies of the repository's `layouts/pm.json` and `mods/`, plus generated config files:
+- **Private app home**: creates a fresh `HERDR_APP_HOME` inside the run directory populated with copies of the repository's `layouts/dudu.json` and `mods/`, plus generated config files:
   - `settings.json`: sound off, telemetry off;
   - `update-notes.json`: records the current version as already seen so Herdr does not treat launch as a post-upgrade first run and attempt to upgrade `herdr-core`;
   - `window.json`: 1000×680 anchored at the bottom-left of the main display (window dimensions govern `pm-project`'s wide vs. narrow responsive layout); the main display UUID is queried live via CoreGraphics rather than read from the user's `window.json` (Herdr centers windows if the configured display UUID is missing);
-  - `shared.json`: selects the `pm` layout and initial stage page.
+  - `shared.json`: selects the `dudu` layout and initial stage page.
 - **Copied ledger**: copies the ledger into the run directory and points `PM_HOME` at the copy, skipping symlinks and sockets so writes inside the test can never follow a link back to the real ledger.
 - **Dedicated core session**: starts `herdr-core` under `HC_SESSION=rc<pid>` after scrubbing inherited `HC_*`, `HERDR_APP_HOME`, and `PM_HOME` variables (which otherwise point at the user's live session when invoked from inside a Herdr terminal).
 - **Stand-in terminals**: spawns two `cat` processes labeled as the project's manager terminal and the target thread's worker terminal so the UI renders live "online" states.

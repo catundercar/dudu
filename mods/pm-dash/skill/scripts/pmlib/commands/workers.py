@@ -1,4 +1,4 @@
-"""Worker messaging, wait, escalation, reattach, tab and retirement commands (`send`, `_deliver-send`,
+"""Worker messaging, wait, escalation, reattach, tab and retirement commands (`send`, `_drain-endpoint`,
 `_deliver-ready`, `wait`, `escalate`, `reattach`, `retab`, `retire`, `idle-workers`, `close-worker`, `codex-cmd`,
 `print_plan`). Layer 4."""
 from __future__ import annotations
@@ -111,17 +111,11 @@ def wait_for_report_events(a: Any, changes: Any, task: Any) -> None:
 # --- CLI Command Handlers ---
 
 
-def cmd__deliver_send(a: Any, ctx: Any = None) -> None:
-    """Internal background worker for async `hc send`: delivers message, updates round_handed, wakes PM on failure."""
+def cmd__drain_endpoint(a: Any, ctx: Any = None) -> None:
+    """Internal detached drain of a herdr-core terminal's mailbox: types its queued sends under the terminal's typist
+    lease and runs each send's reactions (round handed; or the fallback / failure note that wakes the PM)."""
     ctx = Context.from_env() if ctx is None else ctx
-    Workers(ctx).deliver_send(
-        a.term, a.file,
-        unlink=bool(getattr(a, "unlink", False)),
-        task_id=a.task or "",
-        repo=a.repo or "",
-        pre_turn=a.pre_turn,
-        timeout=a.timeout,
-    )
+    Workers(ctx).drain_sends(a.term, list(getattr(a, "env", None) or []), timeout=a.timeout)
 
 
 def cmd__deliver_ready(a: Any, ctx: Any = None) -> None:
@@ -174,6 +168,8 @@ def cmd_send(a: Any, ctx: Any = None) -> None:
             repo=getattr(a, "repo", ".") or ".",
             timeout=a.timeout,
             wait=bool(getattr(a, "wait", False)),
+            as_user=bool(getattr(a, "as_user", False)),
+            idempotency_key=getattr(a, "idempotency_key", None) or "",
         )
     except PmError as err:
         _emit_pm_error(ctx, err)
@@ -396,14 +392,13 @@ def register_send_commands(sub):
     sn.add_argument("--repo", default=".", help="project folder (default: .)")
     sn.add_argument("--timeout", type=int, default=180, help="hc send timeout in seconds (default 180)")
     sn.add_argument("--wait", action="store_true", help="wait synchronously instead of queuing in the background")
-    ds_int = sub.add_parser("_deliver-send", help=argparse.SUPPRESS)
-    ds_int.add_argument("term")
-    ds_int.add_argument("--file", required=True)
-    ds_int.add_argument("--unlink", action="store_true")
-    ds_int.add_argument("--task", default="")
-    ds_int.add_argument("--repo", default="")
-    ds_int.add_argument("--pre-turn", type=int, default=None)
-    ds_int.add_argument("--timeout", type=int, default=180)
+    sn.add_argument("--as-user", action="store_true",
+                    help="the user's own words (the app's thread box / agent window): typed as written, no [from ...]")
+    sn.add_argument("--idempotency-key", help="a retry of the same send passes the same key: it is typed once")
+    de_int = sub.add_parser("_drain-endpoint", help=argparse.SUPPRESS)
+    de_int.add_argument("term")
+    de_int.add_argument("--env", action="append", default=[])
+    de_int.add_argument("--timeout", type=int, default=180)
     dr_int = sub.add_parser("_deliver-ready", help=argparse.SUPPRESS)
     dr_int.add_argument("term")
     dr_int.add_argument("--file", required=True)

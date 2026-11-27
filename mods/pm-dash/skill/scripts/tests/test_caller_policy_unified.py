@@ -26,7 +26,7 @@ if str(TESTS_DIR) not in sys.path:
 from fakes import FakeHc, FakeTui, StubGit, make_ctx  # noqa: E402
 from pmlib.caller import Caller, Role  # noqa: E402
 from pmlib.errors import IdentityError  # noqa: E402
-from pmlib.events import policy  # noqa: E402
+from pmlib.messaging import router as policy  # noqa: E402
 from pmlib.ledger.transition import UpdateRequest  # noqa: E402
 from pmlib.memory.layer import MemoryLayer, MemoryRefused  # noqa: E402
 from pmlib.project.conversation import Conversation  # noqa: E402

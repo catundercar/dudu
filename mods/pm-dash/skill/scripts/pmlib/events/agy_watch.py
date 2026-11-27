@@ -28,6 +28,8 @@ from ..project.project import ProjectRegistry
 from ..project.turn_state import TurnTracker
 from ..store import replace_task_file, write_atomic
 from .deliver import Delivery, prompt_kind, row_time
+from ..messaging.envelope import extract_env_id
+from ..messaging.mailbox import PENDING_TURN
 
 AGY_KINDS = frozenset({"agy", "antigravity"})
 AGY_POLL_SECONDS = 1.5          # fallback poll interval while an agy PM is active
@@ -107,9 +109,6 @@ def parse_agy_row(row: Mapping[str, Any]) -> tuple[str, str, str] | None:
         if not isinstance(content, str) or not content.strip():
             return None
         return ("pm", content.strip(), created_at)
-
-    if rtype == "ERROR_MESSAGE":
-        return ("error", "", created_at)
 
     return None
 
@@ -709,6 +708,7 @@ class AgyTranscriptWatcher:
             if pre_opened_claim and claimed_dt is not None and last_age <= AGY_FRESH_WINDOW:
                 offset, last_step = _seed_before_claimed(path, claimed_dt)
                 turn_cause = None
+                pending_system_turn = False
             elif self._should_seed_eof(repo_str, path, first_at, claimed_dt, state_existed):
                 eof_offset, max_step = _seed_eof(path)
                 cursors.pop(conv_id, None)
@@ -736,6 +736,7 @@ class AgyTranscriptWatcher:
                 offset = 0
                 last_step = None
                 turn_cause = None
+                pending_system_turn = False
         else:
             prev_path = str(entry.get("path") or "")
             raw_off = entry.get("offset")
@@ -750,6 +751,7 @@ class AgyTranscriptWatcher:
             raw_step = entry.get("last_step")
             last_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) else None
             turn_cause = entry.get("turn_cause") if isinstance(entry.get("turn_cause"), dict) else None
+            pending_system_turn = bool(entry.get("pending_system_turn"))
 
         new_offset = offset
         if size > offset:
@@ -768,6 +770,26 @@ class AgyTranscriptWatcher:
                 delivery = Delivery(self.ctx, repo_str)
                 tracker = TurnTracker(self.ctx, repo_str)
                 pane = str(pm_rec.get("pane") or "")
+                term = str(pm_rec.get("terminal") or (pane[3:] if pane.startswith("hc:") else ""))
+                term_working_cache: tuple[bool, int] | None = None
+
+                def _term_working_state() -> tuple[bool, int]:
+                    nonlocal term_working_cache
+                    if term_working_cache is not None:
+                        return term_working_cache
+                    if not term:
+                        term_working_cache = (False, 0)
+                        return term_working_cache
+                    tinfo = self.ctx.hc.get_raw(term)
+                    if isinstance(tinfo, Mapping) and tinfo.get("state") == "live":
+                        raw_s = tinfo.get("status")
+                        s_val = str(raw_s.get("state") or "") if isinstance(raw_s, Mapping) else str(raw_s or "")
+                        s_ms = int(tinfo.get("status_ms") or 0)
+                        term_working_cache = (s_val == "working", s_ms)
+                    else:
+                        term_working_cache = (False, 0)
+                    return term_working_cache
+
                 for raw_line in complete.split(b"\n")[:-1]:
                     if not raw_line.strip():
                         continue
@@ -781,12 +803,36 @@ class AgyTranscriptWatcher:
                     has_step = isinstance(step_idx, int) and not isinstance(step_idx, bool)
                     if has_step and last_step is not None and step_idx <= last_step:
                         continue
+                    rtype = row.get("type")
+                    row_dt_meta = row_time(row.get("created_at"))
+                    row_ms_meta = int(row_dt_meta.timestamp() * 1000) if row_dt_meta is not None else int(self.ctx.clock.time() * 1000)
+                    if rtype == "SYSTEM_MESSAGE":
+                        pending_system_turn = True
+                        unfailing(
+                            lambda rms=row_ms_meta: tracker.append_observation(
+                                {"src": "watcher:agy", "kind": "step_system", "t": rms},
+                                reduce_now=True,
+                            )
+                        )
+                        if has_step:
+                            last_step = step_idx
+                        continue
+                    if rtype == "PLANNER_RESPONSE" and row.get("source") in ("MODEL", None, "") and pending_system_turn:
+                        pending_system_turn = False
+                        if tracker.read().get("phase") not in ("working", "stalled"):
+                            turn_cause = None
+                            unfailing(
+                                lambda: tracker.begin_turn(
+                                    terminal=pane, agent_kind="agy", cause="self", from_hook=True,
+                                )
+                            )
                     parsed = parse_agy_row(row)
                     if parsed is not None:
                         role, raw_text, created_at = parsed
                         row_dt = row_time(created_at)
                         at = row_dt.astimezone().strftime("%Y-%m-%d %H:%M:%S") if row_dt is not None else None
                         if role == "user_input":
+                            pending_system_turn = False
                             kind, sender, text = prompt_kind(raw_text)
                             if kind == "batch":
                                 receipt = delivery.took_delivery(text, late=True)
@@ -799,6 +845,41 @@ class AgyTranscriptWatcher:
                                 )
                             elif kind == "rotate" or kind == "other":
                                 turn_cause = None
+                            elif kind == "supervisor":
+                                turn_cause = None
+                                orig_cause = ""
+                                orig_mids: list[str] = []
+                                orig_batch: list[int] | None = None
+                                env_hit = extract_env_id(raw_text)
+                                if env_hit and tracker.files.pm_mailbox.is_dir():
+                                    it = tracker.pm_mailbox.get(env_hit)
+                                    if it is not None:
+                                        eb = it.envelope.body if isinstance(it.envelope.body, Mapping) else {}
+                                        ec = it.envelope.cause if isinstance(it.envelope.cause, Mapping) else {}
+                                        orig_cause = str(eb.get("original_cause") or ec.get("original_cause") or "")
+                                        orig_mids = [str(m) for m in (eb.get("msg_ids") or ec.get("msg_ids") or []) if m]
+                                        if it.state in ("typed", "accepted"):
+                                            tracker.pm_mailbox.transition(
+                                                env_hit, "consumed", turn_id=PENDING_TURN, clear_intent=True,
+                                            )
+                                st_inc = tracker.read().get("incident") if tracker.files.pm_turn.is_file() else None
+                                if isinstance(st_inc, Mapping):
+                                    if not orig_cause:
+                                        orig_cause = str(st_inc.get("cause_kind") or "")
+                                    if not orig_mids:
+                                        orig_mids = [str(m) for m in (st_inc.get("msg_ids") or []) if m]
+                                    if isinstance(st_inc.get("batch"), list) and len(st_inc["batch"]) == 2:
+                                        orig_batch = [int(st_inc["batch"][0]), int(st_inc["batch"][1])]
+                                eff_cause = orig_cause if orig_cause in ("user", "deliver") else "recovery"
+                                if eff_cause == "deliver" and orig_batch:
+                                    turn_cause = {"after": "deliver", "batch": orig_batch}
+                                elif eff_cause == "user":
+                                    turn_cause = {"after": "user"}
+                                unfailing(
+                                    lambda c=eff_cause, mids=orig_mids or None, b=orig_batch: tracker.begin_turn(
+                                        terminal=pane, agent_kind="agy", cause=c, msg_ids=mids, batch=b, from_hook=True,
+                                    )
+                                )
                             elif kind == "agent":
                                 turn_cause = None
                                 unfailing(lambda: tracker.begin_turn(terminal=pane, agent_kind="agy", cause="agent", from_hook=True))
@@ -808,22 +889,12 @@ class AgyTranscriptWatcher:
                             elif kind == "user":
                                 turn_cause = None
                                 if text:
-                                    at_ms = int(row_dt.timestamp() * 1000) if row_dt is not None else None
                                     consumed, matched_ids, remainder = tracker.consume_ui_prompt(text)
                                     unfailing(
                                         lambda m_ids=matched_ids: tracker.begin_turn(
                                             terminal=pane, agent_kind="agy", cause="user",
                                             msg_ids=m_ids, from_hook=True,
                                         )
-                                    )
-                                    unfailing(
-                                        conv.record_receipt,
-                                        text,
-                                        at=at,
-                                        at_ms=at_ms,
-                                        pane=pane,
-                                        session=conv_id,
-                                        msg_ids=matched_ids or None,
                                     )
                                     if not consumed and remainder:
                                         conv.record("user", at=at, text=remainder)
@@ -832,32 +903,52 @@ class AgyTranscriptWatcher:
                             extra: dict[str, Any] = {}
                             if pane:
                                 extra["by"] = pane
-                            tracker_cause = tracker.end_turn()
+                            tracker_cause = tracker.end_turn(has_reply=True)
                             if turn_cause:
                                 extra.update(turn_cause)
                             elif tracker_cause:
                                 extra.update(tracker_cause)
                             conv.record("pm", at=at, text=raw_text, **extra)
                             recorded += 1
-                        elif role == "error":
-                            unfailing(tracker.end_turn)
-                    elif row.get("type") == "PLANNER_RESPONSE" and row.get("tool_calls"):
+                    elif rtype == "PLANNER_RESPONSE" and row.get("tool_calls"):
                         tcalls = row.get("tool_calls")
                         if isinstance(tcalls, list) and tcalls and isinstance(tcalls[-1], Mapping):
                             tname = str(tcalls[-1].get("name") or "tool")
                             targs = tcalls[-1].get("args") if isinstance(tcalls[-1].get("args"), Mapping) else {}
                             tsum = str(targs.get("toolSummary") or targs.get("CommandLine") or targs.get("Path") or "")
-                            unfailing(lambda tn=tname, ts=tsum: tracker.note_activity(kind="tool", tool=tn, summary=ts))
+                            preamble = " ".join(str(row.get("thinking") or row.get("content") or "").split())[:120]
+                            tw, tms = _term_working_state()
+                            unfailing(
+                                lambda tn=tname, ts=tsum, w=tw, s=tms, pre=preamble: tracker.note_activity(
+                                    kind="tool", tool=tn, summary=ts, terminal_working=w, status_ms=s,
+                                    preamble=pre, src="watcher:agy",
+                                )
+                            )
+                    elif rtype == "GENERIC":
+                        if tracker.read().get("phase") in ("working", "stalled"):
+                            unfailing(lambda: tracker.note_activity(kind="thinking", src="watcher:agy"))
+                    elif rtype == "ERROR_MESSAGE":
+                        # FS-7: ERROR_MESSAGE does not end the turn (agy retries and continues).
+                        err_msg = str(row.get("content") or row.get("error") or row.get("message") or "error")[:200]
+                        unfailing(
+                            lambda msg=err_msg, rms=row_ms_meta: tracker.append_observation(
+                                {"src": "watcher:agy", "kind": "step_error", "t": rms, "message": msg},
+                                reduce_now=True,
+                            )
+                        )
                     if has_step:
                         last_step = step_idx
 
         cursors.pop(conv_id, None)
-        cursors[conv_id] = {
+        cursor_entry: dict[str, Any] = {
             "path": path_str,
             "offset": new_offset,
             "last_step": last_step,
             "turn_cause": turn_cause,
         }
+        if pending_system_turn:
+            cursor_entry["pending_system_turn"] = True
+        cursors[conv_id] = cursor_entry
         fresh: dict[str, Any] = {
             "version": 2,
             "session": {

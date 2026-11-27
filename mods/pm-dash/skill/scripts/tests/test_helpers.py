@@ -55,7 +55,7 @@ from pmlib.project.conversation import Conversation  # noqa: E402
 from pmlib.store import lock_file, unlock_file  # noqa: E402
 from pmlib.workers import codex_pool as codex_pool_mod  # noqa: E402
 from pmlib.workers.sessions import find_session_for  # noqa: E402
-from tests.fakes import FakeChangeWaiter, FakeClock, FakeHc, FakeProcs, make_ctx  # noqa: E402
+from tests.fakes import FakeChangeWaiter, FakeClock, FakeHc, FakeProcs, make_ctx, run_spawned_drains  # noqa: E402
 
 
 def _row(kind: str, content, usage=None, side: bool = False) -> str:
@@ -343,6 +343,7 @@ class HelpersTest(unittest.TestCase):
         self.hc.sent.clear()
         self._set_caller(h1["terminal"])
         self._run_cli("helper", "done", "--text", "No errors in logs.")
+        run_spawned_drains(self.ctx)
         self.assertEqual(len(self.hc.sent), 1)
         self.assertEqual(self.hc.sent[0][0], self.worker_term)
         self.assertIn("helper logs done", self.hc.sent[0][1])
@@ -532,6 +533,7 @@ class HelpersTest(unittest.TestCase):
         h1 = self.ctx.store.task(self.task_id)["helpers"][0]
         self._set_caller(h1["terminal"])
         self._run_cli("helper", "done", "--text", "All good.")
+        run_spawned_drains(self.ctx)  # its notify to the worker is typed by the drain it queued
         self.assertTrue(self.ctx.store.task(self.task_id)["helpers"][0].get("cleanup_term"))
         watcher = HelperWatcher(self.ctx)
         self.assertIn(h1["terminal"], watcher.active_terminals(self.repo))
@@ -553,6 +555,7 @@ class HelpersTest(unittest.TestCase):
         with mock.patch.object(stalls_mod, "STALL_GRACE", 0):
             watcher.look(self.repo, stops, {})
             watcher.look(self.repo, stops, {})
+        run_spawned_drains(self.ctx)
         h2_after = self.ctx.store.task(self.task_id)["helpers"][-1]
         self.assertEqual(h2_after["status"], "done")
         self.assertEqual(self.hc.terminals[h2["terminal"]]["state"], "exited")
@@ -570,6 +573,7 @@ class HelpersTest(unittest.TestCase):
         with mock.patch.object(stalls_mod, "STALL_GRACE", 0):
             watcher.look(self.repo, stops, {})
             watcher.look(self.repo, stops, {})
+        run_spawned_drains(self.ctx)
         sends = [text for t, text in self.hc.sent if t == self.worker_term]
         self.assertEqual(len(sends), 1)
         self.assertIn("blocked", sends[0])
@@ -784,6 +788,7 @@ class HelpersTest(unittest.TestCase):
         self._set_caller(self.pm_term)
         self.hc.sent.clear()
         self._run_cli("helper", "done", "wext2", "--task", self.task_id, "--text", "Done by PM.", "--repo", self.repo)
+        run_spawned_drains(self.ctx)
         self.assertEqual(self.hc.terminals[hw2["terminal"]]["state"], "exited")
         sends = [text for t, text in self.hc.sent if t == self.worker_term]
         self.assertEqual(len(sends), 1)

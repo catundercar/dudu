@@ -153,7 +153,9 @@ def cmd_rotate(a: Any, ctx: Context | None = None) -> None:
             notes=getattr(a, "notes", None),
             reason=getattr(a, "reason", None),
             model=getattr(a, "model", None),
+            profile=getattr(a, "profile", None),
             transcript=getattr(a, "transcript", None),
+            force=bool(getattr(a, "force", False)),
         )
     except PmError as err:
         _exit_on_error(err)
@@ -197,6 +199,7 @@ def cmd_end_session(a: Any, ctx: Context | None = None) -> None:
             agent_pid=getattr(a, "agent_pid", None),
             kill_terminal=bool(getattr(a, "kill_terminal", False)),
             timeout=a.timeout,
+            force=bool(getattr(a, "force", False)),
         )
     except PmError as err:
         _exit_on_error(err)
@@ -250,7 +253,9 @@ def register_manager_session_commands(sub):
     ro.add_argument("--reason", help="why the PM session is swapped (logged transparently in the conversation)")
     ro.add_argument("--model", help="model for the new session (default: config.json pm.model, else opus for "
                                     "Claude Code; never the outgoing session's; other agents: the CLI's default)")
+    ro.add_argument("--profile", help="profile name from profiles / config.json for the new session (recovery ladder)")
     ro.add_argument("--transcript", help="the outgoing session's transcript (default: this session's)")
+    ro.add_argument("--force", action="store_true", help="immediately end the outgoing session without waiting for idle (recovery)")
     se = sub.add_parser("seat", help="run inside the project's fixed PM terminal and swap agent sessions across rotations")
     se.add_argument("--repo", default=".")
     se.add_argument("--kind", default="", help="agent kind for the initial session")
@@ -263,6 +268,7 @@ def register_manager_session_commands(sub):
     es_cmd.add_argument("--agent-pid", type=int, default=None, help="PID of the outgoing agent session in `seat`")
     es_cmd.add_argument("--kill-terminal", action="store_true", help="end a legacy non-seat PM terminal")
     es_cmd.add_argument("--timeout", type=int, default=RETIRE_WAIT)
+    es_cmd.add_argument("--force", action="store_true", help="stop the outgoing session immediately without waiting for idle")
     na = sub.add_parser("name-agent", help="(run by the session-start hook) name a PM in a herdr TUI pane once it shows")
     na.add_argument("pane")
     na.add_argument("name")

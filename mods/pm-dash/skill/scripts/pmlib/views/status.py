@@ -9,6 +9,7 @@ from ..commands.emit import exit_with
 from ..context import Context
 from ..discord import DiscordMirror
 from ..errors import IdentityError, PmError, StoreError
+from ..events.deliver import Delivery
 from ..helpers.config import HELPER_TIMEOUT
 from ..helpers.records import helper_elapsed, project_running_helpers_for, reconcile_project_helpers_for
 from ..ledger.board import Board
@@ -20,13 +21,15 @@ from ..ledger.task import ACTIVE, CLOSED, hc_terminal_of, needs_cleanup, started
 from ..osutil import clip
 from ..project.project import ProjectRegistry, in_scope
 from ..project.readmodel import owner_of, task_offline
+from ..reports import ReportClient, task_log_report
 from ..workers.lifecycle import active_review_of_for, term_status
 
 
 def cmd_log(a, ctx=None):
+    """`pm.py log`: a `report.task_log` envelope, applied here (one entry, kept once under its idempotency key)."""
     ctx = Context.from_env() if ctx is None else ctx
     try:
-        Ledger(ctx).change(a.id, lambda cur, ch: (ch.note(a.text), cur)[1])
+        ReportClient(ctx).submit(task_log_report(ctx, a.id, a.text))
     except (StoreError, IdentityError):
         raise
     except PmError as e:
@@ -172,13 +175,46 @@ def cmd_status(a, ctx=None):
             ctx.out.line(f"  {x['name']}  {x['pane_id']}{' (this session)' if x['pane_id'] == ctx.pane else ''}  "
                          f"{x.get('agent_status')}  {x.get('cwd')}")
     regs = ctx.home.registrations
-    in_hc = [pm for pm in (projects.hc_pm(json.loads(p.read_text(encoding="utf-8")).get("repo") or "") for p in sorted(regs.glob("*.json"))
-                           if json.loads(p.read_text(encoding="utf-8")).get("runtime") == "hc") if pm] if regs.exists() else []
+    hc_recs = []
+    if regs.exists():
+        for p in sorted(regs.glob("*.json")):
+            try:
+                rec = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(rec, dict) and rec.get("runtime") == "hc":
+                hc_recs.append(rec)
+    in_hc = [pm for pm in (projects.hc_pm(r.get("repo") or "") for r in hc_recs) if pm]
+    live_hc_by_name = {pm["name"]: pm for pm in in_hc}
     for pm in in_hc:
         ctx.out.line(f"  {pm['name']}  {pm['pane_id']}{' (this session)' if pm['pane_id'] == ctx.pane else ''}  "
                      f"{pm['agent_status']}  {pm['cwd']}")
     if not pm_panes and not in_hc:
         ctx.out.line("  (none)")
+    for rec in hc_recs:
+        if rec.get("archived") or not rec.get("repo"):
+            continue
+        live_pm = live_hc_by_name.get(rec.get("name"))
+        live_state = str(live_pm.get("agent_status") or "") if live_pm else "offline"
+        undel = Delivery(ctx, rec["repo"]).undelivered_status(live_state=live_state)
+        if undel:
+            mins = max(1, int(undel["waiting_seconds"] // 60))
+            pane = rec.get("pane") or f"hc:{rec.get('terminal') or '?'}"
+            st_word = undel["state"]
+            no_del_en = ", deliverer not running" if not undel["deliverer_running"] else ""
+            no_del_zh = "，投递器未运行" if not undel["deliverer_running"] else ""
+            n_ev, n_msg = int(undel.get("count") or 0), int(undel.get("messages") or 0)
+            what_en = ", ".join(x for x in (
+                f"{n_ev} pending event(s)" if n_ev else "", f"{n_msg} message(s) not typed in" if n_msg else "") if x)
+            what_zh = "、".join(x for x in (
+                f"{n_ev} 条待投递事件" if n_ev else "", f"{n_msg} 条消息未打进终端" if n_msg else "") if x)
+            why = str(undel.get("message_reason") or "")
+            ctx.out.line(tr(
+                f"  ! {rec['name']} ({pane}): {what_en} undelivered for {mins}m "
+                f"(state={st_word}{no_del_en}{f', {why}' if why else ''})",
+                f"  ! {rec['name']}（{pane}）：{what_zh}已等待 {mins} 分钟未送达"
+                f"（状态={st_word}{no_del_zh}{f'，{why}' if why else ''}）",
+            ))
     tasks = ledger.raw_tasks()
     scope = projects.status_scope(tasks, getattr(a, "repo", "."), getattr(a, "all", False))
     pms = projects.pm_records() if scope else []

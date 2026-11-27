@@ -5,7 +5,7 @@
 so a mod that breaks on its second render passes it (f31fad8: the project view's Esc
 focus handle was overwritten by the timeline's keys, and the next render threw in
 track_focus). This check starts a second Herdr of its own: its own app home with this
-repo's mods and pm layout, a copy of the ledger, and its own herdr-core session. It
+repo's mods and dudu layout, a copy of the ledger, and its own herdr-core session. It
 shows the Projects page (list and board), one project's conversation and board, one
 thread's detail, a project on an unreachable machine and a toast. For each it changes a ledger file once (the mods' folder
 watches) and re-renders every mod until the page's mod has rendered at least 3 times,
@@ -43,12 +43,14 @@ Exit: 0 every page rendered without an error; 1 errors, or a page that did not r
 2 not judged: the check could not run in isolation, or the window stopped drawing.
 """
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -57,8 +59,9 @@ REPO = Path(__file__).resolve().parent.parent
 PERSON_HOME = Path.home() / ".config/herdr-app"
 # macOS sun_path: the window's socket, <app home>/herdr-app.sock, must be shorter.
 SUN_LEN = 104
+WIN_WINDOW = {"state": "windowed", "bounds": [80.0, 60.0, 1280.0, 820.0]}
 TAG = "[render-check]"
-# Always on screen in the pm layout, and without a nextCommand() loop of its own.
+# Always on screen in the dudu layout, and without a nextCommand() loop of its own.
 DRIVER = "pm-list"
 # Marks a run folder, so a later run deletes only what an earlier one made.
 MARK = ".render-check"
@@ -197,6 +200,73 @@ const all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(0,
 String(all.filter(w => w.kCGWindowOwnerPID == __PID__ && w.kCGWindowLayer == 0 && w.kCGWindowIsOnscreen).length)"""
 
 
+def is_windows():
+    return sys.platform == "win32"
+
+
+def person_homes():
+    homes = [PERSON_HOME.resolve()]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        homes.append((Path(appdata) / "herdr-app").resolve())
+    return homes
+
+
+def win_window():
+    return {"state": WIN_WINDOW["state"], "bounds": list(WIN_WINDOW["bounds"])}
+
+
+def png_size(path):
+    """Return (width, height) from a PNG's IHDR chunk, or None if invalid."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", data[16:24])
+
+
+def build_win_launcher_script(herdr_exe, log_path, pid_path, env_overrides):
+    """Return Python source for a Session-1 Windows launcher that starts herdr-core in Session 1,
+    spawns herdr-app.exe with combined stdout+stderr redirected to log_path, and writes the exact
+    PID to pid_path."""
+    return (
+        "import os, pathlib, shutil, subprocess, traceback\n"
+        f"HERDR_EXE = {json.dumps(str(herdr_exe))}\n"
+        f"LOG_PATH = pathlib.Path({json.dumps(str(log_path))})\n"
+        f"PID_PATH = pathlib.Path({json.dumps(str(pid_path))})\n"
+        f"ENV_OVERRIDES = {json.dumps({k: str(v) for k, v in env_overrides.items()})}\n"
+        "env = {k: v for k, v in os.environ.items() "
+        "if not k.startswith('HC_') and k not in ('HERDR_APP_HOME', 'PM_HOME')}\n"
+        "env.update(ENV_OVERRIDES)\n"
+        "LOG_PATH.parent.mkdir(parents=True, exist_ok=True)\n"
+        "try:\n"
+        "    hc_bin = shutil.which('hc')\n"
+        "    if hc_bin:\n"
+        "        subprocess.run([hc_bin, 'server', 'start'], env=env, "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)\n"
+        "    log_f = open(LOG_PATH, 'ab')\n"
+        "    flags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)\n"
+        "    proc = subprocess.Popen([HERDR_EXE], stdout=log_f, stderr=subprocess.STDOUT, "
+        "env=env, creationflags=flags)\n"
+        "    tmp = PID_PATH.with_name(PID_PATH.name + '.tmp')\n"
+        "    tmp.write_text(str(proc.pid), encoding='utf-8')\n"
+        "    tmp.replace(PID_PATH)\n"
+        "except Exception:\n"
+        "    with open(LOG_PATH, 'a', encoding='utf-8', errors='replace') as err_f:\n"
+        "        err_f.write('[render-check] ERROR launcher: ' + traceback.format_exc() + '\\n')\n"
+        "    raise\n"
+    )
+
+
+def standin_command():
+    """Command for stand-in hc terminals: `cat` on macOS/POSIX, Python sleep on Windows."""
+    if is_windows():
+        return [sys.executable, "-c", "import time; time.sleep(600)"]
+    return ["cat"]
+
+
 def jxa(script, timeout=10):
     """Runs a read-only (or own-app) JavaScript for Automation snippet; '' when it fails."""
     try:
@@ -226,6 +296,8 @@ class Blocked(Exception):
 def clean_env(**extra):
     # No HC_* from the shell this runs in: inside a Herdr terminal they name the person's core.
     env = {k: v for k, v in os.environ.items() if not k.startswith("HC_") and k not in ("HERDR_APP_HOME", "PM_HOME")}
+    if is_windows():
+        env.setdefault("PYTHONUTF8", "1")
     env.update(extra)
     return env
 
@@ -266,6 +338,8 @@ def ledger_source():
 
 def frontmost():
     """The frontmost app's pid, read-only; None when it cannot be read."""
+    if is_windows():
+        return None
     r = subprocess.run(["osascript", "-l", "JavaScript", "-e",
                         "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier"],
                        capture_output=True, text=True, timeout=10)
@@ -293,18 +367,21 @@ class Check:
         self.drawn = 0  # frames drawn on demand (not `frames`: scripts that extend Check use that name)
         self.unframed = ""  # why the last shot drew nothing, when it failed
         self.hidden = ""
+        self.win_task_name = None
+        self.pid_file = self.dir / "app.pid"
+        self.launcher_path = self.dir / "launch_win.py"
 
     # --- the only two ways out to Herdr: this run's window, this run's core ---------------
     def herdr(self, *args, timeout=20):
         home = self.app.resolve()
-        if not self.app.is_dir() or home == PERSON_HOME.resolve() or self.dir.resolve() not in home.parents:
+        if not self.app.is_dir() or home in person_homes() or self.dir.resolve() not in home.parents:
             raise Blocked(f"refusing to call herdr-app outside this run's home ({self.app})")
         return subprocess.run(["herdr-app", *args], env=clean_env(HERDR_APP_HOME=str(self.app)),
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
     def hc(self, *args, timeout=30):
         return subprocess.run(["hc", *args], env=clean_env(HC_SESSION=self.session), capture_output=True, text=True,
-                              timeout=timeout)
+                              encoding="utf-8", errors="replace", timeout=timeout)
 
     def do(self, command):
         """Runs a command in this run's window; returns what went wrong, or ''."""
@@ -317,13 +394,16 @@ class Check:
     def prepare(self):
         if not shutil.which("herdr-app") or not shutil.which("hc"):
             raise Blocked("herdr-app and hc must be on PATH")
-        if sys.platform != "darwin":
-            raise Blocked("this check launches the macOS app bundle; other systems are not supported yet")
+        if sys.platform not in ("darwin", "win32"):
+            raise Blocked("this check supports macOS and Windows; other systems are not supported yet")
         sock = self.app / "herdr-app.sock"
-        if len(str(sock).encode()) >= SUN_LEN:
+        if not is_windows() and len(str(sock).encode()) >= SUN_LEN:
             raise Blocked(f"{sock} is {len(str(sock).encode())} bytes, the socket path limit is {SUN_LEN - 1}; pass a shorter --dir")
         if self.dir.exists():
-            if sock.exists() and self.herdr("status", timeout=5).returncode == 0:
+            running = (self.app.is_dir() and self.herdr("status", timeout=5).returncode == 0
+                       if is_windows()
+                       else sock.exists() and self.herdr("status", timeout=5).returncode == 0)
+            if running:
                 raise Blocked(f"a Herdr from an earlier run still uses {self.app}; quit it with "
                               f"HERDR_APP_HOME={self.app} herdr-app do app.quit")
             if any(self.dir.iterdir()) and not (self.dir / MARK).exists():
@@ -353,7 +433,8 @@ class Check:
         """The project and thread to show, from the ledger copy as pm.py sees it."""
         self.core = True  # pm.py asks hc; whatever core that starts is this run's and is stopped at the end.
         r = subprocess.run([sys.executable, str(self.src / "mods/pm-dash/skill/scripts/pm.py"), "state"], capture_output=True,
-                           text=True, timeout=120, env=clean_env(HC_SESSION=self.session, PM_HOME=str(self.ledger)))
+                           text=True, encoding="utf-8", errors="replace", timeout=120,
+                           env=clean_env(HC_SESSION=self.session, PM_HOME=str(self.ledger)))
         try:
             state = json.loads(r.stdout)
         except ValueError:
@@ -402,7 +483,7 @@ class Check:
                         candidates.append(p.stem)
             for tid in candidates:
                 sr = subprocess.run([sys.executable, str(pm_py), "project", "session", tid, "--limit", "40"],
-                                    capture_output=True, text=True, timeout=20, env=env)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, env=env)
                 if sr.returncode == 0:
                     try:
                         if (json.loads(sr.stdout).get("items") or []):
@@ -412,14 +493,15 @@ class Check:
                         pass
 
     def install(self):
-        version = subprocess.run(["herdr-app", "--version"], capture_output=True, text=True).stdout.split()[-1:]
+        version = subprocess.run(["herdr-app", "--version"], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace").stdout.split()[-1:]
         (self.app / "layouts").mkdir(parents=True)
-        shutil.copy2(self.src / "layouts/pm.json", self.app / "layouts/pm.json")
+        shutil.copy2(self.src / "layouts/dudu.json", self.app / "layouts/dudu.json")
         write_json(self.app / "settings.json", {"zoom": 1, "sounds": {"enabled": False}, "telemetry": False})
         # The app's own version as the last run: a first start after an update would update herdr-core.
         write_json(self.app / "update-notes.json", {"last_run": version[0] if version else "", "presented": version})
-        write_json(self.app / "window.json", corner())
-        write_json(self.app / "shared.json", {"layout": "pm", "frame.welcomed": "finished",
+        write_json(self.app / "window.json", win_window() if is_windows() else corner())
+        write_json(self.app / "shared.json", {"layout": "dudu", "frame.welcomed": "finished",
                                               PROJECT: {"pm": self.pm["name"]}, "pm-dash": {"view": "list", "project": ""}})
         for name in self.mods:
             src, dst = self.src / "mods" / name, self.app / "mods" / name
@@ -436,13 +518,24 @@ class Check:
                     .replace("__POKE__", json.dumps(str(self.poke_dir))))
             (dst / "main.js").write_text(text.replace("[main, ]", "[main]"), encoding="utf-8")
 
-    def start(self):
-        # Stand-ins, so the views draw their online states: a PM and the thread's worker, each `cat`.
+    def _spawn_standins(self):
+        standin = standin_command()
+        cwd = str(self.dir if is_windows() else REPO)
         for name, label in (("rc-pm", f"pm={self.project}"), ("rc-worker", f"task={self.thread}")):
-            r = self.hc("run", "--bg", "--no-parent", "--name", name, "--label", label, "--cwd", str(REPO), "cat")
+            hc_args = ["run", "--bg", "--no-parent", "--name", name, "--label", label, "--cwd", cwd]
+            if is_windows():
+                hc_args.append("--")
+            hc_args.extend(standin)
+            r = self.hc(*hc_args)
             if r.returncode:
                 raise Blocked(f"hc run in session {self.session}: {(r.stderr or r.stdout).strip()}")
             self.terminals.append(name)
+
+    def start(self):
+        if is_windows():
+            return self._start_windows()
+        # Stand-ins, so the views draw their online states: a PM and the thread's worker.
+        self._spawn_standins()
         binary = Path(os.path.realpath(shutil.which("herdr-app")))
         bundle = binary.parents[2] if len(binary.parents) > 2 else binary
         if bundle.suffix != ".app":
@@ -465,13 +558,75 @@ class Check:
             r = self.herdr("status", timeout=5)
             if r.returncode == 0:
                 try:
-                    if json.loads(r.stdout).get("layout") == "pm":
+                    if json.loads(r.stdout).get("layout") == "dudu":
                         self.hide()
                         return self.drawing()
                 except ValueError:
                     pass
             nap(0.2)  # often: the sooner it answers, the sooner it is hidden
         raise Blocked(f"the private Herdr did not answer within 30 s (log: {self.log})")
+
+    def _read_pid_file(self):
+        try:
+            text = self.pid_file.read_text(encoding="utf-8").strip()
+            return int(text) if text.isdigit() else None
+        except OSError:
+            return None
+
+    def _start_windows(self):
+        binary = Path(os.path.realpath(shutil.which("herdr-app")))
+        self.exe = binary.name
+        self.log.touch()
+        self.pid_file.unlink(missing_ok=True)
+        env_overrides = {
+            "HERDR_APP_HOME": str(self.app),
+            "PM_HOME": str(self.ledger),
+            "HC_SESSION": self.session,
+            "HERDR_TELEMETRY": "0",
+            "DO_NOT_TRACK": "1",
+            "RUST_LOG": "info",
+            "PYTHONUTF8": "1",
+        }
+        self.launcher_path.write_text(
+            build_win_launcher_script(binary, self.log, self.pid_file, env_overrides),
+            encoding="utf-8",
+        )
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        py_bin = str(pythonw) if pythonw.is_file() else sys.executable
+        task_name = f"DuduRC_{os.getpid()}"
+        tr_cmd = f'"{py_bin}" "{self.launcher_path}"'
+        created = subprocess.run(
+            ["schtasks", "/Create", "/TN", task_name, "/TR", tr_cmd, "/SC", "ONCE", "/ST", "23:59", "/IT", "/F"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+        )
+        launched_via_task = False
+        if created.returncode == 0:
+            self.win_task_name = task_name
+            ran = subprocess.run(
+                ["schtasks", "/Run", "/TN", task_name],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+            )
+            launched_via_task = ran.returncode == 0
+        if not launched_via_task:
+            # Safe fallback when already in an interactive desktop session or schtasks is unavailable.
+            subprocess.Popen([py_bin, str(self.launcher_path)], env=clean_env())
+        self.launched = True
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            if not self.pid:
+                self.pid = self._read_pid_file()
+            r = self.herdr("status", timeout=5)
+            if r.returncode == 0:
+                try:
+                    if json.loads(r.stdout).get("layout") == "dudu":
+                        if not self.pid:
+                            self.pid = self._read_pid_file()
+                        self._spawn_standins()
+                        return self.drawing()
+                except ValueError:
+                    pass
+            nap(0.3)
+        raise Blocked(f"the private Herdr did not answer within 45 s (log: {self.log})")
 
     def hide(self, wait=5):
         """Hides the private Herdr, and waits until none of its windows is on screen."""
@@ -489,6 +644,8 @@ class Check:
 
     def on_screen(self):
         """Whether a window of the private Herdr is on screen now (read-only); None when unknown."""
+        if is_windows():
+            return None
         n = jxa(SHOWN.replace("__PID__", str(int(self.pid)))) if self.pid else ""
         return int(n) > 0 if n.isdigit() else None
 
@@ -679,15 +836,69 @@ class Check:
             steps.append(self.step(name, commands, mod, ready))
             if steps[-1]["stalled"]:
                 break  # The rest would only wait on a window that does not draw.
+        if getattr(self.args, "verify_window_controls", False) and (not steps or not steps[-1]["stalled"]):
+            steps.append(self.verify_window_controls())
         return steps
+
+    def verify_window_controls(self):
+        """Verify `window.maximize` grows the window and a second call restores it, using shot PNG
+        IHDR dimensions (works across Windows Session 0 without Win32 desktop access). Also saves
+        `shots/maximized.png` so the maximized restore icon is visually captured."""
+        mark, problems = self.log.stat().st_size, []
+        before_path = self.dir / "wc_before.png"
+        max_path = self.shots / "maximized.png"
+        restored_path = self.dir / "wc_restored.png"
+        self.poke()
+        err = self.shoot(before_path)
+        if err:
+            return {"name": "window-controls", "mod": "window.maximize", "renders": 0, "state": None,
+                    "stalled": True, "problems": [f"before maximize shot failed: {err}"]}
+        s0 = png_size(before_path)
+        p1 = self.do("window.maximize")
+        if p1:
+            problems.append(p1)
+        nap(0.8)
+        self.poke()
+        err = self.shoot(max_path)
+        if err:
+            return {"name": "window-controls", "mod": "window.maximize", "renders": 0, "state": None,
+                    "stalled": True, "problems": [f"maximized shot failed: {err}"]}
+        s1 = png_size(max_path)
+        p2 = self.do("window.maximize")
+        if p2:
+            problems.append(p2)
+        nap(0.8)
+        self.poke()
+        err = self.shoot(restored_path)
+        if err:
+            return {"name": "window-controls", "mod": "window.maximize", "renders": 0, "state": None,
+                    "stalled": True, "problems": [f"restored shot failed: {err}"]}
+        s2 = png_size(restored_path)
+        state = {"before": list(s0) if s0 else None, "maximized": list(s1) if s1 else None,
+                 "restored": list(s2) if s2 else None}
+        if not (s0 and s1 and s2):
+            problems.append(f"could not read PNG dimensions: {state}")
+        else:
+            if not (s1[0] > s0[0] or s1[1] > s0[1]):
+                problems.append(f"window.maximize did not grow window ({s0} -> {s1})")
+            if not (s2[0] < s1[0] or s2[1] < s1[1]):
+                problems.append(f"second window.maximize did not restore window ({s1} -> {s2})")
+            elif abs(s2[0] - s0[0]) > 60 or abs(s2[1] - s0[1]) > 60:
+                problems.append(f"restored size {s2} drifted from initial {s0}")
+        failing, _ = self.errors(mark)
+        if failing:
+            problems.append(f"{len(failing)} error(s) from the mods during window-controls check (listed below)")
+        return {"name": "window-controls", "mod": "window.maximize", "renders": self.renders(DRIVER, mark),
+                "state": state, "stalled": False, "problems": problems}
 
     # --- the verdict -------------------------------------------------------------------------
     def tidy(self, text):
         """Paths as in the repo: the wrapper's own frames out, main.real.js is the mod's main.js."""
         lines = [line for line in text.splitlines()
-                 if not re.search(r"/main\.js(\?v=\d+)?:\d+:\d+\)$|at apply \(native\)$", line)]
+                 if not re.search(r"[\\/]main\.js(\?v=\d+)?:\d+:\d+\)$|at apply \(native\)$", line)]
         text = re.sub(r"\?v=\d+", "", "\n".join(lines))
-        return text.replace(f"{self.app}/", "").replace("main.real.js", "main.js").replace(str(Path.home()), "~")
+        return (text.replace(f"{self.app}/", "").replace(f"{self.app}\\", "")
+                .replace("main.real.js", "main.js").replace(str(Path.home()), "~"))
 
     def errors(self, since=0):
         """Exceptions from the mods (the wrapper's ERROR lines, Herdr's own ERROR lines from scripts),
@@ -715,15 +926,18 @@ class Check:
             lines.append(f"{mark} {s['name']:<15} {s['mod']} rendered {s['renders']}x" +
                          (f"  {json.dumps(s['state'], ensure_ascii=False)}" if s["state"] else ""))
             lines += [f"       {p}" for p in s["problems"]]
-        front = frontmost()
-        if self.front and front and front != self.front:
-            lines.append(f"note: the frontmost app changed during the run (pid {self.front} -> {front}"
-                         f"{', the private Herdr' if front == self.pid else ''})")
+        if is_windows():
+            lines.append(f"platform: windows, pid {self.pid}, {self.drawn} frames drawn on demand")
         else:
-            lines.append(f"frontmost app: pid {self.front} before the run, pid {front} at the end; "
-                         f"private window {self.hidden or 'not hidden'}, {self.drawn} frames drawn on demand")
-        if self.on_screen():
-            lines.append("note: the private window is on screen again at the end (something showed the app)")
+            front = frontmost()
+            if self.front and front and front != self.front:
+                lines.append(f"note: the frontmost app changed during the run (pid {self.front} -> {front}"
+                             f"{', the private Herdr' if front == self.pid else ''})")
+            else:
+                lines.append(f"frontmost app: pid {self.front} before the run, pid {front} at the end; "
+                             f"private window {self.hidden or 'not hidden'}, {self.drawn} frames drawn on demand")
+            if self.on_screen():
+                lines.append("note: the private window is on screen again at the end (something showed the app)")
         status = self.herdr("status", timeout=10)
         try:
             loaded = json.loads(status.stdout).get("errors") or []
@@ -756,44 +970,84 @@ class Check:
     # --- cleanup -----------------------------------------------------------------------------
     def close(self):
         notes = []
-        try:
-            if (self.app / "herdr-app.sock").exists():
-                self.herdr("do", "app.quit", timeout=10)
-        except Exception as e:  # noqa: BLE001 - keep cleaning up
-            notes.append(f"app.quit: {e}")
-        if self.launched and not self.pid:
-            # Stopped before the window was found: look for it once more, it may still be starting.
-            deadline = time.time() + 10
-            while time.time() < deadline and not self.pid:
-                self.pid = next((p for p in self.pids() if self.ours(p)), None)
-                nap(0.5)
-            if self.pid and (self.app / "herdr-app.sock").exists():
+        if is_windows():
+            if self.launched:
                 try:
                     self.herdr("do", "app.quit", timeout=10)
                 except Exception as e:  # noqa: BLE001 - keep cleaning up
                     notes.append(f"app.quit: {e}")
-        if self.pid:
-            deadline = time.time() + 10
-            while time.time() < deadline and self.alive(self.pid):
-                nap(0.3)
-            if self.alive(self.pid) and self.ours(self.pid):
-                os.kill(self.pid, signal.SIGTERM)
-                notes.append(f"the private Herdr ({self.pid}) did not quit; sent SIGTERM")
+                if not self.pid:
+                    self.pid = self._read_pid_file()
+            if self.pid:
+                deadline = time.time() + 10
+                while time.time() < deadline and self.alive(self.pid):
+                    nap(0.3)
+                if self.alive(self.pid):
+                    subprocess.run(["taskkill", "/PID", str(self.pid), "/T", "/F"],
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+                    notes.append(f"the private Herdr ({self.pid}) did not quit; ran taskkill /T /F")
+            if self.win_task_name:
+                subprocess.run(["schtasks", "/Delete", "/TN", self.win_task_name, "/F"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+        else:
+            try:
+                if (self.app / "herdr-app.sock").exists():
+                    self.herdr("do", "app.quit", timeout=10)
+            except Exception as e:  # noqa: BLE001 - keep cleaning up
+                notes.append(f"app.quit: {e}")
+            if self.launched and not self.pid:
+                # Stopped before the window was found: look for it once more, it may still be starting.
+                deadline = time.time() + 10
+                while time.time() < deadline and not self.pid:
+                    self.pid = next((p for p in self.pids() if self.ours(p)), None)
+                    nap(0.5)
+                if self.pid and (self.app / "herdr-app.sock").exists():
+                    try:
+                        self.herdr("do", "app.quit", timeout=10)
+                    except Exception as e:  # noqa: BLE001 - keep cleaning up
+                        notes.append(f"app.quit: {e}")
+            if self.pid:
+                deadline = time.time() + 10
+                while time.time() < deadline and self.alive(self.pid):
+                    nap(0.3)
+                if self.alive(self.pid) and self.ours(self.pid):
+                    os.kill(self.pid, signal.SIGTERM)
+                    notes.append(f"the private Herdr ({self.pid}) did not quit; sent SIGTERM")
         if self.core:
             for name in self.terminals:
                 self.hc("kill", name)
             self.hc("server", "stop")
-            state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "herdr-core" / self.session
-            if self.session.startswith("rc") and state.is_dir():
-                shutil.rmtree(state, ignore_errors=True)
+            state_roots = [Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")]
+            if is_windows() and os.environ.get("LOCALAPPDATA"):
+                state_roots.append(Path(os.environ["LOCALAPPDATA"]))
+            for root in state_roots:
+                state = root / "herdr-core" / self.session
+                if self.session.startswith("rc") and state.is_dir():
+                    shutil.rmtree(state, ignore_errors=True)
         if not self.args.keep:
             for path in (self.app, self.ledger, self.src, self.poke_dir):
                 shutil.rmtree(path, ignore_errors=True)
-            (self.dir / FRAME).unlink(missing_ok=True)
+            for fname in (FRAME, "launch_win.py", "app.pid", "wc_before.png", "wc_restored.png"):
+                (self.dir / fname).unlink(missing_ok=True)
         return notes
 
     @staticmethod
     def alive(pid):
+        if is_windows():
+            kernel32 = getattr(getattr(ctypes, "windll", None), "kernel32", None)
+            if kernel32 is not None:
+                SYNCHRONIZE = 0x00100000
+                WAIT_TIMEOUT = 0x00000102
+                handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+                if not handle:
+                    return False
+                try:
+                    return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+                finally:
+                    kernel32.CloseHandle(handle)
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {int(pid)}", "/NH"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+            return str(int(pid)) in r.stdout
         try:
             os.kill(pid, 0)
             return True
@@ -804,6 +1058,8 @@ class Check:
 
 
 def main():
+    if is_windows() and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--rev", help="check this commit's mods/ and layouts/ (default: the working tree)")
     parser.add_argument("--pm", help="the PM whose project to show (default: the busiest with a conversation)")
@@ -811,12 +1067,16 @@ def main():
     parser.add_argument("--ledger", help="ledger to copy (default: $PM_HOME, ~/.claude/pm or ~/.dudu)")
     parser.add_argument("--dir", help="run folder (default: evidence/render-check/run; keep the socket path short)")
     parser.add_argument("--keep", action="store_true", help="keep the private app home, ledger copy and sources")
+    parser.add_argument("--verify-window-controls", action="store_true",
+                        help="also verify window.maximize grows and restores the window (saves shots/maximized.png)")
     args = parser.parse_args()
 
     def stop(signum, _frame):
         raise KeyboardInterrupt(f"signal {signum}")
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, stop)
+    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, stop)
 
     started = time.time()
     check, code, lines = Check(args), 2, []

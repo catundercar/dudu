@@ -100,7 +100,9 @@ INTERNAL_PROJECT_FILES = frozenset({
     "turn-cause.json", "taken-in.json", "takeover.json", "pm-settings.json",
     "schedules.json", "dudu-attachments.json", LIBRARY_STATE_FILE, RESEARCH_SOURCES_FILE,
     TASK_SEQ_FILE, "seat.json", "seat.lock", "next-session.json", "agy-transcript.json",
-    "pm-turn.json", "pm-turn.lock",
+    "pm-turn.json", "pm-turn.lock", "pm-turn-journal.jsonl", "pm-turn-journal.1.jsonl", "pm-turn.beat",
+    "applied-reports.json", "applied-reports.lock", "applied-reports.jsonl", "applied-reports.0001.jsonl",
+    "mailboxes",
 })
 IMAGE_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif",
@@ -799,6 +801,7 @@ def _has_marker(folder: Path, marker: str) -> bool:
 
 
 HELPERS_FOLDER = "helpers"
+MAILBOXES_FOLDER = "mailboxes"
 
 
 def _is_internal_project_rel(parts: tuple[str, ...]) -> bool:
@@ -806,10 +809,12 @@ def _is_internal_project_rel(parts: tuple[str, ...]) -> bool:
         return True
     if parts[-1].lower() == "conversation.jsonl":
         return True
-    if parts[0].lower() in (ATTACHMENTS_FOLDER, LEDGER_RESEARCH_FOLDER, HELPERS_FOLDER):
+    if parts[0].lower() in (ATTACHMENTS_FOLDER, LEDGER_RESEARCH_FOLDER, HELPERS_FOLDER, MAILBOXES_FOLDER):
         return True
-    if len(parts) == 1 and parts[0].lower() in INTERNAL_PROJECT_FILES:
-        return True
+    if len(parts) == 1:
+        low = parts[0].lower()
+        if low in INTERNAL_PROJECT_FILES or low.startswith("applied-reports.") or low.startswith("pm-turn-journal."):
+            return True
     return False
 
 

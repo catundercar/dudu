@@ -64,6 +64,10 @@ class TuiHost:
     def pane_run(self, pane_id: str, cmd: str, *, session: str | None = None) -> Any:
         return self.call("pane", "run", pane_id, cmd, session=session)
 
+    def bootstrap_pane_exec(self, pane_id: str, cmd: str, *, session: str | None = None) -> Any:
+        """Wave 1 shell-bootstrap primitive: launch an agent process inside a newly opened TUI pane."""
+        return self.pane_run(pane_id, cmd, session=session)
+
     def pane_close(self, pane_id: str, *, session: str | None = None) -> Any:
         return self.call("pane", "close", pane_id, session=session)
 
