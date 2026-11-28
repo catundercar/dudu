@@ -95,6 +95,7 @@ function wrap(cls, name) {
     const real = proto[method];
     if (typeof real !== 'function') continue;
     proto[method] = function (...args) {
+      if (method === 'init' && name === 'default' && ROLE === 'project') this.__renderCheckOwnsCommands = true;
       let out;
       try { out = real.apply(this, args); } catch (e) { failed(`${name}.${method}`, e); throw e; }
       if (method === 'render') say(`R ${MOD} ${name}`);
@@ -166,6 +167,7 @@ function listen(view, cx) {
           }
         }
         else if (command === 'rc-report') say(`STATE ${MOD} ` + JSON.stringify(report(view)));
+        else if (typeof view.handleModCommand === 'function') view.handleModCommand(command, cx);
       } catch (e) { failed(`command ${command}`, e); }
       cx.notify();
     }
@@ -507,7 +509,7 @@ class Check:
             src, dst = self.src / "mods" / name, self.app / "mods" / name
             copy_plain(src, dst)
             role = {DRIVER: "driver", PROJECT: "project"}.get(name, "")
-            if role and "nextCommand" in (src / "main.js").read_text(encoding="utf-8"):
+            if role == "driver" and "nextCommand" in (src / "main.js").read_text(encoding="utf-8"):
                 raise Blocked(f"{name} now reads nextCommand() itself; the check's commands would take its keys. "
                               f"Pick another driver in tests/render_check.py")
             others = sorted(p.name for p in dst.glob("*.js") if p.name != "main.js" and ".test." not in p.name)

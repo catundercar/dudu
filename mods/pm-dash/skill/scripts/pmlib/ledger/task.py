@@ -8,7 +8,7 @@ import datetime
 import re
 from typing import Any, Iterator
 
-from ..project.turn_reducer import Endpoint, record_endpoint
+from ..project.turn_reducer import Endpoint, endpoint_from_dict, parse_legacy_endpoint, record_endpoint
 from ..store import valid_task_number
 
 
@@ -108,6 +108,14 @@ class Task(MutableMapping):
     @property
     def project(self) -> str:
         return str(self._data.get("project") or "")
+
+    @property
+    def project_slug(self) -> str:
+        return str(self._data.get("project_slug") or "")
+
+    @property
+    def folder_alias(self) -> str:
+        return str(self._data.get("folder_alias") or "")
 
     @property
     def repo(self) -> str:
@@ -264,6 +272,38 @@ def started_by_pm(task: Any) -> bool:
 def task_endpoint(task: Any) -> Endpoint | None:
     """Resolve the structured `Endpoint` for a task record (reading `endpoint` or legacy `pane`)."""
     return record_endpoint(_raw_dict(task))
+
+
+def reconcile_task_endpoint(raw: MutableMapping[str, Any]) -> None:
+    """Keep a task's structured `endpoint` (written by a remote dispatch) from going stale. When the task's `pane`
+    names another terminal (a reattach, an escalation or a new dispatch moved it), the pane wins, one epoch on, and
+    the remote state it left goes to `remote_history` (its outbox is still pulled: a late report from the old
+    worker is archived, MR-D4). Without a structured endpoint, or with a pane that agrees, nothing changes."""
+    ep_raw = raw.get("endpoint")
+    pane = str(raw.get("pane") or "").strip()
+    if not isinstance(ep_raw, MutableMapping) or not pane:
+        return
+    ep = endpoint_from_dict(ep_raw)
+    moved = parse_legacy_endpoint(pane, str(raw.get("workspace") or ""), runtime_hint=str(raw.get("runtime") or ""))
+    if ep is None or moved is None or moved.uid == ep.uid:
+        return
+    remote = raw.get("remote")
+    if isinstance(remote, dict) and str(remote.get("machine") or "") == str(ep.machine or "") \
+            and str(remote.get("terminal") or "") == ep.terminal:
+        hist = [dict(h) for h in (raw.get("remote_history") or []) if isinstance(h, dict)]
+        hist.append(dict(remote))
+        raw["remote_history"] = hist[-8:]
+        raw.pop("remote", None)
+    sh = raw.get("self_hosted")
+    if isinstance(sh, dict) and str(sh.get("node_id") or "") == str(ep.machine or "") \
+            and str(sh.get("slot") or "") == ep.terminal:
+        hist = [dict(h) for h in (raw.get("self_hosted_history") or []) if isinstance(h, dict)]
+        hist.append(dict(sh))
+        raw["self_hosted_history"] = hist[-8:]
+        raw.pop("self_hosted", None)
+    raw["endpoint"] = Endpoint(runtime=moved.runtime, machine=moved.machine, terminal=moved.terminal,
+                               workspace=moved.workspace, agent_kind=moved.agent_kind or ep.agent_kind,
+                               epoch=int(ep.epoch or 1) + 1).to_dict()
 
 
 def hc_terminal_of(task: Any) -> str:

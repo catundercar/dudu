@@ -64,6 +64,7 @@ def _outside_reads_impl(
     repo: str | Path | None,
     *briefs: str | Path | None,
     herdr_docs: Path | str | None = None,
+    extra_folders: Iterable[str | Path] = (),
 ) -> list[str]:
     docs = HERDR_DOCS if herdr_docs is None else Path(herdr_docs)
     places = [b if wide_folder(b.parent) else b.parent for b in (Path(x).absolute() for x in briefs if x)]
@@ -71,6 +72,12 @@ def _outside_reads_impl(
     for place in [*places, Path(repo) / "briefs" if repo else None, docs]:
         if place and place.exists():
             out += [p for p in dict.fromkeys((str(place.absolute()), str(place.resolve()))) if p not in out]
+    for folder in extra_folders or ():
+        if not folder:
+            continue
+        fp = Path(folder)
+        if fp.exists() and not wide_folder(fp):
+            out += [p for p in dict.fromkeys((str(fp.absolute()), str(fp.resolve()))) if p not in out]
     return out
 
 
@@ -78,11 +85,12 @@ def outside_reads(
     repo: str | Path | None,
     *briefs: str | Path | None,
     herdr_docs: Path | str | None = None,
+    extra_folders: Iterable[str | Path] = (),
 ) -> list[str]:
     """What a worker reads outside its worktree: each brief's folder, the project's briefs/ (briefs and the
-    screenshots they name) and Herdr's API docs. A brief kept in a wide folder (wide_folder) is let through alone,
-    not its folder. Every spelling a read may arrive by: Claude Code follows no link."""
-    return _outside_reads_impl(repo, *briefs, herdr_docs=herdr_docs)
+    screenshots they name), Herdr's API docs, and sibling linked workspace folders. A brief kept in a wide folder
+    (wide_folder) is let through alone, not its folder. Every spelling a read may arrive by: Claude Code follows no link."""
+    return _outside_reads_impl(repo, *briefs, herdr_docs=herdr_docs, extra_folders=extra_folders)
 
 
 _DEFAULT_OUTSIDE_READS = outside_reads

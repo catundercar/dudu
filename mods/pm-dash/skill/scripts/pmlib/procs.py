@@ -746,6 +746,10 @@ def _default_agy_dir(env_map: Mapping[str, str]) -> Path:
     return Path(env_map.get("AGY_DATA_DIR") or Path.home() / ".gemini" / "antigravity-cli")
 
 
+def _default_pi_sessions(env_map: Mapping[str, str]) -> Path:
+    return Path(env_map.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent") / "sessions"
+
+
 def build_context(
     home_option: str | Path | None = None,
     *,
@@ -774,6 +778,7 @@ def build_context(
     c_projects = c_dir / "projects"
     c_sessions = _default_codex_dir(env_map) / "sessions"
     a_dir = _default_agy_dir(env_map)
+    p_sessions = _default_pi_sessions(env_map)
     h_docs = Path.home() / ".config" / "herdr-app"
     ctx = context.Context(
         home=home_obj,
@@ -793,6 +798,7 @@ def build_context(
         claude_projects=c_projects,
         codex_sessions=c_sessions,
         agy_dir=a_dir,
+        pi_sessions=p_sessions,
         herdr_docs=h_docs,
         after_save=tuple(after_save) if after_save is not None else (),
         seat_alive=seat_alive,
@@ -828,6 +834,7 @@ def build_context(
         deps_watch_mod = _load_hook_module("pmlib.events.deps_watch")
         agy_watch_mod = _load_hook_module("pmlib.events.agy_watch")
         dream_mod = _load_hook_module("pmlib.memory.dream")
+        reports_mod = _load_hook_module("pmlib.reports")
         watchers: list[Any] = []
         if helpers_watch_mod is not None:
             watchers.append(context.DeliverWatcher(
@@ -850,6 +857,12 @@ def build_context(
                 name="dream",
                 look=lambda repo, stops, bases: dream_mod.DreamWatcher(ctx).look(repo, stops, bases),
             ))
+        if reports_mod is not None:
+            # Remote `<machine>/t7` workers' report outboxes, pulled by `seq` with idle backoff (phase 6a).
+            watchers.append(context.DeliverWatcher(
+                name="remote-reports",
+                look=lambda repo, stops, bases: reports_mod.RemoteReportSync(ctx).look(repo, stops, bases),
+            ))
         ctx.deliver_watchers = tuple(watchers)
     if deliver_holds is None and seat_mod is not None:
         ctx.deliver_holds = (lambda repo: seat_mod.next_session_ready(repo, ctx=ctx),)
@@ -861,6 +874,9 @@ def build_context(
             sup = build_context(str(home_obj.root), env=supervisor_env(env_map))
             return landing_mod.Landing(sup).handoff_to_helper(task_id, approval, principal=principal)
         ctx.land_handoff = _land_handoff
+    handover_mod = _load_hook_module("pmlib.manager.handover")
+    if handover_mod is not None:
+        ctx.compact_sync = lambda repo: handover_mod.handover_compact_text(repo, ctx=ctx)
     discord_alert_mod = _load_hook_module("pmlib.discord")
     if discord_alert_mod is not None:
         ctx.alert_sinks = (lambda slug, repo, alert: discord_alert_mod.DiscordMirror(ctx).alert_undelivered(

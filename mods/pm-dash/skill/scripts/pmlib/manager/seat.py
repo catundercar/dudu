@@ -162,14 +162,14 @@ def swap_reason_text(a: Any = None, *, reason: str | None = None, model: str | N
     return tr("manual session swap", "手动换会话")
 
 
-def record_swap_notice(repo: str | Path, reason: str, by: str = "", *, ctx: Context | None = None) -> None:
+def record_swap_notice(repo: str | Path, reason: str, by: str = "", *, slug: str | None = None, ctx: Context | None = None) -> None:
     """Append a transparent one-line notice to conversation.jsonl explaining why the PM session swapped."""
     c = Context.from_env() if ctx is None else ctx
     text = c.config.tr(
         f"PM session swapped ({reason}); taken over from the ledger.",
         f"PM 会话已切换（原因：{reason}），已从台账接手。",
     )
-    Conversation(c, repo).record("pm", text=text, **({"by": by} if by else {}), notice=True)
+    Conversation(c, repo, slug=slug).record("pm", text=text, **({"by": by} if by else {}), notice=True)
 
 
 def _next_session_ready_impl(repo: str | Path, *, ctx: Context) -> bool:

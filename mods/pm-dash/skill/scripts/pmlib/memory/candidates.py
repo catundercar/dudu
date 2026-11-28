@@ -40,13 +40,17 @@ def candidate_names_of(task: dict[str, Any]) -> set[str]:
 class MemoryCandidates:
     """Worker candidate memories under `projects/<slug>/memory/candidates/<worker>/`."""
 
-    def __init__(self, ctx: Context, repo: str | Path) -> None:
+    def __init__(self, ctx: Context, repo: str | Path = "", *, slug: str | None = None) -> None:
         self.ctx = ctx
-        self.repo = str(repo)
-        self.slug = project_slug(repo)
+        self.repo = str(repo or "")
+        resolved_slug = slug if slug else (ctx.store.folder_project_slug(repo) if repo else "")
+        self._explicit_slug = slug or (resolved_slug if (resolved_slug and repo and resolved_slug != project_slug(repo)) else "")
+        self.slug = resolved_slug
 
     @property
     def dir(self) -> Path:
+        if self._explicit_slug:
+            return self.ctx.home.project(self._explicit_slug).memory / "candidates"
         return self.ctx.home.memory_dir(self.repo) / "candidates"
 
     def list(self) -> list[tuple[str, dict[str, Any]]]:
@@ -117,7 +121,7 @@ class MemoryCandidates:
         if len(found) != 1:
             raise Refused(f"no single candidate called {candidate} (`pm.py memory --candidates` lists them)")
         who, m = found[0]
-        layer = MemoryLayer(self.ctx, self.repo)
+        layer = MemoryLayer(self.ctx, self.repo, slug=self._explicit_slug or None)
         kept: dict[str, Any] | None = None
         notes: list[str] = []
         if not drop:

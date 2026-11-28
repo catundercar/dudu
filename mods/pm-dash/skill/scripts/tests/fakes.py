@@ -1703,6 +1703,7 @@ def make_ctx(
         claude_projects=claude_dir / "projects",
         codex_sessions=base / "codex" / "sessions",
         agy_dir=Path(agy_dir) if agy_dir is not None else base / "agy",
+        pi_sessions=base / "pi" / "sessions",
         herdr_docs=base / "herdr-app",
         candidate_pruner=candidate_pruner,
     )

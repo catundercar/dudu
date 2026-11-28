@@ -24,6 +24,7 @@ AGENT_KINDS = {
     # --advisor is not in `claude --help`; a Fable advisor needs the account to have agreed to Fable's billing once.
     "claude": {"argv": ["claude"], "model": ["--model", "{}"], "effort": ["--effort", "{}"],
                "advisor": ["--advisor", "{}"], "fallback": ["--fallback-model", "{}"], "prompt_arg": True},
+    "agy": {"argv": ["agy"], "model": ["--model", "{}"], "effort": [], "prompt_arg": False},
     # No update prompt at startup: it would take the place of the input and the brief could not be delivered.
     "codex": {"argv": ["codex", "-c", "check_for_update_on_startup=false"], "model": ["-m", "{}"],
               "effort": ["-c", 'model_reasoning_effort="{}"'], "prompt_arg": True},

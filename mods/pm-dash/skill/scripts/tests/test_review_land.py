@@ -724,7 +724,7 @@ class LandAndReview(ReviewLandCase):
         repo = self.git.project_root(repo_dir)
         assert repo is not None
         claude = self.ctx.claude_dir
-        for name in ("pm", "wecom", "other-skill"):
+        for name in ("pm", "chat-bot", "other-skill"):
             (claude / "skills" / name).mkdir(parents=True, exist_ok=True)
             (claude / "skills" / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
         (claude / "skills" / "synced" / "b1").mkdir(parents=True, exist_ok=True)
@@ -739,7 +739,7 @@ class LandAndReview(ReviewLandCase):
         # Plugins off, other skills hidden, plus guided compaction settings for Claude Code PM; pm stays listed.
         self.assertEqual(json.loads(Path(settings).read_text()), {
             "enabledPlugins": {"playwright@x": False},
-            "skillOverrides": {"anthropic-skills:docs": "user-invocable-only", "wecom": "user-invocable-only",
+            "skillOverrides": {"anthropic-skills:docs": "user-invocable-only", "chat-bot": "user-invocable-only",
                                "other-skill": "user-invocable-only"},
             "autoCompactWindow": 200000,
             "idleCompaction": True,
@@ -906,8 +906,8 @@ class ResearchCollectionTests(ReviewLandCase):
         self.assertIn("主检出人工修订", dst.read_text(encoding="utf-8"))
 
     def test_non_ignored_evidence_repo_collects_to_ledger_keeps_main_clean_and_retires_and_lands(self) -> None:
-        # 1. Pure research thread in a repo where `evidence/` is NOT in .gitignore (e.g. LiquidLight).
-        repo, slug = self.make_repo("liquidlight", ignore_evidence=False)
+        # 1. Pure research thread in a repo where `evidence/` is NOT in .gitignore (e.g. an external app).
+        repo, slug = self.make_repo("external-app", ignore_evidence=False)
         wt = self.add_worktree(repo, "dev/perf-study", "wt-perf-study")
         tid = self.register_task(repo, "dev/perf-study", wt, title="性能调研")
         (wt / "evidence/perf-study").mkdir(parents=True)
@@ -1629,7 +1629,9 @@ class DelegatedMergeTests(DelegateBase):
             review_cmds.cmd_land(argparse.Namespace(id=tid, keep=False, message=None, timeout=60), ctx=self.ctx)
         self.assertEqual(cm.exception.code, LAND_REFUSED)
 
-        # The authorized exec helper lands cleanly and retires the offline worktree synchronously
+        # The authorized exec helper lands cleanly, retires the offline worktree, and its own `helper done` is quiet
+        helper_entry = next(h for h in helper_entries(self.ctx.store.registration(self.name)) if h["name"] == la["helper_name"])
+        self.assertTrue(helper_entry.get("quiet"))
         self.be(f"hc:{hterm}")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -1638,6 +1640,26 @@ class DelegatedMergeTests(DelegateBase):
         self.assertEqual(self.load_raw(tid)["status"], "merged")
         self.assertTrue(self.load_raw(tid).get("retired"))
         self.assertFalse(wt.exists())
+
+        # Helper reporting `helper done` after `land` already woke the PM with `status=merged` must NOT cause a 2nd wake.
+        from pmlib.helpers.service import Helpers
+        Helpers(self.ctx).done(text="Merged cleanly and retired.")
+        helper_evs = [e for e in Conversation(self.ctx, str(self.repo)).events() if e.get("type") == "helper"]
+        self.assertEqual(len(helper_evs), 1)
+        self.assertFalse(helper_evs[0]["wake"])
+        _, _, pending = Delivery(self.ctx, str(self.repo)).pending_batch()
+        self.assertEqual([(p["event"]["type"], p["event"].get("status")) for p in pending], [("thread", "merged")])
+
+        # Safety net: if a quiet `land` helper times out/exits while its task is still `in_progress`, it DOES wake PM.
+        from pmlib.helpers.records import helper_should_wake_pm
+        tid2, _, _ = self.make_worker_task("still-open", branch="dev/still-open", pane="hc:t98", status="in_progress")
+        q_entry = {"quiet": True, "for_task": tid2}
+        self.assertFalse(helper_should_wake_pm(self.ctx, q_entry, "done"))
+        self.assertTrue(helper_should_wake_pm(self.ctx, q_entry, "timeout"))
+        self.assertTrue(helper_should_wake_pm(self.ctx, q_entry, "exited"))
+        self.assertTrue(helper_should_wake_pm(self.ctx, q_entry, "blocked"))
+        # Once the task is already merged, timeout/exited stays quiet.
+        self.assertFalse(helper_should_wake_pm(self.ctx, {"quiet": True, "for_task": tid}, "timeout"))
 
     def test_supervisor_hands_a_stalled_worker_merge_to_an_exec_helper_as_itself(self) -> None:
         """No `HC_TERMINAL_ID` posing as the PM: the stall watcher hands the approved merge over in process, as

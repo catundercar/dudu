@@ -7,7 +7,10 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 from typing import Any, Iterator
+import urllib.parse
+import urllib.request
 
 from ..agents.sessions import claude_folder, first_cwd, pm_sessions, session_score
 from ..caller import Caller
@@ -16,6 +19,7 @@ from ..home import project_slug
 from ..ledger.ledger import Ledger
 from ..ledger.task import ACTIVE, ATTACHED, Task, created_at
 from ..project.project import in_scope
+from ..store import registration_slug
 
 
 def _worker_raw_task(task: Any) -> dict[str, Any]:
@@ -157,6 +161,7 @@ def pm_session_info_for(ctx: Context, rec: dict[str, Any]) -> dict[str, Any] | N
     if agent and agent != "claude":
         return None
     repo = rec.get("repo") or ""
+    pslug = registration_slug(rec) or (ctx.store.folder_project_slug(repo) if repo else "")
     hints = [repo] if repo else []
     if "agent_session" in rec:
         recorded = rec.get("agent_session")
@@ -165,9 +170,9 @@ def pm_session_info_for(ctx: Context, rec: dict[str, Any]) -> dict[str, Any] | N
         # Explicitly cleared (start / rotate / external claim / archive): do not fall back to stale taken-in.json.
         return None
     # Legacy fallback for already-running PMs before agent_session existed: taken-in.json tracks the latest transcript.
-    if not repo:
+    if not repo and not pslug:
         return None
-    mark_path = ctx.home.project_for(repo).taken_in
+    mark_path = ctx.home.project_for(pslug or repo).taken_in
     if not mark_path.is_file():
         return None
     try:
@@ -302,6 +307,171 @@ def codex_sessions_for(
                    "mtime": path.stat().st_mtime}
 
 
+def _agy_uri_to_path(uri: str) -> str:
+    text = str(uri or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("file://"):
+        parsed = urllib.parse.urlparse(text)
+        raw_path = urllib.request.url2pathname(parsed.path or "")
+        if not raw_path:
+            return ""
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
+            raw_path = f"//{parsed.netloc}{raw_path}"
+        return raw_path
+    return text
+
+
+def _agy_read_summary_workspaces(agy_dir: Path) -> dict[str, list[str]]:
+    db_path = agy_dir / "conversation_summaries.db"
+    if not db_path.is_file():
+        return {}
+    out: dict[str, list[str]] = {}
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
+        try:
+            for cid, raw_uris in con.execute("SELECT conversation_id, workspace_uris FROM conversation_summaries"):
+                if not cid:
+                    continue
+                paths: list[str] = []
+                try:
+                    items = json.loads(raw_uris or "[]")
+                except ValueError:
+                    items = []
+                if isinstance(items, list):
+                    for uri in items:
+                        p = _agy_uri_to_path(str(uri or ""))
+                        if p:
+                            paths.append(p)
+                out[str(cid)] = paths
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+    return out
+
+
+def _agy_opening_blob(path: Path, max_bytes: int = 256 << 10) -> str:
+    """Read the opening of an agy transcript and append decoded USER_INPUT contents so session_score
+    can match task ids and `update <id>` cleanly even across JSON escapes."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(max_bytes).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    decoded_users: list[str] = []
+    for line in head.split("\n")[:20]:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("type") == "PLANNER_RESPONSE":
+            break
+        if row.get("type") == "USER_INPUT" and isinstance(row.get("content"), str):
+            decoded_users.append(row["content"])
+    if decoded_users:
+        return "\n".join(decoded_users) + "\n" + head
+    return head
+
+
+def agy_sessions_for(
+    ctx: Context,
+    task: Any,
+    places: list[str],
+    others: frozenset[str] = frozenset(),
+) -> Iterator[dict[str, Any]]:
+    raw = _worker_raw_task(task)
+    since = raw.get("session_since") if isinstance(raw.get("session_since"), (int, float)) else (created_at(raw) - 600)
+    exclude = set(s for s in (raw.get("prior_sessions") or []) if isinstance(s, str)) | set(others)
+    agy_dir = getattr(ctx, "agy_dir", None)
+    if agy_dir is None:
+        env_dir = (ctx.env or {}).get("AGY_DATA_DIR") if hasattr(ctx, "env") else ""
+        agy_dir = Path(env_dir) if env_dir else (Path.home() / ".gemini" / "antigravity-cli")
+    else:
+        agy_dir = Path(agy_dir)
+    brain = agy_dir / "brain"
+    if not brain.is_dir():
+        return
+    norm_places: list[str] = []
+    for p in places:
+        if not p:
+            continue
+        norm_places.append(str(Path(p)))
+        try:
+            rp = str(Path(p).resolve())
+            if rp not in norm_places:
+                norm_places.append(rp)
+        except OSError:
+            pass
+
+    summaries = _agy_read_summary_workspaces(agy_dir)
+    matched_cwd: dict[str, str] = {}
+    excluded_by_ws: set[str] = set()
+    for cid, ws_paths in summaries.items():
+        if not ws_paths:
+            continue
+        hit = ""
+        for wp in ws_paths:
+            candidates = [wp]
+            try:
+                rwp = str(Path(wp).resolve())
+                if rwp not in candidates:
+                    candidates.append(rwp)
+            except OSError:
+                pass
+            if any(c == p or c.startswith(p + "/") for c in candidates for p in norm_places):
+                hit = wp
+                break
+        if hit:
+            matched_cwd[cid] = hit
+        elif norm_places:
+            excluded_by_ws.add(cid)
+
+    candidates: list[tuple[int, float, str, Path]] = []
+    try:
+        entries = list(brain.iterdir())
+    except OSError:
+        return
+    for conv_dir in entries:
+        cid = conv_dir.name
+        if cid in exclude or cid in excluded_by_ws or not conv_dir.is_dir():
+            continue
+        logs = conv_dir / ".system_generated" / "logs"
+        tr_path = logs / "transcript_full.jsonl"
+        if not tr_path.is_file():
+            tr_path = logs / "transcript.jsonl"
+            if not tr_path.is_file():
+                continue
+        try:
+            mtime = tr_path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < since:
+            continue
+        priority = 1 if cid in matched_cwd else 0
+        candidates.append((priority, mtime, cid, tr_path))
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for _, mtime, cid, tr_path in candidates[:60]:
+        blob = _agy_opening_blob(tr_path)
+        if not blob:
+            continue
+        score = session_score(blob, raw["id"])
+        if score:
+            yield {
+                "kind": "agy",
+                "id": cid,
+                "path": str(tr_path),
+                "cwd": matched_cwd.get(cid, ""),
+                "score": score,
+                "mtime": mtime,
+            }
+
+
 def find_session_for(ctx: Context, task: Any, old_cwd: str = "") -> dict[str, Any] | None:
     """The session of the task's agent: the one the ledger recorded, else transcript discovery."""
     if getattr(ctx, "_legacy", False) and find_session is not _DEFAULT_FIND_SESSION:
@@ -312,7 +482,7 @@ def find_session_for(ctx: Context, task: Any, old_cwd: str = "") -> dict[str, An
 def _find_session_impl(ctx: Context, task: Any, old_cwd: str = "") -> dict[str, Any] | None:
     raw = _worker_raw_task(task)
     kind = dispatched_with(raw)[0]
-    if kind and kind not in ("claude", "codex"):  # the kinds resume_argv can resume
+    if kind and kind not in ("claude", "codex", "agy"):
         return None
     kept = raw.get("session") or {}
     if kept.get("kind") == "claude" and kept.get("id") and kind in ("", "claude"):
@@ -328,10 +498,16 @@ def _find_session_impl(ctx: Context, task: Any, old_cwd: str = "") -> dict[str, 
                 path = max(hits, key=lambda p: p.stat().st_mtime) if hits else None
         if path:
             return {"kind": "claude", "id": kept["id"], "path": str(path), "cwd": first_cwd(path)}
+    if kept.get("kind") == "agy" and kept.get("id") and kind in ("", "agy"):
+        reader = ctx.agents.sessions_reader()
+        path = reader.transcript(kept) if reader is not None else None
+        if path:
+            return {"kind": "agy", "id": kept["id"], "path": str(path), "cwd": ""}
     places = session_places_for(ctx, raw, old_cwd)
     others = claimed_sessions_for(ctx, raw)
     found = (list(claude_sessions_for(ctx, raw, places, others)) if kind in ("", "claude") else []) \
-        + (list(codex_sessions_for(ctx, raw, places, others)) if kind in ("", "codex") else [])
+        + (list(codex_sessions_for(ctx, raw, places, others)) if kind in ("", "codex") else []) \
+        + (list(agy_sessions_for(ctx, raw, places, others)) if kind in ("", "agy") else [])
     found.sort(key=lambda s: (s["score"], s["mtime"]), reverse=True)
     return found[0] if found else None
 

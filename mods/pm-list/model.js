@@ -26,7 +26,7 @@ export function pmStatus(pm, terminal, exact, live) {
 
 // The project's own name: the sidebar sits under the Projects entry, so no "PM-" before it.
 export function pmName(pm) {
-  return pm.project || String(pm.name || '').replace(/^pm-/, '');
+  return String(pm?.display_name || pm?.space_name || pm?.project || '').trim() || String(pm?.name || '').replace(/^pm-/, '');
 }
 
 // How many of a project's threads wait for the user: the ledger's `counts`, else its blocked tasks the user has not answered.
@@ -227,6 +227,75 @@ export function track(changed, rows, now) {
 }
 
 export const HEADER = 30, ROW = 30, COMPACT_ROW = 28, PAD = 6, MAX_ROWS = 8;
+export const HERDR_LISTS_ID = 'herdr-lists', DRAWER_ROW = 38, COMPACT_DRAWER_ROW = 30;
+export const HERDR_LISTS_ACTION = `layout.toggle:${HERDR_LISTS_ID}`;
+
+function isHerdrListsAction(action) {
+  if (action === HERDR_LISTS_ACTION) return true;
+  if (action && typeof action === 'object') {
+    return action.command === 'layout.toggle' && action.args?.id === HERDR_LISTS_ID;
+  }
+  if (typeof action === 'string' && action.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(action);
+      return parsed?.command === 'layout.toggle' && parsed?.args?.id === HERDR_LISTS_ID;
+    } catch (_) { return false; }
+  }
+  return false;
+}
+
+// Format a Herdr keystroke ("cmd-shift-e", "ctrl-shift-e") into a compact keycap label ("⇧⌘E", "Ctrl+Shift+E").
+export function formatShortcut(stroke, platform = 'macos') {
+  const raw = typeof stroke === 'string' ? stroke.trim() : '';
+  if (!raw) return '';
+  const mac = platform === 'macos';
+  const names = mac
+    ? { ctrl: '⌃', alt: '⌥', shift: '⇧', cmd: '⌘', fn: 'fn' }
+    : { ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', cmd: 'Super', fn: 'Fn' };
+  const alias = { secondary: mac ? 'cmd' : 'ctrl', super: 'cmd', win: 'cmd', option: 'alt' };
+  return raw.split(/\s+/).map(chord => {
+    const parts = chord.split('-');
+    let key = parts.pop();
+    if (key === '') { key = '-'; parts.pop(); }
+    if (!key) return '';
+    const held = new Set(parts.map(m => alias[m.toLowerCase()] ?? m.toLowerCase()));
+    if (/^[A-Z]$/.test(key)) held.add('shift');
+    const label = key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1).toLowerCase();
+    return [...Object.keys(names).filter(m => held.has(m)).map(m => names[m]), label].join(mac ? '' : '+');
+  }).filter(Boolean).join(' ');
+}
+
+// Active shortcut bound to `layout.toggle:herdr-lists` in keys.json (layout:<name> beats global).
+export function herdrListsShortcut(bindings = [], layoutName = 'dudu', platform = 'macos') {
+  const list = Array.isArray(bindings) ? bindings : [];
+  const layoutSection = layoutName ? `layout:${layoutName}` : '';
+  const hit = (layoutSection && list.find(b => b?.section === layoutSection && isHerdrListsAction(b?.action) && b?.keys))
+    || list.find(b => b?.section === 'global' && isHerdrListsAction(b?.action) && b?.keys);
+  return hit ? formatShortcut(hit.keys, platform) : '';
+}
+
+// Concise, bilingual micro-surface tooltip content for the Spaces & Agents drawer toggle.
+export function drawerTipParts({ hidden = true, badge = null, lang = 'en', compact = false, shortcut = '' } = {}) {
+  const zh = lang === 'zh';
+  const s = badge?.spacesCount || 0, a = badge?.agentsCount || 0, act = badge?.active || 0;
+  let text = '';
+  let activeText = '';
+  if (!hidden) {
+    text = zh ? '收起 Spaces & Agents' : 'Hide Spaces & Agents';
+  } else if (compact) {
+    text = s || a ? `Spaces & Agents · ${s + a}` : 'Spaces & Agents';
+    if (act > 0) activeText = zh ? `${act} 活跃` : `${act} active`;
+  } else if (s || a) {
+    text = zh
+      ? `${s} 空间 · ${a} 终端`
+      : `${s} ${s === 1 ? 'space' : 'spaces'} · ${a} ${a === 1 ? 'agent' : 'agents'}`;
+    if (act > 0) activeText = zh ? `${act} 活跃` : `${act} active`;
+  } else {
+    text = zh ? '展开 Spaces & Agents' : 'Show Spaces & Agents';
+  }
+  const a11y = [text, activeText, shortcut].filter(Boolean).join(' · ');
+  return { text, activeText, shortcut: shortcut || '', a11y };
+}
 // The block's height in px: the header alone with no PM, at most MAX_ROWS rows' height
 // (the rest scroll). The rail keeps a sliver so the block still gets its width, and so
 // does a list without its header (see underNav) while it has no PM.
@@ -234,6 +303,44 @@ export function listHeight(count, compact, header = true) {
   const rows = Math.min(count, MAX_ROWS);
   if (compact) return rows * COMPACT_ROW + PAD * 2;
   return (header ? HEADER : 0) + (rows ? rows * ROW + PAD : header ? 0 : PAD);
+}
+
+export function findHerdrLists(tree) {
+  if (!tree || typeof tree !== 'object') return null;
+  if (tree.id === HERDR_LISTS_ID) return tree;
+  for (const child of Array.isArray(tree.children) ? tree.children : []) {
+    const found = findHerdrLists(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Plan A progressive drawer state: when `herdr-lists` is present in the layout and hidden,
+// pm-list expands with weight:1 so its bottom drawer row sits flush above Settings; when shown,
+// pm-list shrinks to its content + drawer row so Spaces & Agents get the remaining height.
+export function herdrListsState(tree) {
+  const node = findHerdrLists(tree);
+  return { present: Boolean(node), hidden: Boolean(node?.hidden) };
+}
+
+export function listSizeSpec(count, compact, header = true, herdrState = null) {
+  if (herdrState?.present) {
+    if (herdrState.hidden) return { weight: 1 };
+    return { px: listHeight(count, compact, header) + (compact ? COMPACT_DRAWER_ROW : DRAWER_ROW) };
+  }
+  return { px: listHeight(count, compact, header) };
+}
+
+export function herdrListsBadge(spacesList = [], agentsList = []) {
+  const spacesCount = Array.isArray(spacesList) ? spacesList.length : 0;
+  const liveAgents = Array.isArray(agentsList) ? agentsList : [];
+  const agentsCount = liveAgents.length;
+  const blocked = liveAgents.filter(a => a?.status === 'blocked').length;
+  const working = liveAgents.filter(a => a?.status === 'working').length;
+  const active = blocked + working;
+  const total = spacesCount + agentsCount;
+  const tone = blocked > 0 ? 'blocked' : working > 0 ? 'working' : '';
+  return { spacesCount, agentsCount, total, active, blocked, working, tone };
 }
 
 // True when the list's block comes right after pm-nav's in the same column: the PM title and the

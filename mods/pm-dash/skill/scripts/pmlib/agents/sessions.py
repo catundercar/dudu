@@ -83,13 +83,13 @@ def context_tokens(path):
     return used
 
 
-def sessions_reader(cache=False, *, home=None, claude_projects=None):
-    """Sessions interface wired to pm.py's dynamic CLAUDE_PROJECTS and optional disk cache."""
+def sessions_reader(cache=False, *, home=None, claude_projects=None, agy_dir=None):
+    """Sessions interface wired to pm.py's dynamic CLAUDE_PROJECTS, agy_dir, and optional disk cache."""
     if pm_sessions is None:
         return None
     cache_path = (lambda: (home or pmlib.home.current()).context_tokens_cache) if cache else None
     projects_dir = claude_projects if claude_projects is not None else (lambda: CLAUDE_PROJECTS)
-    return pm_sessions.default_sessions(projects_dir=projects_dir, cache_path=cache_path)
+    return pm_sessions.default_sessions(projects_dir=projects_dir, cache_path=cache_path, agy_dir=agy_dir)
 
 
 def opening(text):
@@ -100,8 +100,11 @@ def opening(text):
             row = json.loads(line)
         except ValueError:
             row = None
-        if isinstance(row, dict) and "assistant" in (row.get("type"), (row.get("message") or {}).get("role"),
-                                                     (row.get("payload") or {}).get("role")):
+        if isinstance(row, dict) and (
+            "assistant" in (row.get("type"), (row.get("message") or {}).get("role"),
+                            (row.get("payload") or {}).get("role"))
+            or row.get("type") == "PLANNER_RESPONSE"
+        ):
             break
         head.append(line)
     return "\n".join(head)

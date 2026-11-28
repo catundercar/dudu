@@ -14,9 +14,9 @@ from ..osutil import slugify
 from ..project import conversation as conversation_mod
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
-from ..store import valid_task_id
+from ..store import registration_slug, valid_task_id
 from .plan import advance_outer_plan_step
-from .task import Task, parse_task_num_ref, task_number
+from .task import Task, parse_task_num_ref, reconcile_task_endpoint, task_number
 from .transition import Transition, TransitionHooks, TransitionPlan, apply_transition
 
 
@@ -36,6 +36,7 @@ class Change:
         self._clock = clock
         self._actor = actor
         self._pending_notes: list[tuple[str, dict[str, Any]]] = []
+        self._pending_slugs: list[str] = []
 
     @property
     def pending_notes(self) -> list[tuple[str, dict[str, Any]]]:
@@ -52,7 +53,9 @@ class Change:
         raw = task.raw if isinstance(task, Task) else task
         entry = {"at": self._clock.now(), "by": self._actor, "text": text}
         raw.setdefault("log", []).append(entry)
-        if raw.get("repo"):  # every ledger entry is also an event in the project's conversation
+        pslug = str(raw.get("project_slug") or "").strip()
+        repo = str(raw.get("repo") or "").strip()
+        if pslug or repo:  # every ledger entry is also an event in the project's conversation
             num = task_number(raw)
             fields = {
                 "task": raw.get("id"),
@@ -63,7 +66,8 @@ class Change:
                 **({"number": num} if num else {}),
                 **extra,
             }
-            self._pending_notes.append((raw["repo"], fields))
+            self._pending_notes.append((repo, fields))
+            self._pending_slugs.append(pslug)
         return entry
 
 
@@ -102,10 +106,22 @@ class Ledger:
 
     def project_tasks(self, repo: str | Path) -> list[Task]:
         repo_s = str(repo)
+        rec = self._projects.pm_record(repo_s)
+        if isinstance(rec, dict):
+            target_slug = registration_slug(rec)
+            if target_slug:
+                regs = self.ctx.store._reg_folder_index()
+                return [
+                    Task(t) for t in self.raw_tasks()
+                    if self.ctx.store._task_slug(t, regs) == target_slug
+                ]
         name = Path(repo_s).name
+        resolved_repo = str(Path(repo_s).resolve())
+        target_slug = project_slug(repo_s)
         return [
             Task(t) for t in self.raw_tasks()
-            if t.get("project") == name and str(Path(t["repo"]).resolve()) == repo_s
+            if (t.get("project_slug") == target_slug)
+            or (t.get("project") == name and t.get("repo") and str(Path(t["repo"]).resolve()) == resolved_repo)
         ]
 
     def new_id(self, project: str, hint: str) -> str:
@@ -259,15 +275,16 @@ class Ledger:
         for then in self._after_save:
             then()
 
-    def _emit_thread(self, repo: str, fields: dict[str, Any]) -> None:
+    def _emit_thread(self, repo: str, fields: dict[str, Any], *, project_slug_val: str = "") -> None:
         if self._record_fn is not None:
-            self._record_fn(repo, "thread", **fields)
+            self._record_fn(repo or project_slug_val, "thread", **fields)
         else:
-            Conversation(self.ctx, repo).record("thread", **fields)
+            Conversation(self.ctx, repo, slug=project_slug_val or None).record("thread", **fields)
 
     def _save_impl(self, task: Task | dict[str, Any]) -> Task:
         raw = task.raw if isinstance(task, Task) else task
         raw["updated"] = self.ctx.clock.now()
+        reconcile_task_endpoint(raw)
         self.ctx.store.change_task(raw["id"], lambda _cur: raw)
         self.run_after_save()
         return Task(raw)
@@ -298,6 +315,7 @@ class Ledger:
         if not create:
             task_id = self.resolve_id(task_id)
         pending: list[tuple[str, dict[str, Any]]] = []
+        pending_slugs: list[str] = []
         wrote = False
         actor = self.ctx.pane or "user"
 
@@ -310,7 +328,9 @@ class Ledger:
                 return None
             raw = result.raw if isinstance(result, Task) else result
             raw["updated"] = self.ctx.clock.now()
+            reconcile_task_endpoint(raw)
             pending.extend(ch.pending_notes)
+            pending_slugs.extend(ch._pending_slugs)
             wrote = True
             return raw
 
@@ -326,8 +346,9 @@ class Ledger:
                 save_hook(result)
             else:
                 self.ctx.store.change_task(task_id, lambda _cur: result)
-            for repo, fields in pending:
-                self._emit_thread(repo, fields)
+            for idx, (repo, fields) in enumerate(pending):
+                pslug = pending_slugs[idx] if idx < len(pending_slugs) else ""
+                self._emit_thread(repo, fields, project_slug_val=pslug)
             return Task(result)
 
         def _apply(cur: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -337,8 +358,9 @@ class Ledger:
 
         result = self.ctx.store.change_task(task_id, _apply)
         if wrote:
-            for repo, fields in pending:
-                self._emit_thread(repo, fields)
+            for idx, (repo, fields) in enumerate(pending):
+                pslug = pending_slugs[idx] if idx < len(pending_slugs) else ""
+                self._emit_thread(repo, fields, project_slug_val=pslug)
             if board:
                 self.run_after_save()
         return Task(result) if isinstance(result, dict) else None
@@ -448,8 +470,9 @@ class Ledger:
         raw = task.raw if isinstance(task, Task) else task
         ch = Change(Task(raw), clock=self.ctx.clock, actor=self.ctx.pane or "user")
         entry = ch.note_on(raw, text, **extra)
-        for repo, fields in ch.pending_notes:
-            self._emit_thread(repo, fields)
+        for idx, (repo, fields) in enumerate(ch.pending_notes):
+            pslug = ch._pending_slugs[idx] if idx < len(ch._pending_slugs) else ""
+            self._emit_thread(repo, fields, project_slug_val=pslug)
         return entry
 
 

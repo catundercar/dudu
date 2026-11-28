@@ -23,7 +23,7 @@ from ..messaging.envelope import P4_BATCH, Envelope, new_env_id
 from ..messaging.principal import Principal
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
-from ..store import lock_file, unlock_file
+from ..store import lock_file, registration_slug, unlock_file
 
 
 def cmd_notify(a, ctx=None):
@@ -49,11 +49,14 @@ def cmd_notify(a, ctx=None):
         return
     session = ctx.caller.herdr_session() if ctx.caller.in_tui() else ""
     me = f"{session}/{ctx.pane}" if session else (ctx.pane or "a session")
-    told = projects.app_pm(rec.get("repo"))
+    told = projects.app_pm(registration_slug(rec) or rec.get("repo"))
     if told:
+        pslug = registration_slug(told) or registration_slug(rec)
         # A desktop-app PM: the message is an event in its project's log, delivered once the PM is idle.
-        Conversation(ctx, told["repo"]).record("agent", by=me, text=a.text, source="session", wake=True)
-        Delivery(ctx, told["repo"]).ensure_running()
+        Conversation(ctx, told.get("repo") or "", slug=pslug or None).record(
+            "agent", by=me, text=a.text, source="session", wake=True
+        )
+        Delivery(ctx, told.get("repo") or "", slug=pslug or None).ensure_running()
         ctx.out.line(f"recorded for {name}; it is told once it is idle")
         return
     inbox.append_inbox(name, me, a.text)
@@ -150,15 +153,18 @@ def cmd_deliver(a, ctx=None):
     """The project's deliverer: send its undelivered events to its PM, one batch per turn, and watch its workers,
     for as long as the PM runs (`Deliverer.run`). One per project; a second one leaves at once."""
     ctx = Context.from_env() if ctx is None else ctx
-    repo = ProjectRegistry(ctx).registered_repo(a.project)
-    if not repo:
+    projects = ProjectRegistry(ctx)
+    slug = projects.resolve_project_slug(a.project)
+    rec = ctx.store.registration(slug) if slug else None
+    repo = str((rec or {}).get("repo") or "") or (projects.registered_repo(a.project) or "")
+    if not rec and not repo:
         sys.exit(f"no project {a.project}")
-    deliverer = Deliverer(ctx, repo)
+    deliverer = Deliverer(ctx, repo, slug=slug or None)
     if a.dry_run:
         start, end, items = deliverer.pending_batch(a.since)
         ctx.out.line(deliverer.batch_text(start, end, items) if items else f"nothing to deliver ({start}-{end})")
         return
-    lock = open(ctx.home.project_for(repo).ensure() / "deliver.lock", "a+")
+    lock = open(deliverer._project_files().ensure() / "deliver.lock", "a+")
     try:
         lock_file(lock)
     except OSError:
@@ -180,17 +186,18 @@ def cmd_event(a, ctx=None):
     repo = ctx.git.project_root(a.repo)
     if not repo:
         sys.exit(f"{a.repo} is not a directory")
+    pslug = ctx.store.folder_project_slug(repo)
     source = f"external:{a.source}"
-    conv = Conversation(ctx, repo)
+    conv = Conversation(ctx, repo, slug=pslug or None)
     if a.key:
         last = next((e for e in reversed(conv.events()) if e.get("type") == "event" and e.get("source") == source), {})
         if last.get("key") == a.key:
             ctx.out.line(f"same key as the latest event from {a.source}; not recorded")
             return
-    wake = bool(ProjectRegistry(ctx).app_pm(repo))
+    wake = bool(ProjectRegistry(ctx).app_pm(pslug or repo))
     conv.record("event", by=ctx.pane or a.source, text=a.text, source=source,
                 **({"key": a.key} if a.key else {}), **({"wake": True} if wake else {}))
-    Delivery(ctx, repo).ensure_running()
+    Delivery(ctx, repo, slug=pslug or None).ensure_running()
     ctx.out.line("recorded; the PM will be told" if wake else "recorded; this project has no desktop-app PM to tell")
 
 

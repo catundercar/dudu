@@ -203,6 +203,7 @@ class Context:
     claude_projects: Path | None = None
     codex_sessions: Path | None = None
     agy_dir: Path | None = None
+    pi_sessions: Path | None = None
     herdr_docs: Path | None = None
     after_save: tuple[Any, ...] = ()
     seat_alive: Any = None
@@ -210,10 +211,12 @@ class Context:
     candidate_pruner: Any = None
     deliver_watchers: tuple[Any, ...] = ()
     deliver_holds: tuple[Any, ...] = ()
-    # Injected from above layer 3 by `build_context` (events may not import landing or discord):
+    # Injected from above layer 3 by `build_context` (events may not import landing, manager, or discord):
     # `land_handoff(task_id, land_approved, principal)` hands a stalled worker merge to an exec helper as the
-    # supervisor; each `alert_sinks` entry `(slug, repo, alert)` takes an `alert.undelivered` to a human channel.
+    # supervisor; `compact_sync(repo)` builds the post-compaction live disk sync text (`handover --compact`);
+    # each `alert_sinks` entry `(slug, repo, alert)` takes an `alert.undelivered` to a human channel.
     land_handoff: Any = None
+    compact_sync: Any = None
     alert_sinks: tuple[Any, ...] = ()
 
     @classmethod

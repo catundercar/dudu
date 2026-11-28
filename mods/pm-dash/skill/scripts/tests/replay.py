@@ -41,6 +41,7 @@ Commands not covered, and why:
 """
 import argparse
 import compileall
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import difflib
 import fcntl
@@ -124,7 +125,12 @@ class Side:
         change(state["terminals"])
         self.hc_state.write_text(json.dumps(state, indent=1, sort_keys=True))
 
-    def run(self, argv, env=None, stdin="", cwd=None):
+    def read_hc_since(self, before):
+        with open(self.hc_log, encoding="utf-8") as f:
+            f.seek(before)
+            return f.read()
+
+    def run(self, argv, env=None, stdin="", cwd=None, check_background=True):
         before = self.hc_log.stat().st_size
         try:
             out = subprocess.run([sys.executable, str(self.pm), *argv], cwd=str(cwd or self.repo),
@@ -133,14 +139,14 @@ class Side:
             code, stdout, stderr = out.returncode, out.stdout, out.stderr
         except subprocess.TimeoutExpired as e:
             code, stdout, stderr = "timeout", str(e.stdout or ""), str(e.stderr or "")
-        background = self.wait_background()
-        with open(self.hc_log, encoding="utf-8") as f:
-            f.seek(before)
-            calls = f.read()
-        result = {"exit": code, "stdout": stdout, "stderr": stderr, "hc": calls, "background": background}
+        background = self.wait_background() if check_background else ""
+        calls = self.read_hc_since(before)
+        result = {"exit": code, "stdout": stdout, "stderr": stderr, "hc": calls, "background": background,
+                  "_hc_before": before}
         with open(self.root / "transcript.txt", "a", encoding="utf-8") as f:  # for a person, with --keep
             f.write(f"$ pm.py {' '.join(argv)}  {env or ''}\n" +
-                    "".join(f"[{k}]\n{v}\n" for k, v in result.items() if v not in ("", None)) + "\n")
+                    "".join(f"[{k}]\n{v}\n" for k, v in result.items()
+                            if not k.startswith("_") and v not in ("", None)) + "\n")
         return result
 
     def wait_background(self):
@@ -427,11 +433,11 @@ def step_label(step):
     return ("as " + who + ": " if who else "") + "pm.py " + " ".join(argv)
 
 
-def run_step(side, step):
+def run_step(side, step, check_background=True):
     argv, opts = (step, {}) if isinstance(step, list) else step
     sha = feature_sha(side) if any("{sha}" in a for a in argv) else ""
     argv = [a.replace("{sha}", sha) for a in argv]
-    return side.run(argv, env=opts.get("env"), stdin=opts.get("stdin", ""))
+    return side.run(argv, env=opts.get("env"), stdin=opts.get("stdin", ""), check_background=check_background)
 
 
 def wall_time():
@@ -442,6 +448,10 @@ def wall_time():
 def wall_minute():
     """Current wall-clock minute index (changes at each :00 boundary); replaceable in tests."""
     return int(wall_time()) // 60
+
+
+_RUN_STEP = run_step
+_WALL_MINUTE = wall_minute
 
 
 def wait_past_minute_boundary(now=None, sleeper=None, guard=MINUTE_GUARD_SECONDS):
@@ -475,32 +485,68 @@ def cleanup_sides(sides):
 def replay(old, new, clock=None, sleeper=None):
     """Run one round of the scenario on both sides; return (commands, differences, aligned)."""
     minute_of = clock or wall_minute
+    # Both sides have disjoint directories, repos, ledgers and fake hc files, so running each step on `old` and
+    # `new` concurrently halves wall time and tightens clock alignment. Stay sequential when tests inject a mock
+    # clock / wall_minute / run_step that expects deterministic old-then-new call order.
+    parallel = clock is None and wall_minute is _WALL_MINUTE and run_step is _RUN_STEP
     differences, commands = [], 0
     old_minutes, new_minutes = [], []
     norm_old, norm_new = normalizer(old), normalizer(new)
-    for step in SCENARIO:
-        if callable(step):
-            step(old)
-            step(new)
-            continue
-        commands += 1
-        if clock is None:
-            wait_past_minute_boundary(sleeper=sleeper)
-        s_old = minute_of()
-        a = run_step(old, step)
-        e_old = minute_of()
-        old_minutes.append((s_old, e_old))
-        s_new = minute_of()
-        b = run_step(new, step)
-        e_new = minute_of()
-        new_minutes.append((s_new, e_new))
-        lines = []
-        for key in ("exit", "stdout", "stderr", "hc", "background"):
-            lines += compare_text(key, norm_old(str(a[key])), norm_new(str(b[key])))
-        if lines:
-            differences += [f"step {commands}: {step_label(step)}"] + ["  " + line for line in lines]
-    tree_old = {norm_old(k): norm_old(v) for k, v in old.tree().items()}
-    tree_new = {norm_new(k): norm_new(v) for k, v in new.tree().items()}
+
+    shared_base = str(old.root.parent) if old.root.parent == new.root.parent else ""
+
+    def timed_step(side, step, check_background=True):
+        started = minute_of()
+        res = run_step(side, step, check_background=check_background) if not check_background else run_step(side, step)
+        ended = minute_of()
+        return started, res, ended
+
+    with ThreadPoolExecutor(max_workers=2) if parallel else contextlib.nullcontext() as pool:
+        for step in SCENARIO:
+            if callable(step):
+                if pool is not None:
+                    f_old = pool.submit(step, old)
+                    f_new = pool.submit(step, new)
+                    f_old.result()
+                    f_new.result()
+                else:
+                    step(old)
+                    step(new)
+                continue
+            commands += 1
+            if clock is None:
+                wait_past_minute_boundary(sleeper=sleeper)
+            if pool is not None:
+                combined_bg = bool(shared_base)
+                f_old = pool.submit(timed_step, old, step, not combined_bg)
+                f_new = pool.submit(timed_step, new, step, not combined_bg)
+                s_old, a, e_old = f_old.result()
+                s_new, b, e_new = f_new.result()
+                if combined_bg and background_processes(shared_base):
+                    f_bg_old = pool.submit(old.wait_background)
+                    f_bg_new = pool.submit(new.wait_background)
+                    a["background"] = f_bg_old.result()
+                    b["background"] = f_bg_new.result()
+                    a["hc"] = old.read_hc_since(a["_hc_before"])
+                    b["hc"] = new.read_hc_since(b["_hc_before"])
+            else:
+                s_old, a, e_old = timed_step(old, step)
+                s_new, b, e_new = timed_step(new, step)
+            old_minutes.append((s_old, e_old))
+            new_minutes.append((s_new, e_new))
+            lines = []
+            for key in ("exit", "stdout", "stderr", "hc", "background"):
+                lines += compare_text(key, norm_old(str(a[key])), norm_new(str(b[key])))
+            if lines:
+                differences += [f"step {commands}: {step_label(step)}"] + ["  " + line for line in lines]
+        if pool is not None:
+            f_old_tree = pool.submit(old.tree)
+            f_new_tree = pool.submit(new.tree)
+            raw_old, raw_new = f_old_tree.result(), f_new_tree.result()
+        else:
+            raw_old, raw_new = old.tree(), new.tree()
+    tree_old = {norm_old(k): norm_old(v) for k, v in raw_old.items()}
+    tree_new = {norm_new(k): norm_new(v) for k, v in raw_new.items()}
     for path in sorted(set(tree_old) | set(tree_new)):
         if path not in tree_new:
             differences.append(f"ledger: {path} only in old")
@@ -542,7 +588,10 @@ def main(argv=None, clock=None, sleeper=None):
         status = 0
         if a.old:
             for attempt in range(MAX_ATTEMPTS):
-                sides = [Side("old", a.old, base), Side("new", a.new, base)]
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    f_old = pool.submit(Side, "old", a.old, base)
+                    f_new = pool.submit(Side, "new", a.new, base)
+                    sides = [f_old.result(), f_new.result()]
                 commands, differences, aligned = replay(*sides, clock=clock, sleeper=sleeper)
                 if aligned or attempt + 1 == MAX_ATTEMPTS:
                     break

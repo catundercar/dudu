@@ -1571,6 +1571,305 @@ class CarbonReviewFixesTests(unittest.TestCase):
         self.assertEqual(nxt2["turn"]["phase"], "generating")
         self.assertEqual(nxt2["turn"]["phase_since_ms"], 55_000)
 
+    def test_w6_retype_submitted_deliver_batch_retypes_agy_and_resolves_incident(self) -> None:
+        # Reproduce 2026-11-28 01:22 real incident: `event.batch` typed to agy returns `started=False`,
+        # terminal stays idle (`>`), W6 stage 2 `retype_submitted` requeues the batch, and `Deliverer.look()`
+        # must actually re-type `[retry #2]` into the terminal and resolve W6 without escalating to `notify_user`.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "proj"
+            repo.mkdir()
+            clock = FakeClock("2026-11-28 01:22:20")
+            status_obj = {"state": "idle", "ms": int(clock.time() * 1000)}
+
+            class _RetypeFakeHc(FakeHc):
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    super().__init__(*args, **kwargs)
+                    self.send_calls = 0
+
+                def send(self, term: str, text: str, *, if_state: str | None = None, timeout: float = 180, errors: bool = False) -> dict[str, Any] | None:
+                    self.send_calls += 1
+                    if self.send_calls == 1:
+                        self.terminals["t1k6"]["send_started"] = False
+                        return super().send(term, text, if_state=if_state, timeout=timeout, errors=errors)
+                    self.terminals["t1k6"]["send_started"] = True
+                    res = super().send(term, text, if_state=if_state, timeout=timeout, errors=errors)
+                    self.set_status("t1k6", "working")
+                    return res
+
+            hc = _RetypeFakeHc(
+                terminals={
+                    "t1k6": {
+                        "address": "t1k6", "state": "live",
+                        "status": status_obj, "reported": True,
+                        "turn": 189, "foreground": {"pid": 88489, "argv": ["agy"]},
+                        "labels": {"pm": "proj", "pm.seat": "1"},
+                        "screen": "done\n> \n? for shortcuts",
+                    },
+                },
+                clock=clock,
+            )
+            ctx = make_ctx(Path(tmp) / "ledger", hc=hc, clock=clock, config={"lang": "en"})
+            slug = project_slug(repo)
+            ep = Endpoint(runtime="hc", machine=None, terminal="t1k6", fg_pid=88489, epoch=2, agent_kind="agy")
+            ctx.store.change_registration(slug, lambda _c: {
+                "name": f"pm-{slug}", "project": "proj", "repo": str(repo), "pane": "hc:t1k6",
+                "terminal": "t1k6", "runtime": "hc", "seat": True, "agent": "agy", "epoch": 2,
+                "endpoint": ep.to_dict(),
+            })
+            dlv = Deliverer(ctx, repo, watchers=(), holds=(), settle=0, unknown_wait=0)
+            changes = FakeChangeWaiter()
+
+            # Prime idle baseline, then append a waking worker report.
+            dlv.look(changes, {}, {})
+            clock.advance(5.0)
+            Conversation(ctx, repo).record(
+                "thread", task="dudu-pm-6b-worker", title="Phase 6b", status="done",
+                by="hc:t1qp", text="status=done; landed", number=339, source="worker", wake=True,
+            )
+            # Initial delivery: sends once (`started=False`), must NOT emit duplicate `started=True` send_submitted.
+            dlv.look(changes, {}, {})
+            self.assertEqual(len(hc.sent), 1)
+            journal_1 = [
+                json.loads(line)
+                for line in dlv._supervisor.tracker.files.pm_turn_journal.read_text().splitlines()
+                if line.strip()
+            ]
+            submits_1 = [e for e in journal_1 if e.get("kind") == "send_submitted"]
+            self.assertEqual(len(submits_1), 1, f"expected single truthful send_submitted, got {submits_1}")
+            self.assertIs(submits_1[0].get("started"), False)
+            self.assertEqual(dlv._supervisor.tracker.read()["turn"]["phase"], "submitted")
+
+            # +20s -> W6 opens + stage 0 classify_screen (no_dialog)
+            clock.advance(20.5)
+            dlv.look(changes, {}, {})
+            # +1s -> stage 1 nudge_enter
+            clock.advance(1.0)
+            dlv.look(changes, {}, {})
+            self.assertEqual(len(hc.sent), 1, "must not retype during nudge_enter")
+
+            # +5.5s -> stage 2 retype_submitted requeues AND immediately re-types `[retry #2]` in the same look!
+            clock.advance(5.5)
+            dlv.look(changes, {}, {})
+            self.assertEqual(len(hc.sent), 2, f"retype_submitted must re-send batch; sent={hc.sent}")
+            self.assertIn("[retry #2]", hc.sent[1][1])
+
+            # Next look: W6 resolved as `turn_started`, never escalated to `notify_user`!
+            clock.advance(1.0)
+            dlv.look(changes, {}, {})
+            st_end = dlv._supervisor.tracker.read()
+            inc_end = st_end.get("incident") or {}
+            self.assertEqual(inc_end.get("status"), "resolved", st_end)
+            self.assertEqual(inc_end.get("resolution"), "turn_started", st_end)
+            self.assertNotEqual(inc_end.get("step_name"), "notify_user")
+            batch_items = [it for it in dlv._supervisor.tracker.pm_mailbox.active_items(("accepted", "typed", "consumed")) if it.envelope.kind == "event.batch"]
+            self.assertEqual(len(batch_items), 1)
+            self.assertEqual(batch_items[0].attempts, 2)
+
+        # Tier-2 (no-status terminal, reported=False) variant via FakeTransport:
+        # `retype_submitted` must also re-deliver `event.batch` without blocking on `pm_working`/`blackbox_cooldown`.
+        with tempfile.TemporaryDirectory() as tmp2:
+            repo2 = Path(tmp2) / "proj2"
+            repo2.mkdir()
+            clock2 = FakeClock("2026-11-28 01:30:00")
+            hc2 = FakeHc(
+                terminals={
+                    "t2": {
+                        "address": "t2", "state": "live", "status": None, "reported": False,
+                        "turn": 1, "foreground": {"pid": 5500, "argv": ["codex"]},
+                        "labels": {"pm": "proj2", "pm.seat": "1"},
+                        "screen": "> ",
+                    },
+                },
+                clock=clock2,
+            )
+            ctx2 = make_ctx(Path(tmp2) / "ledger", hc=hc2, clock=clock2, config={"lang": "en"})
+            slug2 = project_slug(repo2)
+            ep2 = Endpoint(runtime="hc", machine=None, terminal="t2", fg_pid=5500, epoch=1, agent_kind="codex")
+            ctx2.store.change_registration(slug2, lambda _c: {
+                "name": f"pm-{slug2}", "project": "proj2", "repo": str(repo2), "pane": "hc:t2",
+                "terminal": "t2", "runtime": "hc", "seat": True, "agent": "codex", "epoch": 1,
+                "endpoint": ep2.to_dict(),
+            })
+            dlv2 = Deliverer(ctx2, repo2, watchers=(), holds=(), settle=0, unknown_wait=0)
+            tr2 = FakeTransport(clock=clock2)
+            tr2.configure(
+                ep2,
+                next_deliver=[
+                    DeliverOutcome(status="typed", started_turn=False, observed_turn=1, detail="unstarted_t2"),
+                    DeliverOutcome(status="typed", started_turn=True, observed_turn=2, detail="started_t2"),
+                ],
+            )
+            dlv2._driver._transport = tr2
+            dlv2._supervisor._transport = tr2
+            # Establish a prior completed turn (Tier 2: `last_turn_stopped=True`).
+            dlv2._supervisor.tracker.begin_turn(terminal="t2", agent_kind="codex", cause="user", from_hook=True)
+            dlv2._supervisor.tracker.end_turn(has_reply=True)
+            changes2 = FakeChangeWaiter()
+            Conversation(ctx2, repo2).record(
+                "thread", task="t-tier2", title="Tier2 task", status="done",
+                by="hc:tw", text="status=done; ok", number=10, source="worker", wake=True,
+            )
+            dlv2.look(changes2, {}, {})
+            b_items2 = [it for it in dlv2._supervisor.tracker.pm_mailbox.active_items(("accepted", "typed")) if it.envelope.kind == "event.batch"]
+            self.assertEqual(len(b_items2), 1)
+            self.assertEqual(b_items2[0].state, "typed")
+            self.assertEqual(b_items2[0].attempts, 1)
+            clock2.advance(20.5)
+            dlv2.look(changes2, {}, {})  # classify_screen
+            clock2.advance(1.0)
+            dlv2.look(changes2, {}, {})  # nudge_enter
+            clock2.advance(5.5)
+            dlv2.look(changes2, {}, {})  # retype_submitted -> must deliver immediately on Tier 2!
+            b_after = dlv2._supervisor.tracker.pm_mailbox.get(b_items2[0].envelope.env_id)
+            self.assertIsNotNone(b_after)
+            self.assertEqual(b_after.state, "typed")
+            self.assertEqual(b_after.attempts, 2, f"Tier 2 retype_submitted must re-deliver; item={b_after}")
+            st2_end = dlv2._supervisor.tracker.read()
+            self.assertEqual((st2_end.get("incident") or {}).get("status"), "resolved")
+            self.assertEqual((st2_end.get("incident") or {}).get("resolution"), "turn_started")
+
+    def test_w6_retype_and_retry_dedup_skips_answered_received_and_superseded_batches(self) -> None:
+        """P2 retry dedup:
+        1) W6 `retype_submitted` skips and supersedes an `event.batch` whose stretch was already answered/received,
+           resolving the W6 incident cleanly instead of re-waking the PM or escalating to `notify_user`;
+        2) Stale `event.batch` containing a review verdict (`<tid>-review: done`) is superseded before typing when
+           the PM has already acted on the parent task (e.g. `approve` -> `in_progress`);
+        3) Partial batch with one still-unhandled review verdict is NOT dropped."""
+        # Case 1: W6 `retype_submitted` when PM already answered the batch -> superseded, zero re-send!
+        with tempfile.TemporaryDirectory() as tmp1:
+            repo = Path(tmp1) / "proj1"
+            repo.mkdir()
+            clock = FakeClock("2026-11-28 02:00:00")
+            hc = FakeHc(
+                terminals={
+                    "t1": {
+                        "address": "t1", "state": "live", "status": {"state": "idle"}, "turn": 1,
+                        "foreground": {"pid": 6100, "argv": ["agy"]},
+                        "labels": {"pm": "proj1", "pm.seat": "1"},
+                        "screen": "> ",
+                        "send_started": False,
+                    },
+                },
+                clock=clock,
+            )
+            ctx = make_ctx(Path(tmp1) / "ledger", hc=hc, clock=clock, config={"lang": "en"})
+            slug = project_slug(repo)
+            ep = Endpoint(runtime="hc", machine=None, terminal="t1", fg_pid=6100, epoch=1, agent_kind="agy")
+            ctx.store.change_registration(slug, lambda _c: {
+                "name": f"pm-{slug}", "project": "proj1", "repo": str(repo), "pane": "hc:t1",
+                "terminal": "t1", "runtime": "hc", "seat": True, "agent": "agy", "epoch": 1,
+                "endpoint": ep.to_dict(),
+            })
+            dlv = Deliverer(ctx, repo, watchers=(), holds=(), settle=0, unknown_wait=0)
+            changes = FakeChangeWaiter()
+            Conversation(ctx, repo).record(
+                "thread", task="p1-a", title="Task A", status="done",
+                by="hc:tw", text="status=done; finished", number=1, source="worker", wake=True,
+            )
+            dlv.look(changes, {}, {})
+            self.assertEqual(len(hc.sent), 1)
+            b_item = next(it for it in dlv._supervisor.tracker.pm_mailbox.active_items(("typed",)) if it.envelope.kind == "event.batch")
+            b_start, b_end = b_item.envelope.body["start"], b_item.envelope.body["end"]
+
+            # Simulate PM having already answered this batch stretch in conversation.jsonl before W6 reaches retype_submitted.
+            Conversation(ctx, repo).record(
+                "pm", by="hc:t1", text="Task A merged.", after="deliver", batch=[b_start, b_end],
+            )
+            clock.advance(20.5)
+            dlv.look(changes, {}, {})  # classify_screen
+            clock.advance(1.0)
+            dlv.look(changes, {}, {})  # nudge_enter
+            clock.advance(5.5)
+            dlv.look(changes, {}, {})  # retype_submitted -> must supersede, NOT re-send!
+            self.assertEqual(len(hc.sent), 1, f"already-answered batch must not be re-typed; sent={hc.sent}")
+            item_after = dlv._supervisor.tracker.pm_mailbox.get(b_item.envelope.env_id)
+            self.assertEqual(item_after.state, "superseded")
+            self.assertEqual(item_after.hold_reason, "already_answered")
+            inc = dlv._supervisor.tracker.read().get("incident") or {}
+            self.assertEqual(inc.get("status"), "resolved")
+            self.assertEqual(inc.get("resolution"), "superseded")
+
+        # Case 2 & 3: Stale review-verdict batch superseded once PM approves/handles parent, while partial batch stays live.
+        with tempfile.TemporaryDirectory() as tmp2:
+            repo2 = Path(tmp2) / "proj2"
+            repo2.mkdir()
+            clock2 = FakeClock("2026-11-28 02:10:00")
+            hc2 = FakeHc(
+                terminals={
+                    "t2": {
+                        "address": "t2", "state": "live", "status": {"state": "idle"}, "turn": 2,
+                        "foreground": {"pid": 6200, "argv": ["agy"]},
+                        "labels": {"pm": "proj2", "pm.seat": "1"},
+                    },
+                },
+                clock=clock2,
+            )
+            ctx2 = make_ctx(Path(tmp2) / "ledger", hc=hc2, clock=clock2, config={"lang": "en"})
+            slug2 = project_slug(repo2)
+            ep2 = Endpoint(runtime="hc", machine=None, terminal="t2", fg_pid=6200, epoch=2, agent_kind="agy")
+            ctx2.store.change_registration(slug2, lambda _c: {
+                "name": f"pm-{slug2}", "project": "proj2", "repo": str(repo2), "pane": "hc:t2",
+                "terminal": "t2", "runtime": "hc", "seat": True, "agent": "agy", "epoch": 2,
+                "endpoint": ep2.to_dict(),
+            })
+            ctx2.home.tasks.mkdir(parents=True, exist_ok=True)
+            for tid, rev_of, st in (
+                ("p2-a", None, "in_progress"),
+                ("p2-a-review", "p2-a", "done"),
+                ("p2-b", None, "review"),
+                ("p2-b-review", "p2-b", "done"),
+            ):
+                t_obj = {"id": tid, "title": tid, "project": "proj2", "repo": str(repo2), "status": st}
+                if rev_of:
+                    t_obj["review_of"] = rev_of
+                ctx2.home.task(tid).write_text(json.dumps(t_obj), encoding="utf-8")
+
+            conv2 = Conversation(ctx2, repo2)
+            conv2.record(
+                "thread", task="p2-a-review", review_of="p2-a", title="p2-a-review", status="done",
+                by="hc:tr1", text="status=done; no blockers", source="worker", wake=True,
+            )
+            end_a = (ctx2.home.project_for(repo2).conversation).stat().st_size
+            # PM already acted on parent p2-a (e.g. `pm.py approve p2-a` -> status=in_progress) after rotation/takeover!
+            conv2.record(
+                "thread", task="p2-a", title="p2-a", status="in_progress",
+                by="hc:t2", text="PM approved merge", source="pm",
+            )
+
+            dlv2 = Deliverer(ctx2, repo2, watchers=(), holds=(), settle=0)
+            mb2 = dlv2._supervisor.tracker.pm_mailbox
+            stale_env = Envelope(
+                env_id="env_01a2208260c6_55e4abef",
+                idempotency_key=f"batch:{slug2}:0-{end_a}",
+                schema_version=1,
+                created_ms=1000,
+                kind="event.batch",
+                sender=Principal.supervisor(slug2),
+                recipient=LogicalAddress.pm(slug2),
+                project=slug2,
+                cause={"kind": "deliver_batch", "start": 0, "end": end_a},
+                priority=P4_BATCH,
+                body={"text": f"[from pm.py deliver] 1 event(s) (0-{end_a}) #env_01a2208260c6_55e4abef", "start": 0, "end": end_a},
+                require_reply=True,
+            )
+            mb2.enqueue(stale_env, initial_state="accepted", now_ms=1000, target_endpoint_uid=ep2.uid, endpoint_epoch=2)
+            mb2.transition(stale_env.env_id, "accepted", now_ms=1100, attempts=1, hold_reason="retry_unstarted")
+
+            dlv2.look(FakeChangeWaiter(), {}, {})
+            self.assertEqual(hc2.sent, [], "stale review-verdict retry after PM approved parent must be dropped")
+            self.assertEqual(mb2.get(stale_env.env_id).state, "superseded")
+            self.assertEqual(mb2.get(stale_env.env_id).hold_reason, "events_superseded")
+
+            # Case 3: batch with an unhandled review verdict (`p2-b-review`) still delivers normally!
+            start_b = (ctx2.home.project_for(repo2).conversation).stat().st_size
+            conv2.record(
+                "thread", task="p2-b-review", review_of="p2-b", title="p2-b-review", status="done",
+                by="hc:tr2", text="status=done; no blockers", source="worker", wake=True,
+            )
+            dlv2.look(FakeChangeWaiter(), {}, {})
+            self.assertEqual(len(hc2.sent), 1)
+            self.assertIn("p2-b-review", hc2.sent[0][1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -461,6 +461,24 @@ class LegacyPatchCompatAndDynamicCtxTest(unittest.TestCase):
             )
             self.assertFalse(Path(got_work["autoMemoryDirectory"]).name.endswith("-"))
 
+    def test_builtin_agy_registered_and_overridable(self):
+        from pmlib.agents.base import AGENT_KINDS, agent_kinds
+
+        self.assertIn("agy", AGENT_KINDS)
+        self.assertEqual(AGENT_KINDS["agy"]["argv"], ["agy"])
+        self.assertEqual(AGENT_KINDS["agy"]["model"], ["--model", "{}"])
+        self.assertEqual(AGENT_KINDS["agy"]["prompt_arg"], False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = make_ctx(tmp)
+            ctx.home.root.mkdir(parents=True, exist_ok=True)
+            ctx.home.config.write_text(json.dumps({
+                "agents": {"agy": {"argv": ["custom-agy", "--fast"], "model": ["--m", "{}"]}}
+            }), encoding="utf-8")
+            merged = agent_kinds(ctx.config.read())
+            self.assertEqual(merged["agy"]["argv"], ["custom-agy", "--fast"])
+            self.assertEqual(merged["agy"]["model"], ["--m", "{}"])
+
 
 if __name__ == "__main__":
     unittest.main()

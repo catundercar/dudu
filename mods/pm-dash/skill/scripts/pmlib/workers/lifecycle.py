@@ -18,6 +18,9 @@ from ..ledger.ledger import Change, Ledger
 from ..ledger.plan import has_unfinished_plan, sync_plan_for_status
 from ..ledger.task import ACTIVE, CLOSED, Task, hc_terminal_of, started_by_pm
 from ..memory.candidates import MemoryCandidates, candidate_names_of
+from ..messaging.address import Endpoint, is_remote_endpoint, parse_legacy_endpoint, record_endpoint
+from ..messaging.transports.remote_hc import RemoteHcTransport
+from ..messaging.transports.self_hosted import SelfHostedPullTransport
 from ..project.project import in_scope
 from ..store import valid_task_id
 from .research import collect_research_for, retire_dirty_for
@@ -44,20 +47,34 @@ def live_worker_for(ctx: Context, task: Any) -> str:
     pane = raw.get("pane") or ""
     if not pane or pane == ctx.pane or (raw.get("status") == "proposed" and not started_by_pm(raw)):
         return ""
-    if "/" in pane:
-        return pane
+    ep = record_endpoint(raw)
+    if is_remote_endpoint(ep):
+        return pane if remote_presence_for(ctx, ep) != "gone" else ""
     if pane.startswith("hc:"):
         info = ctx.hc.get(pane[3:])
         return pane if info is not None and info.is_live else ""
     return pane if any(x.get("pane_id") == pane for x in ctx.tui.agents()) else ""
 
 
+def remote_presence_for(ctx: Context, ep: Endpoint | None) -> str:
+    """A remote endpoint's presence: `live`, `gone` (a connected machine says so) or `unknown` (partition: counted
+    as still there, I4: a worker on a machine that dropped off the network is never reaped as exited)."""
+    if ep is None:
+        return "gone"
+    if ep.runtime == "self_hosted":
+        return SelfHostedPullTransport(ctx).presence(ep)
+    if ep.runtime != "hc":
+        return "unknown"
+    return RemoteHcTransport(ctx).presence(ep)
+
+
 def is_pane_live_for(ctx: Context, pane: str) -> bool:
     """Whether `pane` (local `hc:<t>`, remote `machine/t`, or TUI pane) currently holds a live terminal/agent."""
     if not pane:
         return False
-    if "/" in pane:
-        return True
+    ep = parse_legacy_endpoint(pane)
+    if is_remote_endpoint(ep):
+        return remote_presence_for(ctx, ep) != "gone"
     if pane.startswith("hc:"):
         info = ctx.hc.get(pane[3:])
         return info is not None and info.is_live
@@ -448,8 +465,12 @@ def retire_workspace_for(
     updated_task = ledger.change(task_id, _finish_retire)
     assert updated_task is not None
     final_raw = updated_task.raw
-    if repo and not (keep_active or (bool(final_raw.get("landed")) and has_unfinished_plan(final_raw) and not force)):
-        MemoryCandidates(ctx, repo).prune(finished=candidate_names_of(final_raw))
+    if (repo or final_raw.get("project_slug")) and not (
+        keep_active or (bool(final_raw.get("landed")) and has_unfinished_plan(final_raw) and not force)
+    ):
+        MemoryCandidates(
+            ctx, repo or "", slug=ctx.store.task_project_slug(final_raw) or None
+        ).prune(finished=candidate_names_of(final_raw))
     lines.append(f"{final_raw['id']} {summary}")
     return RetireResult(
         task_id=final_raw["id"],

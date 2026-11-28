@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..agents.profiles import profiles as agent_profiles
 from ..agents.sessions import claude_folder, opening, pm_session
@@ -19,10 +19,10 @@ from ..messaging.principal import Principal
 from ..osutil import shell_join
 from ..procs import background_work
 from ..project.conversation import Conversation
-from ..project.project import ProjectRegistry
+from ..project.project import ProjectRegistry, project_display_name
 from ..project.turn_reducer import record_endpoint
 from ..project.turn_state import TurnTracker
-from .launch import pm_argv, pm_model, pm_start_argv, successor_argv
+from .launch import AGY_COMPACT_ENV, pm_argv, pm_compact_env, pm_model, pm_start_argv, successor_argv
 from .seat import RETIRE_WAIT, record_swap_notice, swap_reason_text
 
 
@@ -232,10 +232,17 @@ def takeover_prompt(name: str, handover: str, reason: str = "", *, ctx: Context 
         "否则用一两句话简短说明当前在办与待定的事项即可。")
 
 
-def successor_env(*, ctx: Context | None = None) -> dict[str, str]:
-    """This environment without the outgoing session's own variables, for the PM that takes over."""
+def successor_env(kind: str = "", argv: Sequence[str] = (), *, ctx: Context | None = None) -> dict[str, str]:
+    """This environment without the outgoing session's own variables, plus per-agent PM compaction env (for `agy`,
+    `AGY_CLI_AUTO_COMPACT_OVERRIDE` aligned with `pm_compact_tokens`)."""
     c = Context.from_env() if ctx is None else ctx
-    return c.procs.clean_session_env()
+    env = c.procs.clean_session_env()
+    extra = pm_compact_env(kind, argv, ctx=c)
+    if extra:
+        env.update(extra)
+    elif kind or argv:
+        env.pop(AGY_COMPACT_ENV, None)
+    return env
 
 
 def find_pm_session(repo: str | Path, kind: str, *, ctx: Context | None = None) -> dict[str, str] | None:
@@ -285,8 +292,8 @@ def build_fallback_spec(
     session from `handover` (`pi`/`agy` or missing transcript), recording a `notice` event in conversation.jsonl."""
     c = Context.from_env() if ctx is None else ctx
     tr = c.config.tr
-    name = Path(repo).name
     rec = ProjectRegistry(c).pm_record(repo) or {}
+    name = project_display_name(rec, repo)
     prev = failed_spec.get("previous") if isinstance(failed_spec.get("previous"), dict) else (
         rec.get("previous") if isinstance(rec.get("previous"), dict) else {})
     prev_sess = prev.get("agent_session") if isinstance(prev.get("agent_session"), dict) else {}

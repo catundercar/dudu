@@ -367,6 +367,86 @@ class TurnDurationMetricsAndBudgetTests(unittest.TestCase):
         self.assertEqual(rep["top_actions"][1]["category"], "Write")
         self.assertEqual(rep["top_actions"][1]["total_ms"], 90_000)
 
+    def test_w6_retype_submitted_releases_incident_holds_batch_and_replays_real_journal_1591_1604(self) -> None:
+        from pmlib.messaging.router import EndpointSnapshot, evaluate_batch_readiness
+
+        cfg = tr.TurnConfig()
+        ep_dict = {
+            "runtime": "hc", "machine": None, "terminal": "t1k6", "workspace": "",
+            "session_id": "", "agent_kind": "agy", "fg_pid": 88489, "epoch": 2,
+        }
+        s = tr.default_state_v2()
+        # Real 2026-11-28 01:22:23–01:22:54 journal excerpt (seq 1591–1601)
+        real_obs = [
+            {"seq": 1591, "t": 1795846943128, "src": "supervisor", "kind": "hc_state", "state": "live", "status": "idle", "status_msg": "", "status_ms": 1795846942479, "turn": 189, "reported": True, "seat_starting": False, "endpoint": ep_dict},
+            {"seq": 1592, "t": 1795846948179, "src": "supervisor", "kind": "send_submitted", "terminal": "t1k6", "agent_kind": "agy", "cause": "deliver", "msg_ids": [], "hc_turn": 189, "started": False, "endpoint": ep_dict, "batch": [3334330, 3335281]},
+            {"seq": 1594, "t": 1795846956996, "src": "probe:pty", "kind": "pty_probe", "changed": True, "digest": "0d221b7bd325b355", "hint": "tokens:229", "dialog_kind": ""},
+            {"seq": 1595, "t": 1795846957999, "src": "probe:pty", "kind": "pty_probe", "changed": False, "digest": "0d221b7bd325b355", "hint": "tokens:229", "dialog_kind": ""},
+        ]
+        for obs in real_obs:
+            s = tr.reduce(s, obs, cfg)
+        self.assertEqual(s["turn"]["phase"], "submitted")
+        self.assertEqual(s["turn"]["cause"]["kind"], "deliver")
+        self.assertEqual(s["turn"]["cause"]["batch"], [3334330, 3335281])
+
+        # +20s -> W6 opens at seq 1596
+        s, acts = tr.tick(s, 1795846968350, cfg)
+        self.assertEqual(s["incident"]["class"], "W6")
+        self.assertTrue(tr.incident_holds_batch(s))
+        inc_id = s["incident"]["id"]
+        self.assertEqual(acts[-1]["action"], "classify_screen")
+
+        # Stage 0 classify_screen -> no_dialog, Stage 1 nudge_enter -> sent (batch still held)
+        for obs in (
+            {"seq": 1596, "t": 1795846968350, "src": "supervisor", "kind": "recovery_started", "incident_id": inc_id, "class": "W6", "stage": 0, "action": "classify_screen"},
+            {"seq": 1597, "t": 1795846968350, "src": "supervisor", "kind": "recovery_result", "incident_id": inc_id, "class": "W6", "stage": 0, "action": "classify_screen", "outcome": "no_dialog", "detail": "> "},
+            {"seq": 1598, "t": 1795846969350, "src": "supervisor", "kind": "recovery_started", "incident_id": inc_id, "class": "W6", "stage": 1, "action": "nudge_enter"},
+            {"seq": 1599, "t": 1795846969350, "src": "supervisor", "kind": "recovery_result", "incident_id": inc_id, "class": "W6", "stage": 1, "action": "nudge_enter", "outcome": "sent", "detail": "enter"},
+        ):
+            s = tr.reduce(s, obs, cfg)
+        self.assertTrue(tr.incident_holds_batch(s), "batch must remain held while awaiting nudge_enter")
+
+        # +5s -> Stage 2 retype_submitted -> requeued (retry_unstarted)
+        s, acts = tr.tick(s, 1795846974783, cfg)
+        self.assertEqual(acts[-1]["action"], "retype_submitted")
+        for obs in (
+            {"seq": 1600, "t": 1795846974783, "src": "supervisor", "kind": "recovery_started", "incident_id": inc_id, "class": "W6", "stage": 2, "action": "retype_submitted"},
+            {"seq": 1601, "t": 1795846974783, "src": "supervisor", "kind": "recovery_result", "incident_id": inc_id, "class": "W6", "stage": 2, "action": "retype_submitted", "outcome": "requeued", "detail": "retry_unstarted"},
+        ):
+            s = tr.reduce(s, obs, cfg)
+        self.assertEqual(s["incident"]["awaiting_verify"], "retype_submitted")
+        self.assertFalse(tr.incident_holds_batch(s), "retype_submitted for deliver must release incident_holds_batch")
+
+        # Both Tier-1 (status-reporting idle) and Tier-2/3 (no-status recovering) must be ready to deliver the retry!
+        ready_t1, _, reason_t1 = evaluate_batch_readiness(EndpointSnapshot(
+            live_state="live", agent_state="idle", can_report_status=True,
+            turn_phase="recovering", last_turn_stopped=False, recovery_hold=tr.incident_holds_batch(s),
+        ))
+        self.assertTrue(ready_t1, reason_t1)
+        ready_t2, _, reason_t2 = evaluate_batch_readiness(EndpointSnapshot(
+            live_state="live", agent_state="", can_report_status=False,
+            turn_phase="recovering", last_turn_stopped=False, recovery_hold=tr.incident_holds_batch(s),
+        ))
+        self.assertTrue(ready_t2, reason_t2)
+
+        # Once the retried send starts the turn, W6 resolves cleanly.
+        s = tr.reduce(s, {
+            "seq": 1602, "t": 1795846975500, "src": "supervisor", "kind": "send_submitted",
+            "terminal": "t1k6", "agent_kind": "agy", "cause": "deliver", "msg_ids": [],
+            "hc_turn": 190, "started": True, "endpoint": ep_dict, "batch": [3334330, 3335281],
+        }, cfg)
+        self.assertEqual(s["incident"]["status"], "resolved")
+        self.assertEqual(s["incident"]["resolution"], "turn_started")
+        self.assertEqual(s["turn"]["phase"], "generating")
+
+        # User-caused W6 or notified incident must still hold unrelated event batches.
+        s_user = tr.default_state_v2()
+        s_user["incident"] = {"status": "recovering", "cause_kind": "user", "awaiting_verify": "retype_submitted"}
+        self.assertTrue(tr.incident_holds_batch(s_user))
+        s_notified = tr.default_state_v2()
+        s_notified["incident"] = {"status": "notified", "cause_kind": "deliver", "awaiting_verify": ""}
+        self.assertTrue(tr.incident_holds_batch(s_notified))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ MAIN = {
     ]
 }
 PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
+PM_LIST_WEIGHT = {"id": "pm-list", "type": "block", "size": {"weight": 1}, "content": {"mod": "pm-list"}}
 PM_BOARD = {"id": "pm-board", "type": "block", "window_drag": True, "content": {"mod": "pm-dash"}}
 PM_PROJECT_HEADER = {
     "id": "pm-project-header", "type": "block", "size": {"px": 56},
@@ -404,12 +405,17 @@ class InstallTest(unittest.TestCase):
         lists = next(node for node in sidebar["children"] if node["id"] == "sidebar-lists")
         self.assertEqual(lists["children"][0], {
             "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
-        self.assertEqual([node["id"] for node in lists["children"]], ["pm-nav", "pm-list", "spaces", "agents"])
-        self.assertEqual(lists["children"][1], PM_LIST)
-        self.assertEqual(lists["children"][-1]["content"]["mod"], "agents")
+        self.assertEqual([node["id"] for node in lists["children"]], ["pm-nav", "pm-list", "herdr-lists"])
+        self.assertEqual(lists["children"][1], PM_LIST_WEIGHT)
+        drawer = lists["children"][2]
+        self.assertEqual(drawer["type"], "column")
+        self.assertEqual(drawer["hidden"], True)
+        self.assertEqual(drawer["size"], {"weight": 1})
+        self.assertEqual([node["id"] for node in drawer["children"]], ["spaces", "agents"])
+        self.assertEqual(drawer["children"][-1]["content"]["mod"], "agents")
         self.assertEqual(stage["id"], "pm-stage")
         self.assertEqual(stage["type"], "stack")
-        self.assertEqual(stage["active"], "work")
+        self.assertEqual(stage["active"], "pm-board")
         self.assertEqual([node["id"] for node in stage["children"]], ["work", "pm-board", "pm-project"])
         self.assertEqual(stage["children"][0]["type"], "column")
         self.assertEqual(stage["children"][1:], [PM_BOARD, PM_PROJECT])
@@ -433,9 +439,15 @@ class InstallTest(unittest.TestCase):
         expected["toast"] = "pm-toast"
         expected["generated_by"] = "dudu install.sh"
         expected["cloned_from"] = {"name": "main", "version": "1"}
-        expected["children"][0]["children"][0]["children"][0:0] = [{
-            "id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}}, PM_LIST]
-        expected["children"][1] = {"id": "pm-stage", "type": "stack", "active": "work", "children": [
+        expected["children"][0]["children"][0]["children"] = [
+            {"id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}},
+            PM_LIST_WEIGHT,
+            {
+                "id": "herdr-lists", "type": "column", "hidden": True, "size": {"weight": 1},
+                "children": copy.deepcopy(MAIN["children"][0]["children"][0]["children"]),
+            },
+        ]
+        expected["children"][1] = {"id": "pm-stage", "type": "stack", "active": "pm-board", "children": [
             copy.deepcopy(MAIN["children"][1]), PM_BOARD, PM_PROJECT]}
         self.assertEqual(actual, expected)
         self.assertEqual(source.read_bytes(), source_bytes)
@@ -479,7 +491,8 @@ class InstallTest(unittest.TestCase):
         (mod / "model.js").write_text("export function mine() {}" if own else "export function includePMs() {}")
         (mod / "main.js").write_text("export default class Agents {}")
         layout = json.loads((REPO / "layouts/dudu.json").read_text())
-        block = layout["children"][0]["children"][1]["children"][-1]
+        drawer = layout["children"][0]["children"][1]["children"][-1]
+        block = drawer["children"][-1]
         block["content"]["mod"] = "pm-agents"
         target = self.desktop / "layouts/dudu.json"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -526,25 +539,41 @@ class InstallTest(unittest.TestCase):
         target = self.desktop / "layouts/dudu.json"
         layout = json.loads((REPO / "layouts/dudu.json").read_text())
         lists = layout["children"][0]["children"][1]
-        lists["children"] = [node for node in lists["children"] if node["id"] != "pm-list"]
+        # Flatten herdr-lists back to pre-drawer layout for legacy pm-list migration tests.
+        drawer = lists["children"][2]
+        lists["children"] = [lists["children"][0], *drawer["children"]]
         lists["children"][1]["size"] = {"px": 200}
         layout["background"] = "custom"
         target.write_text(json.dumps(layout))
         before = target.read_bytes()
         output = self.run_install("--dry-run")
         self.assertIn(f"Would Add the pm-list block to {target}", output)
+        self.assertIn(f"Would Hide spaces and agents in herdr-lists drawer in {target}", output)
         self.assertEqual(target.read_bytes(), before)
         output = self.run_install()
         self.assertIn(f"Add the pm-list block to {target}", output)
+        self.assertIn(f"Hide spaces and agents in herdr-lists drawer in {target}", output)
         self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), before)
         expected = copy.deepcopy(layout)
-        expected["children"][0]["children"][1]["children"].insert(1, PM_LIST)   # right under pm-nav
+        expected["children"][0]["children"][1]["children"] = [
+            expected["children"][0]["children"][1]["children"][0],
+            PM_LIST_WEIGHT,
+            {
+                "id": "herdr-lists", "type": "column", "hidden": True, "size": {"weight": 1},
+                "children": expected["children"][0]["children"][1]["children"][1:],
+            },
+        ]
         self.assertEqual(json.loads(target.read_text()), expected)
-        # Once added, later installs leave the layout alone, wherever the person moved the block.
+        # Once added, later installs leave the layout alone (even if user toggles hidden: false).
         output = self.run_install()
         self.assertIn("already contains pm-nav", output)
         self.assertNotIn("move the pm-list block", output)
         self.assertEqual(json.loads(target.read_text()), expected)
+        expected_open = copy.deepcopy(expected)
+        expected_open["children"][0]["children"][1]["children"][2]["hidden"] = False
+        target.write_text(json.dumps(expected_open))
+        self.assertIn("already contains pm-nav", self.run_install())
+        self.assertEqual(json.loads(target.read_text()), expected_open)
         # Where earlier installers put the list (right above agents): a hint, and the layout stays as it is.
         old = copy.deepcopy(layout)
         old["children"][0]["children"][1]["children"].insert(2, PM_LIST)
@@ -714,7 +743,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(migrated["background"], "old-custom")
         self.assertEqual(migrated["toast"], "pm-toast")
         self.assertEqual([n["id"] for n in migrated["children"][0]["children"][1]["children"]],
-                         ["pm-nav", "pm-list", "spaces", "agents"])
+                         ["pm-nav", "pm-list", "herdr-lists"])
 
         # An unrelated pm.json (without pm-nav, or invalid JSON) is left untouched and dudu.json is generated from main.json.
         for unrelated in ('{"id":"custom","type":"row","children":[]}', '{invalid'):
@@ -725,6 +754,27 @@ class InstallTest(unittest.TestCase):
                 self.assertIn(f"Generate {target}", out)
                 self.assertEqual(legacy.read_text(), unrelated)
                 self.assertEqual(json.loads(target.read_text())["generated_by"], "dudu install.sh")
+
+    def test_migrates_stage_active_work_to_board(self):
+        self.seed_layout()
+        target = self.desktop / "layouts/dudu.json"
+        layout = json.loads((REPO / "layouts/dudu.json").read_text())
+        layout["children"][1]["active"] = "work"
+        target.write_text(json.dumps(layout))
+        before = target.read_bytes()
+
+        output = self.run_install()
+        self.assertIn(f"Default pm-stage to pm-board in {target}", output)
+        migrated = json.loads(target.read_text())
+        self.assertEqual(migrated["children"][1]["active"], "pm-board")
+        self.assertEqual(target.with_name("dudu.json.pm-backup").read_bytes(), before)
+
+        # Custom active (e.g. pm-project) is left untouched.
+        migrated["children"][1]["active"] = "pm-project"
+        target.write_text(json.dumps(migrated))
+        custom = target.read_bytes()
+        self.assertIn("already contains pm-nav", self.run_install())
+        self.assertEqual(target.read_bytes(), custom)
 
     def test_uninstall_handles_legacy_pm_layout(self):
         self.seed_layout()
@@ -943,6 +993,43 @@ class InstallTest(unittest.TestCase):
         self.assertFalse((self.codex / "skills/pm").exists())
         self.assertEqual((self.codex / "hooks.json.pm-backup").read_text(), text)
 
+    @unittest.skipIf(WINDOWS or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "POSIX mode bits stand in for the Windows DACL an elevated install leaves; root reads anything")
+    def test_unreadable_skill_folder_neither_fails_status_nor_blocks_set_up(self):
+        # Windows host: an elevated install left skills/pm owned by Administrators with a DACL that
+        # grants the user nothing; `setup.py --status` then failed as a whole ("Install failed: [WinError 5]"),
+        # so pm-nav showed "Set up" and wrote no cache of other machines' projects.
+        self.claude.mkdir()
+        self.codex.mkdir()
+        self.run_setup()
+        scripts = self.claude / "skills/pm/scripts"
+        scripts.chmod(0)
+        self.addCleanup(lambda: scripts.chmod(0o755) if scripts.exists() else None)
+        status = json.loads(self.run_setup("--status").stdout)
+        claude = status["agents"]["claude"]
+        self.assertTrue(claude["unreadable"])
+        self.assertFalse(claude["skill_present"])
+        self.assertIn("Cannot read", claude["error"])
+        self.assertIn("Repair it", claude["error"])
+        self.assertEqual(status["summary"]["installed"], ["codex"])
+        self.assertEqual(status["summary"]["ready"], ["codex"])
+        # Set up cannot take the folder back without privileges: it stops before writing anything and says how.
+        before = self.snapshot_readable()
+        result = self.run_setup(success=False)
+        self.assertIn("Cannot read", result.stderr)
+        self.assertIn("Repair it", result.stderr)
+        self.assertEqual(self.snapshot_readable(), before)
+        # Once repaired, Set up and status are whole again.
+        scripts.chmod(0o755)
+        self.run_setup()
+        status = json.loads(self.run_setup("--status").stdout)
+        self.assertEqual(status["summary"]["ready"], ["claude", "codex"])
+        self.assertNotIn("error", status)
+
+    def snapshot_readable(self):
+        return {str(p.relative_to(self.root)): p.read_bytes() if p.is_file() else None
+                for p in self.root.rglob("*") if os.access(p, os.R_OK)}
+
     def test_invalid_codex_hooks_abort_every_agent(self):
         self.codex.mkdir()
         self.claude.mkdir()
@@ -1119,6 +1206,313 @@ class InstallTest(unittest.TestCase):
         self.assertNotEqual(fail.returncode, 0)
         self.assertIn("Python 3.9+ is required", fail.stderr)
 
+    def test_atomic_replace_leaves_no_temp_dirs_and_cleans_stale_files(self):
+        self.run_install("--desktop")
+        for name in MODS:
+            (self.desktop / "mods" / name / "stale.js").write_text("old")
+        (self.claude / "skills/pm/stale.txt").write_text("old")
+        self.run_install("--desktop")
+        # Stale files are gone and no staging/old temp dirs remain in mods/, skills/, or their parents.
+        for parent in (self.desktop / "mods", self.claude / "skills", self.desktop, self.claude):
+            leftovers = [p.name for p in parent.iterdir()
+                         if ".staging-" in p.name or ".old-" in p.name or p.name == ".dudu-staging"]
+            self.assertEqual(leftovers, [], f"leftover temp entries in {parent}: {leftovers}")
+        for name in MODS:
+            self.assertFalse((self.desktop / "mods" / name / "stale.js").exists())
+        self.assertFalse((self.claude / "skills/pm/stale.txt").exists())
+
+    def test_replace_tree_stages_outside_mods_dir_and_prunes_staging_parent(self):
+        setup_mod = load_module("pm_setup_atomic_outside", BUNDLE / "setup.py")
+        src = self.root / "src_mod_outside"
+        app_home = self.root / "herdr-app"
+        mods_dir = app_home / "mods"
+        dst = mods_dir / "pm-project"
+        src.mkdir(parents=True)
+        (src / "mod.json").write_text('{"name":"pm-project"}')
+        (src / "main.js").write_text("new")
+        dst.mkdir(parents=True)
+        (dst / "mod.json").write_text('{"name":"pm-project"}')
+        (dst / "main.js").write_text("old")
+
+        observed = {}
+        real_copytree = shutil.copytree
+
+        def spy_copytree(s, d, *args, **kwargs):
+            observed["staging"] = Path(d)
+            observed["mods_entries_during_copy"] = sorted(p.name for p in mods_dir.iterdir())
+            return real_copytree(s, d, *args, **kwargs)
+
+        with mock.patch.object(setup_mod.shutil, "copytree", side_effect=spy_copytree):
+            setup_mod.replace_tree(src, dst, ())
+
+        # During copytree, staging lives in herdr-app/.dudu-staging, never inside mods/.
+        self.assertEqual(observed["staging"].parent, app_home / ".dudu-staging")
+        self.assertEqual(observed["mods_entries_during_copy"], ["pm-project"])
+        # After swap, target is updated and .dudu-staging is pruned cleanly.
+        self.assertEqual((dst / "main.js").read_text(), "new")
+        self.assertFalse((app_home / ".dudu-staging").exists())
+        self.assertEqual(sorted(p.name for p in mods_dir.iterdir()), ["pm-project"])
+
+    def test_replace_tree_preserves_existing_target_when_copy_fails(self):
+        setup_mod = load_module("pm_setup_atomic_fail", BUNDLE / "setup.py")
+        src = self.root / "src_mod"
+        dst = self.root / "mods/pm-project"
+        src.mkdir(parents=True)
+        (src / "main.js").write_text("new main")
+        (src / "model.js").write_text("new model")
+        dst.mkdir(parents=True)
+        (dst / "main.js").write_text("old main")
+        (dst / "model.js").write_text("old model")
+
+        real_copytree = shutil.copytree
+
+        def failing_copytree(s, d, *args, **kwargs):
+            Path(d).mkdir(parents=True, exist_ok=True)
+            (Path(d) / "main.js").write_text("partial")
+            raise OSError("simulated disk full during copy")
+
+        with mock.patch.object(setup_mod.shutil, "copytree", side_effect=failing_copytree):
+            with self.assertRaises(OSError):
+                setup_mod.replace_tree(src, dst, ())
+
+        # Original directory is completely untouched, and the sibling staging dir was cleaned up.
+        self.assertEqual((dst / "main.js").read_text(), "old main")
+        self.assertEqual((dst / "model.js").read_text(), "old model")
+        self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["pm-project"])
+
+        # Subsequent real copytree succeeds cleanly.
+        with mock.patch.object(setup_mod.shutil, "copytree", real_copytree):
+            setup_mod.replace_tree(src, dst, ())
+        self.assertEqual((dst / "main.js").read_text(), "new main")
+        self.assertEqual((dst / "model.js").read_text(), "new model")
+        self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["pm-project"])
+
+    def test_replace_tree_without_atomic_exchange_updates_mod_folder_in_place(self):
+        # Windows has no atomic directory exchange. A running Herdr there watches each mod folder by
+        # handle: renaming the folder aside fails its reload ("cannot read <mod>: Access is denied
+        # (os error 5)") and later edits go unseen until restart (seen on Windows). So the
+        # folder must stay put and only files move in, the entry files last.
+        setup_mod = load_module("pm_setup_inplace", BUNDLE / "setup.py")
+        src = self.root / "src_mod2"
+        dst = self.root / "herdr-app/mods/pm-nav"
+        (src / "icons").mkdir(parents=True)
+        (src / "main.js").write_text("v2 main")
+        (src / "model.js").write_text("v2 model")
+        (src / "mod.json").write_text("{}")
+        (src / "icons/a.svg").write_text("<svg/>")
+        (src / "was_dir").write_text("now a file")
+        (dst / "gone_dir").mkdir(parents=True)
+        (dst / "gone_dir/x.js").write_text("x")
+        (dst / "was_dir").mkdir()
+        (dst / "main.js").write_text("v1 main")
+        (dst / "old_only.js").write_text("gone in v2")
+        (dst / "__pycache__").mkdir()
+        (dst / "__pycache__/m.pyc").write_bytes(b"0")
+        before = os.stat(dst)
+
+        real_rename, real_replace = os.rename, os.replace
+        renamed, replaced = [], []
+
+        def spy_rename(a, b):
+            renamed.append((Path(a), Path(b)))
+            return real_rename(a, b)
+
+        def spy_replace(a, b):
+            replaced.append(Path(b))
+            return real_replace(a, b)
+
+        with mock.patch.object(setup_mod, "_atomic_exchange_dirs", return_value=False), \
+             mock.patch.object(setup_mod.os, "rename", side_effect=spy_rename), \
+             mock.patch.object(setup_mod.os, "replace", side_effect=spy_replace):
+            setup_mod.replace_tree(src, dst, ("__pycache__",))
+
+        after = os.stat(dst)
+        self.assertEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino), "mod folder was replaced")
+        self.assertFalse(any(dst in (a, b) for a, b in renamed), renamed)
+        self.assertEqual(sorted(str(p.relative_to(dst)) for p in dst.rglob("*")),
+                         ["icons", str(Path("icons/a.svg")), "main.js", "mod.json", "model.js", "was_dir"])
+        self.assertEqual((dst / "main.js").read_text(), "v2 main")
+        self.assertEqual((dst / "was_dir").read_text(), "now a file")
+        # mod.json then main.js come last: the reload they trigger sees every other new file.
+        self.assertEqual([p.name for p in replaced[-2:]], ["mod.json", "main.js"])
+        self.assertTrue(all(p.parent == dst or dst in p.parents for p in replaced))
+        # Staging (outside mods/) is gone, nothing temporary is left next to the mod.
+        self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["pm-nav"])
+        self.assertEqual(sorted(p.name for p in dst.parent.parent.iterdir()), ["mods"])
+
+    def test_replace_file_retries_a_briefly_locked_target(self):
+        setup_mod = load_module("pm_setup_replace_retry", BUNDLE / "setup.py")
+        src, dst = self.root / "a.tmp", self.root / "main.js"
+        src.write_text("new")
+        dst.write_text("old")
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def locked_twice(a, b):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise PermissionError(32, "The process cannot access the file")
+            return real_replace(a, b)
+
+        with mock.patch.object(setup_mod.os, "replace", side_effect=locked_twice), \
+             mock.patch.object(setup_mod.time, "sleep"):
+            setup_mod._replace_file(src, dst)
+        self.assertEqual(dst.read_text(), "new")
+        self.assertEqual(calls["n"], 3)
+
+    def test_replace_tree_file_target_swap_and_rollback_on_rename_failure(self):
+        setup_mod = load_module("pm_setup_atomic_fallback", BUNDLE / "setup.py")
+        src = self.root / "src_mod2"
+        dst = self.root / "mods/pm-dash"
+        src.mkdir(parents=True)
+        (src / "main.js").write_text("v2")
+        dst.parent.mkdir(parents=True)
+        dst.write_text("a file where the mod folder goes")
+
+        # If os.rename(staging, target) fails, the moved-aside target is rolled back.
+        real_rename = os.rename
+        calls = {"n": 0}
+
+        def fail_second_rename(a, b):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("simulated rename failure")
+            return real_rename(a, b)
+
+        with mock.patch.object(setup_mod.os, "rename", side_effect=fail_second_rename):
+            with self.assertRaises(OSError):
+                setup_mod.replace_tree(src, dst, ())
+        self.assertEqual(dst.read_text(), "a file where the mod folder goes")
+        self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["pm-dash"])
+
+        # Without the failure the file is replaced by the folder.
+        setup_mod.replace_tree(src, dst, ())
+        self.assertEqual((dst / "main.js").read_text(), "v2")
+        self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["pm-dash"])
+
+    def test_replace_tree_replaces_symlink_without_touching_linked_dir(self):
+        setup_mod = load_module("pm_setup_atomic_link", BUNDLE / "setup.py")
+        src = self.root / "src_skill"
+        linked = self.root / "elsewhere_skill"
+        dst = self.root / "skills/pm"
+        src.mkdir(parents=True)
+        (src / "SKILL.md").write_text("new skill")
+        linked.mkdir(parents=True)
+        (linked / "SKILL.md").write_text("keep untouched")
+        dst.parent.mkdir(parents=True)
+        dst.symlink_to(linked, target_is_directory=True)
+
+        setup_mod.replace_tree(src, dst, ())
+        self.assertFalse(dst.is_symlink())
+        self.assertEqual((dst / "SKILL.md").read_text(), "new skill")
+        self.assertEqual((linked / "SKILL.md").read_text(), "keep untouched")
+        self.assertEqual(sorted(p.name for p in dst.parent.iterdir()), ["pm"])
+
+    def test_install_keys_adds_herdr_lists_shortcut_and_preserves_existing(self):
+        install_mod = load_module("dudu_install_keys_test", REPO / "install.py")
+        self.assertEqual(install_mod.default_herdr_lists_key("darwin"), "cmd-shift-e")
+        self.assertEqual(install_mod.default_herdr_lists_key("linux"), "ctrl-shift-e")
+        self.assertEqual(install_mod.default_herdr_lists_key("win32"), "ctrl-shift-e")
+        self.assertEqual(install_mod.default_project_search_key("darwin"), "cmd-k")
+        self.assertEqual(install_mod.default_project_search_key("linux"), "ctrl-k")
+        self.assertEqual(install_mod.default_project_search_key("win32"), "ctrl-k")
+        expected_key = install_mod.default_herdr_lists_key()
+        expected_search_key = install_mod.default_project_search_key()
+
+        self.seed_layout()
+        keys_path = self.desktop / "keys.json"
+        # Missing keys.json must not be created partially (would block Herdr's default generation).
+        out_missing = self.run_install()
+        self.assertIn("Skip keys:", out_missing)
+        self.assertFalse(keys_path.exists())
+
+        seed = {
+            "global": {"cmd-b": "layout.toggle:sidebar", "cmd-p": "mod.open:picker"},
+            "terminal": {"cmd-c": "terminal.copy"},
+        }
+        keys_path.write_text(json.dumps(seed, indent=2) + "\n", encoding="utf-8")
+
+        # Dry run reports without mutating.
+        out_dry = self.run_install("--dry-run")
+        self.assertIn(f"Would Bind {expected_key} to layout.toggle:herdr-lists", out_dry)
+        self.assertIn(f"Would Bind {expected_search_key} to pm-project.search", out_dry)
+        self.assertIn(f"Would Bind {expected_search_key} to terminal in terminal section", out_dry)
+        self.assertEqual(json.loads(keys_path.read_text(encoding="utf-8")), seed)
+
+        # Real install writes layout:dudu bindings + terminal passthrough, backs up once, and keeps existing sections intact.
+        out_install = self.run_install()
+        self.assertIn(f"Bind {expected_key} to layout.toggle:herdr-lists", out_install)
+        self.assertIn(f"Bind {expected_search_key} to pm-project.search", out_install)
+        data = json.loads(keys_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["global"], seed["global"])
+        self.assertEqual(data["terminal"], {"cmd-c": "terminal.copy", expected_search_key: "terminal"})
+        self.assertEqual(data["layout:dudu"], {
+            expected_key: "layout.toggle:herdr-lists",
+            expected_search_key: "pm-project.search",
+        })
+        self.assertTrue(keys_path.with_name("keys.json.pm-backup").exists())
+
+        # Idempotent re-run does not touch keys.json.
+        before = keys_path.read_bytes()
+        out_again = self.run_install()
+        self.assertIn("already binds layout.toggle:herdr-lists", out_again)
+        self.assertIn("already binds pm-project.search", out_again)
+        self.assertEqual(keys_path.read_bytes(), before)
+
+        # Uninstall removes only dudu's bindings and preserves user keys.
+        out_un = self.run_install("--uninstall")
+        self.assertIn("Remove layout.toggle:herdr-lists binding", out_un)
+        self.assertIn("Remove pm-project.search binding", out_un)
+        after_un = json.loads(keys_path.read_text(encoding="utf-8"))
+        self.assertEqual(after_un, seed)
+
+    def test_install_keys_respects_custom_binding_and_conflicts(self):
+        install_mod = load_module("dudu_install_keys_conflict", REPO / "install.py")
+        expected_key = install_mod.default_herdr_lists_key()
+        expected_search_key = install_mod.default_project_search_key()
+        self.seed_layout()
+        keys_path = self.desktop / "keys.json"
+
+        # 1) User already bound both actions (object form) to custom keys.
+        custom = {
+            "global": {
+                "cmd-alt-s": {"command": "layout.toggle", "args": {"id": "herdr-lists"}},
+                "cmd-alt-k": {"command": "pm-project.search"},
+            },
+        }
+        keys_path.write_text(json.dumps(custom, indent=2) + "\n", encoding="utf-8")
+        out_custom = self.run_install()
+        self.assertIn("already binds layout.toggle:herdr-lists", out_custom)
+        self.assertIn("already binds pm-project.search", out_custom)
+        self.assertEqual(json.loads(keys_path.read_text(encoding="utf-8")), custom)
+
+        # 2) User already bound the default keys to something else -> never overwrite or touch terminal.
+        conflict = {
+            "global": {expected_key: "app.palette", expected_search_key: "app.palette"},
+        }
+        keys_path.write_text(json.dumps(conflict, indent=2) + "\n", encoding="utf-8")
+        out_conflict = self.run_install()
+        self.assertIn(f"{expected_key} is already bound", out_conflict)
+        self.assertIn(f"{expected_search_key} is already bound", out_conflict)
+        self.assertEqual(json.loads(keys_path.read_text(encoding="utf-8")), conflict)
+
+        # 3) User already bound search key in terminal to a custom action -> keep user's terminal action, still bind layout:dudu.
+        custom_term = {
+            "global": {"cmd-b": "layout.toggle:sidebar"},
+            "terminal": {expected_search_key: "send:\u000c"},
+            "layout:dudu": {expected_key: "layout.toggle:herdr-lists"},
+        }
+        keys_path.write_text(json.dumps(custom_term, indent=2) + "\n", encoding="utf-8")
+        out_term = self.run_install()
+        self.assertIn(f"Bind {expected_search_key} to pm-project.search", out_term)
+        after_term = json.loads(keys_path.read_text(encoding="utf-8"))
+        self.assertEqual(after_term["terminal"][expected_search_key], "send:\u000c")
+        self.assertEqual(after_term["layout:dudu"][expected_search_key], "pm-project.search")
+        # Uninstall must not remove user's custom terminal binding.
+        self.run_install("--uninstall")
+        after_un = json.loads(keys_path.read_text(encoding="utf-8"))
+        self.assertEqual(after_un["terminal"][expected_search_key], "send:\u000c")
+
 
 def load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -1221,6 +1615,153 @@ class WindowsHookTest(unittest.TestCase):
         self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
         self.assertNotIn("legacy ledger found", res2.stdout)
         self.assertTrue((home / ".dudu" / "install" / "skill-claude.json").is_file())
+
+
+class WindowsAclTest(unittest.TestCase):
+    """Windows NTFS ACL inheritance restoration and tempfile avoidance (mocking sys.platform == 'win32')."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.setup = load_module("pm_setup_win_acl", BUNDLE / "setup.py")
+
+    def test_restore_windows_acl_noop_on_non_windows(self):
+        target = self.root / "file.json"
+        target.write_text("{}", encoding="utf-8")
+        for plat in ("darwin", "linux"):
+            with mock.patch.object(sys, "platform", plat), \
+                 mock.patch.object(self.setup.subprocess, "run") as run_mock:
+                self.assertFalse(self.setup.restore_windows_acl(target, recursive=True))
+                run_mock.assert_not_called()
+
+    def test_restore_windows_acl_invokes_icacls_and_handles_errors(self):
+        file_target = self.root / "dudu.json"
+        file_target.write_text("{}", encoding="utf-8")
+        dir_target = self.root / "pm-dash"
+        dir_target.mkdir()
+        missing = self.root / "does-not-exist"
+
+        ok = subprocess.CompletedProcess(args=[], returncode=0)
+        fail = subprocess.CompletedProcess(args=[], returncode=5)
+
+        with mock.patch.object(sys, "platform", "win32"):
+            with mock.patch.object(self.setup.subprocess, "run", return_value=ok) as run_mock:
+                self.assertTrue(self.setup.restore_windows_acl(file_target, recursive=False))
+                self.assertTrue(self.setup.restore_windows_acl(dir_target, recursive=True))
+                self.assertFalse(self.setup.restore_windows_acl(missing, recursive=True))
+                self.assertEqual(
+                    [call.args[0] for call in run_mock.call_args_list],
+                    [
+                        ["icacls", str(file_target), "/reset", "/Q"],
+                        ["icacls", str(dir_target), "/reset", "/T", "/Q"],
+                    ],
+                )
+            with mock.patch.object(self.setup.subprocess, "run", return_value=fail):
+                self.assertFalse(self.setup.restore_windows_acl(file_target))
+            with mock.patch.object(self.setup.subprocess, "run", side_effect=FileNotFoundError("icacls")):
+                self.assertFalse(self.setup.restore_windows_acl(dir_target, recursive=True))
+
+    def test_replace_tree_and_write_json_avoid_tempfile_and_restore_acl_on_windows(self):
+        src = self.root / "src_mod"
+        (src / "sub").mkdir(parents=True)
+        (src / "mod.json").write_text('{"name":"pm-dash"}', encoding="utf-8")
+        (src / "main.js").write_text("v1", encoding="utf-8")
+        (src / "sub/helper.js").write_text("h1", encoding="utf-8")
+        dst = self.root / "herdr-app/mods/pm-dash"
+        json_target = self.root / "herdr-app/layouts/dudu.json"
+
+        ok = subprocess.CompletedProcess(args=[], returncode=0)
+        icacls_cmds = []
+
+        def fake_run(cmd, *args, **kwargs):
+            icacls_cmds.append(cmd)
+            return ok
+
+        with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.object(self.setup.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(self.setup.tempfile, "mkdtemp", side_effect=AssertionError("mkdtemp called on win32")), \
+             mock.patch.object(self.setup.tempfile, "NamedTemporaryFile",
+                               side_effect=AssertionError("NamedTemporaryFile called on win32")):
+            # Fresh install of directory tree.
+            self.setup.replace_tree(src, dst, ())
+            self.assertEqual((dst / "main.js").read_text(encoding="utf-8"), "v1")
+            # In-place update of existing directory tree.
+            (src / "main.js").write_text("v2", encoding="utf-8")
+            self.setup.replace_tree(src, dst, ())
+            self.assertEqual((dst / "main.js").read_text(encoding="utf-8"), "v2")
+            # JSON write.
+            self.setup.write_json(json_target, {"toast": "pm-toast"})
+            self.assertEqual(json.loads(json_target.read_text(encoding="utf-8")), {"toast": "pm-toast"})
+
+        self.assertEqual(
+            icacls_cmds,
+            [
+                ["icacls", str(dst), "/reset", "/T", "/Q"],
+                ["icacls", str(dst), "/reset", "/T", "/Q"],
+                ["icacls", str(json_target), "/reset", "/Q"],
+            ],
+        )
+        self.assertFalse((self.root / "herdr-app/.dudu-staging").exists())
+
+    def test_full_install_restores_acl_for_mods_skills_layout_and_keys_on_windows(self):
+        install_mod = load_module("dudu_install_win_acl", REPO / "install.py")
+        claude = self.root / "claude"
+        codex = self.root / "codex"
+        desktop = self.root / "herdr-app"
+        claude.mkdir()
+        codex.mkdir()
+        (desktop / "layouts").mkdir(parents=True)
+        (desktop / "layouts/main.json").write_text(json.dumps(MAIN), encoding="utf-8")
+        (desktop / "keys.json").write_text(json.dumps({"global": {"ctrl-b": "layout.toggle:sidebar"}}), encoding="utf-8")
+
+        env = {
+            "HOME": str(self.root),
+            "USERPROFILE": str(self.root),
+            "CLAUDE_HOME": str(claude),
+            "CODEX_HOME": str(codex),
+            "HERDR_APP_HOME": str(desktop),
+            "PM_HOME": str(self.root / ".dudu"),
+        }
+        ok = subprocess.CompletedProcess(args=[], returncode=0)
+        icacls_cmds = []
+
+        def fake_run(cmd, *args, **kwargs):
+            icacls_cmds.append(cmd)
+            return ok
+
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.object(install_mod.installer.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(install_mod.installer.tempfile, "mkdtemp",
+                               side_effect=AssertionError("mkdtemp called on win32")), \
+             mock.patch.object(install_mod.installer.tempfile, "NamedTemporaryFile",
+                               side_effect=AssertionError("NamedTemporaryFile called on win32")):
+            # --dry-run must never run icacls.
+            install_mod.main(["--agents", "claude,codex", "--desktop", "--dry-run"])
+            self.assertEqual(icacls_cmds, [])
+
+            # Real install restores ACLs on skills, mods, layout, keys, and hooks files.
+            install_mod.main(["--agents", "claude,codex", "--desktop"])
+            expected_dir_cmds = [
+                ["icacls", str(claude / "skills/pm"), "/reset", "/T", "/Q"],
+                ["icacls", str(codex / "skills/pm"), "/reset", "/T", "/Q"],
+                *(["icacls", str(desktop / "mods" / name), "/reset", "/T", "/Q"] for name in MODS),
+            ]
+            expected_file_cmds = [
+                ["icacls", str(desktop / "layouts/dudu.json"), "/reset", "/Q"],
+                ["icacls", str(desktop / "keys.json"), "/reset", "/Q"],
+                ["icacls", str(claude / "settings.json"), "/reset", "/Q"],
+                ["icacls", str(codex / "hooks.json"), "/reset", "/Q"],
+            ]
+            for cmd in expected_dir_cmds + expected_file_cmds:
+                self.assertIn(cmd, icacls_cmds)
+
+            # Idempotent re-run still heals existing layout, keys, hooks, skills, and mods.
+            icacls_cmds.clear()
+            install_mod.main(["--agents", "claude,codex", "--desktop"])
+            for cmd in expected_dir_cmds + expected_file_cmds:
+                self.assertIn(cmd, icacls_cmds)
 
 
 if __name__ == "__main__":

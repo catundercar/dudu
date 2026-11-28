@@ -32,8 +32,8 @@ from ..messaging.router import (
 )
 from ..messaging.transport import AsyncDeliverHandle, DeliverOutcome
 from ..messaging.transports.local_hc import LocalHcTransport
-from ..messaging.transports.tui import LocalTuiTransport
-from ..messaging.typist import close_if_no_reply, typed_meta
+from ..messaging.transports.remote_hc import RemoteHcTransport
+from ..messaging.typist import close_if_no_reply, transport_for, typed_meta
 from ..osutil import clip, unfailing
 from ..procs import supervisor_env
 from ..project.conversation import Conversation
@@ -269,6 +269,36 @@ def _format_continue_prompt(
     )
 
 
+def _stale_batch_reason(ctx: Context, repo: str, item: MailboxItem) -> str:
+    """Return a non-empty hold reason when an `event.batch` is already answered, acknowledged, or superseded
+    by subsequent PM actions/task transitions, so retries never wake the PM for duplicate confirmation."""
+    if not repo or item.envelope.kind != "event.batch":
+        return ""
+    body = item.envelope.body if isinstance(item.envelope.body, Mapping) else {}
+    b_start, b_end = body.get("start"), body.get("end")
+    if not (
+        isinstance(b_start, int) and not isinstance(b_start, bool)
+        and isinstance(b_end, int) and not isinstance(b_end, bool)
+        and 0 <= b_start < b_end
+    ):
+        return ""
+    dlv = Delivery(ctx, repo, settle=0)
+    if dlv.batch_already_answered(b_start, b_end):
+        return "already_answered"
+    # W2 retries (`retry_after_interrupted` / `retry_after_silent`) re-send a batch whose turn crashed after
+    # `took_delivery` may have recorded `received`; never suppress those purely on `received_ranges`.
+    if item.hold_reason not in ("retry_after_interrupted", "retry_after_silent") and dlv.is_received(b_start, b_end):
+        return "already_received"
+    log_path = ctx.home.project_for(repo).conversation
+    try:
+        log_grew = log_path.exists() and log_path.stat().st_size > b_end
+    except OSError:
+        log_grew = False
+    if (item.attempts >= 1 or bool(item.hold_reason) or log_grew) and not dlv.batch_has_live_news(b_start, b_end):
+        return "events_superseded"
+    return ""
+
+
 class ProjectSupervisor:
     """Co-located per-project observation sampler, heartbeater, journal reducer, and recovery executor (§3.2-3.6)."""
 
@@ -304,9 +334,7 @@ class ProjectSupervisor:
     def _transport_for(self, endpoint: Endpoint) -> Any:
         if self._transport is not None:
             return self._transport
-        if endpoint.runtime == "tui":
-            return LocalTuiTransport(self.ctx)
-        return LocalHcTransport(self.ctx)
+        return transport_for(self.ctx, endpoint)
 
     def _sync_incident_row(self, state: Mapping[str, Any]) -> None:
         inc = state.get("incident")
@@ -447,9 +475,10 @@ class ProjectSupervisor:
             self.tracker.sync_mailbox_projection(now_ms)
         return requeued
 
-    def _requeue_submitted_for_retype(self, act: Mapping[str, Any], ep: Endpoint | None, now_ms: int) -> bool:
+    def _requeue_submitted_for_retype(self, act: Mapping[str, Any], ep: Endpoint | None, now_ms: int) -> str:
+        """Requeue typed-but-unstarted envelopes for W6 retry. Returns `'requeued'`, `'superseded'`, or `'failed'`."""
         if not self.tracker.files.pm_mailbox.is_dir():
-            return False
+            return "failed"
         mailbox = self.tracker.pm_mailbox
         msg_ids = {str(m) for m in (act.get("msg_ids") or []) if m}
         batch_range = act.get("batch")
@@ -468,7 +497,26 @@ class ProjectSupervisor:
         if not matched and candidates:
             candidates.sort(key=lambda x: x.seq)
             matched = [candidates[-1]]
+        if not matched:
+            return "failed"
+        requeued_any = False
+        superseded_any = False
         for it in matched:
+            stale = _stale_batch_reason(self.ctx, self.repo, it)
+            if stale:
+                mailbox.transition(
+                    it.envelope.env_id,
+                    "superseded",
+                    now_ms=now_ms,
+                    hold_reason=stale,
+                    clear_intent=True,
+                )
+                body = it.envelope.body if isinstance(it.envelope.body, Mapping) else {}
+                b_end = body.get("end")
+                if self.repo and isinstance(b_end, int) and not isinstance(b_end, bool) and b_end > 0:
+                    Delivery(self.ctx, self.repo).advance_delivered(b_end)
+                superseded_any = True
+                continue
             mailbox.transition(
                 it.envelope.env_id,
                 "accepted",
@@ -476,9 +524,11 @@ class ProjectSupervisor:
                 hold_reason="retry_unstarted",
                 clear_intent=True,
             )
-        if matched:
-            self.tracker.sync_mailbox_projection(now_ms)
-        return bool(matched)
+            requeued_any = True
+        self.tracker.sync_mailbox_projection(now_ms)
+        if requeued_any:
+            return "requeued"
+        return "superseded" if superseded_any else "failed"
 
     def _execute_recovery_actions(
         self,
@@ -647,9 +697,9 @@ class ProjectSupervisor:
                     res_obs["outcome"] = "endpoint_gone"
 
             elif action == "retype_submitted":
-                ok = self._requeue_submitted_for_retype(act, ep, now_ms)
-                res_obs["outcome"] = "requeued" if ok else "failed"
-                res_obs["detail"] = "retry_unstarted"
+                retype_res = self._requeue_submitted_for_retype(act, ep, now_ms)
+                res_obs["outcome"] = retype_res
+                res_obs["detail"] = "already_handled" if retype_res == "superseded" else "retry_unstarted"
 
             elif action == "continue_turn":
                 cause_kind = str(act.get("cause_kind") or "user")
@@ -1000,9 +1050,7 @@ class EndpointDriver:
     def _transport_for(self, endpoint: Endpoint) -> Any:
         if self._transport is not None:
             return self._transport
-        if endpoint.runtime == "tui":
-            return LocalTuiTransport(self.ctx)
-        return LocalHcTransport(self.ctx)
+        return transport_for(self.ctx, endpoint)
 
     def _settle_deliver_outcome(
         self,
@@ -1261,7 +1309,7 @@ class EndpointDriver:
             if ep_snap_override is not None:
                 ep_snap = ep_snap_override
             else:
-                if isinstance(transport, LocalHcTransport):
+                if isinstance(transport, (LocalHcTransport, RemoteHcTransport)):
                     caps = transport.capabilities(ep, pre_info=info)
                 else:
                     caps = transport.capabilities(ep)
@@ -1295,6 +1343,21 @@ class EndpointDriver:
             )
 
             for item in pending:
+                if item.envelope.kind == "event.batch":
+                    stale = _stale_batch_reason(self.ctx, self.repo, item)
+                    if stale:
+                        mailbox.transition(
+                            item.envelope.env_id,
+                            "superseded",
+                            now_ms=now_ms,
+                            hold_reason=stale,
+                            clear_intent=True,
+                        )
+                        sb = item.envelope.body if isinstance(item.envelope.body, Mapping) else {}
+                        b_end = sb.get("end")
+                        if self.repo and isinstance(b_end, int) and not isinstance(b_end, bool) and b_end > 0:
+                            Delivery(self.ctx, self.repo).advance_delivered(b_end)
+                        continue
                 if held and item.envelope.kind == "event.batch":
                     mailbox.update_hold_reason(item.envelope.env_id, "held", now_ms=now_ms)
                     continue
@@ -1330,7 +1393,7 @@ class EndpointDriver:
                     "if_idle": bool(dec.if_idle_only and a_state not in ("done", "error")),
                     "timeout_s": 70.0,
                 }
-                if isinstance(transport, LocalHcTransport):
+                if isinstance(transport, (LocalHcTransport, RemoteHcTransport)):
                     kw["occupation_hint"] = occ_hint
                     kw["retry_note"] = retry_note
                     kw["pre_info"] = info
@@ -1543,9 +1606,9 @@ def deliver_under_typist_lock(
         )
 
         if transport is None:
-            transport = LocalHcTransport(ctx) if ep.runtime == "hc" else LocalTuiTransport(ctx)
+            transport = transport_for(ctx, ep)
         kw: dict[str, Any] = {"if_idle": bool(if_idle), "timeout_s": float(timeout_s)}
-        if isinstance(transport, LocalHcTransport) and pre_info is not None:
+        if isinstance(transport, (LocalHcTransport, RemoteHcTransport)) and pre_info is not None:
             kw["pre_info"] = pre_info
         outcome = transport.deliver(ep, cur, **kw)
 

@@ -24,6 +24,7 @@ from .records import (
     helper_elapsed,
     helper_entries,
     helper_remaining,
+    helper_should_wake_pm,
     helper_wait_active_for,
     kill_helper_terminal_for,
 )
@@ -169,9 +170,9 @@ class HelperWatcher:
                         f"可用 `pm.py helper stop {name}` 停掉",
                     )
                     if owner_kind == "pm":
-                        Conversation(self.ctx, orepo).record(
+                        Conversation(self.ctx, orepo, slug=oslug or None).record(
                             "helper", by=f"hc:{term}", source="helper", helper=name, status=state,
-                            result=h.get("result") or "", text=msg, wake=not bool(h.get("quiet")), key=key,
+                            result=h.get("result") or "", text=msg, wake=helper_should_wake_pm(self.ctx, h, state), key=key,
                         )
                     else:
                         def _add_note(cur: Task | None, ch: Change, m: str = msg) -> dict[str, Any] | None:

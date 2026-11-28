@@ -37,7 +37,7 @@ from .project.conversation import Conversation
 from .project.project import ProjectRegistry
 from .project.readmodel import IMAGE_MARK
 from .project.turn_state import TurnTracker
-from .store import DOCUMENT_ROOTS, StoreError, replace_task_file, valid_task_id, write_atomic
+from .store import DOCUMENT_ROOTS, StoreError, registration_slug, replace_task_file, valid_task_id, write_atomic
 from .workers.sessions import remember_pm_session_for, remember_worker_session_for
 
 
@@ -521,16 +521,18 @@ def cmd_hook_session_start(a, ctx=None):
         field = lambda name: data[name] if isinstance(data.get(name), str) else ""
         rec = ctx.caller.own_pm_record(field("cwd") or None)
         repo = (rec or {}).get("repo") or ""
+        pslug = registration_slug(rec) or (ctx.store.folder_project_slug(repo) if repo else "")
         if rec and (field("transcript_path") or field("session_id")):
             unfailing(remember_pm_session_for, ctx, rec, field("transcript_path"), field("session_id"))
         is_compact = bool(getattr(a, "compact", False) or field("source") == "compact")
-        if is_compact and repo:
-            ctx.out.line(handover_compact_text(repo, ctx=ctx))
+        target = pslug or repo
+        if is_compact and target:
+            ctx.out.line(handover_compact_text(target, ctx=ctx))
         else:
             ctx.out.line(f"You are {pm.get('name')}, the PM for this project (pm skill). Ledger board: {ctx.home.board}. "
                          "If you have not read it in this session, run `pm.py handover` before anything else.")
-        if repo:
-            Delivery(ctx, repo).ensure_running()  # events that came while no PM ran
+        if repo or pslug:
+            Delivery(ctx, repo, slug=pslug or None).ensure_running()  # events that came while no PM ran
         return
     unfailing(remember_worker_session_for, ctx)
     ctx.out.line(f"A PM coordinator ({pm.get('name')}) runs in {pm['pane_id']}. Before implementing a non-trivial change, "
@@ -794,12 +796,13 @@ def cmd_hook_turn(a, ctx=None):
     if event not in ("UserPromptSubmit", "Stop") or not rec:
         return
     repo = rec.get("repo") or ""
+    pslug = registration_slug(rec) or (ctx.store.folder_project_slug(repo) if repo else "")
     transcript = field("transcript_path")
     session_id = field("session_id")
     unfailing(remember_pm_session_for, ctx, rec, transcript, session_id)
-    delivery = Delivery(ctx, repo) if repo else None
-    conv = Conversation(ctx, repo) if repo else None
-    tracker = TurnTracker(ctx, repo) if repo else None
+    delivery = Delivery(ctx, repo, slug=pslug or None) if (repo or pslug) else None
+    conv = Conversation(ctx, repo, slug=pslug or None) if (repo or pslug) else None
+    tracker = TurnTracker(ctx, repo, slug=pslug or None) if (repo or pslug) else None
     mirror = DiscordMirror(ctx)
     if delivery is not None:
         unfailing(delivery.ensure_running)  # a desktop-app PM's deliverer: started again if none runs
@@ -812,7 +815,7 @@ def cmd_hook_turn(a, ctx=None):
         unlogged_prompt = prompt
         if kind == "user" and tracker is not None and prompt:
             consumed_ui, matched_ids, unlogged_prompt = tracker.consume_ui_prompt(prompt)
-        if repo:
+        if repo or pslug:
             # Words a turn took in while it worked and that no Stop hook recorded (the user stopped that turn):
             # before this prompt, where they were said. Bounded to 512 KiB on synchronous UserPromptSubmit so a
             # multi-MB transcript never hits the 15s hook timeout. They belong to that earlier turn (the newest one
@@ -960,8 +963,9 @@ def cmd_hook_turn(a, ctx=None):
             # `after`: a turn that a delivered batch started answers that batch, not the user (turn_cause).
             pane = ctx.pane
             conv.record("pm", text=reply, **({"by": pane} if pane else {}), **cause_fields)
-        if repo:
-            unfailing(lambda: ProjectRegistry(ctx).app_pm(repo) and StallWatcher(ctx).sweep_exited(repo))
+        sweep_target = pslug or repo
+        if sweep_target:
+            unfailing(lambda: ProjectRegistry(ctx).app_pm(sweep_target) and StallWatcher(ctx).sweep_exited(sweep_target))
         if reply and rec.get("discord") and mirror.is_on() and not mirror.replied_on_discord(transcript):
             mirror.mirror(rec, f"**{rec['name']}**\n{reply}")
         return
@@ -1000,8 +1004,9 @@ def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None, max_scan_byt
     turn_seq: the turn that took these words in; what they match in the PM mailbox is bound to it (read by that
     turn), so that turn's closure settles it instead of the next turn's."""
     ctx = Context.from_env() if ctx is None else ctx
-    repo = rec.get("repo")
-    if not repo or not transcript or not isinstance(transcript, str):
+    repo = rec.get("repo") or ""
+    pslug = registration_slug(rec) or (ctx.store.folder_project_slug(repo) if repo else "")
+    if (not repo and not pslug) or not transcript or not isinstance(transcript, str):
         return
     path, key = Path(transcript), str(Path(transcript))
     try:
@@ -1010,7 +1015,7 @@ def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None, max_scan_byt
         return
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     near = datetime.timedelta(seconds=5)
-    proj_dir = ctx.home.project_for(repo).ensure()
+    proj_dir = ctx.home.project_for(pslug or repo).ensure()
     mark_path = proj_dir / "taken-in.json"
     try:
         mark = json.loads(mark_path.read_text())
@@ -1096,9 +1101,9 @@ def record_taken_in(rec, transcript, ended, prompt="", *, ctx=None, max_scan_byt
             pass
     if not found:
         return
-    conv = Conversation(ctx, repo)
-    delivery = Delivery(ctx, repo)
-    tracker = TurnTracker(ctx, repo)
+    conv = Conversation(ctx, repo, slug=pslug or None)
+    delivery = Delivery(ctx, repo, slug=pslug or None)
+    tracker = TurnTracker(ctx, repo, slug=pslug or None)
     mirror = DiscordMirror(ctx)
     turn_ref = f"seq:{int(turn_seq)}" if turn_seq else ""
     local = lambda t: t.astimezone().strftime("%Y-%m-%d %H:%M:%S")

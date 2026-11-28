@@ -42,6 +42,15 @@ from .review.land import (
 )
 from .store import LockTimeoutError, file_lock, lock_file, unlock_file
 from .workers.lifecycle import close_later_for
+from .workers.self_hosted import (
+    is_offsite_task,
+    is_self_hosted_task,
+    offsite_machine,
+    offsite_where,
+    offsite_workspace_for,
+    refresh_offsite_context,
+    send_to_self_hosted,
+)
 from .workers.service import Workers
 
 Said = list  # [(stream, text)], stream "out" or "err"
@@ -260,14 +269,28 @@ class Landing:
         land_cmd = " ".join(land_parts)
         remaining = post_merge_steps(task)
         extra_note = (approved.get("note") or "").strip()
+        remote = for_helper and is_offsite_task(task)
         lines = []
+        if remote:
+            # MR-D1: the merge runs here, in the main checkout; the offsite worker (with its context) resolves conflicts.
+            where = offsite_where(task)
+            conflict_zh = (f"2. 若遇到合并冲突（退出码 4）：不要在主检出解冲突；把冲突文件清单发回远端 worker（{where}，仍在待命）："
+                           f"`{cmd} send {tid} \"<冲突文件与 land 输出>：请在你的工作树 git merge {base} 解冲突、提交并重新报 review\"`，"
+                           f"然后用 helper done 汇报「冲突已退回远端 worker」。")
+            conflict_en = (f"2. On conflicts (exit 4): do not resolve them in the main checkout; hand the conflict list back "
+                           f"to the remote worker ({where}, kept available): `{cmd} send {tid} \"<conflicting files and "
+                           f"land output>: run git merge {base} in your worktree, resolve, commit and report review "
+                           f"again\"`, then report via helper done that the conflicts went back to the remote worker.")
         if self._tr("en", "zh") == "zh":
             lines.append(f"PM 已裁决合并任务 {tid}（{branch} -> {base}）。请按以下步骤执行：")
             if extra_note:
                 lines.append(f"- PM 补充说明：{extra_note}")
             lines.append(f"1. 运行合并与检查：`{land_cmd}`")
-            lines.append(f"2. 若遇到合并冲突（退出码 4）：在工作树（{worktree or repo}）里运行 `git merge {base}`，"
-                         f"解决冲突、跑相关检查并提交，再重新运行 `{land_cmd}`。")
+            if remote:
+                lines.append(conflict_zh)
+            else:
+                lines.append(f"2. 若遇到合并冲突（退出码 4）：在工作树（{worktree or repo}）里运行 `git merge {base}`，"
+                             f"解决冲突、跑相关检查并提交，再重新运行 `{land_cmd}`。")
             lines.append(f"3. 若检查失败（退出码 1）：查看报错；如属小问题直接修复提交并报 review，或需拍板时用 "
                          f"`{cmd} update {tid} --status blocked --note \"<原因>\"` 汇报。")
             if remaining:
@@ -285,8 +308,11 @@ class Landing:
             if extra_note:
                 lines.append(f"- PM note: {extra_note}")
             lines.append(f"1. Run merge & checks: `{land_cmd}`")
-            lines.append(f"2. On conflicts (exit 4): in worktree ({worktree or repo}) run `git merge {base}`, "
-                         f"resolve conflicts, run targeted checks, commit, then re-run `{land_cmd}`.")
+            if remote:
+                lines.append(conflict_en)
+            else:
+                lines.append(f"2. On conflicts (exit 4): in worktree ({worktree or repo}) run `git merge {base}`, "
+                             f"resolve conflicts, run targeted checks, commit, then re-run `{land_cmd}`.")
             lines.append(f"3. On check failure (exit 1): diagnose; if a fix requires code changes report "
                          f"`{cmd} update {tid} --status review --commit <sha> --note \"...\"`, or if blocked report "
                          f"`{cmd} update {tid} --status blocked --note \"<reason>\"`.")
@@ -351,6 +377,14 @@ class Landing:
         if not branch:
             raise self._refuse(tr(f"{tid} has no branch to land", f"{tid} 没有可合并的分支"))
         git = ctx.git
+        remote_task = is_offsite_task(task)
+        if remote_task:
+            # §11.4: the commits live on the worker's machine; bring them to this checkout first (or say why not).
+            try:
+                offsite_workspace_for(ctx, task).fetch_branch(task)
+            except Refused as err:
+                raise self._refuse(tr(f"{tid}: could not fetch the remote worker's branch {branch}: {err}",
+                                      f"{tid}：取不回远端 worker 的分支 {branch}：{err}"))
         base = git.merge_target(repo, task["base"])
         if git.run(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") is None:
             raise self._refuse(tr(f"branch {branch} does not exist in {repo}", f"{repo} 里找不到分支 {branch}"))
@@ -374,6 +408,13 @@ class Landing:
         term = hc_terminal_of(task)
         worker_info = (ctx.hc.get_raw(term, errors=True) or {}) if term and "/" not in term else {}
         worker_live = worker_info.get("state") == "live"
+        if remote_task and via == "worker":
+            # MR-D1: the main checkout is here; an offsite worker never pushes to it.
+            where = offsite_machine(task)
+            raise self._refuse(tr(
+                f"{tid}: the worker runs on {where}; its merge runs here: "
+                f"`pm.py approve {tid}` (or `--via helper`)",
+                f"{tid}：worker 在 {where} 上；合并在本机做：`pm.py approve {tid}`（或 `--via helper`）"))
         if via == "worker":
             if not worker_live:
                 raise self._refuse(tr(
@@ -385,8 +426,9 @@ class Landing:
         elif via == "helper":
             # The helper starts beside the project's desktop-app PM: the caller's terminal, or (the supervisor)
             # the PM's registered one.
+            pm_target = self.ctx.store.task_project_slug(task) or repo
             has_app_pm = ctx.pane.startswith("hc:") if principal is None else bool(
-                (self._projects.app_pm(repo) or {}).get("terminal"))
+                (self._projects.app_pm(pm_target) or {}).get("terminal"))
             if not has_app_pm:
                 raise self._refuse(tr("--via helper requires a desktop-app PM ($HC_TERMINAL_ID)",
                                       "--via helper 需要桌面版 PM（$HC_TERMINAL_ID）"))
@@ -422,7 +464,7 @@ class Landing:
             hname = self._helper_name(f"land-{tid}", repo)
             fields = self._helper_fields(prompt_text, hname, req, repo, tid,
                                          timeout=max(int(approved["timeout"]) + 300, helpers_timeout_for(ctx)),
-                                         parent_pm=principal is not None)
+                                         parent_pm=principal is not None, quiet=True)
             # Write approval first (with helper_name) so the helper is authorized immediately on start,
             # then update executor_pane once the terminal address is known.
             approved["helper_name"] = hname
@@ -442,7 +484,7 @@ class Landing:
                                    f"PM 批准合并（{short_sha} -> {base}）；交给执行 helper {hname}"),
                            source="pm", **({"handled_by": "pm"} if was_blocked else {}))
 
-            self._change(tid, _record_approve_helper)
+            task = self._change(tid, _record_approve_helper)
             try:
                 hterm = self._start(fields, done)
             except (SystemExit, Exception):
@@ -459,7 +501,9 @@ class Landing:
                     if isinstance(cur.get("land_approved"), dict):
                         cur["land_approved"]["executor_pane"] = f"hc:{hterm}"
                 self._change(tid, _bind_helper_pane, board=False)
-            workers._deliver_later(repo)
+            if remote_task:
+                self._notify_remote_worker(workers, task, approved, hname)
+            workers._deliver_later(repo, slug=ctx.store.task_project_slug(task))
             done.said.append(("out", tr(
                 f"{tid}: merge approved ({short_sha} -> {base}); delegated to exec helper {hname}"
                 + (f" (hc:{hterm})" if hterm else "") + " (async)",
@@ -484,12 +528,14 @@ class Landing:
                        source="pm", **({"handled_by": "pm"} if was_blocked else {}))
 
         task = self._change(tid, _record_approve)
+        if remote_task:
+            refresh_offsite_context(ctx, task)
         prompt_text = self.handoff_prompt(task, approved, for_helper=False)
         if executor == "worker":
             message = f"[from {ctx.pane or 'pm.py'}] {prompt_text}"
             workers.send_async_later(term, message, task_id=tid, repo=repo,
                                      pre_turn=worker_info.get("turn") or 0, timeout=180, kind="cmd.approve_land")
-            workers._deliver_later(repo)
+            workers._deliver_later(repo, slug=ctx.store.task_project_slug(task))
             done.said.append(("out", tr(
                 f"{tid}: merge approved ({short_sha} -> {base}); delegated to worker hc:{term} (async)",
                 f"{tid}：已批准合并（{short_sha} -> {base}）；已异步交给 worker hc:{term}")))
@@ -500,12 +546,34 @@ class Landing:
             f"{tid}：已批准合并（{short_sha} -> {base}）；执行者现在可运行 `{cmd} land {tid}`")))
         return done
 
+    def _notify_remote_worker(self, workers: Workers, task: dict[str, Any], approved: dict[str, Any], hname: str) -> None:
+        """MR-D1: tell the remote worker its commit is being merged here and to stay available for conflicts, and
+        rewrite its `context.json` (`land_approved` now set). Both best effort: a down machine gets the message from
+        its mailbox once it reconnects, the context on the next refresh."""
+        tid = task["id"]
+        short = approved.get("short") or str(approved.get("commit") or "")[:7]
+        msg = self._tr(
+            f"[from pm.py] PM approved {short} -> {approved.get('base')}; the coordinator's merge helper {hname} is "
+            f"landing it in the main checkout. Stay available and do not start new work: if the merge conflicts, the "
+            f"conflict list comes back to you to resolve in your worktree (commit, then report review again).",
+            f"[from pm.py] PM 已批准 {short} -> {approved.get('base')}；协调者本机的合并 helper {hname} 正在主检出合入。"
+            f"请保持待命、不要开始新工作：若合并冲突，冲突清单会发回给你在工作树里解决（提交后重新报 review）。")
+        if is_self_hosted_task(task):
+            send_to_self_hosted(self.ctx, task, msg, kind="cmd.send",
+                                idempotency_key=f"land-delegated:{tid}:{short}:{hname}")
+        else:
+            term = hc_terminal_of(task)
+            if term:
+                workers.send_async_later(term, msg, task_id=tid, repo=task["repo"], timeout=180, kind="cmd.send")
+        refresh_offsite_context(self.ctx, task)
+
     def _helper_fields(self, prompt_text: str, hname: str, req: Any, repo: str, tid: str, *,
-                       timeout: int, parent_pm: bool = False) -> dict[str, Any]:
+                       timeout: int, parent_pm: bool = False, quiet: bool = False) -> dict[str, Any]:
         """The `pm.py helper start` options of a PM-delegated exec helper working for task `tid` (`parent_pm`:
         started from no terminal, beside the project's PM)."""
         return {
             **({"parent_pm": True} if parent_pm else {}),
+            **({"quiet": True} if quiet else {}),
             "prompt": prompt_text, "brief": None, "name": hname,
             "profile": req.profile, "kind": req.kind, "model": req.model, "effort": req.effort,
             "advisor": req.advisor, "codex_profile": req.codex_profile,
@@ -600,9 +668,17 @@ class Landing:
         base = git.merge_target(repo, task["base"])
         if not branch:
             raise self._refuse(tr(f"{tid} has no branch to land", f"{tid} 没有可合并的分支"))
-        checks = verify_commands_for(ctx, repo)
+        checks = verify_commands_for(
+            ctx,
+            repo,
+            project_slug_val=task.get("project_slug") or None,
+            folder_alias=task.get("folder_alias") or None,
+        )
         if not checks:  # no file, or only comments
-            vfile = ctx.home.project_for(repo).verify
+            pslug_val = task.get("project_slug")
+            proj_dir = ctx.home.project(pslug_val) if pslug_val else ctx.home.project_for(repo)
+            falias = task.get("folder_alias")
+            vfile = (proj_dir.root / f"verify.{falias}") if falias and (proj_dir.root / f"verify.{falias}").exists() else proj_dir.verify
             raise self._refuse(tr(
                 f"no checks for {Path(repo).name}: write them to {vfile}, one shell command per line "
                 "(`#` starts a comment), then land again.",
@@ -709,7 +785,7 @@ class Landing:
         rows 8-9b; the deliverer reconciles dependents), research, and the worker's cleanup."""
         tr, ctx = self._tr, self.ctx
         tid, repo = task["id"], task["repo"]
-        wake_pm = bool(self._projects.app_pm(repo))
+        wake_pm = bool(self._projects.app_pm(self.ctx.store.task_project_slug(task) or repo))
 
         def _land_done_delegated(cur: dict[str, Any], ch: Change) -> None:
             cur["status"] = "merged"
@@ -726,7 +802,7 @@ class Landing:
         task = self._change(tid, _land_done_delegated)
         workers = Workers(ctx)
         if wake_pm:
-            workers._deliver_later(repo)
+            workers._deliver_later(repo, slug=ctx.store.task_project_slug(task))
         extra = self._research_lines(task)
         if self_landing:
             closed = workers.retire_review(task)

@@ -13,9 +13,13 @@ from typing import Any, Mapping, Sequence
 
 from .. import osutil
 from ..agents.base import ClaudeAgent, CodexAgent, PiAgent, is_seat_argv
+from ..agents.reads import _rule_path, wide_folder
 from ..context import Context
 from ..errors import Refused
+from ..home import project_slug
 from ..procs import launcher
+from ..project.project import ProjectRegistry
+from ..store import project_folders, registration_slug, write_atomic
 from ..terminals.tabs import pm_tab_name
 
 
@@ -28,6 +32,8 @@ CODEX_COMPACT_TOKENS = 220_000
 CODEX_POST_TURN_COMPACT_PERCENT = 80
 PI_COMPACT_TOKENS = 220_000
 PI_COMPACT_EXT = launcher().parent / "pm_pi_compact.js"
+AGY_COMPACT_ENV = "AGY_CLI_AUTO_COMPACT_OVERRIDE"
+AGY_KINDS = frozenset({"agy", "antigravity"})
 
 
 def pm_compact_instructions() -> str:
@@ -122,7 +128,7 @@ def _env_compact_tokens(env: Mapping[str, str], default: int) -> int:
 def pm_compact_tokens(kind: str = "", *, ctx: Context | None = None) -> int:
     """Auto-compaction token threshold configured for a PM of `kind` (0 when disabled).
     Matches the values applied to Claude (`pm-settings.json`), Codex (`model_auto_compact_token_limit`),
-    and pi (`pm_pi_compact.js`)."""
+    pi (`pm_pi_compact.js`), and agy (`AGY_CLI_AUTO_COMPACT_OVERRIDE`)."""
     c = Context.from_env() if ctx is None else ctx
     cfg = c.config.read().get("pm") or {}
     if cfg.get("compact", True) is False:
@@ -144,12 +150,31 @@ def pm_compact_tokens(kind: str = "", *, ctx: Context | None = None) -> int:
             env_val = _env_compact_tokens(c.env, COMPACT_TOKENS)
             return max(100_000, env_val) if env_val > 0 else 0
         return CODEX_COMPACT_TOKENS
-    if k == "claude":
+    if k in ("claude", *AGY_KINDS):
         if has_cfg:
             return cfg_limit
         env_val = _env_compact_tokens(c.env, COMPACT_TOKENS)
         return max(100_000, env_val) if env_val > 0 else 0
     return cfg_limit if has_cfg else _env_compact_tokens(c.env, COMPACT_TOKENS)
+
+
+def is_agy_kind(kind: str = "", argv: Sequence[str] = ()) -> bool:
+    """Whether `kind` or `argv[0]` runs the `agy` (Antigravity) CLI."""
+    if str(kind or "").strip().lower() in AGY_KINDS:
+        return True
+    if argv:
+        return Path(str(argv[0])).name.lower() in AGY_KINDS
+    return False
+
+
+def pm_compact_env(kind: str = "", argv: Sequence[str] = (), *, ctx: Context | None = None) -> dict[str, str]:
+    """Environment overrides enabling working-set auto-compaction for a PM session (`agy`: `AGY_CLI_AUTO_COMPACT_OVERRIDE`)."""
+    if not is_agy_kind(kind, argv):
+        return {}
+    limit = pm_compact_tokens("agy", ctx=ctx)
+    if limit <= 0:
+        return {}
+    return {AGY_COMPACT_ENV: str(limit)}
 
 
 def claude_compact_settings(*, ctx: Context | None = None) -> dict[str, Any]:
@@ -170,6 +195,62 @@ def claude_compact_settings(*, ctx: Context | None = None) -> dict[str, Any]:
     }
 
 
+def _folder_read_permissions(rec: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Build read-only `permissions` rules for all linked `folders[]` on explicit multi/zero-folder registrations."""
+    if not isinstance(rec, Mapping) or "folders" not in rec or not isinstance(rec.get("folders"), list):
+        return {}
+    r_paths: list[str] = []
+    for f in project_folders(rec):
+        raw_p = f.get("path") or ""
+        if not raw_p:
+            continue
+        p = Path(raw_p)
+        if not p.is_dir() or wide_folder(p):
+            continue
+        for s in dict.fromkeys((str(p.absolute()), str(p.resolve()))):
+            if s not in r_paths:
+                r_paths.append(s)
+    if not r_paths:
+        return {}
+    allow = [f"Read({_rule_path(p)}/**)" for p in r_paths]
+    return {"permissions": {"allow": allow, "blockReadsExemptPaths": r_paths}}
+
+
+def _build_pm_settings(
+    c: Context,
+    kind: str,
+    slug: str,
+    rec: Mapping[str, Any] | None,
+    *,
+    repo: str | Path | None = None,
+) -> tuple[dict[str, Any], str]:
+    mem_root = c.home.project(slug).memory if (slug and (repo or isinstance(rec, Mapping))) else None
+    mine = c.agents.native_memory_settings(kind, mem_root, "pm") if mem_root is not None else {}
+    perms = _folder_read_permissions(rec)
+    compact = claude_compact_settings(ctx=c)
+    lean = (c.config.read().get("pm") or {}).get("lean", True) is not False
+    shared = str(c.home.pm_settings)
+    path = str(c.home.project(slug).ensure() / "pm-settings.json") if (slug and (mine or perms)) else shared
+    if not (lean or compact or mine or perms):
+        return {}, path
+    settings = {**(c.agents.claude_lean_settings() if lean else {}), **compact, **mine, **perms}
+    return settings, path
+
+
+def sync_pm_folder_settings(ctx: Context, slug: str, rec: Mapping[str, Any]) -> Path | None:
+    """Rewrite `projects/<slug>/pm-settings.json` when linked folders change dynamically."""
+    kind = str(rec.get("agent") or "claude")
+    own_path = ctx.home.project(slug).pm_settings
+    if kind != "claude" and not own_path.is_file():
+        return None
+    settings, path = _build_pm_settings(ctx, kind, slug, rec, repo=rec.get("repo") or None)
+    if not settings:
+        return None
+    out_path = Path(path)
+    write_atomic(out_path, (json.dumps(settings, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    return out_path
+
+
 def lean_pm(kind: str, argv: Sequence[str], repo: str | Path | None = None, *, ctx: Context | None = None) -> list[str]:
     """The PM's command started lean and compaction-configured (Claude Code only): no MCP servers, no Chrome,
     and the settings of `lean_settings` + `claude_compact_settings` (written to pm-settings.json in the ledger
@@ -179,11 +260,10 @@ def lean_pm(kind: str, argv: Sequence[str], repo: str | Path | None = None, *, c
     if kind != "claude":
         return list(argv)
     c = Context.from_env() if ctx is None else ctx
-    mem_root = c.home.memory_dir(repo) if repo else None
-    mine = c.agents.native_memory_settings(kind, mem_root, "pm") if mem_root is not None else {}
-    compact = claude_compact_settings(ctx=c)
+    rec = ProjectRegistry(c).pm_record(repo) if repo else None
+    slug = registration_slug(rec) if isinstance(rec, dict) else (project_slug(repo) if repo else "")
+    settings, path = _build_pm_settings(c, kind, slug, rec, repo=repo)
     shared = str(c.home.pm_settings)
-    path = str(c.home.project_for(repo).ensure() / "pm-settings.json") if (mine and repo) else shared
     argv_list = list(argv)
     cut = argv_list.index("--") if "--" in argv_list else len(argv_list)
     head: list[str] = []
@@ -200,9 +280,8 @@ def lean_pm(kind: str, argv: Sequence[str], repo: str | Path | None = None, *, c
     lean = (c.config.read().get("pm") or {}).get("lean", True) is not False
     if lean:
         head += LEAN
-    if (lean or compact or mine) and "--settings" not in head:
+    if settings and "--settings" not in head:
         c.home.root.mkdir(parents=True, exist_ok=True)
-        settings = {**(c.agents.claude_lean_settings() if lean else {}), **compact, **mine}
         Path(path).write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
         head += ["--settings", path]
     return head + argv_list[cut:]
@@ -311,15 +390,16 @@ def seat_argv(
     return [*prefix, "--", *argv]
 
 
-def default_start_prompt(repo: str, *, ctx: Context | None = None) -> str:
+def default_start_prompt(repo: str, *, display_name: str | None = None, ctx: Context | None = None) -> str:
     c = Context.from_env() if ctx is None else ctx
     skill = c.procs.launcher().parent.parent
     handover = f"{c.procs.pm_script()} handover"
+    label = str(display_name or "").strip() or Path(repo).name
     return "[from pm.py start] " + c.config.tr(
-        f"You are the PM (project manager) of the {Path(repo).name} project. Read {skill}/SKILL.md and "
+        f"You are the PM (project manager) of the {label} project. Read {skill}/SKILL.md and "
         f"{skill}/references/pm-playbook.md, then run `{handover}` and work from what it prints. Then tell the "
         "user in three or four sentences what is open and what is waiting for them.",
-        f"你是 {Path(repo).name} 项目的 PM（项目协调者）。先读 {skill}/SKILL.md 和 "
+        f"你是 {label} 项目的 PM（项目协调者）。先读 {skill}/SKILL.md 和 "
         f"{skill}/references/pm-playbook.md，再运行 `{handover}`，按它给出的内容开始工作，"
         "然后用三四句话告诉用户：有哪些在办的事、哪些事在等他。")
 
@@ -337,6 +417,7 @@ def build_pm_seat_parts(
     model: str | None = "",
     prompt: str | None = None,
     *,
+    display_name: str | None = None,
     ctx: Context | None = None,
 ) -> tuple[list[str], list[str], str]:
     c = Context.from_env() if ctx is None else ctx
@@ -347,7 +428,7 @@ def build_pm_seat_parts(
         or (cfg.get("model") if (cfg.get("kind") or "claude") == eff_kind else None)
         or (PM_MODEL if eff_kind == "claude" else "")
     )
-    eff_prompt = prompt or default_start_prompt(repo, ctx=c)
+    eff_prompt = prompt or default_start_prompt(repo, display_name=display_name, ctx=c)
     inner = pm_start_argv(repo, eff_kind, effective_model, eff_prompt, ctx=c)
     s_argv = seat_argv(repo, inner, kind=eff_kind, prompt="" if c.agents.takes_prompt(eff_kind) else eff_prompt, ctx=c)
     return s_argv, inner, eff_prompt
@@ -359,19 +440,21 @@ def build_pm_seat_command(
     model: str | None = "",
     prompt: str | None = None,
     *,
+    display_name: str | None = None,
     ctx: Context | None = None,
 ) -> tuple[list[str], str]:
-    s_argv, _, eff_prompt = build_pm_seat_parts(repo, kind, model, prompt=prompt, ctx=ctx)
+    s_argv, _, eff_prompt = build_pm_seat_parts(repo, kind, model, prompt=prompt, display_name=display_name, ctx=ctx)
     return s_argv, eff_prompt
 
 
 @dataclass(frozen=True)
 class StartTerminalResult:
-    """Outcome of starting a PM terminal: its address and whether it has a desktop tab."""
+    """Outcome of starting a PM terminal: its address, desktop tab status, and bound space id."""
 
     terminal: str | None
     has_tab: bool = True
     no_tab_reason: str = ""
+    space_id: str = ""
 
 
 def _app_reply_error(out: subprocess.CompletedProcess[str]) -> str:
@@ -460,35 +543,68 @@ def _keep_terminal_in_app(ctx: Context, terminal: str) -> tuple[bool, str]:
     return False, last_err
 
 
+def _space_id_for_terminal(ctx: Context, terminal: str, *, fallback: str = "") -> str:
+    """Resolve `herdr.space` for `terminal` from `hc get`, then `herdr-app ls`, else `fallback`."""
+    if terminal:
+        info = ctx.hc.get_raw(terminal) or {}
+        sp_id = str((info.get("labels") or {}).get("herdr.space") or "").strip()
+        if sp_id:
+            return sp_id
+        for sp in ctx.hc.app_spaces():
+            if not isinstance(sp, Mapping) or sp.get("machine") or not sp.get("id"):
+                continue
+            for tab in sp.get("tabs") or ():
+                for term in tab.get("terminals") or ():
+                    if term.get("terminal") == terminal:
+                        return str(sp["id"])
+    return str(fallback or "").strip()
+
+
 def _start_pm_terminal_result(
     repo: str,
     argv: Sequence[str],
     space: str | None = None,
     new_space: str = "",
     *,
+    display_name: str | None = None,
+    no_app_space: bool = False,
     ctx: Context,
 ) -> StartTerminalResult:
     """Start a PM's program in the desktop app: in a new space called new_space, or a tab in the given space,
     else a bare terminal attached to this project's space when `herdr-app` is reachable.
+
+    When `no_app_space` is True (used for remote two-phase creation), skip `herdr-app` calls and start only the
+    guarded `hc run` seat terminal.
 
     A space.new that times out or answers without a terminal may still have made the space: that space's
     terminal is the PM, found by its name among the spaces that were not there before. None found: stop,
     so a second PM is not started in a bare terminal."""
     made: str | None = None
     seated = is_seat_argv(argv)
+    if no_app_space:
+        res = ctx.hc.run(argv, bg=True, keep=seated, no_parent=True, labels=("pm.seat=1",) if seated else (), cwd=repo)
+        made = (res or {}).get("address")
+        return StartTerminalResult(terminal=made, has_tab=False, no_tab_reason="no_app_space", space_id="")
     app_missing = False
     fallback_reason = ""
+    resolved_space_id = ""
+    tab_label = pm_tab_name(repo, (display_name or new_space or "").strip() or None)
     if new_space or space:
-        command = ("space.new", {"name": new_space, "folder": repo, "argv": list(argv)}) if new_space else (
-            "tab.new", {"space": space, "folder": repo, "argv": list(argv)})
+        command = ("space.new", {"name": new_space, "folder": repo, "argv": list(argv), "focus": False}) if new_space else (
+            "tab.new", {"space": space, "folder": repo, "argv": list(argv), "focus": False})
         before = {s.get("id") for s in ctx.hc.app_spaces()} if new_space else set()
         unclear = False
         try:
             out = ctx.hc.app_do(command[0], command[1], timeout=30)
             if out.returncode == 0:
                 try:
-                    made = json.loads(out.stdout).get("terminal")
+                    data = json.loads(out.stdout)
                 except (ValueError, AttributeError):
+                    data = None
+                if isinstance(data, Mapping):
+                    made = data.get("terminal")
+                    resolved_space_id = str(data.get("space") or "").strip()
+                else:
                     made = None
                 unclear = not made
             else:
@@ -501,9 +617,15 @@ def _start_pm_terminal_result(
             app_missing = True
             fallback_reason = str(err)
         if unclear and new_space:
-            made = next((t.get("terminal") for s in ctx.hc.app_spaces() if s.get("name") == new_space
-                         and s.get("id") not in before for tab in s.get("tabs") or []
-                         for t in tab.get("terminals") or [] if t.get("terminal")), None)
+            for s in ctx.hc.app_spaces():
+                if s.get("name") != new_space or s.get("id") in before:
+                    continue
+                found_t = next((t.get("terminal") for tab in s.get("tabs") or []
+                                for t in tab.get("terminals") or [] if t.get("terminal")), None)
+                if found_t:
+                    made = found_t
+                    resolved_space_id = str(s.get("id") or "").strip()
+                    break
             if not made:
                 raise Refused(ctx.config.tr(
                     f"space.new gave no terminal and no new space \"{new_space}\" is open; no PM was "
@@ -515,7 +637,9 @@ def _start_pm_terminal_result(
         if seated:
             ctx.hc.keep(made)
             ctx.hc.label(made, "pm.seat=1")
-        return StartTerminalResult(terminal=made, has_tab=True)
+        if not resolved_space_id:
+            resolved_space_id = _space_id_for_terminal(ctx, made, fallback=space or "")
+        return StartTerminalResult(terminal=made, has_tab=True, space_id=resolved_space_id)
     res = ctx.hc.run(argv, bg=True, keep=seated, no_parent=True, labels=("pm.seat=1",) if seated else (), cwd=repo)
     made = (res or {}).get("address")
     if not made:
@@ -536,7 +660,8 @@ def _start_pm_terminal_result(
                 if kept_ok:
                     has_tab = True
                     no_tab_reason = ""
-                    ctx.hc.name_tab(made, pm_tab_name(repo), wait=5)
+                    resolved_space_id = str(target_space)
+                    ctx.hc.name_tab(made, tab_label, wait=5)
                 else:
                     no_tab_reason = keep_err
         elif open_spaces:
@@ -545,9 +670,10 @@ def _start_pm_terminal_result(
             sp_id = f"sp{os.urandom(16).hex()}"
             tb_id = f"tb{os.urandom(16).hex()}"
             ctx.hc.label(made, f"herdr.space={sp_id}", f"herdr.tab={tb_id}")
-            if ctx.hc.name_tab(made, pm_tab_name(repo), wait=5):
+            if ctx.hc.name_tab(made, tab_label, wait=5):
                 has_tab = True
                 no_tab_reason = ""
+                resolved_space_id = sp_id
                 if new_space:
                     try:
                         ctx.hc.app_do("space.rename", {"id": sp_id, "name": new_space}, timeout=30)
@@ -558,10 +684,11 @@ def _start_pm_terminal_result(
             if kept_ok:
                 has_tab = True
                 no_tab_reason = ""
-                ctx.hc.name_tab(made, pm_tab_name(repo), wait=5)
+                ctx.hc.name_tab(made, tab_label, wait=5)
+                resolved_space_id = _space_id_for_terminal(ctx, made)
             else:
                 no_tab_reason = keep_err
-    return StartTerminalResult(terminal=made, has_tab=has_tab, no_tab_reason=no_tab_reason)
+    return StartTerminalResult(terminal=made, has_tab=has_tab, no_tab_reason=no_tab_reason, space_id=resolved_space_id)
 
 
 def _start_pm_terminal_impl(

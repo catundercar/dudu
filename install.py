@@ -34,6 +34,11 @@ TOAST = "pm-toast"
 TOAST_HINT = f'"toast": "{TOAST}"'
 # The PM list sits right under the PM entry (pm-nav); the mod sizes its own block.
 PM_LIST = {"id": "pm-list", "type": "block", "size": {"px": 30}, "content": {"mod": "pm-list"}}
+HERDR_LISTS_ID = "herdr-lists"
+HERDR_LISTS_ACTION = f"layout.toggle:{HERDR_LISTS_ID}"
+HERDR_LISTS_KEY_SECTION = f"layout:{LAYOUT_NAME}"
+PROJECT_SEARCH_ACTION = "pm-project.search"
+PROJECT_SEARCH_TERMINAL_ACTION = "terminal"
 # The project view: a column in the pm-stage stack with its title bar in a separate window_drag
 # block above the selectable body block. Herdr's window_drag is node-level and ShellRoot paints
 # TextSelectionLayer before mod content, so keeping window_drag on the header block alone lets
@@ -57,6 +62,7 @@ MODS = ("pm-dash", "pm-nav", "pm-list", "pm-toast", "pm-project")
 # list (pull request #2). Its block in a pm layout goes back to Herdr's own agents mod, and the mod is removed.
 RETIRED = {"pm-agents": "agents"}
 write_json, remove_path = installer.write_json, installer.remove_path
+restore_windows_acl = installer.restore_windows_acl
 
 
 def nodes(tree):
@@ -125,25 +131,181 @@ def insert_pm_list(children):
     children.insert(nav[0] + 1 if nav else len(children), dict(PM_LIST, size=dict(PM_LIST["size"])))
 
 
+def wrap_herdr_lists(tree, parent):
+    """Wrap direct sibling `spaces` and `agents` blocks under `parent` into a default-hidden
+    `herdr-lists` drawer column (Plan A), preserving all existing properties on those blocks.
+    Returns True if the layout was mutated."""
+    if parent is None or any(node.get("id") == HERDR_LISTS_ID for node in nodes(tree)):
+        return False
+    children = parent.get("children")
+    if not isinstance(children, list):
+        return False
+    pm_list_idx = next((i for i, c in enumerate(children) if isinstance(c, dict) and has_mod(c, "pm-list")), -1)
+    spaces_idx = next((i for i, c in enumerate(children) if isinstance(c, dict) and has_mod(c, "spaces")), -1)
+    agents_idx = next((i for i, c in enumerate(children) if isinstance(c, dict) and has_mod(c, "agents")), -1)
+    if spaces_idx < 0 or agents_idx < 0:
+        return False
+    # Leave legacy layouts where pm-list sits between spaces and agents untouched (user's arrangement).
+    if pm_list_idx >= 0 and (spaces_idx < pm_list_idx or agents_idx < pm_list_idx):
+        return False
+    indices = sorted((spaces_idx, agents_idx))
+    extracted = [children[i] for i in indices]
+    for i in reversed(indices):
+        children.pop(i)
+    drawer = {
+        "id": HERDR_LISTS_ID,
+        "type": "column",
+        "hidden": True,
+        "size": {"weight": 1},
+        "children": extracted,
+    }
+    children.insert(indices[0], drawer)
+    if pm_list_idx >= 0:
+        pm_list_node = next((c for c in children if isinstance(c, dict) and has_mod(c, "pm-list")), None)
+        if pm_list_node is not None and isinstance(pm_list_node.get("size"), dict) and "px" in pm_list_node["size"]:
+            pm_list_node["size"] = {"weight": 1}
+    return True
+
+
 def manual_layout(desktop, reason):
     print(f"Skip automatic layout: {reason}")
     print(f"Manual fallback (also in README.md): copy {desktop / 'layouts/main.json'} to {desktop / f'layouts/{LAYOUT_NAME}.json'}.")
     print('In sidebar-lists.children, insert first: {"id":"pm-nav","type":"block","size":{"px":64},"content":{"mod":"pm-nav"}}')
     print(f'and right after it: {json.dumps(PM_LIST, separators=(",", ":"))}')
-    print('Replace the work column with: {"id":"pm-stage","type":"stack","active":"work","children":[<original work node>,'
+    print('Replace the work column with: {"id":"pm-stage","type":"stack","active":"pm-board","children":[<original work node>,'
           + json.dumps(PM_BOARD, separators=(",", ":")) + ',' + json.dumps(PM_PROJECT, separators=(",", ":")) + ']}')
     print(f'At the root, add: {TOAST_HINT}')
     print("Keep the original work node intact; if main.json is missing, obtain the default layout from your Herdr desktop installation first.")
 
 
-def back_up(target, args, prefix):
+def back_up(target, args, prefix, label="layout"):
     if not target.exists():
         return
     layout_backup = target.with_name(f"{target.name}.pm-backup")
     if not layout_backup.exists():
-        print(f"{prefix}Back up layout to {layout_backup}")
+        print(f"{prefix}Back up {label} to {layout_backup}")
         if not args.dry_run:
             shutil.copy2(target, layout_backup)
+            restore_windows_acl(layout_backup)
+
+
+def default_herdr_lists_key(platform=None):
+    plat = sys.platform if platform is None else platform
+    return "cmd-shift-e" if plat == "darwin" else "ctrl-shift-e"
+
+
+def default_project_search_key(platform=None):
+    plat = sys.platform if platform is None else platform
+    return "cmd-k" if plat == "darwin" else "ctrl-k"
+
+
+def _is_herdr_lists_action(action):
+    if action == HERDR_LISTS_ACTION:
+        return True
+    if isinstance(action, dict):
+        return (action.get("command") == "layout.toggle"
+                and isinstance(action.get("args"), dict)
+                and action["args"].get("id") == HERDR_LISTS_ID)
+    return False
+
+
+def _is_project_search_action(action):
+    if action == PROJECT_SEARCH_ACTION:
+        return True
+    if isinstance(action, dict):
+        return action.get("command") == PROJECT_SEARCH_ACTION
+    return False
+
+
+def _section_has_key(section, key):
+    return isinstance(section, dict) and any(k.lower() == key.lower() for k in section)
+
+
+def install_keys(desktop, args, prefix, platform=None):
+    keys_path = desktop / "keys.json"
+    if not keys_path.exists():
+        print(f"Skip keys: {keys_path} does not exist yet.")
+        return
+    try:
+        data = json.loads(keys_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("keys.json root must be an object")
+    except (OSError, ValueError) as error:
+        print(f"Skip keys: cannot read {keys_path} ({error}).")
+        return
+    existing_section = data.get(HERDR_LISTS_KEY_SECTION)
+    if existing_section is not None and not isinstance(existing_section, dict):
+        print(f"Skip keys: {HERDR_LISTS_KEY_SECTION} in {keys_path} is not an object.")
+        return
+
+    changed = False
+
+    def bind_layout_action(key, action, matcher):
+        nonlocal changed
+        for section in data.values():
+            if isinstance(section, dict) and any(matcher(v) for v in section.values()):
+                print(f"Skip keys: {keys_path} already binds {action}.")
+                return False
+        for sec_name in (HERDR_LISTS_KEY_SECTION, "global"):
+            if _section_has_key(data.get(sec_name), key):
+                print(f"Skip keys: {key} is already bound in {keys_path}; bind {action} manually if desired.")
+                return False
+        data.setdefault(HERDR_LISTS_KEY_SECTION, {})[key] = action
+        print(f"{prefix}Bind {key} to {action} in {keys_path}")
+        changed = True
+        return True
+
+    bind_layout_action(default_herdr_lists_key(platform), HERDR_LISTS_ACTION, _is_herdr_lists_action)
+    search_key = default_project_search_key(platform)
+    if bind_layout_action(search_key, PROJECT_SEARCH_ACTION, _is_project_search_action):
+        term_sec = data.get("terminal")
+        if term_sec is None or (isinstance(term_sec, dict) and not _section_has_key(term_sec, search_key)):
+            data.setdefault("terminal", {})[search_key] = PROJECT_SEARCH_TERMINAL_ACTION
+            print(f"{prefix}Bind {search_key} to {PROJECT_SEARCH_TERMINAL_ACTION} in terminal section of {keys_path}")
+
+    if changed:
+        back_up(keys_path, args, prefix, label="keys")
+        if not args.dry_run:
+            write_json(keys_path, data)
+    elif not args.dry_run:
+        restore_windows_acl(keys_path)
+
+
+def uninstall_keys(desktop, args, prefix):
+    keys_path = desktop / "keys.json"
+    if not keys_path.exists():
+        return
+    try:
+        data = json.loads(keys_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    sec = data.get(HERDR_LISTS_KEY_SECTION)
+    if not isinstance(sec, dict):
+        return
+    removed_herdr = [k for k, v in sec.items() if v == HERDR_LISTS_ACTION]
+    removed_search = [k for k, v in sec.items() if v == PROJECT_SEARCH_ACTION]
+    if not removed_herdr and not removed_search:
+        return
+    for k in removed_herdr + removed_search:
+        del sec[k]
+    if not sec:
+        del data[HERDR_LISTS_KEY_SECTION]
+    if removed_search:
+        term_sec = data.get("terminal")
+        if isinstance(term_sec, dict):
+            for k in removed_search:
+                if term_sec.get(k) == PROJECT_SEARCH_TERMINAL_ACTION:
+                    del term_sec[k]
+            if not term_sec:
+                del data["terminal"]
+    if removed_herdr:
+        print(f"{prefix}Remove {HERDR_LISTS_ACTION} binding from {keys_path}")
+    if removed_search:
+        print(f"{prefix}Remove {PROJECT_SEARCH_ACTION} binding from {keys_path}")
+    if not args.dry_run:
+        write_json(keys_path, data)
 
 
 def install_layout(desktop, args, prefix):
@@ -196,6 +358,10 @@ def install_layout(desktop, args, prefix):
                     # Where earlier installers put it. The block is the person's to place: say so, move nothing.
                     hints.append(f"The PM list now goes right under the PM entry. To have it there, "
                                  f"move the pm-list block right after pm-nav in {target}.")
+            if wrap_herdr_lists(existing, parent):
+                back_up(target, args, prefix)
+                print(f"{prefix}Hide spaces and agents in {HERDR_LISTS_ID} drawer in {target}")
+                mutated = True
             stage = next((node for node in nodes(existing) if node.get("id") == "pm-stage"
                           and node.get("type") == "stack" and isinstance(node.get("children"), list)), None)
             if stage is not None and not any(has_mod(node, "pm-project") for node in nodes(existing)):
@@ -203,6 +369,13 @@ def install_layout(desktop, args, prefix):
                 stage["children"].append(copy.deepcopy(PM_PROJECT))
                 back_up(target, args, prefix)
                 print(f"{prefix}Add the pm-project block to {target}")
+                mutated = True
+            if stage is not None and stage.get("active") == "work" and any(
+                    isinstance(child, dict) and child.get("id") == "pm-board" for child in stage["children"]):
+                # Default pm-stage to pm-board (Projects) instead of bare terminal (work).
+                stage["active"] = "pm-board"
+                back_up(target, args, prefix)
+                print(f"{prefix}Default pm-stage to pm-board in {target}")
                 mutated = True
             boards = [node for node in nodes(existing) if "window_drag" not in node and is_block(node, PM_BOARD)]
             if boards:
@@ -243,6 +416,9 @@ def install_layout(desktop, args, prefix):
                 elif migrated_from is not None:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(migrated_from, target)
+                    restore_windows_acl(target)
+                elif target.exists():
+                    restore_windows_acl(target)
             if not mutated and migrated_from is None:
                 print(f"Skip layout: {target} already contains pm-nav.")
             if migrated_from is not None:
@@ -266,8 +442,9 @@ def install_layout(desktop, args, prefix):
             raise ValueError("sidebar-lists and work must be separate branches")
         sidebar["children"].insert(0, {"id": "pm-nav", "type": "block", "size": {"px": 64}, "content": {"mod": "pm-nav"}})
         insert_pm_list(sidebar["children"])
+        wrap_herdr_lists(tree, sidebar)
         children = parents[0]["children"]
-        children[children.index(work)] = {"id": "pm-stage", "type": "stack", "active": "work", "children": [
+        children[children.index(work)] = {"id": "pm-stage", "type": "stack", "active": "pm-board", "children": [
             work, copy.deepcopy(PM_BOARD), copy.deepcopy(PM_PROJECT)]}
     except (OSError, ValueError, AttributeError) as error:
         manual_layout(desktop, str(error))
@@ -281,6 +458,7 @@ def install_layout(desktop, args, prefix):
         print(f"{prefix}Back up layout to {layout_backup}")
         if not args.dry_run:
             shutil.copy2(target, layout_backup)
+            restore_windows_acl(layout_backup)
     print(f"{prefix}Generate {target} from {source}")
     if not args.dry_run:
         write_json(target, tree)
@@ -336,6 +514,7 @@ def main(argv=None):
             else:
                 print(f"Skip removal: {path} is absent.")
         remove_retired_mods(desktop, args, prefix)
+        uninstall_keys(desktop, args, prefix)
         setup.kept()
         return
 
@@ -346,6 +525,7 @@ def main(argv=None):
                              ("gpui-kit.d.ts", "jsconfig.json", "*.test.mjs", "__pycache__", ".DS_Store"))
         remove_retired_mods(desktop, args, prefix)
         install_layout(desktop, args, prefix)
+        install_keys(desktop, args, prefix)
         print(f'Next, select the {LAYOUT_NAME} layout: herdr-app do layout.switch \'{{"name":"{LAYOUT_NAME}"}}\'')
         print("Then click the PM board entry in the sidebar. If layout generation was skipped, finish the manual steps first.")
     else:

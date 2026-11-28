@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..agents.codex_pool import codex_args
 from ..agents.profiles import LADDER, WorkerSpec, asks_first, engine_label, fallback_said, worker_record
@@ -33,6 +33,7 @@ from ..messaging.typist import DRAIN_WAIT_S, drain_endpoint
 from ..osutil import file_text, shell_join, slugify, stale_lock
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
+from ..store import project_folders, registration_slug, valid_slug
 from ..terminals.screen import classify_stuck_screen
 from ..terminals.tabs import TERM_HEAD, bug_of, hc_name, not_renamed, tab_short, tab_title, task_bug
 from .brief import keep_sent_for, report_section_for, sent_repo_for
@@ -92,6 +93,30 @@ from .reattach import (
     reattach_plan_for,
     start_beside_pm_for,
 )
+from .remote import (
+    DEFAULT_REMOTE_PM,
+    issue_credential,
+    machine_profile,
+    next_remote_epoch,
+    record_remote_worker,
+    RemoteWorkspace,
+    worker_context,
+)
+from .self_hosted import (
+    is_offsite_task,
+    is_self_hosted_task,
+    next_offsite_epoch,
+    offsite_machine,
+    offsite_workspace_for,
+    queue_for_self_hosted,
+    record_self_hosted_worker,
+    self_hosted_brief,
+    self_hosted_endpoint,
+    self_hosted_envelope,
+)
+from ..messaging.nodes import NodeRegistry, safe_name
+from ..messaging.outbox import TaskTokens
+from ..messaging.transports.self_hosted import SelfHostedPullTransport
 from .research import collect_research_for, retire_dirty_for
 from .send import (
     SendBackResult,
@@ -129,6 +154,7 @@ class DispatchRequest:
 
     title: str | None = None
     repo: str = "."
+    folder: str | None = None
     branch: str | None = None
     label: str | None = None
     path: str | None = None
@@ -158,6 +184,8 @@ class DispatchRequest:
     subplan: list[str] | None = None
     no_review: bool = False
     async_: bool = False
+    on: str | None = None           # a machine added to hc: the worker runs there (`<machine>/t7`, phase 6a)
+    remote_repo: str | None = None  # with `on`: the project's clone there (default config.json machines.<m>.repos)
 
 
 @dataclass(frozen=True)
@@ -293,14 +321,21 @@ class Workers:
     def _caller(self) -> Caller:
         return self.ctx.caller if self.ctx.caller is not None else Caller(self.ctx)
 
-    def _deliver_later(self, repo: str | Path | None) -> None:
-        if not repo:
+    def _deliver_later(self, repo: str | Path | None = None, *, slug: str = "") -> None:
+        eff_slug = slug or (self.ctx.store.folder_project_slug(repo) if repo else "")
+        pm_target = eff_slug or (str(repo) if repo else "")
+        if not pm_target:
             return
         if getattr(self.ctx, "_legacy", False):
-            deliver_later(str(repo))
-        elif self._projects.app_pm(repo):
+            deliver_later(str(repo or eff_slug), slug=eff_slug)
+        elif self._projects.app_pm(pm_target):
+            spawn_target = (
+                str(repo)
+                if (repo and (not eff_slug or project_slug(repo) == eff_slug))
+                else eff_slug
+            )
             self.ctx.procs.spawn_pm(
-                ["deliver", str(repo)],
+                ["deliver", spawn_target],
                 env=self.ctx.procs.clean_session_env(),
                 cwd=self.ctx.home.root,
             )
@@ -373,8 +408,12 @@ class Workers:
         wrap: bool = False,
         memory: bool = True,
         writes: Iterable[str | Path] = (),
+        *,
+        slug: str | None = None,
     ) -> list[str]:
-        return worker_argv_for(self.ctx, spec, reads=reads, repo=repo, extra=extra, wrap=wrap, memory=memory, writes=writes)
+        return worker_argv_for(
+            self.ctx, spec, reads=reads, repo=repo, extra=extra, wrap=wrap, memory=memory, writes=writes, slug=slug
+        )
 
     def worker_placement(self) -> list[str]:
         return worker_placement_for(self.ctx)
@@ -471,9 +510,12 @@ class Workers:
         asks: bool = False,
         outer_steps: list[dict[str, Any]] | None = None,
         no_review: bool = False,
+        slug: str = "",
+        folder_alias: str = "",
     ) -> dict[str, Any]:
-        argv = self.worker_argv(spec, reads, repo, extra, wrap=self.ctx.pane.startswith("hc:"))
-        pool = self.codex_pool(repo)
+        argv = self.worker_argv(spec, reads, repo, extra, wrap=self.ctx.pane.startswith("hc:"), slug=slug or None)
+        pool_target = repo or (self.ctx.home.project(slug).root if slug else "")
+        pool = self.codex_pool(pool_target) if pool_target else []
         plan: dict[str, Any] = {
             "what": what,
             "task": task_id or self.ctx.config.tr("(new)", "（新建）"),
@@ -483,7 +525,7 @@ class Workers:
             "effort": spec.effort,
             "codex_profile": getattr(spec, "provider", "") or None,
             "pool": getattr(spec, "pool_said", ""),
-            "usage": (self.codex_usage(repo, pool) or {}) if pool else {},
+            "usage": (self.codex_usage(pool_target, pool) or {}) if pool and pool_target else {},
             "cwd": str(cwd),
             "name": getattr(spec, "name", ""),
             "tab": tab,
@@ -492,11 +534,208 @@ class Workers:
             "asks_user_first": asks,
             "argv": argv,
         }
+        if slug:
+            plan["project_slug"] = slug
+        if folder_alias:
+            plan["folder"] = folder_alias
         if outer_steps:
             plan["plan"] = outer_steps
         if no_review:
             plan["no_review"] = True
         return plan
+
+    def _registration_for_dispatch(
+        self, req_repo: str, given: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if given and given.get("project_slug"):
+            rec = self.ctx.store.registration(str(given["project_slug"]))
+            if rec is not None:
+                return rec
+        rec = self._projects.pm_record(req_repo)
+        if rec is not None:
+            return rec
+        try:
+            p = Path(req_repo).expanduser().resolve()
+            pdir = self.ctx.home.projects.resolve()
+        except OSError:
+            return None
+        if p.parent == pdir and valid_slug(p.name):
+            return self.ctx.store.registration(p.name)
+        return None
+
+    def _resolve_dispatch_target(
+        self, req: DispatchRequest, given: dict[str, Any] | None = None
+    ) -> tuple[str, str, str, str, str, list[dict[str, Any]], dict[str, Any] | None]:
+        """Resolve `(repo, target_cwd, project_slug, project_name, folder_alias, sibling_folders, proj_rec)`."""
+        tr = self.ctx.config.tr
+        proj_rec = self._registration_for_dispatch(req.repo, given)
+        if proj_rec is not None and isinstance(proj_rec.get("folders"), list):
+            pslug = registration_slug(proj_rec)
+            proj_name = str(proj_rec.get("project") or pslug)
+            folders = project_folders(proj_rec)
+            selected: dict[str, Any] | None = None
+
+            def _pick_folder(sel: dict[str, Any]) -> tuple[str, str]:
+                fpath = str(sel["path"])
+                if req.here:
+                    r_dir = self.ctx.git.project_root(fpath) or (fpath if Path(fpath).is_dir() else "")
+                    if not r_dir:
+                        raise Refused(tr(
+                            f"folder '{sel['alias']}' ({fpath}) is not a directory",
+                            f"文件夹 '{sel['alias']}'（{fpath}）不是有效目录",
+                        ))
+                    return r_dir, r_dir
+                git_root = self.ctx.git.main_root(fpath)
+                if not git_root:
+                    raise Refused(tr(
+                        f"folder '{sel['alias']}' ({fpath}) is not a git repository; use --here to run in place",
+                        f"文件夹 '{sel['alias']}'（{fpath}）不是 Git 仓库；原地执行请改用 --here",
+                    ))
+                return git_root, git_root
+
+            if req.folder:
+                req_folder_res = ""
+                try:
+                    req_folder_res = str(Path(req.folder).expanduser().resolve())
+                except OSError:
+                    pass
+                for f in folders:
+                    if f.get("alias") == req.folder:
+                        selected = f
+                        break
+                    if req_folder_res:
+                        try:
+                            if str(Path(f["path"]).resolve()) == req_folder_res:
+                                selected = f
+                                break
+                        except OSError:
+                            pass
+                if selected is None:
+                    avail = ", ".join(f["alias"] for f in folders) or tr("(none)", "（无）")
+                    raise Refused(tr(
+                        f"folder '{req.folder}' is not in project {pslug} (available: {avail})",
+                        f"文件夹 '{req.folder}' 不在项目 {pslug} 中（可选：{avail}）",
+                    ))
+                repo, target_cwd = _pick_folder(selected)
+                falias = str(selected["alias"])
+                siblings = [f for f in folders if f["alias"] != falias]
+                return repo, target_cwd, pslug, proj_name, falias, siblings, proj_rec
+
+            if given and given.get("folder_alias"):
+                for f in folders:
+                    if f.get("alias") == given["folder_alias"]:
+                        selected = f
+                        break
+            if selected is not None:
+                repo, target_cwd = _pick_folder(selected)
+                falias = str(selected["alias"])
+                siblings = [f for f in folders if f["alias"] != falias]
+                return repo, target_cwd, pslug, proj_name, falias, siblings, proj_rec
+
+            explicit_repo_path = bool(
+                req.repo
+                and str(req.repo).strip() not in ("", ".")
+                and not (valid_slug(str(req.repo)) and not Path(str(req.repo)).expanduser().exists())
+            )
+            if explicit_repo_path:
+                req_res = ""
+                with contextlib.suppress(OSError):
+                    req_res = str(Path(req.repo).expanduser().resolve())
+                req_match_root = (
+                    (self.ctx.git.project_root(req.repo) or req_res)
+                    if req.here
+                    else self.ctx.git.main_root(req.repo)
+                )
+                for f in folders:
+                    if not req.here and not self.ctx.git.main_root(f["path"]):
+                        continue
+                    f_res = ""
+                    with contextlib.suppress(OSError):
+                        f_res = str(Path(f["path"]).resolve())
+                    if req_res and f_res and f_res == req_res:
+                        selected = f
+                        break
+                    if not req.here and req_match_root and self.ctx.git.main_root(f["path"]) == req_match_root:
+                        selected = f
+                        break
+                    if req.here and req_match_root and f_res and f_res == req_match_root:
+                        selected = f
+                        break
+                if selected is not None:
+                    repo, target_cwd = _pick_folder(selected)
+                    falias = str(selected["alias"])
+                    siblings = [f for f in folders if f["alias"] != falias]
+                    return repo, target_cwd, pslug, proj_name, falias, siblings, proj_rec
+
+            if req.here:
+                if len(folders) == 0:
+                    proj_dir = self.ctx.home.project(pslug).root
+                    if not req.dry_run:
+                        proj_dir.mkdir(parents=True, exist_ok=True)
+                    cwd_val = str(Path(req.path).expanduser().resolve() if req.path else proj_dir)
+                    return "", cwd_val, pslug, proj_name, "", [], proj_rec
+                if len(folders) == 1:
+                    repo, target_cwd = _pick_folder(folders[0])
+                    return repo, target_cwd, pslug, proj_name, str(folders[0]["alias"]), [], proj_rec
+                choices = ", ".join(f"--folder {f['alias']}" for f in folders)
+                raise Refused(tr(
+                    f"project {pslug} has {len(folders)} linked folders; specify one with {choices}",
+                    f"项目 {pslug} 关联了 {len(folders)} 个文件夹，请显式指定：{choices}",
+                ))
+
+            git_candidates: list[tuple[dict[str, Any], str]] = []
+            for f in folders:
+                gr = self.ctx.git.main_root(f["path"])
+                if gr:
+                    git_candidates.append((f, gr))
+            if len(git_candidates) == 0:
+                raise Refused(tr(
+                    f"project {pslug} has no git repository linked; add one with `pm.py project folders add` or use --here",
+                    f"项目 {pslug} 尚未关联 Git 仓库；请先用 `pm.py project folders add` 绑定或改用 --here",
+                ))
+            if len(git_candidates) >= 2:
+                choices = ", ".join(f"--folder {f['alias']}" for f, _ in git_candidates)
+                raise Refused(tr(
+                    f"project {pslug} has {len(git_candidates)} git repositories; specify which one with {choices}",
+                    f"项目 {pslug} 有 {len(git_candidates)} 个 Git 仓库，请显式指定：{choices}",
+                ))
+            selected, repo = git_candidates[0]
+            falias = str(selected["alias"])
+            siblings = [f for f in folders if f["alias"] != falias]
+            return repo, repo, pslug, proj_name, falias, siblings, proj_rec
+
+        # Legacy registration (no `folders` field) or unregistered git repository
+        repo = self.ctx.git.project_root(req.repo) if req.here else self.ctx.git.main_root(req.repo)
+        if not repo:
+            raise Refused(f"{req.repo} is not a directory" if req.here else f"{req.repo} is not in a git repository")
+        if req.folder:
+            folder_match = req.folder == Path(repo).name
+            if not folder_match:
+                try:
+                    folder_match = str(Path(req.folder).expanduser().resolve()) == str(Path(repo).resolve())
+                except OSError:
+                    folder_match = False
+            if not folder_match:
+                raise Refused(tr(
+                    f"folder '{req.folder}' does not match {repo}",
+                    f"文件夹 '{req.folder}' 与 {repo} 不匹配",
+                ))
+        pslug = registration_slug(proj_rec) if proj_rec else project_slug(repo)
+        proj_name = (str(proj_rec.get("project") or "") if proj_rec else "") or Path(repo).name
+        falias = Path(repo).name if (proj_rec and proj_rec.get("repo") == repo) else ""
+        return repo, repo, pslug, proj_name, falias, [], proj_rec
+
+    def _sibling_folders_for_task(self, task: Mapping[str, Any]) -> list[str]:
+        pslug = str(task.get("project_slug") or "")
+        reg = (
+            self.ctx.store.registration(pslug)
+            if pslug
+            else (self._projects.pm_record(task["repo"]) if task.get("repo") else None)
+        )
+        if not isinstance(reg, dict):
+            return []
+        t_repo = str(task.get("repo") or "")
+        return [f["path"] for f in project_folders(reg) if f.get("path") and str(f["path"]) != t_repo]
 
     # --- Internal task creation (replaces ledger.cmd_new(Namespace(...))) ---
 
@@ -523,25 +762,33 @@ class Workers:
         kind: str | None = None,
         options: list[str] | None = None,
         extra_fields: dict[str, Any] | None = None,
+        project_slug_val: str = "",
+        folder_alias: str = "",
+        project_name: str = "",
     ) -> dict[str, Any]:
-        project = Path(repo).name
+        project = project_name or (Path(repo).name if repo else project_slug_val)
         task: dict[str, Any] = {
             "id": self._ledger.new_id(project, slug or branch or title),
             "title": title,
             "project": project,
             "repo": repo,
             "status": status,
-            "base": base or self.ctx.git.base_branch(repo),
+            "base": base or (self.ctx.git.base_branch(repo) if repo else ""),
             "owner": "pm",
             "workspace": self.ctx.workspace if workspace is None else workspace,
             "pane": self.ctx.pane if pane is None else pane,
             "created": self.ctx.clock.now(),
         }
+        if project_slug_val:
+            task["project_slug"] = project_slug_val
+        if folder_alias:
+            task["folder_alias"] = folder_alias
         for key, val in (("agent", agent), ("branch", branch), ("worktree", worktree), ("brief", brief_path), ("kind", kind)):
             if val:
                 task[key] = val
         if parent:
-            task["parent"] = parent_of(task["id"], parent, repo=repo, ledger=self._ledger, home=self.ctx.home)
+            parent_repo = repo or (str(self.ctx.home.project(project_slug_val).root) if project_slug_val else "")
+            task["parent"] = parent_of(task["id"], parent, repo=parent_repo, ledger=self._ledger, home=self.ctx.home)
         if outer_steps:
             task["plan"] = [dict(s) for s in outer_steps]
         if sub_steps:
@@ -562,10 +809,11 @@ class Workers:
             self.ctx.store._task_slug(task),
             timeout=30.0,
         )
-        told = wake_fields_for(task, task["status"], False, self._caller, bool(self._projects.app_pm(task.get("repo"))))
+        app_target = project_slug_val or task.get("repo")
+        told = wake_fields_for(task, task["status"], False, self._caller, bool(self._projects.app_pm(app_target)))
         created = self._ledger.create(task, note_text=note_text, note_extra={**asked, **told})
         if told.get("wake"):
-            self._deliver_later(task["repo"])
+            self._deliver_later(task.get("repo"), slug=project_slug_val)
         return created.raw
 
     # --- Dispatch ---
@@ -583,11 +831,14 @@ class Workers:
         workspace: str,
         pane: str,
         worktree: str,
+        project_slug_val: str = "",
+        folder_alias: str = "",
+        project_name: str = "",
     ) -> dict[str, Any]:
         worker_info = worker_record(spec)
         brief_resolved = str(Path(req.brief or "").resolve())
         if held:
-            base_fallback = self.ctx.git.base_branch(repo) if not (req.base or held.get("base")) else None
+            base_fallback = self.ctx.git.base_branch(repo) if (repo and not (req.base or held.get("base"))) else None
 
             def _take_up(cur: Task | None, ch: Change) -> dict[str, Any]:
                 assert cur is not None
@@ -601,12 +852,18 @@ class Workers:
                     title=req.title,
                     agent=spec.name,
                     brief=brief_resolved,
-                    base=req.base or task.get("base") or base_fallback or self.ctx.git.base_branch(repo),
+                    base=req.base or task.get("base") or base_fallback or (self.ctx.git.base_branch(repo) if repo else ""),
                     kind=spec.kind,
                     workspace=workspace,
                     pane=pane,
                     worktree=worktree,
                 )
+                if project_slug_val:
+                    task["project_slug"] = project_slug_val
+                if folder_alias:
+                    task["folder_alias"] = folder_alias
+                if repo:
+                    task["repo"] = repo
                 if req.parent:
                     task["parent"] = req.parent
                 if req.branch:
@@ -663,6 +920,9 @@ class Workers:
                 "escalations": [],
                 "rounds": 0,
             },
+            project_slug_val=project_slug_val,
+            folder_alias=folder_alias,
+            project_name=project_name,
         )
 
     def _ask_first(
@@ -676,6 +936,9 @@ class Workers:
         outer_explicit: bool,
         sub_steps: list[dict[str, Any]] | None,
         stderr_lines: list[str],
+        project_slug_val: str = "",
+        folder_alias: str = "",
+        project_name: str = "",
     ) -> DispatchResult:
         model = " ".join(x for x in (spec.kind, spec.model, spec.effort) if x)
         what = self.ctx.config.tr(f"profile {spec.profile} ({model})", f"{spec.profile} 档（{model}）") if spec.profile else model
@@ -705,6 +968,10 @@ class Workers:
                 for f in QUESTION_FIELDS:
                     task.pop(f, None)
                 task.update(options=options, status="blocked", held="ask")
+                if project_slug_val:
+                    task["project_slug"] = project_slug_val
+                if folder_alias:
+                    task["folder_alias"] = folder_alias
                 if req.here:
                     task["held_here"] = True
                 if outer_steps is not None:
@@ -740,6 +1007,9 @@ class Workers:
                 pane=None,
                 options=options,
                 extra_fields=extra,
+                project_slug_val=project_slug_val,
+                folder_alias=folder_alias,
+                project_name=project_name,
             )
             task_id = created["id"]
             lines.append(task_id)
@@ -761,10 +1031,15 @@ class Workers:
         outer_explicit: bool,
         sub_steps: list[dict[str, Any]] | None,
         stderr_lines: list[str],
+        target_cwd: str = "",
+        project_slug_val: str = "",
+        folder_alias: str = "",
+        project_name: str = "",
+        sibling_folders: Sequence[Mapping[str, Any]] = (),
     ) -> DispatchResult:
-        base = req.base or self.ctx.git.base_branch(repo)
+        base = req.base or (self.ctx.git.base_branch(repo) if (repo and not req.here) else "")
         if req.here:
-            path = Path(req.path).expanduser().resolve() if req.path else Path(repo)
+            path = Path(req.path).expanduser().resolve() if req.path else Path(target_cwd or repo)
             if not path.is_dir():
                 raise Refused(f"{path} is not a directory")
         else:
@@ -786,21 +1061,28 @@ class Workers:
                 )
                 if res.returncode != 0:
                     raise Refused(f"prep command failed with exit code {res.returncode}")
-        reads = list(self.ctx.agents.outside_reads(repo, req.brief or ""))
+        extra_folders = [f["path"] for f in sibling_folders if f.get("path")]
+        reads_base = repo or str(path)
+        reads = list(self.ctx.agents.outside_reads(reads_base, req.brief or "", extra_folders=extra_folders))
         for att in req.attach or ():
-            for extra_r in self.ctx.agents.outside_reads(repo, att):
+            for extra_r in self.ctx.agents.outside_reads(reads_base, att, extra_folders=extra_folders):
                 if extra_r not in reads:
                     reads.append(extra_r)
         made = self.ctx.hc.start_terminal(
-            spec.name, path, self.worker_argv(spec, reads, repo, wrap=True), self.worker_placement()
+            spec.name,
+            path,
+            self.worker_argv(spec, reads, repo, wrap=True, slug=project_slug_val or None),
+            self.worker_placement(),
         )
-        self.pool_started(spec, repo)
+        pool_target = repo or (str(self.ctx.home.project(project_slug_val).root) if project_slug_val else str(path))
+        self.pool_started(spec, pool_target)
         if not made:
             raise Refused(f"hc run failed; {path} is ready, start the worker by hand")
         task = self._register_worker(
             req, spec, repo, held,
             outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
             workspace="", pane=f"hc:{made}", worktree="" if req.here else str(path),
+            project_slug_val=project_slug_val, folder_alias=folder_alias, project_name=project_name,
         )
         task_id = task["id"]
         lines: list[str] = [task_id]
@@ -836,13 +1118,13 @@ class Workers:
             self.send_ready_later(
                 made, sent, kind=spec.kind, trust=str(path),
                 strict=spec.kind in ("claude", "codex"),
-                stop_on_exit=bool(spec.advisor), task_id=task_id, repo=repo,
+                stop_on_exit=bool(spec.advisor), task_id=task_id, repo=pool_target,
             )
             lines.append(
                 f"pane=hc:{made} " + (f"cwd={path}" if req.here else f"worktree={path}")
                 + (f" tab={tab}" if tab else "") + (f" ({fast})" if fast else "") + " (async)"
             )
-            self._deliver_later(repo)
+            self._deliver_later(repo, slug=project_slug_val)
             return DispatchResult(
                 task_id=task_id, pane=f"hc:{made}", worktree="" if req.here else str(path),
                 lines=tuple(lines), stderr_lines=tuple(stderr_lines),
@@ -871,17 +1153,200 @@ class Workers:
             f"pane=hc:{made} " + (f"cwd={path}" if req.here else f"worktree={path}")
             + (f" tab={tab}" if tab else "") + (f" ({fast})" if fast else "")
         )
-        self._deliver_later(repo)
+        self._deliver_later(repo, slug=project_slug_val)
         return DispatchResult(
             task_id=task_id, pane=f"hc:{made}", worktree="" if req.here else str(path),
             lines=tuple(lines), stderr_lines=tuple(stderr_lines),
         )
 
+    def _dispatch_remote_hc(
+        self,
+        req: DispatchRequest,
+        spec: WorkerSpec,
+        repo: str,
+        brief: str,
+        held: dict[str, Any] | None,
+        *,
+        outer_steps: list[dict[str, Any]] | None,
+        outer_explicit: bool,
+        sub_steps: list[dict[str, Any]] | None,
+        stderr_lines: list[str],
+        project_slug_val: str = "",
+        folder_alias: str = "",
+        project_name: str = "",
+    ) -> DispatchResult:
+        """A worker on another machine (`--on <machine>`, §9.3 phase 6a): its worktree made there (`hc exec --on`),
+        its state folder written there (`context.json`, `credential.json` with this task's token), its terminal
+        started there (`hc run --on`, address `<machine>/t7`), its brief typed through the remote transport. The PM
+        and the ledger stay here; its reports come back through its outbox. Always asynchronous."""
+        tr = self.ctx.config.tr
+        machine = str(req.on or "").strip()
+        if req.here:
+            raise Refused(tr("--here and --on do not go together: a remote worker gets a worktree of its own there",
+                             "--here 不能和 --on 一起用：远端 worker 在那台机器上有自己的工作树"))
+        if not req.branch:
+            raise Refused(tr("--on needs a branch", "--on 需要分支"))
+        profile = machine_profile(self.ctx, machine, repo, remote_repo=req.remote_repo or "")
+        ws = RemoteWorkspace(self.ctx, profile)
+        old_remote = (held or {}).get("remote") if isinstance((held or {}).get("remote"), dict) else None
+        if old_remote and old_remote.get("machine") and old_remote.get("machine") != machine:
+            # The task moves to another machine: bring its commits here first, so the new worktree starts from them.
+            try:
+                RemoteWorkspace.for_task(self.ctx, held).fetch_branch(held)
+            except Refused as err:
+                stderr_lines.append(tr(
+                    f"warning: could not bring {req.branch} from {old_remote['machine']} ({err}); the new worker on "
+                    f"{machine} starts from this checkout's {req.branch} (or the base): commits only on "
+                    f"{old_remote['machine']} are not in it",
+                    f"警告：没能从 {old_remote['machine']} 取回 {req.branch}（{err}）；{machine} 上的新 worker 从本机的 "
+                    f"{req.branch}（或基准）开始：只在 {old_remote['machine']} 上的提交不在其中"))
+        epoch = next_remote_epoch(held)
+        prep = ws.prepare(local_repo=repo, branch=req.branch, base=req.base or self.ctx.git.base_branch(repo),
+                          epoch=epoch)
+        env_argv = ["env", f"PM_WORKER_STATE={prep.state_dir}"]
+        argv = env_argv + self.worker_argv(spec, (), repo, wrap=False, memory=False, slug=project_slug_val or None)
+        made = self.ctx.hc.start_terminal(spec.name, prep.worktree, argv, (), on=machine)
+        self.pool_started(spec, repo)
+        if not made:
+            raise Refused(tr(f"hc run --on {machine} failed; {machine}:{prep.worktree} is ready, start the worker by hand",
+                             f"hc run --on {machine} 失败；{machine}:{prep.worktree} 已备好，请手动启动 worker"))
+        address = made if "/" in made else f"{machine}/{made}"
+        terminal = address.split("/", 1)[1]
+        task = self._register_worker(
+            req, spec, repo, held,
+            outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
+            workspace="", pane=f"hc:{address}", worktree="",
+            project_slug_val=project_slug_val, folder_alias=folder_alias, project_name=project_name,
+        )
+        task_id = task["id"]
+        task = record_remote_worker(self.ctx, task_id, machine=machine, terminal=terminal, epoch=epoch, prep=prep,
+                                    pm_command=profile.pm_command)
+        credential = issue_credential(self.ctx, task_id, epoch, machine)
+        ws.write_state(prep.state_dir, worker_context(self.ctx, task), credential)
+        self.ctx.hc.label(address, f"task={task_id}")
+        short = tab_short(req.tab or req.title or "", req.bug or "")
+
+        def _set_fields(cur: Task | None, _ch: Change) -> dict[str, Any]:
+            assert cur is not None
+            r = cur.raw
+            r["tab"] = short
+            if req.bug:
+                r["bug"] = req.bug
+            self._round_starts(r, address, handed=False)
+            return r
+
+        self._ledger.change(task_id, _set_fields)
+        sent = self.keep_sent(task_id, brief)
+        # The brief's commands name this machine's pm.py; the worker there runs its own.
+        local_cmd = self.ctx.procs.pm_command()
+        remote_text = sent.read_text(encoding="utf-8").replace(local_cmd, profile.pm_command)
+        remote_sent = sent.with_name(sent.stem + ".remote" + sent.suffix)
+        remote_sent.write_text(remote_text, encoding="utf-8")
+        self.send_ready_later(
+            address, remote_sent, kind=spec.kind, trust=prep.worktree,
+            strict=spec.kind in ("claude", "codex"), stop_on_exit=bool(spec.advisor), task_id=task_id, repo=repo,
+        )
+        self._deliver_later(repo, slug=project_slug_val)
+        lines = [task_id, f"pane=hc:{address} worktree={machine}:{prep.worktree} epoch={epoch} (async)"]
+        if spec.pool_said:
+            lines.append(spec.pool_said)
+        return DispatchResult(task_id=task_id, pane=f"hc:{address}", worktree=prep.worktree, lines=tuple(lines),
+                              stderr_lines=tuple(stderr_lines))
+
+    def _dispatch_self_hosted(
+        self,
+        req: DispatchRequest,
+        spec: WorkerSpec,
+        repo: str,
+        brief: str,
+        held: dict[str, Any] | None,
+        *,
+        node: Mapping[str, Any],
+        outer_steps: list[dict[str, Any]] | None,
+        outer_explicit: bool,
+        sub_steps: list[dict[str, Any]] | None,
+        stderr_lines: list[str],
+        project_slug_val: str = "",
+        folder_alias: str = "",
+        project_name: str = "",
+    ) -> DispatchResult:
+        """A worker on a self-hosted pull node (`--on <node>`, §9.3 phase 6b): no inbound SSH or hc bridge.
+        Grants `(node_id, task_id, epoch)`, builds the §6.5-scoped brief (project memories only), and enqueues
+        `cmd.brief` for the node's next outbound sync."""
+        tr = self.ctx.config.tr
+        if req.here:
+            raise Refused(tr("--here and --on do not go together: a self-hosted worker gets a worktree on its node",
+                             "--here 不能和 --on 一起用：自托管 worker 在其节点上有自己的工作树"))
+        if not req.branch:
+            raise Refused(tr("--on needs a branch", "--on 需要分支"))
+        slug = project_slug_val or project_slug(repo)
+        allowed = {str(p) for p in (node.get("projects") or []) if p}
+        if "*" not in allowed and slug not in allowed:
+            alias = node.get("alias") or node.get("node_id")
+            raise Refused(tr(
+                f"node {alias} is not authorized for project {slug} (allowed: {', '.join(sorted(allowed)) or 'none'})",
+                f"节点 {alias} 未获项目 {slug} 授权（允许：{', '.join(sorted(allowed)) or '无'}）",
+            ))
+        node_id = str(node["node_id"])
+        alias = str(node.get("alias") or node_id)
+        if held is not None and is_offsite_task(held) and offsite_machine(held) not in ("", alias, node_id):
+            try:
+                offsite_workspace_for(self.ctx, held).fetch_branch(held)
+            except Refused as err:
+                old_where = offsite_machine(held)
+                stderr_lines.append(tr(
+                    f"warning: could not bring {req.branch} from {old_where} ({err}); the new worker on {alias} "
+                    f"starts from this checkout's {req.branch} (or the base)",
+                    f"警告：没能从 {old_where} 取回 {req.branch}（{err}）；{alias} 上的新 worker 从本机分支或基准开始",
+                ))
+        epoch = next_offsite_epoch(held)
+        base_ref = req.base or self.ctx.git.base_branch(repo)
+        base_sha = self.ctx.git.run(repo, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}") or ""
+        pm_cmd = str(node.get("pm_command") or DEFAULT_REMOTE_PM)
+        task = self._register_worker(
+            req, spec, repo, held,
+            outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
+            workspace="", pane="", worktree="",
+            project_slug_val=project_slug_val, folder_alias=folder_alias, project_name=project_name,
+        )
+        task_id = task["id"]
+        slot = f"{safe_name(task_id)}-e{epoch}"
+        task = record_self_hosted_worker(
+            self.ctx, task_id, node=node, slot=slot, epoch=epoch, base_sha=base_sha, pm_command=pm_cmd,
+        )
+        NodeRegistry(self.ctx.home.tokens, clock=self.ctx.clock).grant(node_id, task_id, epoch)
+        TaskTokens(self.ctx.home.tokens).issue(task_id, epoch, machine=node_id)
+        short = tab_short(req.tab or req.title or "", req.bug or "")
+
+        def _set_fields(cur: Task | None, _ch: Change) -> dict[str, Any]:
+            assert cur is not None
+            r = cur.raw
+            r["tab"] = short
+            if req.bug:
+                r["bug"] = req.bug
+            return r
+
+        self._ledger.change(task_id, _set_fields)
+        sh_text = self_hosted_brief(self.ctx, task, brief, pm_cmd)
+        self.keep_sent(task_id, sh_text)
+        env = self_hosted_envelope(
+            self.ctx,
+            task,
+            sh_text,
+            kind="cmd.brief",
+            idempotency_key=f"brief:{task_id}:e{epoch}",
+            body={"task_id": task_id, "epoch": epoch, "project": slug, "branch": req.branch,
+                  "base": base_ref, "base_sha": base_sha},
+        )
+        queue_for_self_hosted(self.ctx, task, env)
+        self._deliver_later(repo, slug=project_slug_val)
+        pane = f"sh:{node_id}/{slot}"
+        lines = [task_id, f"pane={pane} node={alias} epoch={epoch} (pull)"]
+        return DispatchResult(task_id=task_id, pane=pane, worktree="", lines=tuple(lines),
+                              stderr_lines=tuple(stderr_lines))
+
     def dispatch(self, req: DispatchRequest) -> DispatchResult:
         """Dispatch a worker (hc desktop or herdr TUI) for a new or existing open task."""
-        repo = self.ctx.git.project_root(req.repo) if req.here else self.ctx.git.main_root(req.repo)
-        if not repo:
-            raise Refused(f"{req.repo} is not a directory" if req.here else f"{req.repo} is not in a git repository")
         outer_steps, outer_explicit, sub_steps = _parse_new_plan(self.ctx, req.plan, req.step, req.outer_plan, req.subplan)
         stderr_lines: list[str] = []
         explicit_brief = bool(req.brief)
@@ -896,7 +1361,7 @@ class Workers:
                 "--attach and --note require --ask",
                 "--attach 和 --note 需要配合 --ask 使用",
             ))
-        given = self._ledger.load(req.task, repo=repo).raw if req.task else None
+        given = self._ledger.load(req.task).raw if req.task else None
         if given:
             req.task = given["id"]
             if given.get("review_of") or given["status"] in CLOSED:
@@ -906,11 +1371,25 @@ class Workers:
                     f"{req.task} 状态是 {given['status']}"
                     + ("（审查线程）" if given.get("review_of") else "") + "：dispatch 只接手未关闭的任务",
                 ))
-            if given.get("repo") != repo:
+        repo, target_cwd, pslug, proj_name, folder_alias, sibling_folders, proj_rec = self._resolve_dispatch_target(
+            req, given
+        )
+        if given:
+            g_slug = str(given.get("project_slug") or "")
+            g_repo = str(given.get("repo") or "")
+            proj_paths = {f["path"] for f in project_folders(proj_rec)} if proj_rec is not None else set()
+            same_proj = (
+                (bool(pslug) and g_slug == pslug)
+                or (bool(repo) and g_repo == repo)
+                or (bool(g_repo) and g_repo in proj_paths)
+            )
+            if not same_proj:
+                belong = g_slug or g_repo or "another project"
+                dest = pslug or repo or target_cwd
                 raise Refused(self.ctx.config.tr(
-                    f"{req.task} belongs to {given.get('repo') or 'another project'}, not {repo}: dispatch it from "
-                    f"that project (--repo {given.get('repo')})",
-                    f"{req.task} 属于 {given.get('repo') or '别的项目'}，不是 {repo}：到那个项目里派（--repo {given.get('repo')}）",
+                    f"{req.task} belongs to {belong}, not {dest}: dispatch it from "
+                    f"that project (--repo {g_repo or g_slug})",
+                    f"{req.task} 属于 {belong}，不是 {dest}：到那个项目里派（--repo {g_repo or g_slug}）",
                 ))
             busy = self.live_worker(given)
             if busy:
@@ -953,12 +1432,13 @@ class Workers:
         req.bug = bug_of(req.bug, req.tab, req.title, cfg=self.ctx.config) or (given or {}).get("bug") or ""
         req.label = req.label or slugify((given or {}).get("id") or req.title) or "worker"
         req.name = req.name or hc_name(req.label)
-        req.parent = parent_of("", req.parent, repo=repo, ledger=self._ledger, home=self.ctx.home)
+        parent_repo = repo or (str(self.ctx.home.project(pslug).root) if pslug else target_cwd)
+        req.parent = parent_of("", req.parent, repo=parent_repo, ledger=self._ledger, home=self.ctx.home)
         if ask_text:
-            base_ref = req.base or (self.ctx.git.base_branch(repo) if not req.here else "")
+            base_ref = req.base or (self.ctx.git.base_branch(repo) if (repo and not req.here) else "")
             brief = assemble_thin_brief_for(
                 self.ctx,
-                repo=repo,
+                repo=repo or target_cwd,
                 title=req.title,
                 ask=ask_text,
                 attachments=req.attach or (),
@@ -966,6 +1446,7 @@ class Workers:
                 branch=req.branch,
                 base=base_ref,
                 here=req.here,
+                project_slug_val=pslug or None,
             )
             if not req.dry_run:
                 req.brief = str(write_thin_brief_for(self.ctx, req.label, brief))
@@ -982,29 +1463,39 @@ class Workers:
             branch=req.branch or "",
             dry_run=req.dry_run,
         ))
-        spec, pool_warn = self.apply_codex_pool(spec, repo, "worker", hold=not req.dry_run)
+        pool_target = repo or (str(self.ctx.home.project(pslug).root) if pslug else target_cwd)
+        spec, pool_warn = self.apply_codex_pool(spec, pool_target, "worker", hold=not req.dry_run)
+        extra_folders = [f["path"] for f in sibling_folders if f.get("path")]
+        reads_base = repo or target_cwd
         try:
             if pool_warn:
                 stderr_lines.append(pool_warn)
-            held = given or held_task_for(self.ctx, repo, req.branch, req.title if req.here else None)
-            spec.preapproved = asks_first(spec) and not req.confirmed and self.deep_confirmed(repo)
+            held = given or held_task_for(
+                self.ctx, repo, req.branch, req.title if req.here else None, project_slug_val=pslug or None
+            )
+            spec.preapproved = asks_first(spec) and not req.confirmed and self.deep_confirmed(pool_target)
             asks = asks_first(spec) and not req.confirmed and not spec.preapproved
             if req.dry_run:
                 assert req.here or req.branch
-                cwd = req.path or repo if req.here else req.path or self.ctx.git.worktree_home(repo) / (req.branch or "").replace("/", "-")
+                cwd = req.path or target_cwd if req.here else req.path or self.ctx.git.worktree_home(repo) / (req.branch or "").replace("/", "-")
                 tab = (
                     tab_title(tab_short(req.tab or req.title), req.bug, dry=True, cfg=self.ctx.config)
                     if self.ctx.hc.new_tabs(caller_pane=self.ctx.pane) else ""
                 )
-                dry_reads = list(self.ctx.agents.outside_reads(repo, req.brief)) if req.brief else []
+                dry_reads = (
+                    list(self.ctx.agents.outside_reads(reads_base, req.brief, extra_folders=extra_folders))
+                    if (req.brief or extra_folders)
+                    else []
+                )
                 for att in req.attach or ():
-                    for extra_r in self.ctx.agents.outside_reads(repo, att):
+                    for extra_r in self.ctx.agents.outside_reads(reads_base, att, extra_folders=extra_folders):
                         if extra_r not in dry_reads:
                             dry_reads.append(extra_r)
                 plan = self.build_dry_run_plan(
                     spec, repo, "dispatch", given and given["id"], cwd, tab,
                     parent=req.parent or "", reads=dry_reads,
                     asks=asks, outer_steps=outer_steps, no_review=req.no_review,
+                    slug=pslug, folder_alias=folder_alias,
                 )
                 if ask_text:
                     plan["thin_brief"] = True
@@ -1017,12 +1508,37 @@ class Workers:
                     req, spec, repo, held,
                     outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
                     stderr_lines=stderr_lines,
+                    project_slug_val=pslug, folder_alias=folder_alias, project_name=proj_name,
+                )
+            if req.on:
+                node_reg = NodeRegistry(self.ctx.home.tokens, clock=self.ctx.clock)
+                node_hit = node_reg.find(req.on)
+                if node_hit is not None:
+                    if node_hit.get("revoked_ms"):
+                        raise Refused(self.ctx.config.tr(
+                            f"self-hosted node {req.on} is revoked: enroll and join again first",
+                            f"自托管节点 {req.on} 已吊销：请重新注册加入",
+                        ))
+                    return self._dispatch_self_hosted(
+                        req, spec, repo, brief, held,
+                        node=node_hit,
+                        outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
+                        stderr_lines=stderr_lines,
+                        project_slug_val=pslug, folder_alias=folder_alias, project_name=proj_name,
+                    )
+                return self._dispatch_remote_hc(
+                    req, spec, repo, brief, held,
+                    outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
+                    stderr_lines=stderr_lines,
+                    project_slug_val=pslug, folder_alias=folder_alias, project_name=proj_name,
                 )
             if self.ctx.pane.startswith("hc:"):
                 return self._dispatch_hc(
                     req, spec, repo, brief, held,
                     outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
                     stderr_lines=stderr_lines,
+                    target_cwd=target_cwd, project_slug_val=pslug, folder_alias=folder_alias,
+                    project_name=proj_name, sibling_folders=sibling_folders,
                 )
             # Herdr TUI dispatch
             place = (held or {}).get("held_in") or {}
@@ -1068,21 +1584,22 @@ class Workers:
                     )
                     if res.returncode != 0:
                         raise Refused(f"prep command failed with exit code {res.returncode}")
-            tui_reads = list(self.ctx.agents.outside_reads(repo, req.brief or ""))
+            tui_reads = list(self.ctx.agents.outside_reads(reads_base, req.brief or "", extra_folders=extra_folders))
             for att in req.attach or ():
-                for extra_r in self.ctx.agents.outside_reads(repo, att):
+                for extra_r in self.ctx.agents.outside_reads(reads_base, att, extra_folders=extra_folders):
                     if extra_r not in tui_reads:
                         tui_reads.append(extra_r)
-            argv = self.worker_argv(spec, tui_reads, repo)
+            argv = self.worker_argv(spec, tui_reads, repo, slug=pslug or None)
             if not self.ctx.tui.agent_start(spec.name, kind=spec.kind, pane=pane, argv=argv[1:]):
                 raise Refused(f"agent start failed in {pane}")
-            self.pool_started(spec, repo)
+            self.pool_started(spec, pool_target)
         finally:
-            self.pool_started(spec, repo, tries=0)
+            self.pool_started(spec, pool_target, tries=0)
         task = self._register_worker(
             req, spec, repo, held,
             outer_steps=outer_steps, outer_explicit=outer_explicit, sub_steps=sub_steps,
             workspace=workspace, pane=pane, worktree=path_str,
+            project_slug_val=pslug, folder_alias=folder_alias, project_name=proj_name,
         )
         task_id = task["id"]
         lines = [task_id]
@@ -1209,11 +1726,16 @@ class Workers:
         task: dict[str, Any] | None = None
         if resolved and self.ctx.home.task(resolved).is_file():
             task = self._ledger.load(resolved).raw
+            if is_self_hosted_task(task):
+                return self._send_self_hosted(
+                    task, message_text, file_path=file_path, as_user=as_user, idempotency_key=idempotency_key,
+                )
             term = hc_terminal_of(task)
-            if not term or "/" in term:
+            if not term:
+                # A remote `<machine>/t7` worker is a herdr-core terminal too: its mailbox and transport take it.
                 raise Refused(self.ctx.config.tr(
-                    f"{task['id']} has no local herdr-core terminal",
-                    f"{task['id']} 没有本机 herdr-core 终端",
+                    f"{task['id']} has no herdr-core terminal",
+                    f"{task['id']} 没有 herdr-core 终端",
                 ))
         else:
             term = target[3:] if target.startswith("hc:") else target
@@ -1297,6 +1819,74 @@ class Workers:
         why = deliver_failure_reason(self.ctx, out, term) if out is not None else send_failure_reason({}, info, term)
         raise Refused(self.ctx.config.tr(f"failed to send to hc:{term}: {why}", f"发送到 hc:{term} 失败：{why}"))
 
+    def _send_self_hosted(
+        self,
+        task: dict[str, Any],
+        message_text: str | None = None,
+        *,
+        file_path: str | Path | None = None,
+        as_user: bool = False,
+        idempotency_key: str = "",
+    ) -> SendResult:
+        if file_path:
+            body = Path(file_path).read_text(encoding="utf-8")
+        elif message_text:
+            body = message_text
+        else:
+            raise Refused(self.ctx.config.tr("send needs a message or --file <path>", "send 需要提供消息正文或 --file <路径>"))
+        ep = self_hosted_endpoint(task)
+        if ep is None:
+            raise Refused(self.ctx.config.tr(f"{task['id']} has no self-hosted endpoint", f"{task['id']} 没有自托管端点"))
+        if SelfHostedPullTransport(self.ctx).link_state(ep) == "unauthorized":
+            raise Refused(self.ctx.config.tr(
+                f"{task['id']}: self-hosted node {ep.machine} is revoked",
+                f"{task['id']}：自托管节点 {ep.machine} 已吊销",
+            ))
+        message = body if (as_user or body.startswith("[from ")) else f"[from {self.ctx.pane or 'pm.py'}] {body}"
+        if (not as_user and task.get("status") == "blocked" and self._caller.is_pm_caller(task)
+                and self._caller.blocked_by_worker(task)):
+            flat = " ".join(body.split())
+            snippet = flat[:120] + ("…" if len(flat) > 120 else "")
+
+            def _unblock_sh(cur: Task | None, ch: Change) -> dict[str, Any]:
+                assert cur is not None
+                r = cur.raw
+                if r.get("status") != "blocked" or not self._caller.blocked_by_worker(r):
+                    return r
+                r["status"] = "in_progress"
+                for f in (*QUESTION_FIELDS, "paused_from", "escalating", "adopting"):
+                    r.pop(f, None)
+                sync_plan_for_status(r, "in_progress", prev_status="blocked")
+                label = self.ctx.config.tr("PM handled (sent to worker)", "PM 已处理（已发消息给 worker）")
+                ch.note_on(
+                    r,
+                    f"status=in_progress; {label}: {snippet}" if snippet else f"status=in_progress; {label}",
+                    handled_by="pm",
+                )
+                return r
+
+            updated = self._ledger.change(task["id"], _unblock_sh)
+            assert updated is not None
+            task = updated.raw
+        slug = project_slug(str(task.get("repo") or "")) if task.get("repo") else str(task.get("project") or "")
+        sender = Principal.user(slug, actor_id="user:app") if as_user else None
+        env = self_hosted_envelope(
+            self.ctx, task, message,
+            kind="chat.user" if as_user else "cmd.send",
+            sender=sender,
+            priority=P1_USER if as_user else P3_DIRECT,
+            idempotency_key=idempotency_key,
+        )
+        out = queue_for_self_hosted(self.ctx, task, env)
+        if out.status == "rejected":
+            raise Refused(self.ctx.config.tr(f"failed to send to {ep.legacy_pane}: {out.detail}",
+                                             f"发送到 {ep.legacy_pane} 失败：{out.detail}"))
+        msg = self.ctx.config.tr(
+            f"queued for self-hosted worker {ep.legacy_pane} (task {task['id']})",
+            f"已入队给自托管 worker {ep.legacy_pane}（任务 {task['id']}）",
+        )
+        return SendResult(queued=out.status != "typed", terminal=ep.legacy_pane, task_id=task["id"], message=msg)
+
     def drain_sends(self, term: str, env_ids: Sequence[str] = (), *, timeout: int = 180) -> None:
         """Internal detached drain of herdr-core terminal `term`'s mailbox (`pm.py _drain-endpoint`): types what is
         queued for it under its typist lease, returning once `env_ids` have been typed (by this or another holder of
@@ -1330,12 +1920,14 @@ class Workers:
         )
         if task_id:
             self._round_sent(task_id, term, handed, seen)
+            t = self.ctx.store.task(task_id) or {}
+            resolved_repo = repo or t.get("repo") or ""
+            tslug = self.ctx.store.task_project_slug(t) if t else ""
             if not handed:
                 diag = classify_stuck_screen(self.ctx.hc.read(term))
                 summary = diag["summary"] or self.ctx.hc.screen_line(term, width=200)
-                t = self.ctx.store.task(task_id) or {}
-                resolved_repo = repo or t.get("repo") or ""
-                wake = bool(resolved_repo and self._projects.app_pm(resolved_repo))
+                pm_target = tslug or resolved_repo
+                wake = bool(pm_target and self._projects.app_pm(pm_target))
                 msg = self.ctx.config.tr(
                     f"brief not delivered to hc:{term} ({diag['kind']}): {summary}; "
                     f"delegate unblocking with `pm.py triage {task_id}`",
@@ -1347,9 +1939,9 @@ class Workers:
                     lambda cur, ch: (ch.note_on(cur.raw, msg, source="harness", **({"wake": True} if wake else {})), cur.raw)[1],
                 )
                 if wake:
-                    self._deliver_later(resolved_repo)
-            elif repo:
-                self._deliver_later(repo)
+                    self._deliver_later(resolved_repo, slug=tslug)
+            elif resolved_repo or tslug:
+                self._deliver_later(resolved_repo, slug=tslug)
         return handed
 
     # --- Wait ---
@@ -1358,7 +1950,8 @@ class Workers:
         """Wait for a worker's report in the ledger. Raises `WaitOutcome` with code 2 (timeout), 3 (stopped), or 4 (app PM)."""
         task = self._ledger.load(task_id).raw
         tid = task["id"]
-        rec = self._projects.app_pm(task.get("repo")) if task.get("repo") else None
+        pm_target = self.ctx.store.task_project_slug(task) or task.get("repo")
+        rec = self._projects.app_pm(pm_target) if pm_target else None
         if self.ctx.pane and rec and rec.get("pane") == self.ctx.pane:
             raise WaitOutcome(
                 self.ctx.config.tr(
@@ -1434,7 +2027,11 @@ class Workers:
                 plan = self.build_dry_run_plan(
                     spec, task["repo"], "escalate", tid, worktree, dry_tab,
                     parent=task.get("parent") or "",
-                    reads=self.ctx.agents.outside_reads(task["repo"], task.get("brief") or ""),
+                    reads=self.ctx.agents.outside_reads(
+                        task["repo"],
+                        task.get("brief") or "",
+                        extra_folders=self._sibling_folders_for_task(task),
+                    ),
                     asks=asks,
                 )
                 return EscalateResult(task_id=tid, dry_run_plan=plan, stderr_lines=tuple(stderr_lines))
@@ -1442,7 +2039,13 @@ class Workers:
                 _, ask_msg = ask_escalation_for(self.ctx, task, spec, current, why)
                 return EscalateResult(task_id=tid, lines=(ask_msg,), stderr_lines=tuple(stderr_lines), asked=True)
             ours = own_worker_for(self.ctx, task, old)
-            mem = MemoryLayer(self.ctx, task.get("repo")).memory_part() if task.get("repo") else ""
+            t_pslug = str(task.get("project_slug") or "").strip()
+            mem_target = (
+                str(self.ctx.home.project(t_pslug).root)
+                if (t_pslug and valid_slug(t_pslug))
+                else task.get("repo")
+            )
+            mem = MemoryLayer(self.ctx, mem_target).memory_part() if mem_target else ""
             text = escalation_brief_for(self.ctx, task, spec, worktree, why) + mem
             sent_path = self.ctx.home.sent_dir / f"{tid}.escalated.md"
             sent_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1541,7 +2144,7 @@ class Workers:
             + (self.ctx.config.tr(f"; ended {old}", f"；已结束 {old}") if ended else kept)
             + (self.ctx.config.tr(" (it was interrupted first)", "（先中断了它）") if interrupted else "")
         )
-        self._deliver_later(task["repo"])
+        self._deliver_later(task.get("repo"), slug=self.ctx.store.task_project_slug(task))
         unsent_error = ""
         if unsent:
             unsent_msg = self.ctx.config.tr(f"brief not sent; the worker's screen: {unsent}", f"任务书没送达；worker 屏幕上是：{unsent}")
@@ -1653,7 +2256,7 @@ class Workers:
                     f"{pane} 已经开了，但提示没送达。屏幕上是：{seen_line}",
                 ))
             line = f"{plan['how']} {plan['kind']} pane={pane}" + (f" session={plan['session']}" if plan["session"] else "")
-            self._deliver_later(updated.raw["repo"])
+            self._deliver_later(updated.raw.get("repo"), slug=self.ctx.store.task_project_slug(updated.raw))
             return ReattachResult(
                 task_id=tid, how=plan["how"], kind=plan["kind"], pane=pane,
                 session=plan["session"], lines=(line,),

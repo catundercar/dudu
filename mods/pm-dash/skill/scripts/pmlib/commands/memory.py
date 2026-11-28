@@ -19,6 +19,7 @@ from ..memory.layer import (
     recall_text,
     squash,
 )
+from ..messaging.outbox import WorkerState
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..reports import LocalFacts, ReportClient, memory_report
@@ -56,9 +57,41 @@ def cmd_remember(a, ctx=None):
         sys.exit(3)
 
 
+def _recall_from_worker_state(a, ctx, state):
+    """§6.5 offline recall on a remote/self-hosted node from `<worker_state>/context.json`."""
+    tr = ctx.config.tr
+    rows = [m for m in (state.context.get("memories") or []) if isinstance(m, dict)]
+    kind, topic = getattr(a, "type", None), getattr(a, "topic", None)
+    if a.search or kind or topic:
+        word = squash(a.search or "")
+        hits = []
+        for m in rows:
+            name = str(m.get("name") or "")
+            desc = str(m.get("description") or "")
+            body = str(m.get("body") or "")
+            mtype = str(m.get("type") or "")
+            mtopic = str(m.get("topic") or "")
+            if word in squash(name + desc + body) and kind in (None, mtype) and topic in (None, mtopic):
+                hits.append(f"- [{name}]({name}.md) — {desc} ({mtype})")
+        ctx.out.line("\n".join(hits) if hits else tr("(no memory mentions that)", "（没有提到它的记忆）"))
+        return
+    if not a.name:
+        sys.exit("name a memory, or search: recall --search <word>")
+    target = Path(a.name).stem
+    hit = next((m for m in rows if str(m.get("name") or "") in (a.name, target)), None)
+    if not hit:
+        sys.exit(f"no memory called {a.name} (`pm.py memory` lists them)")
+    layer = None if hit.get("shared") == "personal" else str(state.context.get("project") or "project")
+    ctx.out.line(MemoryLayer(ctx, layer).recall_text(hit))
+
+
 def cmd_recall(a, ctx=None):
     ctx = Context.from_env() if ctx is None else ctx
     tr = ctx.config.tr
+    state = WorkerState.from_env(getattr(ctx, "env", None))
+    if state is not None and isinstance(state.context.get("memories"), list):
+        _recall_from_worker_state(a, ctx, state)
+        return
     repo = ctx.git.project_root(a.repo)
     if not repo:
         sys.exit(f"{a.repo} is not a directory")

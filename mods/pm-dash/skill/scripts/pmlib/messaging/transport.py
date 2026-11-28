@@ -64,6 +64,9 @@ class ObserveBatch:
     next_cursors: dict[str, int] = field(default_factory=dict)
     inbound_reports: tuple[Envelope, ...] = ()
     terminal_info: dict[str, Any] | None = None
+    # One row per pulled outbox line, in order: `{seq, mac, envelope, parsed}` (the MAC is checked by the applier
+    # side against the task token; the envelope as written, since the MAC covers exactly those bytes).
+    inbound_meta: tuple[dict[str, Any], ...] = ()
 
 
 class AsyncDeliverHandle(Protocol):

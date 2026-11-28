@@ -32,6 +32,7 @@ from ..library import (
     memory_version,
     split_context_path,
 )
+from ..manager.service import ManagerSessions
 from ..memory.layer import (
     MEMORY_TYPES,
     TOPICS,
@@ -69,27 +70,10 @@ def cmd_project_edit(a, slug, ctx=None):
     if cmd == "memory":
         return lib.memory_page(repo)
     if cmd == "repo-docs":
-        mutating = bool(a.include or a.exclude or a.on or a.off or a.reset)
-        if not mutating:
-            return ctx.store.repo_docs_settings(slug)
         if a.on and a.off:
             raise ValueError("cannot pass both --on and --off")
         if a.reset and (a.include or a.exclude or a.on or a.off):
             raise ValueError("--reset cannot be combined with --include, --exclude, --on, or --off")
-        lib.project_write_check(ctx.caller.memory_writer(repo))
-        if a.reset:
-            ctx.store.set_library_state(slug, repo_docs=None)
-        else:
-            cur = dict(ctx.store.library_state(slug).get("repo_docs") or {})
-            if a.on:
-                cur["enabled"] = True
-            elif a.off:
-                cur["enabled"] = False
-            if a.include is not None:
-                cur["include"] = list(a.include)
-            if a.exclude is not None:
-                cur["exclude"] = list(a.exclude)
-            ctx.store.set_library_state(slug, repo_docs=cur)
         return ctx.store.repo_docs_settings(slug)
     if cmd == "research-migrate":
         return lib.migrate_research(slug, tuple(a.topic or ()), apply=a.apply)
@@ -485,6 +469,37 @@ def cmd_project(a, ctx=None):
         elif a.project_cmd == "interrupt":
             slug = reg.resolve_project_slug(a.slug)
             out = TurnTracker(ctx, slug).interrupt_pm()
+        elif a.project_cmd == "rename":
+            res = ManagerSessions(ctx).rename(a.slug, a.name)
+            out = {
+                "ok": True,
+                "slug": res.slug,
+                "name": res.name,
+                "project": res.project,
+                "display_name": res.display_name,
+                "previous_name": res.previous_name,
+                "tab_renamed": res.tab_renamed,
+                "space_renamed": res.space_renamed,
+            }
+        elif a.project_cmd == "set-space":
+            out = ManagerSessions(ctx).set_space(
+                a.slug,
+                a.space_id,
+                space_name=getattr(a, "space_name", None),
+            )
+        elif a.project_cmd == "folders":
+            mgr = ManagerSessions(ctx)
+            fcmd = a.folders_cmd
+            if fcmd == "ls":
+                out = mgr.list_folders(a.slug)
+            elif fcmd == "add":
+                out = mgr.add_folder(a.slug, a.path, alias=getattr(a, "alias", None))
+            elif fcmd == "remove":
+                out = mgr.remove_folder(a.slug, a.target, force=bool(getattr(a, "force", False)))
+            elif fcmd == "rename-alias":
+                out = mgr.rename_folder_alias(a.slug, a.target, a.new_alias)
+            else:
+                raise ValueError(f"unknown folders command: {fcmd}")
         elif a.project_cmd == "log":
             out = projects.thread_log(ledger.resolve_id(a.id), before=a.before, limit=a.limit)
         elif a.project_cmd == "tasks":
@@ -638,6 +653,29 @@ def register_project_command(sub):
     psend.add_argument("words", nargs="*", help="[target_terminal] text")
     pint = within.add_parser("interrupt", help="interrupt the PM terminal's current foreground step without killing it")
     pint.add_argument("slug", help="project slug, PM name or folder")
+    prn = within.add_parser("rename", help="rename a project's display name without changing its slug, tasks or history")
+    prn.add_argument("slug", help="project slug, PM name, current project name or folder")
+    prn.add_argument("name", help="new project display name")
+    psp = within.add_parser("set-space", help="bind a dedicated Herdr space id to a project registration")
+    psp.add_argument("slug", help="project slug, PM name, current project name or folder")
+    psp.add_argument("space_id", help="space id on the project's machine (without machine/ prefix)")
+    psp.add_argument("--space-name", help="optional space display name to persist")
+    pfo = within.add_parser("folders", help="list, add, remove, or rename equal-status workspace folders of a project")
+    fsub = pfo.add_subparsers(dest="folders_cmd", required=True)
+    fls = fsub.add_parser("ls", help="list linked workspace folders for a project as JSON")
+    fls.add_argument("slug", help="project slug, PM name, project name or folder")
+    fad = fsub.add_parser("add", help="link an equal-status workspace folder to a project")
+    fad.add_argument("slug", help="project slug, PM name, project name or folder")
+    fad.add_argument("path", help="directory path to link")
+    fad.add_argument("--alias", help="optional folder alias (default: directory name, auto-disambiguated)")
+    frm = fsub.add_parser("remove", help="unlink a workspace folder from a project (never deletes files on disk)")
+    frm.add_argument("slug", help="project slug, PM name, project name or folder")
+    frm.add_argument("target", help="folder alias or path to unlink")
+    frm.add_argument("--force", action="store_true", help="unlink even when active threads still run under this folder")
+    fra = fsub.add_parser("rename-alias", help="rename a linked workspace folder's alias")
+    fra.add_argument("slug", help="project slug, PM name, project name or folder")
+    fra.add_argument("target", help="current folder alias or path")
+    fra.add_argument("new_alias", help="new folder alias")
 
 
 def register_home_command(sub):

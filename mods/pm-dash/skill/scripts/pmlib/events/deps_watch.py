@@ -40,10 +40,16 @@ class DependencyWatcher:
         the event."""
         every = self._ledger.raw_tasks()
         only_set = set(only_tasks) if only_tasks is not None else None
+        scope_slug = self.ctx.store.folder_project_slug(repo) if repo else ""
         candidates = [
             t for t in every
-            if isinstance(t, dict) and t.get("status") == "proposed" and t.get("depends_on") and t.get("repo")
-            and (not repo or in_scope(t["repo"], repo))
+            if isinstance(t, dict) and t.get("status") == "proposed" and t.get("depends_on")
+            and (t.get("repo") or t.get("project_slug"))
+            and (
+                not repo
+                or (t.get("repo") and in_scope(t["repo"], repo))
+                or (scope_slug and self.ctx.store.task_project_slug(t) == scope_slug)
+            )
             and (only_set is None or t.get("id") in only_set)
         ]
         if not candidates:
@@ -77,15 +83,17 @@ class DependencyWatcher:
             if not claimed or fresh_task is None:
                 continue
             fresh = fresh_task.raw
+            pslug = self.ctx.store.task_project_slug(fresh)
+            t_repo = str(fresh.get("repo") or "")
             msg = _dep_event_message(fresh, info, key, tr_fn=self.ctx.config.tr)
-            wake = bool(self._projects.app_pm(fresh["repo"]))
-            Conversation(self.ctx, fresh["repo"]).record(
+            wake = bool(self._projects.app_pm(pslug or t_repo))
+            Conversation(self.ctx, t_repo, slug=pslug or None).record(
                 "event", task=fresh["id"], title=fresh.get("title") or "",
                 brief=fresh.get("brief") or "", depends_on=expected_deps,
                 source="deps", by="pm.py", key=key, text=msg, wake=wake,
             )
             if wake:
-                Delivery(self.ctx, fresh["repo"]).ensure_running()
+                Delivery(self.ctx, t_repo, slug=pslug or None).ensure_running()
             emitted.append((fresh, key, msg))
         return emitted
 
@@ -100,13 +108,17 @@ class DependencyWatcher:
         every = self._ledger.raw_tasks()
         affected = [
             t for t in every
-            if isinstance(t, dict) and t.get("status") == "proposed" and t.get("repo")
+            if isinstance(t, dict) and t.get("status") == "proposed"
+            and (t.get("repo") or t.get("project_slug"))
             and any(isinstance(d, str) and d.strip() == task_id for d in (t.get("depends_on") or []))
         ]
         if not affected:
             return []
         out: list[tuple[dict[str, Any], str, str]] = []
-        repos = list(dict.fromkeys(([primary_repo] if primary_repo else []) + [t["repo"] for t in affected]))
+        repos = list(dict.fromkeys(
+            ([primary_repo] if primary_repo else [])
+            + [t.get("project_slug") or t.get("repo") for t in affected]
+        ))
         ids = {t["id"] for t in affected}
         for r in repos:
             if r:

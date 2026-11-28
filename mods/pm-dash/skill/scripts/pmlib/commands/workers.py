@@ -279,7 +279,8 @@ def cmd_wait(a: Any, ctx: Any = None) -> None:
         try:
             task = svc._ledger.load(a.id).raw
             a.id = task["id"]
-            rec = svc._projects.app_pm(task.get("repo")) if task.get("repo") else None
+            pm_target = svc.ctx.store.task_project_slug(task) or task.get("repo")
+            rec = svc._projects.app_pm(pm_target) if pm_target else None
             if ctx.pane and rec and rec.get("pane") == ctx.pane:
                 raise WaitOutcome(
                     ctx.config.tr(

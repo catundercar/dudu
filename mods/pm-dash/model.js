@@ -72,6 +72,7 @@ const STRINGS = {
     setupDone: 'Done. Restart your coding agent sessions, then say "act as PM for this project".',
     setupOutdated: 'A PM skill update is available.', update: 'Update',
     setupIncomplete: 'Setup did not finish. Try again.',
+    setupLocal: 'PM is not set up on this computer. Projects on other machines open as usual; Set up to run PMs here.',
     // No Python 3.8+ to run the PM scripts (Windows: the Microsoft Store stub does not count).
     noPython: 'PM needs Python 3 first. Install Python 3.8 or newer from python.org, restart Herdr, then click Set up.',
     noPythonWindows: 'PM needs Python 3 first. Install it from python.org, or run winget install Python.Python.3.12 in a terminal. Then restart Herdr and click Set up.',
@@ -81,7 +82,7 @@ const STRINGS = {
     summary: (p, r, w) => `${p} ${p === 1 ? 'project' : 'projects'} · ${r} ${r === 1 ? 'task' : 'tasks'} running · ${w} ${w === 1 ? 'item' : 'items'} waiting`,
 
     // The Projects page, the project board and their dialogs. "Projects" is a name, in every language.
-    projectsTitle: 'Projects', listView: 'List', boardView: 'Board', chatView: 'Conversation',
+    projectsTitle: 'Projects', listView: 'List', boardView: 'Board', chatView: 'Conversation', switchToChat: 'Back to Conversation',
     pageSummary: (p, r, w) => `${p} ${p === 1 ? 'project' : 'projects'} · ${r} ${r === 1 ? 'thread' : 'threads'} working · ${w} waiting for you`,
     count_waiting: n => `Needs you ${n}`, count_working: n => `In progress ${n}`, count_review: n => `Review ${n}`,
     count_proposed: n => `Not started ${n}`, count_merged_today: n => `Merged ${n}`,
@@ -89,17 +90,54 @@ const STRINGS = {
     archivedN: n => `Archived ${n}`, archivedTitle: 'Archived', backToProjects: 'Projects',
     archivedSummary: n => `${n} ${n === 1 ? 'project' : 'projects'} · restoring starts a new PM that takes over from the handover`,
     pausedLine: (n, titles) => `Paused ${n}: ${titles}`, nothingPaused: 'Nothing was open', archivedOn: day => `archived ${day}`,
-    restore: 'Restore', openProject: 'Open project', archiveProject: 'Archive project', newProject: 'New project',
+    restore: 'Restore', openProject: 'Open project', renameProject: 'Rename project', archiveProject: 'Archive project', newProject: 'New project',
+    renameTitle: name => `Rename ${name}`, renamePlaceholder: 'Project name',
+    renameHint: 'Changes the display name everywhere without affecting tasks or history.',
+    save: 'Save', saving: 'Saving…',
+    renameEmpty: 'Project name cannot be empty.',
+    renameControlChars: 'Project name cannot contain line breaks or control characters.',
+    renameTooLong: 'Project name is too long (max 80 characters).',
+    renameDuplicate: name => `A project named “${name}” already exists.`,
     windowMinimize: 'Minimize', windowMaximize: 'Maximize', windowRestore: 'Restore', windowClose: 'Close',
-    remoteProject: 'On another machine: click opens its conversation; archive it there',
+    remoteProject: 'On another machine: click opens its conversation',
     archiveTitle: name => `Archive ${name}?`, archiveLead: 'The PM session closes, and these threads are marked paused and stop reminding you:',
     archiveNone: 'The PM session closes. No threads are open.',
     archiveKeep: 'The conversation, the ledger and the decisions you made all stay. On restore a new PM takes over from the handover.',
     cancel: 'Cancel', archive: 'Archive', thread_blocked: 'Needs you', thread_in_progress: 'In progress',
     thread_review: 'Review', thread_proposed: 'Not started',
-    folder: 'Folder', chooseFolder: 'Choose a folder…', name: 'Name', manager: 'Manager', place: 'Where',
-    newSpace: name => `New space “${name}”`, currentSpace: name => `Current space “${name}”`,
-    placeHint: 'The PM starts in this space and the project view opens.', create: 'Create · ⌘↵', creating: 'Starting the PM…',
+    machine: 'Machine',
+    machineOfflineTip: (m, st) => `${m} is ${st}; connect with hc machine login`,
+    remoteConnectedCount: n => `${n} remote connected via hc`,
+    folder: 'Folder', folders: 'Folders', chooseFolder: 'Choose a folder…',
+    optionalFoldersHint: 'Optional · link 0 or more folders',
+    foldersLinkedCount: n => `Optional · ${n} ${n === 1 ? 'folder' : 'folders'} linked`,
+    foldersZeroHint: 'Optional · 0 linked (can add anytime later)',
+    foldersOnMachine: m => `Folders on ${m}`,
+    addFolder: 'Add folder…',
+    addFolderOn: m => `Add folder on ${m}…`,
+    noFoldersLinked: 'No folders linked yet',
+    noFoldersRemoteHint: 'No folders linked yet — click to add or leave empty…',
+    enterRemotePath: m => `Path on ${m}, e.g. ~/project/repo…`,
+    browse: 'Browse', browseRemoteTip: m => `Browse folders on ${m}`,
+    add: 'Add', notFound: 'Not found',
+    folderNotFoundRemote: m => `Directory does not exist on ${m}`,
+    createRemoteFolder: 'Create folder', creatingFolder: 'Creating…', checkingPath: 'Checking…',
+    remotePickerEmpty: 'No subfolders here', remotePickerUp: 'Up',
+    remotePickerHint: '↵ to add · Esc close',
+    remotePmMissing: m => `pm.py was not found on ${m}. Install the pm skill on ${m} first.`,
+    removeFolder: 'Unlink folder', folderBadge: 'folder',
+    name: 'Name', manager: 'Manager',
+    spacePreview: (name, m) => m ? `${m} space: “${name}”` : `space: “${name}”`,
+    readyZeroFolders: 'ready even with 0 folders',
+    notInstalled: 'not installed',
+    machineConnected: 'Connected',
+    dedicatedSpaceHint: (name, m) => name
+      ? (m ? `Starts PM on ${m} in space “${name}” and opens conversation.` : `Starts PM in space “${name}” and opens conversation.`)
+      : (m ? `Starts PM on ${m} in a dedicated space and opens conversation.` : 'Starts PM in a dedicated space and opens conversation.'),
+    placeHint: 'Starts PM in its dedicated space and opens conversation.',
+    create: 'Create · ⌘↵', creating: 'Starting the PM…',
+    workspaceFolders: n => `Workspace folders (${n})`,
+    unlinkFolderActiveWarn: (alias, n) => `${n} active threads still run in “${alias}”. Unlink anyway?`,
     ledgerOpen: (name, n, titles) => `The ledger already has ${n} open ${n === 1 ? 'item' : 'items'} for ${name} (${titles}); the new PM takes ${n === 1 ? 'it' : 'them'} over.`,
     failedAction: text => `Failed: ${text}`,
     endedCount: n => `Ended ${n}`, endedRecent: titles => `Latest: ${titles}`, endedMore: n => `Click to see all ${n}`,
@@ -107,6 +145,38 @@ const STRINGS = {
     unclaimedBlocked: n => `Unclaimed blocked ${n}`, unclaimedShort: 'Unclaimed',
     unclaimedTip: 'Blocked tasks with no project PM (not counted in waiting for you). Click to view on the board.',
     today: 'Today', yesterday: day => `Yesterday · ${day}`, earlier: 'Earlier',
+    tokUsage: 'Token Usage', tokAnalytics: 'Token Analytics', tokToday: 'today', tokHit: 'hit',
+    tokCacheHit: 'cache hit', tokReqs: n => `${n} reqs`, tokTasksSess: (t, s) => `${t} threads · ${s} sess`,
+    tokRangeToday: 'Today', tokRange7d: '7d', tokRange30d: '30d', tokRangeAll: 'All',
+    tokAgentAll: 'All Agents', tokAgentClaude: 'Claude', tokAgentAgy: 'agy', tokAgentCodex: 'Codex', tokAgentPi: 'pi',
+    tokDimModel: 'Model', tokDimTask: 'Thread', tokDimAgent: 'Agent',
+    tokMetricTokens: 'Tokens', tokMetricCost: 'Cost', tokMetricRequests: 'Requests',
+    tokKpiTotal: 'Total Tokens', tokKpiTotalTag: 'incl. cache',
+    tokKpiTotalSub: (i, o, c) => `In ${i} · Out ${o} · Cache ${c}`,
+    tokKpiReqs: 'Requests & Threads', tokKpiErr: n => `${n} ${n === 1 ? 'error' : 'errors'}`,
+    tokKpiCost: 'Est. API Cost', tokKpiSaved: s => `Saved ${s}`,
+    tokKpiCostSub: 'API list-rate equiv · sub not billed',
+    tokKpiHit: 'Cache Hit Rate', tokKpiHitTag: 'of prompt',
+    tokKpiHitSub: (p, br) => br ? `Prompt ${p} · ${br}` : `Prompt ${p}`,
+    tokDedupHint: 'Local logs & subagents deduplicated',
+    tokScopeAll: 'All projects', tokScopeOne: name => `${name}`,
+    tokCacheMs: ms => `incremental cache ${ms}ms`,
+    tokChartSubHour: 'Hourly today · stacked by runtime',
+    tokChartSubDay: 'Daily · stacked by runtime',
+    tokChartSubWeek: 'Weekly · stacked by runtime',
+    tokDimSubModel: 'Sorted by token volume',
+    tokDimSubTask: 'PM & threads (work + review) · click to jump',
+    tokDimSubAgent: 'All 4 runtime adapters',
+    tokPmInline: tok => `PM ${tok}`,
+    tokPmCostSub: (tok, cost, pct) => `PM ${tok} · ${cost} (${pct}) · API list-rate`,
+    tokPmAgentSub: (tok, cost) => `PM ${tok} (${cost})`,
+    tokPmModelSub: tok => `PM ${tok}`,
+    tokAdvisorBadge: 'Advisor', tokCoding: 'Work', tokReview: 'Review',
+    tokShare: p => `${p} share`, tokCacheWriteUnavail: 'Cache write — (agy N/A)',
+    tokCacheWriteAmt: w => `Cache write ${w}`, tokCacheReadAmt: r => `Cache read ${r}`,
+    tokAdapterReady: 'Adapter ready', tokNoData: 'No token usage recorded in this window yet.',
+    tokRefreshTip: 'Refresh token analytics', tokCollapseTip: 'Collapse token analytics',
+    tokExpandTip: 'Expand token analytics', tokPeak: 'Peak', tokLoading: 'Scanning transcripts…',
     ...PLAN_STRINGS.en,
   },
   zh: {
@@ -134,6 +204,7 @@ const STRINGS = {
     setupDone: '设置完成。重启编程 agent 的会话，然后说“作为本项目的 PM”。',
     setupOutdated: 'PM 技能有可用更新。', update: '更新',
     setupIncomplete: '设置尚未完成，请重试。',
+    setupLocal: '本机还没设置 PM。其他机器上的项目照常能打开；要在本机跑 PM 再点「设置」。',
     noPython: 'PM 需要先装 Python 3：从 python.org 安装 3.8 或更新的版本，装好后重开 Herdr，再点「设置」。',
     noPythonWindows: 'PM 需要先装 Python 3：从 python.org 下载安装，或在终端运行 winget install Python.Python.3.12。装好后重开 Herdr，再点「设置」。',
     line: (name, text) => `${name}：${text}`,
@@ -141,7 +212,7 @@ const STRINGS = {
     summaryWaiting: w => `${w} 件事等你`,
     summary: (p, r, w) => `${p} 个项目 · ${r} 个任务在跑 · ${w} 件事等你`,
 
-    projectsTitle: 'Projects', listView: '列表', boardView: '看板', chatView: '对话',
+    projectsTitle: 'Projects', listView: '列表', boardView: '看板', chatView: '对话', switchToChat: '返回对话',
     pageSummary: (p, r, w) => `${p} 个项目 · ${r} 个线程在做 · ${w} 件等你`,
     count_waiting: n => `等你 ${n}`, count_working: n => `进行中 ${n}`, count_review: n => `待审 ${n}`,
     count_proposed: n => `未开始 ${n}`, count_merged_today: n => `已合并 ${n}`,
@@ -149,17 +220,54 @@ const STRINGS = {
     archivedN: n => `已归档 ${n}`, archivedTitle: '已归档', backToProjects: 'Projects',
     archivedSummary: n => `${n} 个项目 · 恢复后 PM 重新启动，从交接记录接手`,
     pausedLine: (n, titles) => `暂停 ${n}：${titles}`, nothingPaused: '归档时没有在办的事', archivedOn: day => `${day} 归档`,
-    restore: '恢复', openProject: '打开项目', archiveProject: '归档项目', newProject: '新建项目',
+    restore: '恢复', openProject: '打开项目', renameProject: '重命名项目', archiveProject: '归档项目', newProject: '新建项目',
+    renameTitle: name => `重命名「${name}」`, renamePlaceholder: '项目名称',
+    renameHint: '修改全界面显示名称，不影响已有任务与对话记录。',
+    save: '保存', saving: '正在保存…',
+    renameEmpty: '项目名称不能为空。',
+    renameControlChars: '项目名称不能包含换行或控制字符。',
+    renameTooLong: '项目名称过长（最多 80 个字符）。',
+    renameDuplicate: name => `已存在名为「${name}」的项目。`,
     windowMinimize: '最小化', windowMaximize: '最大化', windowRestore: '还原', windowClose: '关闭',
-    remoteProject: '在另一台机器上：点击打开对话；归档要到那台机器上做',
+    remoteProject: '在另一台机器上：点击打开对话',
     archiveTitle: name => `归档 ${name}?`, archiveLead: 'PM 会话会关掉，下面这些线程标成暂停，不再提醒你：',
     archiveNone: 'PM 会话会关掉。现在没有在办的线程。',
     archiveKeep: '对话、台账和你做过的决定都留着。恢复时新 PM 从交接记录接手。',
     cancel: '取消', archive: '归档', thread_blocked: '等你', thread_in_progress: '进行中',
     thread_review: '待审', thread_proposed: '未开始',
-    folder: '文件夹', chooseFolder: '选择文件夹…', name: '名称', manager: '管理者', place: '放在哪',
-    newSpace: name => `新开 space「${name}」`, currentSpace: name => `放进当前 space「${name}」`,
-    placeHint: 'PM 在这个 space 里启动，项目视图直接打开。', create: '创建 · ⌘↵', creating: '正在启动 PM…',
+    machine: '机器',
+    machineOfflineTip: (m, st) => `${m} 当前 ${st}；请用 hc machine login 连接`,
+    remoteConnectedCount: n => `已通过 hc 连接 ${n} 台远端机器`,
+    folder: '文件夹', folders: '文件夹', chooseFolder: '选择文件夹…',
+    optionalFoldersHint: '可选 · 支持关联 0 或多个文件夹',
+    foldersLinkedCount: n => `可选 · 已关联 ${n} 个文件夹`,
+    foldersZeroHint: '可选 · 暂关联 0 个（创建后也可随时添加）',
+    foldersOnMachine: m => `${m} 上的文件夹`,
+    addFolder: '添加文件夹…',
+    addFolderOn: m => `在 ${m} 上添加文件夹…`,
+    noFoldersLinked: '暂未关联文件夹',
+    noFoldersRemoteHint: '暂未关联文件夹 — 点击添加或直接留空创建…',
+    enterRemotePath: m => `${m} 上的路径，如 ~/project/repo…`,
+    browse: '浏览', browseRemoteTip: m => `浏览 ${m} 上的文件夹`,
+    add: '添加', notFound: '目录不存在',
+    folderNotFoundRemote: m => `${m} 上不存在该目录`,
+    createRemoteFolder: '新建此目录', creatingFolder: '正在创建…', checkingPath: '正在检查…',
+    remotePickerEmpty: '当前目录下没有子文件夹', remotePickerUp: '上一级',
+    remotePickerHint: '↵ 添加 · Esc 关闭',
+    remotePmMissing: m => `${m} 上未找到 pm.py，请先在 ${m} 安装 pm 技能。`,
+    removeFolder: '解除关联', folderBadge: '目录',
+    name: '名称', manager: '管理者',
+    spacePreview: (name, m) => m ? `${m} 空间：「${name}」` : `空间：「${name}」`,
+    readyZeroFolders: '0 个文件夹也能直接创建',
+    notInstalled: '未安装',
+    machineConnected: '已连接',
+    dedicatedSpaceHint: (name, m) => name
+      ? (m ? `在 ${m} 的专属空间「${name}」启动 PM 并打开对话。` : `在专属空间「${name}」启动 PM 并打开对话。`)
+      : (m ? `在 ${m} 的专属空间启动 PM 并打开对话。` : '在专属空间启动 PM 并打开对话。'),
+    placeHint: '在专属空间启动 PM 并直接打开对话。',
+    create: '创建 · ⌘↵', creating: '正在启动 PM…',
+    workspaceFolders: n => `关联文件夹（${n}）`,
+    unlinkFolderActiveWarn: (alias, n) => `「${alias}」下仍有 ${n} 个进行中线程，确定解除关联？`,
     ledgerOpen: (name, n, titles) => `台账里已有 ${name} 的 ${n} 件没结束的事（${titles}），新 PM 会接着管。`,
     failedAction: text => `没有成功：${text}`,
     endedCount: n => `已结束 ${n}`, endedRecent: titles => `最近：${titles}`, endedMore: n => `点开看全部 ${n} 条`,
@@ -167,6 +275,38 @@ const STRINGS = {
     unclaimedBlocked: n => `无人认领的阻塞 ${n}`, unclaimedShort: '无人认领',
     unclaimedTip: '没有对应项目 PM 的阻塞任务（不计入「等你」）。点击到看板查看。',
     today: '今天', yesterday: day => `昨天 · ${day}`, earlier: '更早',
+    tokUsage: 'Token 用量', tokAnalytics: 'Token 用量分析', tokToday: '今日', tokHit: '命中',
+    tokCacheHit: '命中', tokReqs: n => `${n} 请求`, tokTasksSess: (t, s) => `${t} 任务 · ${s} 会话`,
+    tokRangeToday: '今天', tokRange7d: '7 天', tokRange30d: '30 天', tokRangeAll: '全部',
+    tokAgentAll: '全部 Agent', tokAgentClaude: 'Claude', tokAgentAgy: 'agy', tokAgentCodex: 'Codex', tokAgentPi: 'pi',
+    tokDimModel: '按模型', tokDimTask: '按任务', tokDimAgent: '按 Agent',
+    tokMetricTokens: 'Token', tokMetricCost: '费用', tokMetricRequests: '请求',
+    tokKpiTotal: '总 Token', tokKpiTotalTag: '缓存 + 读写',
+    tokKpiTotalSub: (i, o, c) => `输入 ${i} · 输出 ${o} · 缓存 ${c}`,
+    tokKpiReqs: '请求与任务', tokKpiErr: n => `${n} 次异常`,
+    tokKpiCost: '估算费用', tokKpiSaved: s => `缓存省 ${s}`,
+    tokKpiCostSub: 'API 等效单价估算 · 订阅制不扣款',
+    tokKpiHit: '缓存命中率', tokKpiHitTag: '占提示词',
+    tokKpiHitSub: (p, br) => br ? `提示词 ${p} · ${br}` : `提示词 ${p}`,
+    tokDedupHint: '本地会话日志与子代理已去重合并',
+    tokScopeAll: '全部项目', tokScopeOne: name => `${name} 项目`,
+    tokCacheMs: ms => `增量游标缓存 ${ms}ms`,
+    tokChartSubHour: '今日按小时 · 堆叠色区分运行时',
+    tokChartSubDay: '按天汇总 · 堆叠色区分运行时',
+    tokChartSubWeek: '按周汇总 · 堆叠色区分运行时',
+    tokDimSubModel: '按 Token 消耗排序',
+    tokDimSubTask: '含 PM 自身与任务（编码+审查）· 点击跳转',
+    tokDimSubAgent: '四类运行时适配器全覆盖',
+    tokPmInline: tok => `PM ${tok}`,
+    tokPmCostSub: (tok, cost, pct) => `PM 自身 ${tok} · ${cost} (${pct}) · 等效单价`,
+    tokPmAgentSub: (tok, cost) => `PM ${tok} (${cost})`,
+    tokPmModelSub: tok => `PM ${tok}`,
+    tokAdvisorBadge: 'Advisor 独立拆账', tokCoding: '编码', tokReview: '审查',
+    tokShare: p => `占 ${p}`, tokCacheWriteUnavail: '缓存写 — (agy 暂缺)',
+    tokCacheWriteAmt: w => `缓存写 ${w}`, tokCacheReadAmt: r => `缓存读 ${r}`,
+    tokAdapterReady: '适配器已就绪', tokNoData: '当前时间窗口内暂无 Token 记录。',
+    tokRefreshTip: '刷新 Token 统计', tokCollapseTip: '收起 Token 分析舱',
+    tokExpandTip: '展开 Token 分析舱', tokPeak: '峰值', tokLoading: '正在扫描会话日志…',
     ...PLAN_STRINGS.zh,
   },
 };
@@ -184,6 +324,13 @@ export function setupState(status) {
   if (!list('installed').length) return 'missing';
   if (list('outdated').length) return 'outdated';
   return list('ready').length ? 'ready' : 'missing';
+}
+
+// Set up missing (or still being checked) covers the Projects page with the Set up card only while
+// there is nothing to show: projects on other machines are read over hc and need no Set up here.
+export function setupCoversPage(status, state) {
+  if (status !== null && status !== 'missing') return false;
+  return !(Array.isArray(state?.pms) ? state.pms : []).some(pm => pm && pm.machine);
 }
 
 export function shouldRecheckSetup(status, busy = false, checking = false) {
@@ -528,7 +675,7 @@ export function layout(state, width = 980, _height = 640, scale = 1, wide = widt
     const pm = p.name || '', base = { pm, machine: p.machine };
     const parts = boardGroups(state.tasks.filter(t => (t.pm || '') === pm));
     const latest = [...state.events].reverse().find(e => e.pm === p.name);
-    const pmRow = { ...p, id: pmId(p.name), type: 'pm', title: p.project || (p.sourceName ?? p.name) || word(state.lang, 'noPm'),
+    const pmRow = { ...p, id: pmId(p.name), type: 'pm', title: projectName(p) || word(state.lang, 'noPm'),
       machineNumber: machines.length > 1 ? machines.find(m => m.machine === (p.machine || '')).number : null,
       latest: eventText(latest, state.lang), x: px, y, w: pw, h: 48 };
     rows.push(pmRow);
@@ -636,6 +783,75 @@ export function isDarkTheme(theme) {
   return luminance(theme.foreground) > luminance(theme.background);
 }
 
+export function mixHex(baseColor, targetColor, ratio) {
+  const parse = c => {
+    if (typeof c !== 'string' || !c.startsWith('#')) return null;
+    const h = c.slice(1);
+    const hex = h.length === 3 ? [...h].map(x => x + x).join('') : h.slice(0, 6);
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
+    return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+  };
+  const a = parse(baseColor), b = parse(targetColor);
+  if (!a || !b) return baseColor || targetColor || '#000000';
+  const r = Math.max(0, Math.min(1, Number(ratio) || 0));
+  const ch = i => Math.round(a[i] + (b[i] - a[i]) * r).toString(16).padStart(2, '0');
+  return `#${ch(0)}${ch(1)}${ch(2)}`;
+}
+
+// Micro-surface tonal ladder derived from active theme tokens (Plan B: Tonal Layering).
+// Dark themes step cleanly from recessed well -> panel base -> elevated pod/card without border boxes;
+// light themes step cleanly in the opposite direction while preserving contrast.
+export function tonalSurfaces(t) {
+  const dark = isDarkTheme({
+    foreground: t?.foreground || '#eeeeee',
+    background: t?.background || t?.surface || '#111318',
+  });
+  const bg = t?.background || t?.surface || (dark ? '#111318' : '#ffffff');
+  const surface = t?.surface || (dark ? '#1a1d24' : '#f7f6f3');
+  const accent = t?.accent || '#58a6ff';
+  const fg = t?.foreground || (dark ? '#eeeeee' : '#1e1f22');
+  const border = t?.border || (dark ? '#333333' : '#dedcd5');
+  if (dark) {
+    const sameSurface = surface.toLowerCase() === bg.toLowerCase();
+    const pod = sameSurface ? mixHex(bg, '#ffffff', 0.045) : mixHex(bg, surface, 0.42);
+    const card = sameSurface ? mixHex(bg, '#ffffff', 0.055) : mixHex(bg, surface, 0.52);
+    return {
+      dark: true,
+      well: mixHex(bg, '#000000', 0.36),
+      tabBar: mixHex(bg, '#000000', 0.18),
+      pod,
+      podWell: mixHex(bg, '#000000', 0.24),
+      card,
+      chip: mixHex(bg, '#000000', 0.30),
+      chipHover: mixHex(bg, '#ffffff', 0.065),
+      chipOpen: withAlpha(accent, 0.16),
+      chipOpenBorder: withAlpha(accent, 0.34),
+      segActive: t.raised || mixHex(bg, '#ffffff', 0.10),
+      softChip: withAlpha(fg, 0.075),
+      softChipHover: withAlpha(fg, 0.045),
+      pillMuted: withAlpha(fg, 0.065),
+      hairline: withAlpha(border, 0.42),
+    };
+  }
+  return {
+    dark: false,
+    well: mixHex(bg, '#000000', 0.055),
+    tabBar: surface,
+    pod: mixHex(bg, '#000000', 0.03),
+    podWell: bg,
+    card: mixHex(bg, '#000000', 0.032),
+    chip: mixHex(bg, '#000000', 0.055),
+    chipHover: mixHex(bg, '#000000', 0.09),
+    chipOpen: withAlpha(accent, 0.12),
+    chipOpenBorder: withAlpha(accent, 0.30),
+    segActive: bg,
+    softChip: withAlpha(fg, 0.068),
+    softChipHover: withAlpha(fg, 0.04),
+    pillMuted: withAlpha(fg, 0.06),
+    hairline: withAlpha(border, 0.65),
+  };
+}
+
 // Use only supplied theme tokens, choosing their higher-contrast foreground
 // for each solid fill rather than assuming white also works in a dark theme.
 export function solidText(fill, theme) {
@@ -672,7 +888,7 @@ export function counts(state) {
     review += pc.review;
     waiting += pc.waiting;
     if (pc.waiting > 0) {
-      waitingByPm.push({ name: pm.project || (pm.sourceName ?? pm.name) || word(state?.lang, 'unassigned'), count: pc.waiting });
+      waitingByPm.push({ name: projectName(pm) || word(state?.lang, 'unassigned'), count: pc.waiting });
     }
   }
   if (hasStateCounts) {
@@ -842,9 +1058,27 @@ export function arcHops(samples, reverse = false) {
 
 // ---- The Projects page ------------------------------------------------------
 
-export const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', pi: 'pi' };
+export const AGENT_NAMES = { claude: 'Claude Code', agy: 'agy', codex: 'Codex', pi: 'pi' };
 export const agentName = kind => AGENT_NAMES[kind] || kind || '';
-export const projectName = pm => pm?.project || String(pm?.sourceName ?? pm?.name ?? '').replace(/^pm-/, '');
+export const projectName = pm => String(pm?.display_name || pm?.space_name || pm?.project || '').trim()
+  || String(pm?.sourceName ?? pm?.name ?? '').replace(/^pm-/, '');
+export const PROJECT_NAME_MAX = 80;
+export function validateProjectName(raw, lang = 'en', { pms = [], currentPm = '' } = {}) {
+  const name = String(raw || '').trim();
+  if (!name) return { ok: false, name: '', error: word(lang, 'renameEmpty') };
+  if (/[\x00-\x1f\x7f]/.test(name)) return { ok: false, name, error: word(lang, 'renameControlChars') };
+  if (name.length > PROJECT_NAME_MAX) return { ok: false, name, error: word(lang, 'renameTooLong') };
+  const lower = name.toLowerCase();
+  const selfName = typeof currentPm === 'string' ? currentPm : String(currentPm?.name || '');
+  const list = Array.isArray(pms) ? pms : [];
+  const dup = list.find(p => p && p.name !== selfName && projectName(p).toLowerCase() === lower);
+  if (dup) return { ok: false, name, error: word(lang, 'renameDuplicate', name) };
+  return { ok: true, name, error: '' };
+}
+export function renameArgv(script, pm, newName) {
+  const target = typeof pm === 'string' ? pm : (pm?.repo || pm?.sourceName || pm?.name || projectName(pm));
+  return [script, 'project', 'rename', String(target), String(newName || '').trim()];
+}
 
 // What a board shows: one project's PM, threads and events (`project`: its PM's name), or every
 // project that is not archived. Tasks no PM owns stay on the all-projects board.
@@ -906,7 +1140,11 @@ export const archivedDay = value => /^\d{4}-(\d{2}-\d{2})/.exec(String(value || 
 // active first, and the archived ones, newest archive first. `lines`: {pm name: lastPmLine(...)}.
 export function projectCards(state, lines = {}, today = '') {
   const cards = state.pms.map(pm => ({
-    key: pm.name, name: projectName(pm), repo: pm.repo || '', machine: pm.machine || '', status: pm.status || '',
+    key: pm.name, sourceName: pm.sourceName || pm.name || '', slug: pm.slug || '',
+    name: projectName(pm), repo: pm.repo || '',
+    folders: Array.isArray(pm.folders) ? pm.folders : [],
+    spaceId: pm.space_id || '', spaceName: pm.space_name || '',
+    machine: pm.machine || '', status: pm.status || '',
     agent: agentName(pm.agent), archived: pm.archived || null, counts: projectCounts(pm, state.tasks, today),
     ...(!pm.archived && pm.lost && typeof pm.lost === 'object' ? { lost: pm.lost } : {}),
     ...(!pm.archived && pm.undelivered && typeof pm.undelivered === 'object' ? { undelivered: pm.undelivered } : {}),
@@ -962,16 +1200,233 @@ export function archiveThreads(state, pm) {
 // ---- New project --------------------------------------------------------------
 
 export const folderName = path => String(path || '').replace(/\/+$/, '').split('/').pop() || '';
-export const KINDS = ['claude', 'codex', 'pi'];
-// Open work the ledger already keeps under this project name: the new PM takes it over.
-export function ledgerOpen(state, name) {
-  const key = String(name || '').trim().toLowerCase();
-  return key ? state.tasks.filter(t => [...OPEN, 'paused'].includes(t.status) && String(t.project || '').toLowerCase() === key) : [];
+export const KINDS = ['claude', 'agy', 'codex', 'pi'];
+// Open work the ledger already keeps under this project name or any linked folder: the new PM takes it over.
+export function ledgerOpen(state, name, repoOrFolders = '') {
+  const folderList = Array.isArray(repoOrFolders)
+    ? repoOrFolders.map(f => typeof f === 'string' ? f : f?.path || '')
+    : [repoOrFolders];
+  const keys = new Set([name, ...folderList.map(folderName)].map(v => String(v || '').trim().toLowerCase()).filter(Boolean));
+  return keys.size ? state.tasks.filter(t => [...OPEN, 'paused'].includes(t.status) && keys.has(String(t.project || '').toLowerCase())) : [];
 }
-// What the form runs: pm.py start for the chosen folder, name, agent and space (new | current).
-export function startArgv(script, form) {
-  return [script, 'start', '--repo', form.repo, '--name', String(form.name || '').trim() || folderName(form.repo),
-    '--kind', form.kind || 'claude', '--space', form.space === 'current' ? 'current' : 'new'];
+export function remotePmArgv(args, scripts = PM_SCRIPTS) {
+  return ['sh', ['-c', `for f in ${scripts.map(path => `"$HOME/${path}"`).join(' ')}; do ` +
+    'if [ -f "$f" ]; then exec env -u HC_TERMINAL_ID -u HERDR_PANE_ID python3 "$f" "$@"; fi; done; ' +
+    'echo "pm.py not found" >&2; exit 127', 'sh', ...args]];
+}
+export const REMOTE_PROBE_SH = [
+  'printf "HOME\\t%s\\n" "$HOME"',
+  'pm_found=""',
+  `for rel in ${PM_SCRIPTS.join(' ')}; do if [ -f "$HOME/$rel" ]; then pm_found="$HOME/$rel"; break; fi; done`,
+  'printf "PM\\t%s\\n" "$pm_found"',
+  'if [ -n "$PM_HOME" ]; then ledger="$PM_HOME"; elif [ -d "$HOME/.claude/pm" ] && ! [ "$HOME/.claude/pm" -ef "$HOME/.dudu" ]; then ledger="$HOME/.claude/pm"; else ledger="$HOME/.dudu"; fi',
+  'printf "LEDGER\\t%s\\n" "$ledger"',
+  'for raw in "$@"; do',
+  '  p="$raw"; case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#??}";; esac',
+  '  if [ -d "$p" ]; then',
+  '    resolved=$(cd "$p" 2>/dev/null && pwd -P) || resolved="$p"',
+  '    is_git=0; branch=""',
+  '    if command -v git >/dev/null 2>&1 && git -C "$resolved" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      is_git=1; branch=$(git -C "$resolved" symbolic-ref --short HEAD 2>/dev/null || git -C "$resolved" rev-parse --short HEAD 2>/dev/null || true)',
+  '    fi',
+  '    printf "DIR\\t1\\t%s\\t%s\\t%s\\t%s\\n" "$raw" "$resolved" "$is_git" "$branch"',
+  '  else',
+  '    printf "DIR\\t0\\t%s\\t%s\\t0\\t\\n" "$raw" "$p"',
+  '  fi',
+  'done',
+].join('\n');
+export const REMOTE_LIST_DIRS_SH = [
+  'target="${1:-$HOME}"',
+  'case "$target" in "") target="$HOME";; "~") target="$HOME";; "~/"*) target="$HOME/${target#??}";; esac',
+  'if [ ! -d "$target" ]; then parent=$(dirname "$target"); if [ -d "$parent" ]; then target="$parent"; else target="$HOME"; fi; fi',
+  'cur=$(cd "$target" 2>/dev/null && pwd -P) || cur="$target"',
+  'printf "BASE\\t%s\\t%s\\n" "$cur" "$HOME"',
+  'for d in "$cur"/*/; do',
+  '  [ -d "$d" ] || continue',
+  '  base=$(basename "$d")',
+  '  case "$base" in .*|node_modules|target|__pycache__) continue;; esac',
+  '  full="${cur%/}/$base"',
+  '  is_git=0; branch=""',
+  '  if command -v git >/dev/null 2>&1 && git -C "$full" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '    is_git=1; branch=$(git -C "$full" symbolic-ref --short HEAD 2>/dev/null || git -C "$full" rev-parse --short HEAD 2>/dev/null || true)',
+  '  fi',
+  '  printf "ENTRY\\t%s\\t%s\\t%s\\t%s\\n" "$base" "$full" "$is_git" "$branch"',
+  'done',
+].join('\n');
+export const REMOTE_MKDIR_SH = [
+  'p="$1"',
+  'case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#??}";; esac',
+  'mkdir -p "$p" && resolved=$(cd "$p" && pwd -P) && printf "%s\\n" "$resolved"',
+].join('\n');
+export const LOCAL_GIT_PROBE_SH = [
+  'p="$1"',
+  'if [ -d "$p" ]; then',
+  '  resolved=$(cd "$p" 2>/dev/null && pwd -P) || resolved="$p"',
+  '  is_git=0; branch=""',
+  '  if command -v git >/dev/null 2>&1 && git -C "$resolved" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '    is_git=1; branch=$(git -C "$resolved" symbolic-ref --short HEAD 2>/dev/null || git -C "$resolved" rev-parse --short HEAD 2>/dev/null || true)',
+  '  fi',
+  '  printf "DIR\\t1\\t%s\\t%s\\t%s\\t%s\\n" "$p" "$resolved" "$is_git" "$branch"',
+  'else',
+  '  printf "DIR\\t0\\t%s\\t%s\\t0\\t\\n" "$p" "$p"',
+  'fi',
+].join('\n');
+export function parseRemoteProbe(stdout) {
+  const out = { home: '', pmScript: '', ledgerHome: '', dirs: [] };
+  for (const line of String(stdout || '').split('\n')) {
+    if (!line) continue;
+    const parts = line.split('\t');
+    if (parts[0] === 'HOME') out.home = parts[1] || '';
+    else if (parts[0] === 'PM') out.pmScript = parts[1] || '';
+    else if (parts[0] === 'LEDGER') out.ledgerHome = parts[1] || '';
+    else if (parts[0] === 'DIR') {
+      out.dirs.push({
+        exists: parts[1] === '1',
+        raw: parts[2] || '',
+        path: parts[3] || parts[2] || '',
+        git: parts[4] === '1',
+        branch: parts[5] || '',
+      });
+    }
+  }
+  return out;
+}
+export function parseRemoteDirs(stdout) {
+  const out = { base: '', home: '', entries: [] };
+  for (const line of String(stdout || '').split('\n')) {
+    if (!line) continue;
+    const parts = line.split('\t');
+    if (parts[0] === 'BASE') {
+      out.base = parts[1] || '';
+      out.home = parts[2] || '';
+    } else if (parts[0] === 'ENTRY') {
+      out.entries.push({
+        name: parts[1] || '',
+        path: parts[2] || '',
+        git: parts[3] === '1',
+        branch: parts[4] || '',
+      });
+    }
+  }
+  out.entries.sort((a, b) => Number(b.git) - Number(a.git) || a.name.localeCompare(b.name));
+  return out;
+}
+export function normalizeMachines(rawListing) {
+  const arr = Array.isArray(rawListing) ? rawListing : Array.isArray(rawListing?.machines) ? rawListing.machines : [];
+  const seen = new Set();
+  const out = [];
+  for (const m of arr) {
+    const name = typeof m?.name === 'string' ? m.name.trim() : '';
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const state = String(m?.state || 'unreachable');
+    out.push({ name, state, connected: state === 'connected', sinceMs: m?.since_ms ?? null });
+  }
+  return out.sort((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name));
+}
+export function initialMachineForDialog(machines, activeSpaces = []) {
+  const active = (Array.isArray(activeSpaces) ? activeSpaces : []).find(s => s?.active);
+  const m = active?.machine ? String(active.machine) : '';
+  if (m && (Array.isArray(machines) ? machines : []).some(item => item?.name === m && item?.connected)) return m;
+  return '';
+}
+export function disambiguateFolderAlias(path, existing = []) {
+  const norm = String(path || '').replace(/\/+$/, '');
+  const parts = norm.split('/').filter(Boolean);
+  const base = parts.at(-1) || 'folder';
+  const taken = new Set((Array.isArray(existing) ? existing : []).map(a => String(a || '').toLowerCase()).filter(Boolean));
+  if (!taken.has(base.toLowerCase())) return base;
+  const parent = parts.length >= 2 ? parts.at(-2) : '';
+  if (parent) {
+    const cand = `${parent}-${base}`;
+    if (!taken.has(cand.toLowerCase())) return cand;
+  }
+  let n = 2;
+  while (taken.has(`${base}-${n}`.toLowerCase())) n++;
+  return `${base}-${n}`;
+}
+export function addFolderEntry(folders, entry) {
+  const list = Array.isArray(folders) ? folders : [];
+  const rawPath = typeof entry === 'string' ? entry : entry?.path || '';
+  const normPath = String(rawPath).trim().replace(/\/+$/, '') || (rawPath.startsWith('/') ? '/' : '');
+  if (!normPath) return list;
+  if (list.some(f => String(f?.path || '').replace(/\/+$/, '') === normPath)) return list;
+  const alias = (typeof entry === 'object' && entry?.alias) ? String(entry.alias).trim()
+    : disambiguateFolderAlias(normPath, list.map(f => f.alias));
+  return [...list, {
+    path: normPath,
+    alias,
+    git: Boolean(typeof entry === 'object' ? entry?.git : false),
+    branch: typeof entry === 'object' ? String(entry?.branch || '') : '',
+  }];
+}
+export function removeFolderEntry(folders, path) {
+  const target = String(path || '').replace(/\/+$/, '');
+  return (Array.isArray(folders) ? folders : []).filter(f => String(f?.path || '').replace(/\/+$/, '') !== target);
+}
+export function canSubmitNewProject(form, { busy = false, remoteReady = true } = {}) {
+  if (busy) return false;
+  if (form?.machine && !remoteReady) return false;
+  return Boolean(String(form?.name || '').trim());
+}
+// What the form runs: pm.py start for 0..N equal folders, name, and agent kind (1:1 Space, no --space).
+export function startArgv(script, form, { noAppSpace = false, json = false } = {}) {
+  const folderList = Array.isArray(form?.folders)
+    ? form.folders.map(f => String(typeof f === 'string' ? f : f?.path || '').trim()).filter(Boolean)
+    : (form?.repo ? [String(form.repo).trim()] : []);
+  const effName = String(form?.name || '').trim() || folderName(folderList[0]);
+  const argv = [script, 'start'];
+  for (const p of folderList) argv.push('--folder', p);
+  if (effName) argv.push('--name', effName);
+  argv.push('--kind', form?.kind || 'claude');
+  if (noAppSpace) argv.push('--no-app-space');
+  if (json) argv.push('--json');
+  return argv;
+}
+export function stripMachinePrefix(id, machine = '') {
+  const s = String(id || '');
+  return machine && s.startsWith(`${machine}/`) ? s.slice(machine.length + 1) : s;
+}
+export function qualifyForMachine(id, machine = '') {
+  const s = String(id || '');
+  if (!s || !machine) return s;
+  return s.startsWith(`${machine}/`) ? s : `${machine}/${s}`;
+}
+export function shouldCloseSpaceAfterArchive({ machine = '', spaceId = '', pmTerminal = '', spaces = [], terminals = [] } = {}) {
+  const list = Array.isArray(spaces) ? spaces : [];
+  const terms = Array.isArray(terminals) ? terminals : [];
+  const qSpace = qualifyForMachine(spaceId, machine);
+  const qPm = qualifyForMachine(pmTerminal, machine);
+  const sp = (qSpace && list.find(s => s?.id === qSpace))
+    || (qPm && list.find(s => Array.isArray(s?.tabs) && s.tabs.some(tab => Array.isArray(tab?.terminals) && tab.terminals.some(t => t?.terminal === qPm))));
+  if (!sp?.id || !Array.isArray(sp.tabs)) return { close: false, spaceId: sp?.id || '' };
+  const termByAddr = new Map(terms.filter(t => t?.address).map(t => [t.address, t]));
+  for (const tab of sp.tabs) {
+    if (!tab || typeof tab !== 'object' || !Array.isArray(tab.terminals)) {
+      return { close: false, spaceId: sp.id };
+    }
+    const tabTerms = tab.terminals;
+    if (typeof tab.panes === 'number' && tab.panes > tabTerms.length) return { close: false, spaceId: sp.id };
+    for (const t of tabTerms) {
+      const addr = qualifyForMachine(t?.terminal || '', machine);
+      if (!addr) return { close: false, spaceId: sp.id };
+      if (qPm && addr === qPm) continue;
+      const info = termByAddr.get(addr);
+      if (!info) return { close: false, spaceId: sp.id };
+      if (info.state === 'finished') continue;
+      if (machine) return { close: false, spaceId: sp.id };
+      if (info.state !== 'live') return { close: false, spaceId: sp.id };
+      const isIdleShell = Boolean(info.program?.shell) && info.status !== 'working';
+      if (!isIdleShell) return { close: false, spaceId: sp.id };
+    }
+  }
+  return { close: true, spaceId: sp.id };
+}
+export function resolveRestoreSpace({ machine = '', spaceId = '', spaces = [] } = {}) {
+  const qSpace = qualifyForMachine(spaceId, machine);
+  if (!qSpace) return { reuse: false, qualifiedSpaceId: '' };
+  const exists = (Array.isArray(spaces) ? spaces : []).some(s => s?.id === qSpace);
+  return exists ? { reuse: true, qualifiedSpaceId: qSpace } : { reuse: false, qualifiedSpaceId: '' };
 }
 
 // ---- Esc ----------------------------------------------------------------------
@@ -981,11 +1436,12 @@ export function startArgv(script, form) {
 // back to that project's conversation, the archived projects back to the list, and the Projects page
 // (list or board) back to the page it covered, as a second Projects click does ('back', which pm-nav decides). A dialog over the page has the keyboard and
 // closes itself. Only while the stage shows this page (shown); otherwise null, and the key goes on.
-export function escapeTarget(shown, page, { hoverCard = false, ended = false } = {}) {
+export function escapeTarget(shown, page, { hoverCard = false, ended = false, tokens = false } = {}) {
   if (!shown) return null;
   if (hoverCard) return { hoverCard: true };
-  // Only a board on screen has ended lists to fold: the list and archived pages go on.
+  // Only a board on screen has ended lists or token shelf to fold: the list and archived pages go on.
   if (ended && (page?.project || page?.view === 'board')) return { ended: true };
+  if (tokens && (page?.project || page?.view === 'board')) return { tokens: true };
   if (page?.project) return { project: page.project };
   if (page?.view === 'archived') return { view: 'list' };
   return { back: true };
@@ -1449,8 +1905,10 @@ export function taskDependencies(task, allTasks = [], { terms = [], live = [] } 
     const isBlocked = !isMet && !isBroken && status === 'blocked' && !target?.answered;
     const isWorking = !isMet && !isBroken && !target?.offline &&
       (status === 'in_progress' || (status === 'blocked' && Boolean(target?.answered)));
+    const depNum = taskNumber(target) || taskNumber(entry);
     items.push({
       id: depId,
+      ...(depNum ? { number: depNum } : {}),
       targetId: target?.id || (taskMachine ? `${taskMachine}/${depId}` : depId),
       sourceId: target?.sourceId || depId,
       pm: target?.pm || task?.pm || '',
@@ -1729,4 +2187,345 @@ export function windowControlButtons(win, { overlay = false } = {}) {
       labelKey: 'windowClose',
     },
   ];
+}
+
+// ---- Board Token Analytics helpers (pure JS, zero host APIs) -------------------------------
+
+export const TOKENS_EXPANDED_KEY = 'pm-dash.tokens.expanded';
+export const TOKEN_RANGES = ['today', '7d', '30d', 'all'];
+export const TOKEN_METRICS = ['tokens', 'cost', 'requests'];
+export const TOKEN_DIMS = ['model', 'task', 'agent'];
+export const TOKEN_AGENTS = ['all', 'claude', 'agy', 'codex', 'pi'];
+export const RUNTIME_ORDER = ['claude', 'agy', 'codex', 'pi'];
+
+export function readTokensExpanded(storage) {
+  try {
+    return storage?.getItem?.(TOKENS_EXPANDED_KEY) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+export function writeTokensExpanded(storage, expanded) {
+  try {
+    storage?.setItem?.(TOKENS_EXPANDED_KEY, expanded ? '1' : '0');
+  } catch (_) { /* Ignore unavailable storage. */ }
+}
+
+export function parseTokenAnalytics(text) {
+  try {
+    const data = JSON.parse(text);
+    if (!data || typeof data !== 'object' || data.version !== 1 || !data.projects || typeof data.projects !== 'object') {
+      return null;
+    }
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
+export function formatTokens(n) {
+  const v = Number(n) || 0;
+  if (v <= 0) return '0';
+  if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+  return String(Math.round(v));
+}
+
+export function formatCompactInt(n) {
+  const v = Math.round(Number(n) || 0);
+  return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+export function formatUsd(n, { decimals = 2 } = {}) {
+  const v = Number(n) || 0;
+  if (v <= 0) return '$0.00';
+  if (v < 0.01) return '<$0.01';
+  const [intPart, decPart] = v.toFixed(decimals).split('.');
+  const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return decPart !== undefined ? `$${formattedInt}.${decPart}` : `$${formattedInt}`;
+}
+
+export function formatPct(ratio, decimals = 1) {
+  const r = Math.max(0, Math.min(1, Number(ratio) || 0));
+  return `${(r * 100).toFixed(decimals)}%`;
+}
+
+export function selectTokenScope(data, scope = '', pms = []) {
+  const projects = data?.projects;
+  if (!projects || typeof projects !== 'object') return null;
+  if (!scope) {
+    return {
+      key: '__all__',
+      label: '',
+      ranges: projects.__all__?.ranges || null,
+      scanMs: Number(data?.scan_ms) || 0,
+    };
+  }
+  const pmObj = Array.isArray(pms) ? pms.find(p => p?.name === scope || p?.sourceName === scope) : null;
+  const candidates = [
+    scope,
+    scope.replace(/^pm-/, ''),
+    pmObj?.sourceName,
+    pmObj?.sourceName?.replace(/^pm-/, ''),
+    pmObj?.display_name,
+    pmObj?.space_name,
+    pmObj?.project,
+    folderName(pmObj?.repo),
+  ].filter(Boolean);
+  for (const cand of candidates) {
+    const lower = String(cand).toLowerCase();
+    for (const [slug, entry] of Object.entries(projects)) {
+      if (slug === '__all__') continue;
+      if (slug.toLowerCase() === lower || String(entry?.pm_name || '').toLowerCase() === lower ||
+          String(entry?.project || '').toLowerCase() === lower) {
+        return {
+          key: slug,
+          label: (pmObj ? projectName(pmObj) : '') || entry?.project || slug,
+          ranges: entry?.ranges || null,
+          scanMs: Number(data?.scan_ms) || 0,
+        };
+      }
+    }
+  }
+  // Scope has no recorded usage yet: return empty range structure instead of falling back to __all__.
+  return {
+    key: scope,
+    label: (pmObj ? projectName(pmObj) : '') || scope.replace(/^pm-/, ''),
+    ranges: null,
+    scanMs: Number(data?.scan_ms) || 0,
+  };
+}
+
+function emptyPmSummary() {
+  return {
+    total_tokens: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+    prompt_tokens: 0, requests: 0, errors: 0, sessions: 0, cost_usd: 0, cache_savings_usd: 0,
+    cache_hit_rate: 0, share: 0, agents: [], models: [], by_agent: {},
+  };
+}
+
+function emptySlice(range = 'today') {
+  return {
+    range,
+    bucket_mode: range === 'today' ? 'hour' : 'day',
+    kpi: {
+      total_tokens: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      prompt_tokens: 0, requests: 0, errors: 0, tasks: 0, sessions: 0,
+      cost_usd: 0, cache_savings_usd: 0, cache_hit_rate: 0,
+      pm_tokens: 0, pm_cost_usd: 0, pm_requests: 0, pm_sessions: 0,
+      by_agent_hit_rate: {}, by_agent_requests: {},
+    },
+    pm: emptyPmSummary(),
+    buckets: [],
+    by_model: [],
+    by_task: [],
+    by_agent: RUNTIME_ORDER.map(a => ({
+      agent: a,
+      label: { claude: 'Claude Code', agy: 'Antigravity (agy)', codex: 'Codex CLI', pi: 'pi Agent' }[a],
+      requests: 0, errors: 0, sessions: 0, tasks: 0,
+      total_tokens: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      cache_write_available: a !== 'agy', cache_hit_rate: 0, cost_usd: 0, cache_savings_usd: 0,
+      pm_tokens: 0, pm_cost_usd: 0, pm_requests: 0, pm_sessions: 0,
+    })),
+  };
+}
+
+export function selectBreakdownRows(rows = [], dim = 'task', limit = 6) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (dim === 'agent') return list.slice(0, 4);
+  if (dim !== 'task' || list.length <= limit) return list.slice(0, limit);
+  const top = list.slice(0, limit);
+  const topIds = new Set(top.map(r => r?.id));
+  const extraPm = list.slice(limit).filter(r => r?.role === 'pm' && ((r.total_tokens || 0) > 0 || (r.requests || 0) > 0) && !topIds.has(r.id));
+  if (!extraPm.length) return top;
+  const keepNonPm = Math.max(0, limit - extraPm.length);
+  const kept = [];
+  for (const r of top) {
+    if (r?.role === 'pm' || kept.filter(x => x?.role !== 'pm').length < keepNonPm) kept.push(r);
+  }
+  return [...kept, ...extraPm];
+}
+
+export function sparklineBars(buckets = [], count = 12) {
+  const list = Array.isArray(buckets) ? buckets : [];
+  if (!list.length) return Array.from({ length: count }, () => 0);
+  // Pick the most recent `count` active-window buckets (or compress evenly if > count).
+  const activeEnd = list.reduce((last, b, idx) => ((Number(b?.total_tokens) || 0) > 0 ? idx : last), -1);
+  let slice;
+  if (list.length <= count) {
+    slice = list;
+  } else if (activeEnd >= 0) {
+    const start = Math.max(0, Math.min(list.length - count, activeEnd - count + 1));
+    slice = list.slice(start, start + count);
+  } else {
+    slice = list.slice(-count);
+  }
+  const vals = slice.map(b => Number(b?.total_tokens) || 0);
+  const peak = Math.max(1, ...vals);
+  const ratios = vals.map(v => (v > 0 ? Math.max(0.14, v / peak) : 0));
+  while (ratios.length < count) ratios.unshift(0);
+  return ratios;
+}
+
+export function filterTokenSlice(rawSlice, { agent = 'all', metric = 'tokens', dim = 'task' } = {}) {
+  const base = rawSlice && typeof rawSlice === 'object' ? rawSlice : emptySlice();
+  const baseKpi = base.kpi || emptySlice().kpi;
+  const activeAgent = RUNTIME_ORDER.includes(agent) ? agent : 'all';
+
+  let kpi;
+  let pm;
+  if (activeAgent === 'all') {
+    kpi = { ...baseKpi };
+    if (base.pm && typeof base.pm === 'object') {
+      pm = { ...emptyPmSummary(), ...base.pm };
+    } else {
+      // Backwards-compatible derivation from by_task when reading pre-pm cached JSON
+      const pmRows = (base.by_task || []).filter(r => r?.role === 'pm');
+      const pmTok = pmRows.reduce((s, r) => s + (Number(r.total_tokens) || 0), 0);
+      const pmCost = pmRows.reduce((s, r) => s + (Number(r.cost_usd) || 0), 0);
+      const pmReqs = pmRows.reduce((s, r) => s + (Number(r.requests) || 0), 0);
+      pm = {
+        ...emptyPmSummary(),
+        total_tokens: pmTok,
+        cost_usd: pmCost,
+        requests: pmReqs,
+        share: (kpi.total_tokens || 0) > 0 ? pmTok / kpi.total_tokens : 0,
+      };
+    }
+  } else {
+    const agRow = (base.by_agent || []).find(a => a.agent === activeAgent) || emptySlice().by_agent.find(a => a.agent === activeAgent);
+    const promptTok = (agRow.input_tokens || 0) + (agRow.cache_read_tokens || 0) + (agRow.cache_write_tokens || 0);
+    const pmAg = base.pm?.by_agent?.[activeAgent];
+    const pmTok = pmAg ? (Number(pmAg.total_tokens) || 0) : (Number(agRow.pm_tokens) || 0);
+    const pmCost = pmAg ? (Number(pmAg.cost_usd) || 0) : (Number(agRow.pm_cost_usd) || 0);
+    const pmReqs = pmAg ? (Number(pmAg.requests) || 0) : (Number(agRow.pm_requests) || 0);
+    const pmSess = pmAg ? (Number(pmAg.sessions) || 0) : (Number(agRow.pm_sessions) || 0);
+    kpi = {
+      total_tokens: agRow.total_tokens || 0,
+      input_tokens: agRow.input_tokens || 0,
+      output_tokens: agRow.output_tokens || 0,
+      cache_read_tokens: agRow.cache_read_tokens || 0,
+      cache_write_tokens: agRow.cache_write_tokens || 0,
+      prompt_tokens: promptTok,
+      requests: agRow.requests || 0,
+      errors: agRow.errors || 0,
+      tasks: agRow.tasks || 0,
+      sessions: agRow.sessions || 0,
+      cost_usd: agRow.cost_usd || 0,
+      cache_savings_usd: agRow.cache_savings_usd || 0,
+      cache_hit_rate: agRow.cache_hit_rate || 0,
+      pm_tokens: pmTok,
+      pm_cost_usd: pmCost,
+      pm_requests: pmReqs,
+      pm_sessions: pmSess,
+      by_agent_hit_rate: agRow.cache_hit_rate ? { [activeAgent]: agRow.cache_hit_rate } : {},
+      by_agent_requests: agRow.requests ? { [activeAgent]: agRow.requests } : {},
+    };
+    pm = {
+      ...emptyPmSummary(),
+      ...(pmAg || {}),
+      total_tokens: pmTok,
+      cost_usd: pmCost,
+      requests: pmReqs,
+      sessions: pmSess,
+      share: kpi.total_tokens > 0 ? pmTok / kpi.total_tokens : 0,
+      agents: pmTok > 0 ? [activeAgent] : [],
+      models: Array.isArray(pmAg?.models) ? pmAg.models : [],
+    };
+  }
+
+  const rawBuckets = Array.isArray(base.buckets) ? base.buckets : [];
+  const metricField = metric === 'cost' ? 'by_agent_cost' : metric === 'requests' ? 'by_agent_requests' : 'by_agent_tokens';
+  const metricScalar = metric === 'cost' ? 'cost_usd' : metric === 'requests' ? 'requests' : 'total_tokens';
+  const buckets = rawBuckets.map(b => {
+    const map = b[metricField] || {};
+    const agents = activeAgent === 'all' ? RUNTIME_ORDER : [activeAgent];
+    let val = 0;
+    const segments = [];
+    for (const a of agents) {
+      const av = Number(map[a]) || 0;
+      if (av <= 0) continue;
+      if (a === 'claude') {
+        const advVal = metric === 'cost' ? (Number(b.advisor_cost) || 0)
+          : metric === 'tokens' ? (Number(b.advisor_tokens) || 0) : 0;
+        const advPart = Math.min(av, Math.max(0, advVal));
+        const mainPart = Math.max(0, av - advPart);
+        if (mainPart > 0) segments.push({ key: 'claude', value: mainPart });
+        if (advPart > 0) segments.push({ key: 'fable', value: advPart });
+      } else {
+        segments.push({ key: a, value: av });
+      }
+      val += av;
+    }
+    if (activeAgent === 'all' && val === 0 && Number(b[metricScalar]) > 0) {
+      val = Number(b[metricScalar]) || 0;
+      segments.push({ key: 'claude', value: val });
+    }
+    return {
+      key: b.key,
+      label: b.label,
+      value: val,
+      total_tokens: activeAgent === 'all' ? (Number(b.total_tokens) || 0) : (Number(b.by_agent_tokens?.[activeAgent]) || 0),
+      cost_usd: activeAgent === 'all' ? (Number(b.cost_usd) || 0) : (Number(b.by_agent_cost?.[activeAgent]) || 0),
+      requests: activeAgent === 'all' ? (Number(b.requests) || 0) : (Number(b.by_agent_requests?.[activeAgent]) || 0),
+      by_agent_tokens: b.by_agent_tokens || {},
+      by_agent_cost: b.by_agent_cost || {},
+      by_agent_requests: b.by_agent_requests || {},
+      segments,
+    };
+  });
+  const maxBucket = Math.max(0, ...buckets.map(b => b.value));
+  const peakBucket = buckets.reduce((best, b) => (b.value > (best?.value || 0) ? b : best), null);
+
+  let rows = [];
+  if (dim === 'model') {
+    rows = (base.by_model || [])
+      .filter(m => activeAgent === 'all' || m.agent === activeAgent)
+      .slice()
+      .sort((a, b) => (metric === 'cost' ? b.cost_usd - a.cost_usd : metric === 'requests' ? b.requests - a.requests : b.total_tokens - a.total_tokens));
+  } else if (dim === 'agent') {
+    rows = (base.by_agent || [])
+      .filter(a => activeAgent === 'all' || a.agent === activeAgent)
+      .slice();
+  } else {
+    rows = (base.by_task || [])
+      .map(t => {
+        if (activeAgent === 'all') return t;
+        const tok = Number(t.by_agent?.[activeAgent]) || 0;
+        const cost = Number(t.by_agent_cost?.[activeAgent]) || 0;
+        const reqs = Number(t.by_agent_requests?.[activeAgent]) || 0;
+        if (tok <= 0 && reqs <= 0) return null;
+        const io = t.by_agent_io?.[activeAgent];
+        return {
+          ...t,
+          total_tokens: tok,
+          cost_usd: cost,
+          requests: reqs,
+          input_tokens: io ? (Number(io.input_tokens) || 0) : 0,
+          output_tokens: io ? (Number(io.output_tokens) || 0) : 0,
+          cache_read_tokens: io ? (Number(io.cache_read_tokens) || 0) : 0,
+          cache_write_tokens: io ? (Number(io.cache_write_tokens) || 0) : 0,
+          models: Array.isArray(io?.models) && io.models.length ? io.models : t.models,
+          agents: [activeAgent],
+          work_tokens: tok,
+          review_tokens: 0,
+          share: kpi.total_tokens > 0 ? tok / kpi.total_tokens : 0,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (metric === 'cost' ? b.cost_usd - a.cost_usd : metric === 'requests' ? b.requests - a.requests : b.total_tokens - a.total_tokens));
+  }
+
+  return {
+    range: base.range || 'today',
+    bucketMode: base.bucket_mode || 'hour',
+    kpi,
+    pm,
+    buckets,
+    maxBucket,
+    peakBucket,
+    rows,
+  };
 }

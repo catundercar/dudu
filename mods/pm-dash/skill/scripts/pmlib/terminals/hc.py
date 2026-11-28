@@ -2,6 +2,7 @@
 its protocol (`hc connect`), desktop tab renaming (`herdr-app`), and legacy module-level wrappers. Layer 1."""
 from __future__ import annotations
 
+import base64
 import contextlib
 from dataclasses import dataclass, field
 import json
@@ -28,6 +29,16 @@ def _exec_bin(prog: str, env: Mapping[str, str] | None = None) -> str:
         if found and found.lower().endswith((".cmd", ".bat")):
             return found
     return prog
+
+
+def _b64_text(val: Any) -> str:
+    """`hc exec` gives what a program wrote as base64; a runner (tests) may already give text."""
+    if not isinstance(val, str) or not val:
+        return ""
+    try:
+        return base64.b64decode(val.encode("ascii"), validate=True).decode("utf-8", errors="replace")
+    except (ValueError, UnicodeEncodeError):
+        return val
 
 
 def _opt_int(val: Any) -> int | None:
@@ -245,8 +256,10 @@ class HcHost:
     def __call__(self, *args: Any, errors: bool = False, env: Any = None, timeout: float = 60) -> Any:
         return self.call(*args, errors=errors, env=env, timeout=timeout)
 
-    def call(self, *args: Any, errors: bool = False, env: Any = None, timeout: float = 60) -> Any:
-        """Parsed JSON of a herdr-core CLI call, or None when hc is missing or fails."""
+    def call(self, *args: Any, errors: bool = False, env: Any = None, timeout: float = 60,
+             input: str | None = None) -> Any:
+        """Parsed JSON of a herdr-core CLI call, or None when hc is missing or fails. `input`: text piped to hc's
+        stdin (`hc file write`, `hc exec -i`)."""
         if self._runner is not None:
             kw: dict[str, Any] = {}
             if errors:
@@ -255,12 +268,14 @@ class HcHost:
                 kw["env"] = env
             if timeout != 60:
                 kw["timeout"] = timeout
+            if input is not None:
+                kw["input"] = input
             return self._runner(*args, **kw) if kw else self._runner(*args)
         try:
             cut = args.index("--") if "--" in args else len(args)
             out = subprocess.run(
                 [_exec_bin(self.bin(), env=env), *args[:cut], "--json", *args[cut:]],
-                capture_output=True, text=True, timeout=timeout, env=env,
+                capture_output=True, text=True, timeout=timeout, env=env, input=input,
             )
             if out.returncode != 0:
                 return json.loads(out.stderr or "null") if errors else None
@@ -392,8 +407,11 @@ class HcHost:
         keep: bool = False,
         no_parent: bool = False,
         env: Any = None,
+        on: str = "",
     ) -> dict[str, Any] | None:
         args: list[str] = ["run"]
+        if on:
+            args.extend(("--on", on))
         if bg:
             args.append("--bg")
         if keep:
@@ -421,9 +439,12 @@ class HcHost:
         placement: Iterable[str] = (),
         labels: Iterable[str] = (),
         env: Any = None,
+        on: str = "",
     ) -> str | None:
-        """Start an agent in a herdr-core terminal (`hc run --bg`) and return its address."""
-        res = self.run(argv, name=name, cwd=cwd, labels=labels, bg=True, placement=placement, env=env)
+        """Start an agent in a herdr-core terminal (`hc run --bg`) and return its address (`<machine>/t7` with
+        `on`)."""
+        kw: dict[str, Any] = {"on": on} if on else {}
+        res = self.run(argv, name=name, cwd=cwd, labels=labels, bg=True, placement=placement, env=env, **kw)
         return res.get("address") if isinstance(res, dict) else None
 
     def send(
@@ -517,6 +538,70 @@ class HcHost:
     def server_status(self) -> dict[str, Any] | None:
         res = self.call("server", "status")
         return res if isinstance(res, dict) else None
+
+    # --- Other machines (`hc machine ls`, `hc file read|write --on`, `hc exec --on`): the read/exec ports of the
+    # remote-terminal transport (pm-message-routing.md §5.2, §7.2). Nothing here adds, logs in or removes a machine.
+
+    def machines(self) -> list[dict[str, Any]] | None:
+        """`hc machine ls`: each machine's `name`, `state` (connecting | connected | needs_login | unreachable) and
+        `since_ms`; None when the local core cannot be asked (that is not evidence about any machine)."""
+        res = self.call("machine", "ls", errors=True)
+        if isinstance(res, dict) and isinstance(res.get("machines"), list):
+            return [m for m in res["machines"] if isinstance(m, dict)]
+        if isinstance(res, list):
+            return [m for m in res if isinstance(m, dict)]
+        return None
+
+    def file_read(
+        self, path: str, *, on: str = "", offset: int | None = None, limit: int | None = None,
+        timeout: float = 60,
+    ) -> dict[str, Any] | None:
+        """`hc file read [--on M] [--offset N] [--limit K] PATH`: `{text, first, last, lines}` or `{error: {kind}}`."""
+        args: list[str] = ["file", "read"]
+        if on:
+            args.extend(("--on", on))
+        if offset is not None:
+            args.extend(("--offset", str(max(1, int(offset)))))
+        if limit is not None:
+            args.extend(("--limit", str(max(1, int(limit)))))
+        args.extend(("--", path))
+        res = self.call(*args, errors=True, timeout=timeout)
+        return res if isinstance(res, dict) else None
+
+    def file_write(self, path: str, text: str, *, on: str = "", timeout: float = 60) -> dict[str, Any] | None:
+        """`hc file write [--on M] PATH` with `text` piped in (missing folders are made): `{path, bytes}` or error."""
+        args: list[str] = ["file", "write"]
+        if on:
+            args.extend(("--on", on))
+        args.extend(("--", path))
+        res = self.call(*args, errors=True, timeout=timeout, input=text)
+        return res if isinstance(res, dict) else None
+
+    def exec(
+        self, argv: Iterable[str], *, on: str = "", cwd: str = "", timeout: float = 60, stdin: str | None = None,
+    ) -> dict[str, Any] | None:
+        """`hc exec [--on M] [--cwd D] [--timeout S] [-i] -- ARGV`: `{code, stdout, stderr, timed_out, ...}` with
+        stdout/stderr decoded from base64 to text, or `{error: {kind}}` (`unavailable`: the machine is not reachable)."""
+        args: list[str] = ["exec"]
+        if on:
+            args.extend(("--on", on))
+        if cwd:
+            args.extend(("--cwd", str(cwd)))
+        t_val = max(1, min(600, int(timeout)))
+        args.extend(("--timeout", str(t_val)))
+        if stdin is not None:
+            args.append("--stdin")
+        args.append("--")
+        args.extend(argv)
+        res = self.call(*args, errors=True, timeout=t_val + 15, input=stdin)
+        if not isinstance(res, dict):
+            return None
+        if res.get("error"):
+            return res
+        out = dict(res)
+        for key in ("stdout", "stderr"):
+            out[key] = _b64_text(res.get(key))
+        return out
 
     def app_bin(self) -> str:
         """The herdr-app CLI: config.json's "herdr_app", else `herdr-app` on PATH, else `~/.local/bin/herdr-app`."""

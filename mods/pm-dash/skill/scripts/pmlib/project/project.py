@@ -8,21 +8,108 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..context import Context
 from ..home import project_slug
-from ..store import SLUG_RE, StoreError
+from ..store import SLUG_RE, StoreError, project_folders, registration_slug, valid_slug
 from .turn_reducer import Endpoint, record_endpoint
+
+
+PROJECT_NAME_MAX_LEN = 80
 
 
 def _every_seat_alive(repo: Any, rec: Any, term: Any = None) -> bool:
     return True
 
 
+def _extract_herdr_space(term_info: Any) -> str:
+    """Read `herdr.space` label from a `TerminalInfo` or raw `hc get` dict."""
+    if term_info is None:
+        return ""
+    if hasattr(term_info, "label") and callable(term_info.label):
+        return str(term_info.label("herdr.space") or "").strip()
+    if isinstance(term_info, Mapping):
+        labels = term_info.get("labels")
+        if isinstance(labels, Mapping):
+            return str(labels.get("herdr.space") or "").strip()
+    return ""
+
+
+def backfill_space_id(
+    ctx: Context,
+    slug: str,
+    rec: Mapping[str, Any] | None,
+    term_info: Any,
+    *,
+    overwrite: bool = False,
+) -> str:
+    """Lazily backfill `space_id` into `pms/<slug>.json` from a live PM terminal's `herdr.space` label."""
+    existing = str(rec.get("space_id") or "").strip() if isinstance(rec, Mapping) else ""
+    if existing and not overwrite:
+        return existing
+    sp_id = _extract_herdr_space(term_info)
+    if not sp_id or not valid_slug(slug):
+        return existing
+    with contextlib.suppress(OSError, StoreError):
+        def _apply(cur: dict[str, Any] | None) -> dict[str, Any] | None:
+            if cur is None:
+                return None
+            if cur.get("space_id") and not overwrite:
+                return None
+            if cur.get("space_id") == sp_id:
+                return None
+            cur["space_id"] = sp_id
+            return cur
+
+        ctx.store.change_registration(slug, _apply)
+    return sp_id
+
+
 def pm_name(repo: str | Path) -> str:
     return f"pm-{project_slug(repo)}"
+
+
+def project_display_name(rec: Mapping[str, Any] | None, repo: str | Path | None = None) -> str:
+    """User-facing project name: display_name -> space_name -> project -> repo folder name -> slug -> pm name."""
+    if isinstance(rec, Mapping):
+        for key in ("display_name", "space_name", "project"):
+            val = str(rec.get(key) or "").strip()
+            if val:
+                return val
+        raw_repo = str(rec.get("repo") or "").strip()
+        if raw_repo:
+            return Path(raw_repo).name
+        raw_slug = str(rec.get("slug") or "").strip()
+        if raw_slug:
+            return raw_slug
+        raw_name = str(rec.get("name") or "").strip()
+        if raw_name:
+            return raw_name[3:] if raw_name.startswith("pm-") else raw_name
+    if repo:
+        return Path(str(repo)).name
+    return ""
+
+
+def validate_project_display_name(raw: Any, *, tr: Callable[[str, str], str] | None = None) -> str:
+    """Validate and normalize a user-specified project display name."""
+    _tr = tr or (lambda en, _zh: en)
+    name = str(raw or "").strip()
+    if not name:
+        raise ValueError(_tr("project name cannot be empty", "项目名称不能为空"))
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+        raise ValueError(_tr(
+            "project name cannot contain line breaks or control characters",
+            "项目名称不能包含换行或控制字符",
+        ))
+    if len(name) > PROJECT_NAME_MAX_LEN:
+        raise ValueError(_tr(
+            f"project name is too long (max {PROJECT_NAME_MAX_LEN} characters)",
+            f"项目名称过长（最多 {PROJECT_NAME_MAX_LEN} 个字符）",
+        ))
+    return name
 
 
 def in_scope(repo: str | Path | None, scope: str | Path) -> bool:
@@ -59,8 +146,24 @@ class Coordinator:
         return str(self._data.get("name") or "")
 
     @property
+    def slug(self) -> str:
+        return registration_slug(self._data)
+
+    @property
+    def space_id(self) -> str:
+        return str(self._data.get("space_id") or "")
+
+    @property
+    def folders(self) -> list[dict[str, Any]]:
+        return project_folders(self._data)
+
+    @property
     def project(self) -> str:
         return str(self._data.get("project") or "")
+
+    @property
+    def display_name(self) -> str:
+        return project_display_name(self._data)
 
     @property
     def repo(self) -> str:
@@ -132,8 +235,20 @@ class Project:
         return str(self._data.get("project") or self.slug)
 
     @property
+    def display_name(self) -> str:
+        return project_display_name(self._data) or self.slug
+
+    @property
     def repo(self) -> str:
         return str(self._data.get("repo") or "")
+
+    @property
+    def space_id(self) -> str:
+        return str(self._data.get("space_id") or "")
+
+    @property
+    def folders(self) -> list[dict[str, Any]]:
+        return project_folders(self._data)
 
     @property
     def archived(self) -> bool:
@@ -168,11 +283,47 @@ class ProjectRegistry:
         """What the injected seat check says of a seated PM's registration."""
         return bool(self._seat_alive(repo, rec, term))
 
+    def _folder_match_registration(self, root: str | Path) -> dict[str, Any] | None:
+        """Find the registration owning `root` (checking `folders[]` and legacy `repo`, exact then nested)."""
+        if not root:
+            return None
+        try:
+            resolved_root = str(Path(root).resolve())
+        except OSError:
+            resolved_root = str(root)
+        slug_cand = project_slug(root)
+        direct = self.ctx.store.registration(slug_cand)
+        if isinstance(direct, dict):
+            direct_folders = project_folders(direct)
+            if any(str(Path(f["path"]).resolve()) == resolved_root for f in direct_folders):
+                return direct
+            if not direct_folders and str(direct.get("repo") or "") == str(root):
+                return direct
+            dslug = registration_slug(direct)
+            if dslug:
+                try:
+                    if str(self.ctx.home.project(dslug).root.resolve()) == resolved_root:
+                        return direct
+                except OSError:
+                    pass
+        nested: list[dict[str, Any]] = []
+        for rec in self.ctx.store.registrations():
+            for f in project_folders(rec):
+                try:
+                    fp = str(Path(f["path"]).resolve())
+                except OSError:
+                    fp = str(f["path"])
+                if fp == resolved_root:
+                    return rec
+                if resolved_root.startswith(fp + "/") or resolved_root.startswith(fp + os.sep):
+                    nested.append(rec)
+        return nested[0] if nested else direct
+
     def _hc_pm_impl(self, root: str | Path | None) -> dict[str, Any] | None:
         if not root:
             return None
         try:
-            rec = self.ctx.store.registration(project_slug(root)) or {}
+            rec = self.pm_record(root) or {}
         except StoreError:
             rec = {}
         if rec.get("runtime") != "hc" or not rec.get("terminal"):
@@ -180,7 +331,9 @@ class ProjectRegistry:
         info = self.ctx.hc.get(rec["terminal"])
         if info is None:
             return None
-        if info.state != "live" or info.labels.get("pm") != Path(root).name:
+        slug = registration_slug(rec) or project_slug(root)
+        expected_labels = {x for x in (Path(str(root)).name, slug) if x}
+        if info.state != "live" or info.labels.get("pm") not in expected_labels:
             return None
         term = dict(info.raw) if isinstance(info.raw, Mapping) and info.raw else {
             "address": info.address,
@@ -210,6 +363,14 @@ class ProjectRegistry:
 
     def _find_pm_impl(self, listing: list[dict[str, Any]] | None = None, repo: str | Path | None = None) -> dict[str, Any] | None:
         listing = self.ctx.tui.agents() if listing is None else listing
+        if isinstance(repo, str) and SLUG_RE.match(repo) and not Path(repo).is_dir():
+            in_hc = self.hc_pm(repo)
+            if in_hc:
+                return in_hc
+            want = f"pm-{repo}"
+            pms = [a for a in listing if a.get("name") == want]
+            pms.sort(key=lambda a: a.get("workspace_id") != self.ctx.workspace)
+            return pms[0] if pms else None
         root = self.ctx.git.project_root(repo or ".")
         if not root:
             return None
@@ -238,8 +399,14 @@ class ProjectRegistry:
         return self._find_pm_impl(listing=listing, repo=repo)
 
     def _pm_record_impl(self, repo: str | Path | None) -> dict[str, Any] | None:
+        if isinstance(repo, str) and SLUG_RE.match(repo) and not Path(repo).is_dir():
+            direct = self.ctx.store.registration(repo)
+            if direct is not None:
+                return direct
         root = self.ctx.git.project_root(repo or ".")
-        return self.ctx.store.registration(project_slug(root)) if root else None
+        if not root:
+            return None
+        return self._folder_match_registration(root)
 
     def pm_record(self, repo: str | Path | None) -> dict[str, Any] | None:
         """The registration file of the PM for repo, or None."""
@@ -289,15 +456,51 @@ class ProjectRegistry:
         rec = self.pm_record(repo) or {}
         return {rec.get("pane"), (rec.get("previous") or {}).get("pane")} - {None, ""}
 
+    def find_display_name_conflict(self, display_name: str, *, exclude_slug: str = "") -> dict[str, Any] | None:
+        """Return another project's registration that already uses `display_name` (case-insensitive), else None."""
+        want = str(display_name or "").strip().casefold()
+        if not want:
+            return None
+        regs = self.ctx.home.registrations
+        for path in sorted(regs.glob("*.json")) if regs.exists() else []:
+            if exclude_slug and path.stem == exclude_slug:
+                continue
+            try:
+                rec = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if exclude_slug and registration_slug(rec, path.stem) == exclude_slug:
+                continue
+            if project_display_name(rec).casefold() == want:
+                return rec
+        return None
+
     def registered_repo(self, project: str | Path) -> str | None:
         """The folder of a project given as its folder, or as the name it is registered under."""
         if Path(project).is_dir():
             return self.ctx.git.project_root(project)
         regs = self.ctx.home.registrations
         for path in sorted(regs.glob("*.json")) if regs.exists() else []:
-            rec = json.loads(path.read_text())
-            if project in (rec.get("project"), path.stem) and rec.get("repo"):
-                return rec["repo"]
+            with contextlib.suppress(OSError, ValueError):
+                rec = json.loads(path.read_text())
+                if not isinstance(rec, dict):
+                    continue
+                folders = project_folders(rec)
+                repo_val = str(rec.get("repo") or (folders[0]["path"] if folders else "") or "")
+                if not repo_val:
+                    continue
+                candidates = (
+                    rec.get("display_name"),
+                    rec.get("space_name"),
+                    rec.get("project"),
+                    rec.get("name"),
+                    rec.get("slug"),
+                    path.stem,
+                )
+                if project in candidates:
+                    return repo_val
         return None
 
     def pm_records(self) -> list[dict[str, Any]]:
@@ -327,12 +530,12 @@ class ProjectRegistry:
                 rec = json.loads(p.read_text())
             except (OSError, ValueError):
                 continue
-            if rec.get("project") == project:
+            if project in (rec.get("project"), rec.get("display_name"), rec.get("space_name")):
                 return rec
         return None
 
     def resolve_project_slug(self, target: Any) -> str:
-        """Resolve a project slug, PM name (pm-<slug>), registered project name or folder to its canonical slug."""
+        """Resolve a project slug, PM name (pm-<slug>), registered project/display name or folder to its canonical slug."""
         if not isinstance(target, str) or not target:
             return ""
         if SLUG_RE.match(target):
@@ -344,15 +547,19 @@ class ProjectRegistry:
             if Path(target).is_dir():
                 root = self.ctx.git.project_root(target)
                 if root:
+                    hit = self._folder_match_registration(root)
+                    if hit:
+                        rslug = registration_slug(hit)
+                        if rslug:
+                            return rslug
                     return project_slug(root)
+        target_cf = target.casefold()
         for rec in self.ctx.store.registrations():
-            if target in (rec.get("project"), rec.get("name")) or str(rec.get("project") or "").lower() == target.lower():
-                repo = rec.get("repo")
-                if isinstance(repo, str) and repo:
-                    return project_slug(repo)
-                name = str(rec.get("name") or "")
-                if name.startswith("pm-") and SLUG_RE.match(name[3:]):
-                    return name[3:]
+            names = [str(rec.get(k) or "") for k in ("slug", "display_name", "space_name", "project", "name")]
+            if target in names or any(n and n.casefold() == target_cf for n in names):
+                rslug = registration_slug(rec)
+                if rslug:
+                    return rslug
         return target
 
 

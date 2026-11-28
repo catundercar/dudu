@@ -28,32 +28,39 @@ def cmd_project_session(a, ctx=None):
         raise
     except PmError as exc:
         exit_with(ctx, exc)
-    reader = sessions_reader(home=ctx.home, claude_projects=ctx.agents.claude_projects)
+    reader = sessions_reader(
+        home=ctx.home,
+        claude_projects=ctx.agents.claude_projects,
+        agy_dir=ctx.agents.agy_dir,
+    )
+    supported = reader.supported_kinds
     hints = task_workdirs_for(ctx, task)
     # Check dispatched_with first: a stale recorded session of another kind never overrides the current worker.
     dispatched_kind = dispatched_with(task)[0]
-    if dispatched_kind and dispatched_kind != "claude":
+    if dispatched_kind and dispatched_kind not in supported:
         sys.exit(f"session kind {dispatched_kind!r} is not supported")
     kept = valid_recorded_session(task)
     if kept is not None:
         # Recorded session: never fall back to scanning other transcripts when its file is missing.
-        if kept["kind"] != "claude":
-            sys.exit(f"session kind {kept['kind']!r} is not supported")
+        kind = kept["kind"]
+        if kind not in supported:
+            sys.exit(f"session kind {kind!r} is not supported")
         sid = kept["id"]
-        path = reader.transcript({"kind": "claude", "id": sid, "hints": hints})
+        path = reader.transcript({"kind": kind, "id": sid, "hints": hints})
         if path is None:
             sys.exit(f"transcript not found for task {a.id} (session {sid})")
-        session = {"kind": "claude", "id": sid, "path": str(path), "hints": hints}
+        session = {"kind": kind, "id": sid, "path": str(path), "hints": hints}
     else:
         # No recorded session for the current worker: scan via find_session, requiring unambiguous match.
         found = find_session_for(ctx, task)
         if found is None:
             sys.exit(f"no session found for task {a.id}")
-        if found.get("kind") != "claude":
-            sys.exit(f"session kind {found.get('kind')!r} is not supported")
+        kind = found.get("kind") or ""
+        if kind not in supported:
+            sys.exit(f"session kind {kind!r} is not supported")
         if found.get("score", 0) < 2:
-            sys.exit(f"no unambiguous Claude session found for task {a.id}")
-        session = {"kind": "claude", "id": found["id"], "path": found["path"], "hints": hints}
+            sys.exit(f"no unambiguous {kind} session found for task {a.id}")
+        session = {"kind": kind, "id": found["id"], "path": found["path"], "hints": hints}
     try:
         turns = reader.turns(session, before=a.before, limit=a.limit, after=a.after)
     except pm_sessions.SessionError as exc:

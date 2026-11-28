@@ -22,7 +22,10 @@ import urllib.request
 from ..agents.sessions import HELPER_PROMPT, PM_PROMPT, PM_SESSION_MARK, REVIEW_PROMPT
 from ..context import Context
 from ..home import project_slug
-from ..osutil import unfailing
+from ..ledger.ledger import Ledger
+from ..ledger.task import ACTIVE
+from ..memory.decisions import QUOTED, Decisions
+from ..osutil import clip, unfailing
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
 from ..project.turn_state import TurnTracker
@@ -709,6 +712,7 @@ class AgyTranscriptWatcher:
                 offset, last_step = _seed_before_claimed(path, claimed_dt)
                 turn_cause = None
                 pending_system_turn = False
+                pending_compact_sync = False
             elif self._should_seed_eof(repo_str, path, first_at, claimed_dt, state_existed):
                 eof_offset, max_step = _seed_eof(path)
                 cursors.pop(conv_id, None)
@@ -737,6 +741,7 @@ class AgyTranscriptWatcher:
                 last_step = None
                 turn_cause = None
                 pending_system_turn = False
+                pending_compact_sync = False
         else:
             prev_path = str(entry.get("path") or "")
             raw_off = entry.get("offset")
@@ -752,6 +757,7 @@ class AgyTranscriptWatcher:
             last_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) else None
             turn_cause = entry.get("turn_cause") if isinstance(entry.get("turn_cause"), dict) else None
             pending_system_turn = bool(entry.get("pending_system_turn"))
+            pending_compact_sync = bool(entry.get("pending_compact_sync"))
 
         new_offset = offset
         if size > offset:
@@ -806,6 +812,11 @@ class AgyTranscriptWatcher:
                     rtype = row.get("type")
                     row_dt_meta = row_time(row.get("created_at"))
                     row_ms_meta = int(row_dt_meta.timestamp() * 1000) if row_dt_meta is not None else int(self.ctx.clock.time() * 1000)
+                    if rtype == "CHECKPOINT" and row.get("status") in ("DONE", None, ""):
+                        pending_compact_sync = True
+                        if has_step:
+                            last_step = step_idx
+                        continue
                     if rtype == "SYSTEM_MESSAGE":
                         pending_system_turn = True
                         unfailing(
@@ -835,6 +846,8 @@ class AgyTranscriptWatcher:
                             pending_system_turn = False
                             kind, sender, text = prompt_kind(raw_text)
                             if kind == "batch":
+                                if "[pm post-compact live disk sync]" in raw_text:
+                                    pending_compact_sync = False
                                 receipt = delivery.took_delivery(text, late=True)
                                 turn_cause = {"after": "deliver", "batch": [receipt.start, receipt.end]}
                                 unfailing(
@@ -948,6 +961,8 @@ class AgyTranscriptWatcher:
         }
         if pending_system_turn:
             cursor_entry["pending_system_turn"] = True
+        if pending_compact_sync:
+            cursor_entry["pending_compact_sync"] = True
         cursors[conv_id] = cursor_entry
         fresh: dict[str, Any] = {
             "version": 2,
@@ -994,3 +1009,89 @@ class AgyTranscriptWatcher:
             return None
         unfailing(self.sync, repo_str, rec)
         return AGY_POLL_SECONDS
+
+
+def agy_compact_sync_pending(ctx: Context, repo: str | Path) -> bool:
+    """True when the active `agy` PM session recorded a `CHECKPOINT` compaction that has not yet been aligned."""
+    repo_str = str(repo or "")
+    if not repo_str:
+        return False
+    state_path = ctx.home.project_for(repo_str).agy_transcript
+    if not state_path.is_file():
+        return False
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(state, dict):
+        return False
+    cid = str((state.get("session") or {}).get("id") or "")
+    cursors = state.get("cursors") if isinstance(state.get("cursors"), Mapping) else {}
+    cur = cursors.get(cid) if cid else None
+    return bool(isinstance(cur, Mapping) and cur.get("pending_compact_sync"))
+
+
+def clear_agy_compact_sync(ctx: Context, repo: str | Path) -> bool:
+    """Clear `pending_compact_sync` on the active `agy` PM session once the live ledger sync has been delivered."""
+    repo_str = str(repo or "")
+    if not repo_str:
+        return False
+    state_path = ctx.home.project_for(repo_str).agy_transcript
+    if not state_path.is_file():
+        return False
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(state, dict):
+        return False
+    cid = str((state.get("session") or {}).get("id") or "")
+    cursors = state.get("cursors") if isinstance(state.get("cursors"), dict) else None
+    if not cid or cursors is None:
+        return False
+    cur = cursors.get(cid)
+    if not isinstance(cur, dict) or not cur.get("pending_compact_sync"):
+        return False
+    cur.pop("pending_compact_sync", None)
+    write_atomic(
+        state_path,
+        (json.dumps(state, ensure_ascii=False) + "\n").encode("utf-8"),
+        replace_fn=replace_task_file,
+    )
+    return True
+
+
+def format_agy_compact_sync(ctx: Context, repo: str | Path) -> str:
+    """Build the concise post-compaction live disk ledger snapshot attached to the next `agy` deliver batch."""
+    repo_str = str(repo or "")
+    if not repo_str:
+        return ""
+    if callable(getattr(ctx, "compact_sync", None)):
+        text = ctx.compact_sync(repo_str)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    name = Path(repo_str).name
+    ledger = Ledger(ctx)
+    tasks = [t.raw for t in ledger.project_tasks(repo_str)]
+    active = [t for t in tasks if t.get("status") in ACTIVE]
+    out = [
+        f"[pm post-compact live disk sync] PM of {name} ({repo_str}). Trust these current ledger records on disk "
+        "over any older status in the compaction summary:",
+        "",
+        "## Open work (`pm.py show <id>` for more)",
+    ]
+    if not active:
+        out.append("(none)")
+    else:
+        for t in active:
+            out.append(f"- [{t['status']}] {ledger.task_ref(t)}: {t['title']}")
+            log = t.get("log") or []
+            if log:
+                e = log[-1]
+                out.append("    " + clip(" ".join(f"{e.get('at', '')} {e.get('by', '')}: {e.get('text', '')}".split()), 600))
+    decisions = Decisions(ctx, repo_str).unremembered()
+    if decisions:
+        shown = decisions[-5:]
+        out += ["", f"## Recent one-off / unremembered decisions ({len(shown)} of {len(decisions)})"]
+        out += [clip(QUOTED.sub("", line), 200) for line in shown]
+    return "\n".join(out)

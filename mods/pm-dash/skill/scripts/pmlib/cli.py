@@ -16,6 +16,7 @@ from .commands import (
     ledger as ledger_cmd,
     manager as manager_cmd,
     memory as memory_cmd,
+    nodes as nodes_cmd,
     project as project_cmd,
     review as review_cmd,
     workers as workers_cmd,
@@ -31,12 +32,18 @@ from .views import (
     project as project_view,  # noqa: F401
     state as state_view,
     status as status_view,
+    tokens as tokens_view,
 )
 
 
 COMMANDS = {
     "new": (ledger_cmd, "cmd_new"),
     "update": (ledger_cmd, "cmd_update"),
+    "remote-sync": (ledger_cmd, "cmd_remote_sync"),
+    "worker": (nodes_cmd, "cmd_worker"),
+    "mailbox-sync": (nodes_cmd, "cmd_mailbox_sync"),
+    "worker-hub": (nodes_cmd, "cmd_worker_hub"),
+    "worker-agent": (nodes_cmd, "cmd_worker_agent"),
     "log": (status_view, "cmd_log"),
     "show": (status_view, "cmd_show"),
     "board": (status_view, "cmd_board"),
@@ -70,6 +77,7 @@ COMMANDS = {
     "idle-workers": (workers_cmd, "cmd_idle_workers"),
     "close-worker": (workers_cmd, "cmd_close_worker"),
     "state": (state_view, "cmd_state"),
+    "tokens": (tokens_view, "cmd_tokens"),
     "project": (project_cmd, "cmd_project"),
     "helper": (helpers_cmd, "cmd_helper"),
     "dash": (dash_view, "cmd_dash"),
@@ -107,6 +115,8 @@ def build_parser():
     status_view.register_status_views(sub)
     manager_cmd.register_claim_command(sub)
     ledger_cmd.register_guard_command(sub)
+    ledger_cmd.register_remote_sync_command(sub)
+    nodes_cmd.register_node_commands(sub)
     manager_cmd.register_manager_lifecycle_commands(sub)
     events_cmd.register_event_commands(sub)
     workers_cmd.register_codex_cmd_command(sub)
@@ -117,6 +127,7 @@ def build_parser():
     review_cmd.register_land_review_commands(sub)
     workers_cmd.register_worker_lifecycle_commands(sub)
     state_view.register_state_view(sub)
+    tokens_view.register_tokens_view(sub)
     project_cmd.register_project_command(sub)
     helpers_cmd.register_helper_commands(sub)
     dash_view.register_dash_view(sub)

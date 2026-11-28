@@ -13,18 +13,39 @@ from ..context import Context
 from ..osutil import own_group, stop_group
 
 
-def verify_commands_for(ctx: Context, repo: str | Path) -> list[str] | None:
-    """The project's checks, one shell command per line of projects/<project>/verify (`#` starts a comment);
+def verify_commands_for(
+    ctx: Context,
+    repo: str | Path,
+    *,
+    project_slug_val: str | None = None,
+    folder_alias: str | None = None,
+) -> list[str] | None:
+    """The project's checks, one shell command per line of projects/<project>/verify[.<alias>] (`#` starts a comment);
     None when the file does not exist."""
-    path = ctx.home.project_for(repo).verify
-    if not path.exists():
+    proj_dir = ctx.home.project(project_slug_val) if project_slug_val else ctx.home.project_for(repo)
+    candidates: list[Path] = []
+    if folder_alias:
+        candidates.append(proj_dir.root / f"verify.{folder_alias}")
+    candidates.append(proj_dir.verify)
+    path = next((p for p in candidates if p.exists()), None)
+    if path is None:
         return None
     lines = (line.strip() for line in path.read_text().splitlines())
     return [line for line in lines if line and not line.startswith("#")]
 
 
-def verify_commands(repo: str | Path) -> list[str] | None:
-    return verify_commands_for(Context.from_env(), repo)
+def verify_commands(
+    repo: str | Path,
+    *,
+    project_slug_val: str | None = None,
+    folder_alias: str | None = None,
+) -> list[str] | None:
+    return verify_commands_for(
+        Context.from_env(),
+        repo,
+        project_slug_val=project_slug_val,
+        folder_alias=folder_alias,
+    )
 
 
 # `land` exit codes: 1 a check failed or timed out, 2 refused (nothing was changed), 4 conflicts,

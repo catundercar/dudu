@@ -802,12 +802,17 @@ class ProjectLifecycle(unittest.TestCase):
         self.assertNotIn(("hc", "run"), [c[:2] for c in self.hc.ops])
         self.assertIsNone(ProjectRegistry(self.ctx).pm_record(self.repo))
 
-    def test_name_with_space_current_is_said_not_ignored(self) -> None:
+    def test_name_with_space_current_sets_display_name_without_warning(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.quiet(manager_cmds.cmd_start, argparse.Namespace(repo=self.repo, kind="pi", model=None, name="别名",
                                                                   space="current"))
-        self.assertIn("--space current", err.getvalue())
+        self.assertEqual(err.getvalue(), "")
+        rec = ProjectRegistry(self.ctx).pm_record(self.repo)
+        assert rec is not None
+        self.assertEqual(rec["display_name"], "别名")
+        self.assertNotIn("space_name", rec)
+        self.assertTrue(any(c["fn"] == "name_tab" and c["name"] == "PM-别名" for c in self.hc.tab_calls))
 
     def test_state_has_archived_and_card_counts(self) -> None:
         self.register()
@@ -2411,6 +2416,45 @@ class PMSeatAndAdopt(unittest.TestCase):
         c = make_ctx(self.tmp / "compact-env-home", git=GitRepo(), env={"PM_COMPACT_TOKENS": "160000"})
         self.assertEqual(launch_mod.pm_compact_tokens("claude", ctx=c), 160000)
         self.assertEqual(launch_mod.pm_compact_tokens("codex", ctx=c), 160000)
+        self.assertEqual(launch_mod.pm_compact_tokens("agy", ctx=c), 160000)
+
+    def test_agy_seat_and_successor_env_inject_auto_compact_override(self) -> None:
+        c = make_ctx(self.tmp / "agy-compact-home", git=GitRepo(), clock=self.clock)
+        with mock.patch.dict(os.environ, {"AGY_CLI_AUTO_COMPACT_OVERRIDE": "999999"}, clear=False):
+            self.assertEqual(successor_env("agy", ctx=c).get("AGY_CLI_AUTO_COMPACT_OVERRIDE"), "200000")
+            self.assertNotIn("AGY_CLI_AUTO_COMPACT_OVERRIDE", successor_env("claude", ctx=c))
+            c.home.config.parent.mkdir(parents=True, exist_ok=True)
+            c.home.config.write_text(json.dumps({"pm": {"compact_tokens": 150000}}), encoding="utf-8")
+            self.assertEqual(successor_env("agy", ctx=c).get("AGY_CLI_AUTO_COMPACT_OVERRIDE"), "150000")
+            c.home.config.write_text(json.dumps({"pm": {"compact": False}}), encoding="utf-8")
+            self.assertNotIn("AGY_CLI_AUTO_COMPACT_OVERRIDE", successor_env("agy", ctx=c))
+
+        # End-to-end through `pm.py seat --kind agy`: child sees AGY_CLI_AUTO_COMPACT_OVERRIDE from config,
+        # and does not see it when `pm.compact: false`.
+        out_file = Path(self.repo) / "agy_env_probe.txt"
+        probe = Path(self.repo) / "agy_env_probe.py"
+        probe.write_text(
+            "import os\n"
+            f"with open({str(out_file)!r}, 'a', encoding='utf-8') as f:\n"
+            "    f.write(os.environ.get('AGY_CLI_AUTO_COMPACT_OVERRIDE', '<unset>') + '\\n')\n",
+            encoding="utf-8",
+        )
+        c.home.config.write_text(json.dumps({"pm": {"compact_tokens": 175000}}), encoding="utf-8")
+        env = _clean_child_env(c.home.root, AGY_CLI_AUTO_COMPACT_OVERRIDE="888888")
+        res1 = subprocess.run(
+            [sys.executable, str(PM_SCRIPT), "seat", "--repo", self.repo, "--kind", "agy", "--no-shell", "--",
+             sys.executable, str(probe)],
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(res1.returncode, 0, res1.stderr)
+        c.home.config.write_text(json.dumps({"pm": {"compact": False}}), encoding="utf-8")
+        res2 = subprocess.run(
+            [sys.executable, str(PM_SCRIPT), "seat", "--repo", self.repo, "--kind", "agy", "--no-shell", "--",
+             sys.executable, str(probe)],
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+        self.assertEqual(out_file.read_text(encoding="utf-8").splitlines(), ["175000", "<unset>"])
 
 
 if __name__ == "__main__":

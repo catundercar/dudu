@@ -336,8 +336,9 @@ header .sub { color: var(--ink3); font-size: 13.5px; }
       }
       groupsEl.appendChild(e.el);   // also reorders
       const n = e.node;
-      n.querySelector("b").textContent = g.none ? tx("noPm") : g.name;
-      n.querySelector("small").textContent = g.none ? tx("noPmSub") : (g.hub ? tx("hubSub") : g.project + (g.pane ? ` · ${g.pane}` : ""));
+      const label = g.display_name || g.space_name || g.project;
+      n.querySelector("b").textContent = g.none ? tx("noPm") : (label || g.name);
+      n.querySelector("small").textContent = g.none ? tx("noPmSub") : (g.hub ? tx("hubSub") : g.name + (g.pane ? ` · ${g.pane}` : ""));
       n.querySelector(".pill").textContent = g.none ? "—" : (PM_ST[g.status] || g.status || "—");
       for (const c of ["hub", "working", "idle", "done", "blocked", "offline"]) n.classList.toggle(c, c === "hub" ? !!g.hub : g.status === c);
       n.title = g.title ? tx("current", g.title) : "";

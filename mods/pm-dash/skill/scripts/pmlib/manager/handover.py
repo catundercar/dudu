@@ -8,6 +8,7 @@ from typing import Any
 
 from ..agents.sessions import transcript_rows
 from ..context import Context
+from ..home import project_slug
 from ..ledger.deps import evaluate_depends_on, format_dep_summary
 from ..ledger.family import format_children_summary, task_children_map
 from ..ledger.ledger import Ledger
@@ -18,8 +19,9 @@ from ..memory.decisions import QUOTED, Decisions
 from ..memory.layer import MemoryLayer
 from ..osutil import clip
 from ..project.conversation import Conversation
-from ..project.project import ProjectRegistry, pm_name
+from ..project.project import ProjectRegistry, pm_name, project_display_name
 from ..project.turn_state import TurnTracker
+from ..store import project_folders, registration_slug
 from ..workers.wait import waited_tasks_for
 
 
@@ -133,6 +135,8 @@ def _handover_task_where(
     c = Context.from_env() if ctx is None else ctx
     tr = c.config.tr
     parts = [f"{k}={t[k]}" for k in ("pane", "branch") if t.get(k)]
+    if t.get("folder_alias"):
+        parts.append(f"folder={t['folder_alias']}")
     if t.get("parent"):
         parts.append(f"parent={t['parent']}")
     if isinstance(t.get("plan"), list) and t["plan"]:
@@ -160,11 +164,14 @@ def handover_compact_text(repo: str, *, ctx: Context | None = None) -> str:
     c = Context.from_env() if ctx is None else ctx
     tr = c.config.tr
     rec = ProjectRegistry(c).pm_record(repo) or {}
-    name = Path(repo).name
+    slug = registration_slug(rec) or project_slug(repo)
+    proj_ref = repo if (repo and project_slug(repo) == slug) else str(c.home.project(slug).root)
+    name = project_display_name(rec, repo)
     ledger = Ledger(c)
     out = [f"[pm post-compact live disk sync] PM of {name} ({repo}). Trust these current ledger records on disk "
            "over any older status in the compaction summary:"]
-    tasks = [t.raw for t in ledger.project_tasks(repo)]
+    out += _workspace_folders_section(rec, ctx=c)
+    tasks = [t.raw for t in ledger.project_tasks(proj_ref)]
     active = [t for t in tasks if t["status"] in ACTIVE]
     dep_by_id, children_map = _handover_dep_context(tasks, ctx=c)
     out += _handover_ready_lines(active, dep_by_id, ctx=c)
@@ -180,12 +187,12 @@ def handover_compact_text(repo: str, *, ctx: Context | None = None) -> str:
     loose = [ledger.task_ref(t) for t in tasks if t["status"] in ("merged", "released") and not t.get("retired")]
     if loose:
         out.append(f"Merged, not retired yet (`pm.py retire <id>`): {', '.join(loose)}")
-    decisions = Decisions(c, repo).unremembered()
+    decisions = Decisions(c, proj_ref).unremembered()
     if decisions:
         shown = decisions[-HANDOVER_COMPACT_DECISIONS:]
         out += ["", f"## Recent one-off / unremembered decisions ({len(shown)} of {len(decisions)})"]
         out += [clip(QUOTED.sub("", line), HANDOVER_DECISION_WIDTH) for line in shown]
-    waiting = _merge_unanswered_with_mailbox(c, repo, Conversation(c, repo).events())
+    waiting = _merge_unanswered_with_mailbox(c, proj_ref, Conversation(c, proj_ref, slug=slug).events())
     if waiting:
         out += ["", "## Not answered yet: the user said this after the PM's latest reply (Unanswered user messages)",
                 *[f"{e.get('at', '')} {tr('User', '用户')}: {clip(str(e.get('text') or ''), 2000)}" for e in waiting]]
@@ -239,23 +246,47 @@ def handover_waits(tasks: list[dict[str, Any]], rec: dict[str, Any], *, ctx: Con
             *[f"pm.py wait {t['id']} --timeout 3600" for t in waited]]
 
 
+def _workspace_folders_section(rec: dict[str, Any], *, ctx: Context | None = None) -> list[str]:
+    folders = project_folders(rec)
+    if len(folders) < 2:
+        return []
+    c = Context.from_env() if ctx is None else ctx
+    lines = ["", f"## Workspace folders ({len(folders)})"]
+    for f in folders:
+        tag = "git" if f.get("git") else ("non-git" if "git" in f else "folder")
+        lines.append(f"- {f['alias']}: {f['path']} ({tag})")
+    git_count = sum(1 for f in folders if f.get("git"))
+    if git_count >= 2:
+        lines.append(c.config.tr(
+            "Multiple Git repositories are linked; pass `--folder <alias>` explicitly when running `pm.py dispatch`.",
+            "关联了多个 Git 仓库；运行 `pm.py dispatch` 时请显式传 `--folder <alias>`。",
+        ))
+    return lines
+
+
 def handover_full_text(repo: str, turns: int = 6, *, ctx: Context | None = None) -> str:
     """The whole record, as `handover` printed it before it was shortened: every decision with the user's words,
     three ledger entries per task, the tasks closed in the last 48 h, longer exchanges."""
     c = Context.from_env() if ctx is None else ctx
     tr = c.config.tr
     rec = ProjectRegistry(c).pm_record(repo) or {}
-    d = c.home.project_for(repo).ensure()
+    slug = registration_slug(rec) or project_slug(repo)
+    proj_ref = repo if (repo and project_slug(repo) == slug) else str(c.home.project(slug).root)
+    d = c.home.project(slug).ensure()
     name = Path(repo).name
+    display_name = project_display_name(rec, repo)
     ledger = Ledger(c)
-    out = [f"# Handover: PM of {name}", "",
-           f"You are {pm_name(repo)}. Repository: {repo}. This text is the project's record; trust it over anything "
+    folders = project_folders(rec)
+    where_line = f"Repository: {repo}." if len(folders) <= 1 else f"Workspace folders: {len(folders)} linked (see below)."
+    out = [f"# Handover: PM of {display_name}", "",
+           f"You are {pm_name(repo)}. {where_line} This text is the project's record; trust it over anything "
            "you think you remember, and do not read the previous session's transcript.",
            "Then read `references/pm-playbook.md` of the pm skill."]
+    out += _workspace_folders_section(rec, ctx=c)
     profile = Path(repo) / ".claude" / "coordination.md"
     if profile.exists():
         out.append(f"Project profile (read it): {profile}")
-    tasks = [t for t in ledger.raw_tasks() if t.get("project") == name and str(Path(t["repo"]).resolve()) == repo]
+    tasks = [t.raw for t in ledger.project_tasks(proj_ref)]
     active = [t for t in tasks if t["status"] in ACTIVE or (t["status"] in ("merged", "released") and not t.get("retired"))]
     dep_by_id, children_map = _handover_dep_context(tasks, ctx=c)
     out += _handover_ready_lines(active, dep_by_id, ctx=c)
@@ -267,6 +298,8 @@ def handover_full_text(repo: str, turns: int = 6, *, ctx: Context | None = None)
     out += ["", "## Open work"] + ([] if active else ["(none)"])
     for t in active:
         where_parts = [f"{k}={t[k]}" for k in ("pane", "agent", "branch", "worktree", "brief", "parent") if t.get(k)]
+        if t.get("folder_alias"):
+            where_parts.append(f"folder={t['folder_alias']}")
         kids = children_map.get(t["id"])
         if kids:
             where_parts.append(format_children_summary(kids, dep_by_id, tr_fn=tr))
@@ -283,7 +316,7 @@ def handover_full_text(repo: str, turns: int = 6, *, ctx: Context | None = None)
     closed = [t for t in tasks if t not in active and t.get("updated", "") >= day_ago]
     if closed:
         out += ["", "## Closed in the last 48 h"] + [f"- [{t['status']}] {ledger.task_ref(t, by_id)}: {t['title']}" for t in closed]
-    out += handover_talk(repo, rec, turns, 700, ctx=c)
+    out += handover_talk(proj_ref, rec, turns, 700, ctx=c)
     out += handover_waits(tasks, rec, ctx=c)
     return "\n".join(out)
 
@@ -304,28 +337,34 @@ def handover_text(
         return handover_full_text(repo, turns=turns, ctx=c)
     tr = c.config.tr
     rec = ProjectRegistry(c).pm_record(repo) or {}
-    d = c.home.project_for(repo).ensure()
+    slug = registration_slug(rec) or project_slug(repo)
+    proj_ref = repo if (repo and project_slug(repo) == slug) else str(c.home.project(slug).root)
+    d = c.home.project(slug).ensure()
     name = Path(repo).name
+    display_name = project_display_name(rec, repo)
     ledger = Ledger(c)
-    out = [f"# Handover: PM of {name}", "",
-           f"You are {pm_name(repo)}. Repository: {repo}. This is the project's record; trust it over anything you "
+    folders = project_folders(rec)
+    where_line = f"Repository: {repo}." if len(folders) <= 1 else f"Workspace folders: {len(folders)} linked (see below)."
+    out = [f"# Handover: PM of {display_name}", "",
+           f"You are {pm_name(repo)}. {where_line} This is the project's record; trust it over anything you "
            "think you remember, and do not read the previous session's transcript. "
            "The playbook is `references/pm-playbook.md` of the pm skill."]
+    out += _workspace_folders_section(rec, ctx=c)
     profile = Path(repo) / ".claude" / "coordination.md"
     if profile.exists():
         out.append(f"Project profile (read it): {profile}")
-    tasks = [t.raw for t in ledger.project_tasks(repo)]
+    tasks = [t.raw for t in ledger.project_tasks(proj_ref)]
     active = [t for t in tasks if t["status"] in ACTIVE]
     dep_by_id, children_map = _handover_dep_context(tasks, ctx=c)
     out += _handover_ready_lines(active, dep_by_id, ctx=c)
-    mem_layer = MemoryLayer(c, repo)
-    dec_svc = Decisions(c, repo)
+    mem_layer = MemoryLayer(c, proj_ref)
+    dec_svc = Decisions(c, proj_ref)
     remembered = mem_layer.memory_block()
     has_memories = bool(mem_layer.memories())
     decisions = dec_svc.unremembered() if has_memories else dec_svc.lines()
     if remembered:
         out += ["", remembered]
-        waiting = MemoryCandidates(c, repo).list()
+        waiting = MemoryCandidates(c, proj_ref).list()
         if waiting:
             out.append(tr(f"{len(waiting)} candidate(s) saved by workers wait to be adopted or dropped: "
                           "`pm.py memory --candidates`.",
@@ -360,7 +399,7 @@ def handover_text(
     closed = [t for t in tasks if t["status"] in CLOSED and t["id"] not in loose and t.get("updated", "") >= day_ago]
     if closed:
         out.append(f"Closed in the last 48 h: {len(closed)} (`pm.py status --all` lists them)")
-    out += handover_talk(repo, rec, turns, HANDOVER_USER, HANDOVER_REPLY, ctx=c)
+    out += handover_talk(proj_ref, rec, turns, HANDOVER_USER, HANDOVER_REPLY, ctx=c)
     out += handover_waits(tasks, rec, ctx=c)
     return "\n".join(out)
 

@@ -606,12 +606,18 @@ class ClaudeSessionsTests(unittest.TestCase):
         self.assertEqual(second.context_tokens({"kind": "claude", "id": self.SID}), 180100)
 
     def test_unsupported_agent_kinds_do_not_guess(self):
-        for kind in ("codex", "agy", "pi"):
+        for kind in ("codex", "pi"):
             s = {"kind": kind, "id": self.SID}
             self.assertIsNone(self.sessions.transcript(s))
             self.assertEqual(self.sessions.context_tokens(s), 0)
             with self.assertRaises(pm_sessions.UnsupportedSessionError):
                 self.sessions.turns(s)
+        # agy is supported: a missing transcript reports SessionNotFoundError rather than UnsupportedSessionError.
+        agy_missing = {"kind": "agy", "id": self.SID}
+        self.assertIsNone(self.sessions.transcript(agy_missing))
+        self.assertEqual(self.sessions.context_tokens(agy_missing), 0)
+        with self.assertRaises(pm_sessions.SessionNotFoundError):
+            self.sessions.turns(agy_missing)
 
     def test_compact_summary_rows_skipped_and_session_started_skips_summary(self):
         rows = [
@@ -690,7 +696,7 @@ class ClaudeSessionsTests(unittest.TestCase):
     def test_turns_extracts_structured_questions_without_truncating_options(self):
         long_desc = "详细说明" * 40  # > 300 chars total JSON when combined with multiple options
         lines = [
-            make_row("user", "继续做 08-i18n", ts="2026-11-24T10:00:00.000Z"),
+            make_row("user", "继续做 web-i18n", ts="2026-11-24T10:00:00.000Z"),
             make_row("assistant", [
                 {"type": "tool_use", "id": "toolu_b1", "name": "Bash", "input": {"command": "git status"}},
                 {
@@ -835,6 +841,7 @@ class PmStateAndCliTests(unittest.TestCase):
             ("claude", "p-claude", "claude"),
             ("codex", "p-codex", "codex"),
             ("pi", "p-pi", "pi"),
+            ("agy", "p-agy", "agy"),
         ):
             repo = str(Path(self.tmp) / proj)
             Path(repo).mkdir(exist_ok=True)
@@ -849,6 +856,12 @@ class PmStateAndCliTests(unittest.TestCase):
         self.assertEqual(by_proj["p-codex"]["compact_tokens"], 220_000)
         self.assertIn("model_auto_compact_token_limit=220000", codex_pm_compact("codex", ["codex"], ctx=self.ctx))
         self.assertEqual(by_proj["p-pi"]["compact_tokens"], 220_000)
+        self.assertEqual(by_proj["p-agy"]["compact_tokens"], 200_000)
+        self.assertEqual(
+            launch_mod.pm_compact_env("agy", ctx=self.ctx),
+            {"AGY_CLI_AUTO_COMPACT_OVERRIDE": "200000"},
+        )
+        self.assertEqual(launch_mod.pm_compact_env("claude", ctx=self.ctx), {})
 
         cfg_path = self.ctx.home.config
         cfg_path.write_text(json.dumps({"pm": {"compact_tokens": 260_000}}))
@@ -856,7 +869,19 @@ class PmStateAndCliTests(unittest.TestCase):
         self.assertEqual(by_proj["p-claude"]["compact_tokens"], 260_000)
         self.assertEqual(by_proj["p-codex"]["compact_tokens"], 260_000)
         self.assertEqual(by_proj["p-pi"]["compact_tokens"], 220_000)
+        self.assertEqual(by_proj["p-agy"]["compact_tokens"], 260_000)
+        self.assertEqual(
+            launch_mod.pm_compact_env("agy", ctx=self.ctx),
+            {"AGY_CLI_AUTO_COMPACT_OVERRIDE": "260000"},
+        )
         self.assertIn("model_auto_compact_token_limit=260000", codex_pm_compact("codex", ["codex"], ctx=self.ctx))
+
+        cfg_path.write_text(json.dumps({"pm": {"compact_tokens": 150_000}}))
+        self.assertEqual(
+            launch_mod.pm_compact_env("", ["agy", "--model", "gemini-4-neon-medium"], ctx=self.ctx),
+            {"AGY_CLI_AUTO_COMPACT_OVERRIDE": "150000"},
+        )
+        cfg_path.write_text(json.dumps({"pm": {"compact_tokens": 260_000}}))
 
         self.env = {"PM_PI_COMPACT_TOKENS": "280000"}  # the session's environment
         self.be("")
@@ -872,6 +897,8 @@ class PmStateAndCliTests(unittest.TestCase):
         self.assertEqual(by_proj["p-claude"]["compact_tokens"], 0)
         self.assertEqual(by_proj["p-codex"]["compact_tokens"], 0)
         self.assertEqual(by_proj["p-pi"]["compact_tokens"], 0)
+        self.assertEqual(by_proj["p-agy"]["compact_tokens"], 0)
+        self.assertEqual(launch_mod.pm_compact_env("agy", ctx=self.ctx), {})
 
     def test_pm_context_from_hook_turn_and_taken_in_fallback_excludes_previous(self):
         slug = project_slug(self.repo)
@@ -952,9 +979,40 @@ class PmStateAndCliTests(unittest.TestCase):
             "status": "in_progress", "created": "2026-11-16 10:50",
             "session": {"kind": "codex", "id": "codex-abc"},
         }))
+        # Task 4: agy worker without recorded session -> discovered via AGY_DATA_DIR & read with tool pairing.
+        agy_dir = self.tmp / "fake-agy"
+        agy_cid = "22222222-3333-4444-8555-666666666666"
+        agy_logs = agy_dir / "brain" / agy_cid / ".system_generated" / "logs"
+        agy_logs.mkdir(parents=True)
+        (agy_logs / "transcript_full.jsonl").write_text("\n".join([
+            json.dumps({
+                "step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+                "created_at": "2026-11-16T12:00:00Z",
+                "content": "<USER_REQUEST>\nTask brief: run pm.py update proj-agy --status review\n</USER_REQUEST>",
+            }),
+            json.dumps({
+                "step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+                "created_at": "2026-11-16T12:00:05Z", "input_tokens": 800, "cache_read_tokens": 4200,
+                "tool_calls": [{"name": "run_command", "args": {"CommandLine": '"pytest -q"'}}],
+            }),
+            json.dumps({
+                "step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE",
+                "created_at": "2026-11-16T12:00:06Z", "content": "3 passed",
+            }),
+            json.dumps({
+                "step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+                "created_at": "2026-11-16T12:00:10Z", "input_tokens": 900, "cache_read_tokens": 5100,
+                "content": "全部完成。",
+            }),
+        ]) + "\n", encoding="utf-8")
+        (sub_ledger / "tasks" / "proj-agy.json").write_text(json.dumps({
+            "id": "proj-agy", "title": "Agy", "project": "proj", "repo": self.repo, "worktree": str(worktree),
+            "status": "in_progress", "created": "2026-11-16 11:55",
+            "worker": {"kind": "agy", "model": "gemini-4-neon-medium"},
+        }))
 
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sub_home), "USERPROFILE": str(sub_home),
-               "PM_HOME": str(sub_ledger)}
+               "PM_HOME": str(sub_ledger), "AGY_DATA_DIR": str(agy_dir)}
         run = lambda *args: subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "pm.py"), *args],
             capture_output=True, text=True, env=env, timeout=20,
@@ -975,12 +1033,22 @@ class PmStateAndCliTests(unittest.TestCase):
         self.assertFalse(page2["earlier"])
         self.assertEqual(page2["from"], 0)
 
-        # find_session fallback works for task without recorded session.
+        # find_session fallback works for task without recorded session (Claude and agy).
         r_find = run("project", "session", "proj-t2")
         self.assertEqual(r_find.returncode, 0, r_find.stderr)
         found = json.loads(r_find.stdout)
         self.assertEqual(found["id"], self.SID_FIND)
         self.assertEqual(found["context"], 3300)
+
+        r_agy = run("project", "session", "proj-agy", "--limit", "10")
+        self.assertEqual(r_agy.returncode, 0, r_agy.stderr)
+        agy_page = json.loads(r_agy.stdout)
+        self.assertEqual(agy_page["kind"], "agy")
+        self.assertEqual(agy_page["id"], agy_cid)
+        self.assertEqual(agy_page["context"], 6000)
+        self.assertEqual(agy_page["started"], "2026-11-16T12:00:00Z")
+        self.assertTrue(any(i["type"] == "tool" and i["name"] == "run_command" and i["input"] == "pytest -q" and i["output"] == "3 passed" for i in agy_page["items"]))
+        self.assertTrue(any(i["type"] == "text" and i["text"] == "全部完成。" for i in agy_page["items"]))
 
         # Codex session and missing/invalid task exit non-zero with clear error.
         r_codex = run("project", "session", "proj-codex")

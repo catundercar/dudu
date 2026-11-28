@@ -29,6 +29,8 @@ from .mailbox import MailboxItem, MailboxStore
 from .principal import Principal
 from .transport import DeliverOutcome, InterruptOutcome
 from .transports.local_hc import LocalHcTransport
+from .transports.remote_hc import RemoteHcTransport
+from .transports.self_hosted import SelfHostedPullTransport
 from .transports.tui import LocalTuiTransport
 
 LEASE_POLL_S = 0.5
@@ -53,7 +55,15 @@ def endpoint_mailbox(ctx: Context, ep: Endpoint) -> MailboxStore:
 
 
 def transport_for(ctx: Context, ep: Endpoint) -> Any:
-    return LocalTuiTransport(ctx) if ep.runtime == "tui" else LocalHcTransport(ctx)
+    """The `Transport` of an endpoint: the TUI's, a self-hosted node's pull queue (phase 6b), a remote machine's
+    (`<machine>/t7`, §9.3 phase 6a), or this machine's herdr-core."""
+    if ep.runtime == "tui":
+        return LocalTuiTransport(ctx)
+    if ep.runtime == "self_hosted":
+        return SelfHostedPullTransport(ctx)
+    if ep.runtime == "hc" and ep.machine:
+        return RemoteHcTransport(ctx)
+    return LocalHcTransport(ctx)
 
 
 def typed_meta(item: MailboxItem, outcome: DeliverOutcome) -> dict[str, Any]:
@@ -164,7 +174,7 @@ def type_item_locked(
     cur = mailbox.record_intent(item.envelope.env_id, pre_turn=pre_turn, pre_status_ms=pre_sms, attempt=attempt,
                                 endpoint_uid=ep.uid, now_ms=now_ms_of(ctx))
     kw: dict[str, Any] = {"if_idle": bool(if_idle), "timeout_s": float(timeout_s)}
-    if isinstance(transport, LocalHcTransport) and pre is not None:
+    if isinstance(transport, (LocalHcTransport, RemoteHcTransport)) and pre is not None:
         kw["pre_info"] = pre
     outcome = transport.deliver(ep, cur, **kw)
     done = now_ms_of(ctx)
@@ -190,6 +200,8 @@ class DrainResult:
     typed: list[tuple[MailboxItem, DeliverOutcome]] = field(default_factory=list)
     failed: list[tuple[MailboxItem, DeliverOutcome]] = field(default_factory=list)
     waited_out: bool = False
+    # Left `accepted` because the endpoint's machine is unreachable (I4): typed once it reconnects, never failed.
+    held: list[tuple[MailboxItem, DeliverOutcome]] = field(default_factory=list)
 
     def outcome_for(self, env_id: str) -> DeliverOutcome | None:
         for item, out in (*self.typed, *self.failed):
@@ -322,7 +334,9 @@ def drain_endpoint(
                     lease.try_acquire()  # renew for this send
                     head = queue[0]
                     age_s = (now_ms_of(ctx) - int(head.accepted_ms or head.envelope.created_ms or 0)) / 1000.0
-                    if max_age_s and age_s > float(max_age_s) and head.envelope.env_id not in wanted:
+                    # A remote endpoint's queue may sit out a partition; it is not stale for that (the undelivered
+                    # alert tells a person it waits), so it is never expired here.
+                    if max_age_s and age_s > float(max_age_s) and head.envelope.env_id not in wanted and not ep.machine:
                         stale = mailbox.transition(head.envelope.env_id, "expired", now_ms=now_ms_of(ctx),
                                                    error="expired", hold_reason="expired", clear_intent=True)
                         out_stale = DeliverOutcome(status="rejected", detail="expired")
@@ -330,8 +344,34 @@ def drain_endpoint(
                         if on_failed is not None:
                             on_failed(stale, out_stale)
                         continue
-                    item, outcome = type_item_locked(ctx, mailbox, ep, queue[0], transport, timeout_s=timeout_s,
+                    if ep.machine and isinstance(head.intent, Mapping) and hasattr(transport, "reconcile"):
+                        # A send to a remote terminal that timed out with the line dropping: did it go in? Compare
+                        # the terminal's turn/status now with the intent's anchors before typing it again (§5.1.2).
+                        rec = transport.reconcile(ep, pre_turn=int(head.intent.get("pre_turn") or 0),
+                                                  pre_status_ms=int(head.intent.get("pre_status_ms") or 0))
+                        if rec.status == "typed":
+                            done_ms = now_ms_of(ctx)
+                            item = mailbox.transition(head.envelope.env_id, "typed", now_ms=done_ms,
+                                                      attempts=head.next_attempt(), target_endpoint_uid=ep.uid,
+                                                      endpoint_epoch=int(ep.epoch or 1), hold_reason="",
+                                                      clear_intent=True, meta=typed_meta(head, rec))
+                            item = close_if_no_reply(mailbox, item, rec, done_ms)
+                            result.typed.append((item, rec))
+                            if on_typed is not None:
+                                on_typed(item, rec)
+                            continue
+                        if rec.status != "timeout_uncertain":
+                            result.held.append((head, rec))
+                            return result
+                        head = mailbox.clear_intent(head.envelope.env_id, now_ms=now_ms_of(ctx)) or head
+                    item, outcome = type_item_locked(ctx, mailbox, ep, head, transport, timeout_s=timeout_s,
                                                      close=False)
+                    if outcome.status == "partitioned" or (outcome.status == "timeout_uncertain" and ep.machine):
+                        # The line is down (or dropped under the send): the envelope stays `accepted` with its hold
+                        # reason (and, if uncertain, its intent anchors for the reconcile), and nothing behind it is
+                        # tried now. The next drain after reconnect types it.
+                        result.held.append((item, outcome))
+                        return result
                     if outcome.status == "typed" and (accept is None or accept(item, outcome)):
                         item = close_if_no_reply(mailbox, item, outcome, now_ms_of(ctx))
                         result.typed.append((item, outcome))

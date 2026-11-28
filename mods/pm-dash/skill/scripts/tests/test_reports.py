@@ -133,7 +133,8 @@ class TestReportsAndC6a(unittest.TestCase):
         self.assertTrue(rec.late_report)
         self.assertEqual(self.store.task("demo-1")["status"], "in_progress")
 
-        mb = MailboxStore(self.home.project_for(self.repo_dir).pm_mailbox)
+        self.assertFalse(self.home.project_for(self.repo_dir).pm_mailbox.exists())
+        mb = MailboxStore(self.home.project("demo").pm_mailbox)
         late_items = [it for it in mb.active_items() if it.envelope.kind == "event.late_report"]
         self.assertEqual(len(late_items), 1)
         self.assertEqual(late_items[0].envelope.body.get("sender_epoch"), 1)
@@ -150,7 +151,8 @@ class TestReportsAndC6a(unittest.TestCase):
         self.assertEqual(rec.status, "rejected")
         self.assertEqual(self.store.task("demo-1")["status"], "in_progress")
 
-        mb = MailboxStore(self.home.project_for(self.repo_dir).pm_mailbox)
+        self.assertFalse(self.home.project_for(self.repo_dir).pm_mailbox.exists())
+        mb = MailboxStore(self.home.project("demo").pm_mailbox)
         rej_items = [it for it in mb.active_items() if it.envelope.kind == "event.report_rejected"]
         self.assertEqual(len(rej_items), 1)
         self.assertEqual(rej_items[0].envelope.body.get("task_id"), "demo-1")
