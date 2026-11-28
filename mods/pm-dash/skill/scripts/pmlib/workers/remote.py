@@ -32,6 +32,28 @@ from ..messaging.outbox import CONTEXT_FILE, CREDENTIAL_FILE, TaskTokens
 from ..messaging.transports.remote_hc import RemoteHcTransport
 
 
+REMOTE_WORKERS_FLAG = "remote_workers"
+
+
+def remote_workers_enabled(ctx: Context) -> bool:
+    """Workers on other machines (`dispatch --on`, self-hosted nodes) are built and tested but not offered yet: they
+    run only with `{"experimental": {"remote_workers": true}}` in config.json. Projects on other machines (the PM and
+    its workers there, seen and driven from here) need no flag."""
+    return ctx.config.experimental(REMOTE_WORKERS_FLAG)
+
+
+def require_remote_workers(ctx: Context) -> None:
+    if not remote_workers_enabled(ctx):
+        raise Refused(ctx.config.tr(
+            "workers on another machine are experimental and off: set {\"experimental\": {\"remote_workers\": true}} "
+            "in config.json to use --on and self-hosted workers. To work on another machine, create the project on "
+            "that machine (New project > Machine) and drive it from here",
+            "在其他机器上跑 worker 是实验功能，默认关闭：要用 --on 和自托管 worker，请在 config.json 里设 "
+            "{\"experimental\": {\"remote_workers\": true}}。要在其他机器上干活，请在那台机器上建项目"
+            "（New project > Machine），从这里查看和操作",
+        ))
+
+
 DEFAULT_REMOTE_PM = "python3 ~/.claude/skills/pm/scripts/pm.py"
 MAX_BUNDLE_BYTES = 6 * 1024 * 1024  # `hc exec` keeps 8 MB of stdout; base64 grows a bundle by a third
 _B64_WRITE = "import base64,sys;open(sys.argv[1],'wb').write(base64.b64decode(sys.stdin.read()))"

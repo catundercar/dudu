@@ -25,6 +25,7 @@ from ..nodes.agent import (
 from ..nodes.hub import SyncHub
 from ..nodes.wire import HubUnavailable, client_for, serve_http, serve_stdio
 from ..osutil import shell_quote
+from ..workers.remote import require_remote_workers
 from .emit import exit_with
 
 
@@ -79,6 +80,7 @@ def cmd_worker(a: Any, ctx: Any = None) -> None:
     sub = getattr(a, "worker_cmd", None)
     try:
         if sub == "enroll":
+            require_remote_workers(ctx)
             _worker_enroll(a, ctx)
         elif sub == "join":
             _worker_join(a, ctx)
@@ -192,6 +194,11 @@ def cmd_mailbox_sync(a: Any, ctx: Any = None) -> None:
     """`pm.py mailbox-sync --stdio`: restricted SSH stdio carrier for the self-hosted sync protocol."""
     del a
     ctx = Context.from_env() if ctx is None else ctx
+    try:
+        require_remote_workers(ctx)
+    except Refused as err:
+        exit_with(ctx, err)
+        return
     hub = SyncHub(ctx)
     serve_stdio(hub, sys.stdin, ctx.out.line)
 
@@ -199,6 +206,11 @@ def cmd_mailbox_sync(a: Any, ctx: Any = None) -> None:
 def cmd_worker_hub(a: Any, ctx: Any = None) -> None:
     """`pm.py worker-hub`: lightweight HTTP JSON endpoint serving `POST /v1/worker/sync`."""
     ctx = Context.from_env() if ctx is None else ctx
+    try:
+        require_remote_workers(ctx)
+    except Refused as err:
+        exit_with(ctx, err)
+        return
     hub = SyncHub(ctx)
     serve_http(
         hub,
@@ -246,7 +258,7 @@ def cmd_worker_agent(a: Any, ctx: Any = None) -> None:
 
 
 def register_node_commands(sub: Any) -> None:
-    w = sub.add_parser("worker", help="manage self-hosted worker nodes (enroll, join, revoke, list)")
+    w = sub.add_parser("worker", help="experimental (experimental.remote_workers): manage self-hosted worker nodes (enroll, join, revoke, list)")
     wsub = w.add_subparsers(dest="worker_cmd", required=True)
 
     en = wsub.add_parser("enroll", help="issue a single-use enrollment token for a self-hosted worker node")
@@ -280,10 +292,10 @@ def register_node_commands(sub: Any) -> None:
     ls.add_argument("--all", action="store_true", help="include revoked nodes")
     ls.add_argument("--json", action="store_true", help="emit node list as JSON")
 
-    ms = sub.add_parser("mailbox-sync", help="isomorphic JSON sync endpoint over stdio (for restricted SSH)")
+    ms = sub.add_parser("mailbox-sync", help="experimental (experimental.remote_workers): self-hosted sync endpoint over stdio (for restricted SSH)")
     ms.add_argument("--stdio", action="store_true", help="read signed JSON requests on stdin and write JSON replies on stdout")
 
-    wh = sub.add_parser("worker-hub", help="run a lightweight HTTP server serving POST /v1/worker/sync")
+    wh = sub.add_parser("worker-hub", help="experimental (experimental.remote_workers): HTTP server serving POST /v1/worker/sync")
     wh.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1)")
     wh.add_argument("--port", type=int, default=8765, help="bind port (default 8765; 0 for ephemeral)")
 

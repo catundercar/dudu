@@ -2,6 +2,11 @@
 
 All notable changes to dudu. Dates are UTC.
 
+## v0.3.1 (2026-11-28)
+
+- Remote means a project on another machine: create it there (New project → Machine) and open, drive, archive and restore it from this desktop. Its PM and workers run on that machine.
+- Workers on a different machine from their PM are experimental and off: `dispatch --on`, self-hosted worker nodes (`worker enroll`, `worker-hub`, `mailbox-sync`) and the deliverer's pull of remote report outboxes run only with `{"experimental": {"remote_workers": true}}` in `config.json`. Their code, design and tests stay; `pm.py remote-sync` still pulls by hand.
+
 ## Unreleased
 
 - In the desktop app each project now has one deliverer that runs for as long as its manager does, instead of one per report that gave up after ten minutes. It decides by itself which ledger entries are news, so a report written by an older `pm.py` (on a worker that has not been updated) reaches the manager too, and it watches the project's workers through herdr-core: a worker without hooks (pi, agy) that stops without reporting, and any worker whose terminal exits or that waits at a prompt, is reported within seconds. A report that comes during a rotation goes to the new manager once its takeover turn is over; the deliverer ends by itself once the manager's terminal is gone, and restarts on its own after an install. `pm.py wait` refuses in a desktop-app manager's own terminal, where it would bring each report twice.

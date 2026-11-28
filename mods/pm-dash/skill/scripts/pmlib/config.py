@@ -47,6 +47,11 @@ class Config:
     def get(self, key: str, default: Any = None) -> Any:
         return self.read().get(key, default)
 
+    def experimental(self, name: str) -> bool:
+        """An opt-in feature that is built and tested but not offered yet: `{"experimental": {name: true}}`."""
+        flags = self.read().get("experimental")
+        return isinstance(flags, dict) and flags.get(name) is True
+
     def lang(self) -> str:
         return "zh" if self.read().get("lang") == "zh" else "en"
 

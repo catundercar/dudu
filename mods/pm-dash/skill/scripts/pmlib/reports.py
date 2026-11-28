@@ -34,6 +34,7 @@ from .messaging.typist import endpoint_mailbox, transport_for
 from .procs import supervisor_env
 from .reactions import Say, Updates
 from .store import file_lock, lock_file, unlock_file, write_atomic
+from .workers.remote import remote_workers_enabled
 
 
 MAX_APPLIED_RECEIPTS = 512
@@ -789,7 +790,10 @@ class RemoteReportSync:
         return out
 
     def look(self, repo: str | Path, stops: Any = None, bases: Any = None) -> float | None:
-        """The deliverer's watcher hook: sync whatever remote outbox is due; the soonest next look (clock seconds)."""
+        """The deliverer's watcher hook: sync whatever remote outbox is due; the soonest next look (clock seconds).
+        Off unless remote workers are switched on (`experimental.remote_workers`); `pm.py remote-sync` still pulls."""
+        if not remote_workers_enabled(self.ctx):
+            return None
         due: float | None = None
         for task in self.remote_tasks(repo):
             for res in self.sync_task(task):

@@ -168,6 +168,7 @@ class _SelfHostedBase(unittest.TestCase):
             pane="hc:t1",
             hc_terminal="t1",
             env={"HOME": str(self.root / "user-home"), "PM_HOME": str(self.root / "home")},
+            config={"experimental": {"remote_workers": True}},
         )
         self.ctx.store.change_registration(
             self.slug,
@@ -563,6 +564,7 @@ class TestPrivacyBoundaryAndMergeAndInterrupt(_SelfHostedBase):
         # Allowlist includes both `shared-rule` (allowed) and `priv-user` (MUST still be excluded because type=='user').
         self.ctx.home.config.write_text(json.dumps({
             "self_hosted": {"share_personal_memories": ["shared-rule", "priv-user"]},
+            "experimental": {"remote_workers": True},
         }), encoding="utf-8")
 
         _joined, _st, agent = self._enroll_and_join("priv-node")
