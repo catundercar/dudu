@@ -438,3 +438,357 @@ test('PmList loads remote-states.json even while local pm.py state is pending or
   assert.equal(Boolean(failingRows[0].unregistered), false);
   assert.equal(failing.view.viewable(failingRows[0]), true);
 });
+
+test('Plan A herdr-lists drawer: weight:1 when hidden, px when expanded, live spaces/agents badge, and layout.toggle click', () => {
+  const hiddenTree = {
+    id: 'root',
+    children: [{
+      id: 'sidebar',
+      children: [{
+        id: 'sidebar-lists',
+        children: [
+          { id: 'pm-nav', type: 'block', size: { px: 40 }, content: { mod: 'pm-nav' } },
+          { id: 'pm-list', type: 'block', size: { px: 30 }, content: { mod: 'pm-list' } },
+          { id: 'herdr-lists', type: 'column', hidden: true, size: { weight: 1 }, children: [
+            { id: 'spaces', type: 'block', content: { mod: 'spaces' } },
+            { id: 'agents', type: 'block', content: { mod: 'agents' } },
+          ] },
+        ],
+      }],
+    }],
+  };
+  assert.deepEqual(list.herdrListsState(hiddenTree), { present: true, hidden: true });
+  assert.deepEqual(list.listSizeSpec(3, false, false, { present: true, hidden: true }), { weight: 1 });
+  assert.deepEqual(list.listSizeSpec(3, false, false, { present: true, hidden: false }), { px: list.listHeight(3, false, false) + list.DRAWER_ROW });
+  assert.deepEqual(list.listSizeSpec(3, false, false, { present: false, hidden: false }), { px: list.listHeight(3, false, false) });
+
+  const badge = list.herdrListsBadge([{ id: 's1' }, { id: 's2' }], [{ address: 'a1', status: 'working' }, { address: 'a2', status: 'idle' }]);
+  assert.deepEqual(badge, { spacesCount: 2, agentsCount: 2, total: 4, active: 1, blocked: 0, working: 1, tone: 'working' });
+  const blockedBadge = list.herdrListsBadge([{ id: 's1' }], [{ address: 'a1', status: 'blocked' }, { address: 'a2', status: 'working' }]);
+  assert.equal(blockedBadge.tone, 'blocked');
+  assert.equal(blockedBadge.active, 2);
+
+  // Full PmList render: collapsed (hidden: true) vs expanded (hidden: false)
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import .*;$/gm, '').replace('export default class PmList', 'class PmList');
+  let curTree = structuredClone(hiddenTree);
+  let curPlatform = 'macos';
+  let curKeys = [
+    { section: 'global', keys: 'cmd-b', action: 'layout.toggle:sidebar' },
+    { section: 'layout:dudu', keys: 'cmd-shift-e', action: 'layout.toggle:herdr-lists' },
+  ];
+  const runs = [];
+  const rendered = new Map();
+  const popups = new Map();
+  const element = () => {
+    const rec = { id: '', texts: [], click: null, hover: null, bordered: false, nativeTooltip: null, popupContent: null };
+    const node = new Proxy(rec, {
+      get(target, prop) {
+        if (prop === 'id') return v => { target.id = v; rendered.set(v, target); return node; };
+        if (prop === 'child') return c => { if (typeof c === 'string') target.texts.push(c); return node; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (typeof c === 'string') target.texts.push(c); return node; };
+        if (prop === 'when') return (cond, fn) => (cond ? fn(node) : node);
+        if (prop === 'on_click') return fn => { target.click = fn; return node; };
+        if (prop === 'on_hover') return fn => { target.hover = fn; return node; };
+        if (prop === 'border_1' || prop === 'border') return () => { target.bordered = true; return node; };
+        if (prop === 'tooltip') return v => { target.nativeTooltip = v; return node; };
+        if (prop === 'content') return c => { target.popupContent = c; return node; };
+        return () => node;
+      },
+    });
+    return node;
+  };
+  const Popup = {
+    new(id, _trigger) {
+      const p = element();
+      p.id(id);
+      popups.set(id, p);
+      return p;
+    },
+  };
+  const bindings = {
+    ...list, View: class {}, div: element, svg: element, image: element, v_flex: element, h_flex: element, Popup,
+    theme: () => ({ chrome: '#111', surface: '#1a1a1a', raised: '#222', popover: '#252525', border: '#333', hover: '#2a2a2a', selected: '#333', foreground: '#eee', muted: '#999', dim: '#666', working: '#3fb950', blocked: '#f85149', accent: '#58a6ff' }),
+    home: () => '/h', appHome: () => '/a', exec: async () => ({}), readTextFile: async () => '',
+    watchFolder: async () => {}, layout: () => curTree, run: (cmd, args) => runs.push([cmd, args]),
+    terminals: () => [], agents: () => [{ address: 'a1', status: 'working' }], panes: () => [],
+    spaces: () => [{ id: 's1' }, { id: 's2' }], shared: k => (k === 'layout' ? 'dudu' : null), setShared: () => {}, openOverlay: () => {},
+    keys: () => curKeys, window: () => ({ platform: curPlatform }),
+    execPython: async () => ({}), localStorage: { setItem() {}, getItem() { return null; } },
+  };
+  const PmList = new Function(...Object.keys(bindings), `${source}; return PmList;`)(...Object.values(bindings));
+  const view = new PmList();
+  Object.assign(view, { state: { lang: 'zh', pms: [{ name: 'pm-dudu', project: 'dudu', status: 'idle' }], events: [] }, remote: {}, changed: {}, folded: true, compact: false, narrow: false, hover: null, drawerHover: false, error: '' });
+  const cx = { notify() {}, stop_propagation() {} };
+  view.render(cx);
+  assert.deepEqual(runs.at(-1), ['layout.resize', { id: 'pm-list', weight: 1 }], 'hidden herdr-lists resizes pm-list to weight:1');
+  const toggle = rendered.get('pm-herdr-lists-toggle');
+  assert.ok(toggle, 'drawer bar renders at bottom of pm-list');
+  assert.equal(toggle.bordered, false, 'drawer bar uses frameless Plan B style with no border');
+  assert.equal(toggle.nativeTooltip, null, 'drawer bar does not emit native bordered .tooltip()');
+  assert.equal(popups.has('pm-herdr-lists-tip'), false, 'tooltip popup stays closed until hovered');
+  assert.deepEqual(rendered.get('pm-herdr-lists-count')?.texts, ['3']);
+  assert.deepEqual(rendered.get('pm-herdr-lists-active')?.texts, ['1']);
+
+  // Hovering opens clean micro-surface Popup with concise counts + live shortcut keycap
+  toggle.hover(true, cx);
+  rendered.clear(); popups.clear();
+  view.render(cx);
+  assert.ok(popups.has('pm-herdr-lists-tip'), 'hovering drawer bar opens custom Popup tooltip');
+  assert.deepEqual(rendered.get('pm-herdr-lists-tip-text')?.texts, ['2 空间 · 1 终端']);
+  assert.deepEqual(rendered.get('pm-herdr-lists-tip-active')?.texts, ['1 活跃']);
+  assert.deepEqual(rendered.get('pm-herdr-lists-shortcut')?.texts, ['⇧⌘E']);
+  assert.equal(rendered.get('pm-herdr-lists-tip-card')?.bordered, false, 'tooltip card has no heavy border');
+
+  // Clicking drawer bar toggles layout and dismisses hover tooltip
+  rendered.get('pm-herdr-lists-toggle').click({}, cx);
+  assert.deepEqual(runs.at(-1), ['layout.toggle', { id: 'herdr-lists' }], 'clicking drawer bar calls layout.toggle');
+  assert.equal(view.drawerHover, false, 'clicking drawer bar clears hover state');
+
+  // Expanded state: herdr-lists visible -> pm-list resizes to px, shows 收起, and hover tooltip reflects Hide + shortcut
+  curTree.children[0].children[0].children[2].hidden = false;
+  curTree.children[0].children[0].children[1].size = { weight: 1 };
+  view.state.lang = 'en';
+  curPlatform = 'linux';
+  curKeys = [{ section: 'layout:dudu', keys: 'ctrl-shift-e', action: 'layout.toggle:herdr-lists' }];
+  rendered.clear(); popups.clear(); runs.length = 0;
+  view.render(cx);
+  assert.equal(runs[0][0], 'layout.resize');
+  assert.equal(runs[0][1].id, 'pm-list');
+  assert.equal(runs[0][1].px, list.listHeight(1, false, false) + list.DRAWER_ROW);
+  assert.deepEqual(rendered.get('pm-herdr-lists-hide')?.texts, ['Hide']);
+  rendered.get('pm-herdr-lists-toggle').hover(true, cx);
+  rendered.clear(); popups.clear();
+  view.render(cx);
+  assert.deepEqual(rendered.get('pm-herdr-lists-tip-text')?.texts, ['Hide Spaces & Agents']);
+  assert.deepEqual(rendered.get('pm-herdr-lists-shortcut')?.texts, ['Ctrl+Shift+E']);
+
+  // Compact rail mode also uses frameless hover + custom Popup without native tooltip
+  view.compact = true;
+  curTree.children[0].children[0].children[2].hidden = true;
+  rendered.clear(); popups.clear();
+  view.render(cx);
+  assert.equal(rendered.get('pm-herdr-lists-toggle')?.nativeTooltip, null);
+  assert.ok(popups.has('pm-herdr-lists-tip'), 'compact rail hover opens custom Popup');
+  assert.deepEqual(rendered.get('pm-herdr-lists-tip-text')?.texts, ['Spaces & Agents · 3']);
+});
+
+test('formatShortcut, herdrListsShortcut, and drawerTipParts handle platforms, overrides, and EN/ZH copy', () => {
+  assert.equal(list.formatShortcut('cmd-shift-e', 'macos'), '⇧⌘E');
+  assert.equal(list.formatShortcut('cmd-alt-s', 'macos'), '⌥⌘S');
+  assert.equal(list.formatShortcut('ctrl-shift-e', 'linux'), 'Ctrl+Shift+E');
+  assert.equal(list.formatShortcut('ctrl-shift-e', 'windows'), 'Ctrl+Shift+E');
+  assert.equal(list.formatShortcut('', 'macos'), '');
+
+  // layout:dudu takes precedence over global; object actions and custom keys are honored
+  const both = [
+    { section: 'global', keys: 'cmd-alt-s', action: 'layout.toggle:herdr-lists' },
+    { section: 'layout:dudu', keys: 'cmd-shift-e', action: 'layout.toggle:herdr-lists' },
+  ];
+  assert.equal(list.herdrListsShortcut(both, 'dudu', 'macos'), '⇧⌘E');
+  assert.equal(list.herdrListsShortcut(both, 'main', 'macos'), '⌥⌘S');
+  assert.equal(list.herdrListsShortcut([
+    { section: 'layout:dudu', keys: 'cmd-opt-s', action: { command: 'layout.toggle', args: { id: 'herdr-lists' } } },
+  ], 'dudu', 'macos'), '⌘S'.includes('S') ? list.formatShortcut('cmd-opt-s', 'macos') : '');
+  assert.equal(list.herdrListsShortcut([
+    { section: 'layout:dudu', keys: 'cmd-alt-s', action: { command: 'layout.toggle', args: { id: 'herdr-lists' } } },
+  ], 'dudu', 'macos'), '⌥⌘S');
+  assert.equal(list.herdrListsShortcut([], 'dudu', 'macos'), '');
+
+  assert.deepEqual(
+    list.drawerTipParts({ hidden: true, badge: { spacesCount: 18, agentsCount: 31, active: 1 }, lang: 'en', shortcut: '⇧⌘E' }),
+    { text: '18 spaces · 31 agents', activeText: '1 active', shortcut: '⇧⌘E', a11y: '18 spaces · 31 agents · 1 active · ⇧⌘E' },
+  );
+  assert.deepEqual(
+    list.drawerTipParts({ hidden: true, badge: { spacesCount: 1, agentsCount: 1, active: 0 }, lang: 'en', shortcut: '' }),
+    { text: '1 space · 1 agent', activeText: '', shortcut: '', a11y: '1 space · 1 agent' },
+  );
+  assert.deepEqual(
+    list.drawerTipParts({ hidden: true, badge: { spacesCount: 0, agentsCount: 0, active: 0 }, lang: 'zh', shortcut: '⇧⌘E' }),
+    { text: '展开 Spaces & Agents', activeText: '', shortcut: '⇧⌘E', a11y: '展开 Spaces & Agents · ⇧⌘E' },
+  );
+  assert.deepEqual(
+    list.drawerTipParts({ hidden: false, badge: { spacesCount: 18, agentsCount: 31, active: 1 }, lang: 'zh', shortcut: '⇧⌘E' }),
+    { text: '收起 Spaces & Agents', activeText: '', shortcut: '⇧⌘E', a11y: '收起 Spaces & Agents · ⇧⌘E' },
+  );
+});
+
+test('pm-list shows display_name/space_name while matching terminals by project, and offers hover rename for local projects', () => {
+  assert.equal(list.pmName({ name: 'pm-web', project: 'webapp-dir', display_name: '前端工作台' }), '前端工作台');
+  assert.equal(list.pmName({ name: 'pm-api', project: 'api-dir', space_name: 'API Gateway' }), 'API Gateway');
+  assert.equal(list.pmName({ name: 'pm-ops', project: 'ops' }), 'ops');
+
+  const local = {
+    lang: 'zh',
+    pms: [{ name: 'pm-web', project: 'webapp-dir', display_name: '前端工作台', repo: '/r/webapp-dir', pane: 'hc:t1', status: 'idle' }],
+    events: [],
+  };
+  const terms = [{ address: 't1', state: 'live', labels: { pm: 'webapp-dir' }, status: 'working' }];
+  const rows = list.pmRows(local, {}, terms, [{ address: 't1', status: 'working' }]);
+  assert.equal(rows[0].label, '前端工作台');
+  assert.equal(rows[0].project, 'webapp-dir');
+  assert.equal(rows[0].exact, true);
+  assert.equal(rows[0].status, 'working');
+
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import .*;$/gm, '').replace('export default class PmList', 'class PmList');
+  const rendered = new Map();
+  const overlays = [];
+  const element = () => {
+    const rec = { id: '', texts: [], click: null };
+    const node = new Proxy(rec, {
+      get(target, prop) {
+        if (prop === 'id') return v => { target.id = v; rendered.set(v, target); return node; };
+        if (prop === 'child') return c => { if (typeof c === 'string') target.texts.push(c); return node; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (typeof c === 'string') target.texts.push(c); return node; };
+        if (prop === 'when') return (cond, fn) => (cond ? fn(node) : node);
+        if (prop === 'on_click') return fn => { target.click = fn; return node; };
+        return () => node;
+      },
+    });
+    return node;
+  };
+  const bindings = {
+    ...list, View: class {}, div: element, svg: element, image: element, v_flex: element, h_flex: element,
+    theme: () => ({ chrome: '#111', surface: '#1a1a1a', raised: '#222', border: '#333', hover: '#2a2a2a', selected: '#333', foreground: '#eee', muted: '#999', dim: '#666', working: '#3fb950', blocked: '#f85149', accent: '#58a6ff' }),
+    home: () => '/h', appHome: () => '/a', exec: async () => ({}), readTextFile: async () => '',
+    watchFolder: async () => {}, layout: () => ({ id: 'root', children: [] }), run: () => {},
+    terminals: () => terms, agents: () => [], panes: () => [], spaces: () => [],
+    shared: () => null, setShared: () => {}, openOverlay: spec => overlays.push(spec),
+    execPython: async () => ({}), localStorage: { setItem() {}, getItem() { return null; } },
+  };
+  const PmList = new Function(...Object.keys(bindings), `${source}; return PmList;`)(...Object.values(bindings));
+  const view = new PmList();
+  Object.assign(view, { state: local, remote: {}, changed: {}, folded: true, compact: false, narrow: false, hover: 'pm-web', error: '' });
+  view.render({ notify() {}, stop_propagation() {} });
+  assert.ok(rendered.get('rename-pm-web'), 'hovered local project row renders rename icon button');
+  assert.ok(rendered.get('archive-pm-web'), 'hovered local project row still renders archive icon button');
+  rendered.get('rename-pm-web').click({}, { stop_propagation() {} });
+  assert.deepEqual(overlays, [{ mod: 'pm-dash', props: { dialog: 'rename', pm: 'pm-web' }, kind: 'dialog', width: 420, height: 224 }]);
+
+  // Remote registered project: hover offers archive (with machine in props) while keeping rename local-only.
+  overlays.length = 0;
+  rendered.clear();
+  const remote = {
+    dev: {
+      pms: [{ name: 'pm-api', project: 'api', display_name: 'Remote API', repo: '/home/dev/api', pane: 'hc:t9', status: 'idle' }],
+      tasks: [{ id: 't1', pm: 'pm-api', status: 'in_progress' }],
+      events: [],
+    },
+  };
+  Object.assign(view, { state: local, remote, hover: 'dev/pm-api' });
+  view.render({ notify() {}, stop_propagation() {} });
+  assert.equal(rendered.get('rename-dev/pm-api'), undefined, 'remote row keeps rename hidden');
+  assert.ok(rendered.get('archive-dev/pm-api'), 'hovered remote row renders archive icon button');
+  rendered.get('archive-dev/pm-api').click({}, { stop_propagation() {} });
+  assert.deepEqual(overlays, [{ mod: 'pm-dash', props: { dialog: 'archive', pm: 'dev/pm-api', machine: 'dev' }, kind: 'popup', width: 340, height: 274 }]);
+});
+
+test('Windows client PmList reloads remote-states.json on remote cache signal/watch and opens remote project conversation instead of terminal', async () => {
+  const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8')
+    .replace(/^import [\s\S]*?;$/gm, '').replace('export default class PmList', 'class PmList');
+  const stage = { id: 'pm-stage', active: 'work', children: [{ id: 'work' }, { id: 'pm-board' }, { id: 'pm-project' }] };
+  const terms = [
+    term('198.51.100.10/t1k6', { labels: { pm: 'dudu' }, status: 'idle' }),
+    term('198.51.100.10/t2', { labels: { pm: 'Nova' }, status: 'idle' }),
+    term('198.51.100.10/t3', { labels: { pm: 'issues' }, status: 'idle' }),
+  ];
+  let cacheText = null;
+  let cacheDirExists = false;
+  let wakeCacheWatch = null;
+  const sharedMap = new Map();
+  const runs = [], sharedCalls = [], afterTimers = [];
+  const tasks = [];
+  const cx = {
+    spawn: fn => { const p = Promise.resolve().then(() => fn(cx)); tasks.push(p); return p; },
+    timer: {
+      every: () => ({ cancel() {} }),
+      after: (_ms, fn) => { afterTimers.push(fn); return { cancel() {} }; },
+    },
+    notify: () => {},
+  };
+  const element = () => {
+    const node = new Proxy({}, { get: (_t, key) => (...args) => {
+      if (key === 'when' && args[0]) args[1](node);
+      return node;
+    } });
+    return node;
+  };
+  const bindings = {
+    ...list, View: class {}, div: element, svg: element, image: element, v_flex: element, h_flex: element, Popup: { new: () => element() },
+    theme: () => ({}),
+    home: () => 'C:\\Users\\dev',
+    appHome: () => 'C:\\Users\\dev\\.config\\herdr-app',
+    // Windows has no `sh` on PATH; fallback LEDGER_HOME_SH rejects.
+    exec: async () => { throw new Error('ENOENT: sh'); },
+    readTextFile: async path => (path === 'C:\\Users\\dev\\.dudu/cache/remote-states.json' ? cacheText : null),
+    watchFolder: path => {
+      if (path === 'C:\\Users\\dev\\.dudu/cache') {
+        if (!cacheDirExists) return Promise.reject(new Error('ENOENT: cache'));
+        return new Promise(resolve => { wakeCacheWatch = resolve; });
+      }
+      return new Promise(() => {});
+    },
+    layout: () => ({ id: 'root', children: [stage] }),
+    run: (cmd, args) => runs.push([cmd, args]),
+    terminals: () => terms,
+    agents: () => [],
+    panes: () => terms.map(t => ({ terminal: t.address })),
+    spaces: () => [],
+    shared: key => sharedMap.get(key),
+    setShared: (key, val) => { sharedMap.set(key, val); sharedCalls.push([key, val]); },
+    openOverlay: () => {},
+    keys: () => [],
+    window: () => ({ platform: 'windows' }),
+    execPython: async () => ({
+      code: 0,
+      stdout: JSON.stringify({ home: 'C:\\Users\\dev\\.dudu', lang: 'en', pms: [], tasks: [], events: [] }),
+    }),
+    localStorage: { setItem() {}, getItem() { return null; } },
+  };
+  const PmList = new Function(...Object.keys(bindings), `${source}; return PmList;`)(...Object.values(bindings));
+  const view = new PmList();
+  view.init({}, cx);
+  for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r));
+
+  // Before remote-states.json exists, remote terminals fall back to unregistered rows.
+  const beforeRows = list.allPmRows(view.state, view.remote, terms, []);
+  assert.equal(beforeRows.length, 3);
+  assert.ok(beforeRows.every(r => r.unregistered === true));
+  assert.ok(beforeRows.every(r => view.viewable(r) === false));
+
+  // Once pm-nav creates cache/, writes remote-states.json, and sets shared('pm-remote-cache'),
+  // PmList's re-render reloads the cache immediately and arms the cache watcher.
+  cacheDirExists = true;
+  cacheText = JSON.stringify({
+    at: Date.now(),
+    states: {
+      '198.51.100.10': {
+        pms: [
+          { name: 'pm-dudu', project: 'dudu', pane: 'hc:t1k6', status: 'idle' },
+          { name: 'pm-nova', project: 'Nova', pane: 'hc:t2', status: 'idle' },
+          { name: 'pm-issues', project: 'issues', pane: 'hc:t3', status: 'idle' },
+        ],
+        tasks: [],
+        events: [],
+      },
+    },
+  });
+  sharedMap.set('pm-remote-cache', '198.51.100.10:pm-dudu:0,pm-issues:0,pm-nova:0');
+  view.render(cx);
+  assert.equal(afterTimers.length, 1);
+  afterTimers.shift()(cx);
+  for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r));
+  assert.equal(typeof wakeCacheWatch, 'function', 'cache folder watcher is armed once cache exists');
+
+  const afterRows = list.allPmRows(view.state, view.remote, terms, []);
+  assert.equal(afterRows.length, 3);
+  assert.ok(afterRows.every(r => !r.unregistered), 'all remote PMs are now registered from remote-states.json');
+  assert.ok(afterRows.every(r => view.viewable(r) === true), 'all remote PMs open pm-project');
+
+  const duduRow = afterRows.find(r => r.key === '198.51.100.10/pm-dudu');
+  assert.ok(duduRow);
+  view.open(duduRow);
+  assert.deepEqual(sharedCalls, [['pm-project', { pm: '198.51.100.10/pm-dudu', machine: '198.51.100.10' }]]);
+  assert.deepEqual(runs.at(-1), ['layout.select', { stack: 'pm-stage', child: 'pm-project' }]);
+});

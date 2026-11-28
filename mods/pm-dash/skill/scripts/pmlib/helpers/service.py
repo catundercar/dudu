@@ -208,13 +208,14 @@ class Helpers:
         *,
         exec_mode: bool = False,
         repo: str = "",
+        slug: str = "",
     ) -> str:
         """Instructions sent to a newly started helper."""
         cmd = self.ctx.procs.pm_command()
         rpath = str(result_path)
         docs = docs_line(herdr_docs=self.ctx.herdr_docs, tr_fn=self.ctx.config.tr)
         if exec_mode:
-            mem = MemoryLayer(self.ctx, repo).memory_part() if repo else ""
+            mem = MemoryLayer(self.ctx, repo, slug=slug or None).memory_part() if (repo or slug) else ""
             return self.ctx.config.tr(
                 f"[Execution Helper {name} for {owner_id}]\n\n"
                 f"Working directory: {cwd}\n"
@@ -693,7 +694,7 @@ class Helpers:
 
                 result_path = helper_result_path_for(self.ctx, slug, owner_dir, name)
                 result_path.parent.mkdir(parents=True, exist_ok=True)
-                brief_text = self.brief(name, owner_id, prompt_text, result_path, cwd, exec_mode=exec_mode, repo=repo)
+                brief_text = self.brief(name, owner_id, prompt_text, result_path, cwd, exec_mode=exec_mode, repo=repo, slug=slug)
                 brief_saved = result_path.parent / f".{result_path.stem}-brief.md"
                 write_atomic(brief_saved, brief_text.encode("utf-8"), replace_fn=replace_task_file)
 
@@ -767,7 +768,7 @@ class Helpers:
                 stop_on_exit=True, repo=repo, helper_owner_kind=owner_kind, helper_owner_id=owner_id,
                 helper_slug=slug, helper_name=name,
             )
-            Delivery(self.ctx, repo).ensure_running()
+            Delivery(self.ctx, repo, slug=slug or None).ensure_running()
             return HelperStartResult(
                 name=name,
                 terminal=made,
@@ -884,14 +885,14 @@ class Helpers:
                     f"helper {name}（hc:{term}）未就绪（{diag['kind']}）：{summary}；"
                     f"可用 `pm.py helper stop {name}` 停掉",
                 )
-                Conversation(self.ctx, repo).record(
+                Conversation(self.ctx, repo, slug=slug or None).record(
                     "helper", by=f"hc:{term}", source="helper", helper=name,
                     status="blocked", text=msg, wake=not is_quiet[0],
                 )
                 if not is_quiet[0]:
-                    Delivery(self.ctx, repo).ensure_running()
+                    Delivery(self.ctx, repo, slug=slug or None).ensure_running()
         elif repo:
-            Delivery(self.ctx, repo).ensure_running()
+            Delivery(self.ctx, repo, slug=slug or None).ensure_running()
 
     def done(
         self,
@@ -1005,8 +1006,8 @@ class Helpers:
             status="done", summary=summary_val, fallback=fallback, kill_term=not is_self,
             cleanup_term=is_self, notify=not is_owner,
         )
-        if is_self and resolved_repo:
-            Delivery(self.ctx, resolved_repo).ensure_running()
+        if is_self and (resolved_repo or slug):
+            Delivery(self.ctx, resolved_repo, slug=slug or None).ensure_running()
         final_name = (updated or entry).get("name") or "?"
         if transitioned:
             line = self.ctx.config.tr(

@@ -94,6 +94,13 @@ export const THREAD_STRINGS = {
     detailReviewStepTip: 'Click to toggle review window',
     agentSessionFallback: 'Session transcript unavailable; switch to live terminal.',
     windowSizeTip: (cur, next) => `Window size: ${cur} (click for ${next})`,
+    waitsDep: ref => `waits ${ref}`,
+    queuedLabel: 'queued',
+    reviewBadge: 'In review',
+    reviewTitle: 'Review',
+    readOnlyLabel: 'read-only',
+    reviewerSubLabel: 'reviewer',
+    depsAutoUnblock: ref => `Auto-unblocks once ${ref} lands on main.`,
   },
   zh: {
     sumWaiting: n => `${n} 等你`,
@@ -139,6 +146,13 @@ export const THREAD_STRINGS = {
     detailReviewStepTip: '点击开关审查小窗',
     agentSessionFallback: '暂无可解析会话，可切到原生终端查看。',
     windowSizeTip: (cur, next) => `窗口尺寸：${cur}（点击切到 ${next}）`,
+    waitsDep: ref => `等 ${ref}`,
+    queuedLabel: '排队',
+    reviewBadge: '待审',
+    reviewTitle: '审查',
+    readOnlyLabel: '只读',
+    reviewerSubLabel: 'reviewer',
+    depsAutoUnblock: ref => `${ref} 合入 main 后自动解除。`,
   },
 };
 
@@ -550,6 +564,16 @@ export const STRINGS = {
     docNotText: 'Binary or image file; not shown as text here.',
     docTooLarge: 'File exceeds 1 MB and is not read whole here.',
     imageOpenPreview: 'Open image preview',
+    imageZoomLightbox: 'Zoom image',
+    imageZoomIn: 'Zoom in (+)',
+    imageZoomOut: 'Zoom out (-)',
+    imageZoomFit: 'Fit to window (0)',
+    imageZoomActual: 'Actual size 100% (1)',
+    imageZoomCycle: 'Cycle zoom (Fit / 100% / 150% / 200%)',
+    imageOpenExternal: 'Open in system preview',
+    imageCloseLightbox: 'Close preview (Esc)',
+    imageOpenExternalFailed: err => `Could not open in system preview: ${err}`,
+    imageLightboxHint: 'Scroll to pan · Double-click Fit / 100% · Esc to close',
     imageLoading: 'Loading image…',
     imageLoadFailed: 'Image preview unavailable',
     imageTooLarge: 'Image is too large to preview here.',
@@ -694,6 +718,40 @@ export const STRINGS = {
     sideTabOpened: 'Open',
     sideTabCopyPath: 'Copy path',
     sideTabMissing: 'No longer exists',
+    switchToBoard: 'Switch to Board',
+    renameProject: 'Rename project',
+    filterThreads: 'Filter Threads…',
+    filterLibrary: 'Filter Library…',
+    filterMemory: 'Filter Memory…',
+    inlineFilterHint: 'Esc',
+    sideTabsOverflow: n => `+${n}`,
+    sideTabsOverflowTip: n => `${n} more open tabs`,
+    workspaceFolders: n => `Workspace folders (${n})`,
+    workspaceFoldersSub: 'All folders equal · click alias to rename',
+    workspaceFoldersEmptyTip: 'Link 0 or more workspace folders',
+    workspaceFoldersTip: n => `${n} workspace ${n === 1 ? 'folder' : 'folders'} · click to manage`,
+    addFolder: 'Add folder…',
+    addFolderShort: 'Add folder',
+    addFolderOn: m => `Add folder on ${m}…`,
+    noFoldersLinked: 'No folders linked yet',
+    folderAliasRenameTip: 'Click to rename alias',
+    unlinkFolderTip: 'Unlink folder (keeps files on disk)',
+    unlinkFolderActiveWarn: (alias, n) => `${n} active ${n === 1 ? 'thread still runs' : 'threads still run'} in “${alias}”. Unlink anyway?`,
+    unlinkAnyway: 'Unlink',
+    cancel: 'Cancel',
+    folderBadgeNonGit: 'folder',
+    folderMissing: 'missing',
+    multiGitDispatchHint: n => `${n} git repos · pass --folder <alias> on dispatch`,
+    enterRemotePath: m => `Path on ${m}, e.g. ~/project/repo…`,
+    browseRemote: m => `Browse ${m}`,
+    browseRemoteTip: m => `Browse folders on ${m}`,
+    folderNotFoundRemote: m => `Directory does not exist on ${m}`,
+    createRemoteFolder: 'Create folder',
+    addBtn: 'Add',
+    remoteFoldersUnsupported: m => `Update pm.py on ${m} to manage workspace folders`,
+    mentionFilesMultiTitle: n => `Files · ${n} folders`,
+    mentionEmptyFilesNoFolders: 'No workspace folders linked yet',
+    folderAliasTip: (alias, path) => (path ? `Folder ${alias} · ${path}` : `Folder ${alias}`),
     ...CHANGE_STRINGS.en,
     ...SEARCH_STRINGS.en,
   },
@@ -928,6 +986,16 @@ export const STRINGS = {
     docNotText: '二进制或图片文件，不在面板内按文本展开。',
     docTooLarge: '文件超过 1 MB，不在面板内整篇读取。',
     imageOpenPreview: '打开原图预览',
+    imageZoomLightbox: '全屏放大查看',
+    imageZoomIn: '放大（+）',
+    imageZoomOut: '缩小（-）',
+    imageZoomFit: '适应窗口（0）',
+    imageZoomActual: '100% 原图（1）',
+    imageZoomCycle: '切换缩放（适应窗口 / 100% / 150% / 200%）',
+    imageOpenExternal: '用系统应用打开原图',
+    imageCloseLightbox: '关闭预览（Esc）',
+    imageOpenExternalFailed: err => `无法用系统应用打开：${err}`,
+    imageLightboxHint: '滚轮/双指平移细节 · 双击切换适应/100% · Esc 关闭',
     imageLoading: '正在加载图片…',
     imageLoadFailed: '无法加载图片预览',
     imageTooLarge: '图片过大，无法在此预览。',
@@ -1072,6 +1140,40 @@ export const STRINGS = {
     sideTabOpened: '已打开',
     sideTabCopyPath: '复制路径',
     sideTabMissing: '文件已不存在',
+    switchToBoard: '切换到看板',
+    renameProject: '重命名项目',
+    filterThreads: '筛选线程…',
+    filterLibrary: '筛选资料库…',
+    filterMemory: '筛选记忆…',
+    inlineFilterHint: 'Esc',
+    sideTabsOverflow: n => `+${n}`,
+    sideTabsOverflowTip: n => `还有 ${n} 个已打开标签`,
+    workspaceFolders: n => `关联文件夹（${n}）`,
+    workspaceFoldersSub: '全部目录平权 · 点击别名重命名',
+    workspaceFoldersEmptyTip: '关联 0 个或多个工作区文件夹',
+    workspaceFoldersTip: n => `已关联 ${n} 个文件夹 · 点击管理`,
+    addFolder: '添加文件夹…',
+    addFolderShort: '添加文件夹',
+    addFolderOn: m => `在 ${m} 添加文件夹…`,
+    noFoldersLinked: '暂未关联文件夹',
+    folderAliasRenameTip: '点击修改别名',
+    unlinkFolderTip: '解除关联（不删除盘上文件）',
+    unlinkFolderActiveWarn: (alias, n) => `「${alias}」下仍有 ${n} 个进行中线程，确定解除关联？`,
+    unlinkAnyway: '确认解绑',
+    cancel: '取消',
+    folderBadgeNonGit: '目录',
+    folderMissing: '不存在',
+    multiGitDispatchHint: n => `含 ${n} 个 Git 仓库 · 派发需指定 --folder <alias>`,
+    enterRemotePath: m => `${m} 上的路径，如 ~/project/repo…`,
+    browseRemote: m => `浏览 ${m}`,
+    browseRemoteTip: m => `浏览 ${m} 上的文件夹`,
+    folderNotFoundRemote: m => `${m} 上不存在该目录`,
+    createRemoteFolder: '新建此目录',
+    addBtn: '添加',
+    remoteFoldersUnsupported: m => `请更新 ${m} 上的 pm.py 以管理关联文件夹`,
+    mentionFilesMultiTitle: n => `文件 · ${n} 个文件夹`,
+    mentionEmptyFilesNoFolders: '暂未关联文件夹',
+    folderAliasTip: (alias, path) => (path ? `仓库 ${alias} · ${path}` : `仓库 ${alias}`),
     ...CHANGE_STRINGS.zh,
     ...SEARCH_STRINGS.zh,
   },
@@ -1182,12 +1284,19 @@ export function pmStartState(pm, terminal, starting = false) {
   if (pm.archived) return 'archived';
   const runtime = pm.runtime || (pm.pane && !String(pm.pane).startsWith('hc:') ? 'tui' : '');
   if (runtime === 'tui') return pm.status && pm.status !== 'offline' ? 'tui_live' : 'tui';
-  if (pm.repo_ok === false || !pm.repo) return 'missing_repo';
+  const hasExplicitZero = Array.isArray(pm.folders) && pm.folders.length === 0;
+  if (pm.repo_ok === false || (!pm.repo && !hasExplicitZero)) return 'missing_repo';
   return 'startable';
 }
 
 export function startPmArgs(pm) {
-  const args = ['start', '--repo', String(pm?.repo || '')];
+  if (pm?.repo) {
+    const args = ['start', '--repo', String(pm.repo)];
+    if (pm?.agent) args.push('--kind', String(pm.agent));
+    return args;
+  }
+  const slug = String(pm?.slug || '').trim();
+  const args = slug ? ['start', '--slug', slug] : ['start', '--name', projectName(pm)];
   if (pm?.agent) args.push('--kind', String(pm.agent));
   return args;
 }
@@ -2046,7 +2155,7 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
     nowCache.set(id, cached);
     return cached;
   };
-  const items = [], shown = new Set(), asked = new Set(), before = new Map(), keys = new Map(), questions = [], questionMeta = new Map(), incidentsByKey = new Map();
+  const items = [], shown = new Set(), asked = new Set(), before = new Map(), keys = new Map(), questions = [], questionMeta = new Map(), incidentsByKey = new Map(), incidentsById = new Map();
   const hasPastes = Array.isArray(pastes) && pastes.length > 0;
   const carried = hasPastes
     ? new Set([...events.filter(e => e.type === 'user'), ...(pending || [])]
@@ -2224,8 +2333,11 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
         push(e, { kind: 'decision', key: key(e, 'decision'), text: decText, quote: squash(e.quote) });
       }
     } else if (e.type === 'event' && e.source === 'pm-incident') {
-      const incKey = String(e.key || e.incident_id || '').trim() || key(e, 'incident');
+      const incId = String(e.incident_id || '').trim();
+      const rawKey = String(e.key || '').trim();
+      const incKey = rawKey || incId || key(e, 'incident');
       const fields = {
+        incidentId: incId,
         incidentClass: String(e.incident_class || e.class || ''),
         status: String(e.status || 'open'),
         stage: Number(e.stage) || 0,
@@ -2236,14 +2348,20 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
         suggestedProfile: String(e.suggested_profile || ''),
         text: squash(e.text || ''),
       };
-      const existing = incidentsByKey.get(incKey);
+      const existing = (incId && incidentsById.get(incId))
+        || (rawKey && incidentsByKey.get(rawKey))
+        || incidentsByKey.get(incKey);
       if (existing) {
         Object.assign(existing, {
           at: e.at || existing.at,
           ...(Number(e.at_ms) > 0 ? { at_ms: Number(e.at_ms) } : {}),
           ...fields,
+          incidentId: incId || existing.incidentId || '',
           count: (existing.count || 1) + 1,
         });
+        if (incId) incidentsById.set(incId, existing);
+        if (rawKey) incidentsByKey.set(rawKey, existing);
+        incidentsByKey.set(incKey, existing);
       } else {
         if (anchoredIdx < anchoredPending.length) flushPendingBefore(e);
         const incItem = push(e, {
@@ -2253,6 +2371,8 @@ export function timeline(events, tasks = [], { pending = [], typing = false, tod
           count: 1,
           ...fields,
         });
+        if (incId) incidentsById.set(incId, incItem);
+        if (rawKey) incidentsByKey.set(rawKey, incItem);
         incidentsByKey.set(incKey, incItem);
       }
     } else if (e.type === 'thread' && e.task) {
@@ -2429,6 +2549,13 @@ export const FINISHED_LIMIT = 6;
 export const OPEN_GROUPS = ['waiting', 'working', 'offline', 'paused', 'parked'];
 const GROUP = { blocked: 'waiting', review: 'working', in_progress: 'working', paused: 'paused' };
 
+function shortCommit(t) {
+  const raw = String(t?.landed?.commit || t?.landed?.sha || t?.commit || t?.merge_commit || '').trim();
+  if (!raw) return '';
+  const m = /^[0-9a-f]{7,40}$/i.exec(raw);
+  return m ? raw.slice(0, 7) : '';
+}
+
 const termStatusWord = s => (typeof s === 'string' ? s : (s && typeof s === 'object' ? String(s.state || '') : ''));
 
 // The tasks whose own worker or task-serving helper is at work now: a live terminal on this computer
@@ -2527,16 +2654,19 @@ const openRow = (t, lang, atWork, terms = [], live = []) => {
   const group = isOffline ? 'offline' : answeredRow(t) || postGate ? 'working' : GROUP[t.status] || 'parked';
   const rowTone = postGate ? 'running' : tone(t.status, false, Boolean(t.offline), answeredRow(t));
   const revWorking = reviewWorking(t, terms, live);
+  const reviewModel = t.status === 'review' ? (formatAgentModelEffort(t.review || t).model || '') : '';
   return { task: t.id, ...(num ? { number: num } : {}), title: t.title || t.id, status: t.status || '',
     tone: rowTone,
     waiting: WAITING.includes(t.status) && !answeredRow(t), ...(answeredRow(t) ? { answered: true } : {}),
     group,
     ...(t.status === 'review' ? { reviewing: true } : {}),
     ...(revWorking ? { reviewWorking: true } : {}),
+    ...(reviewModel ? { reviewModel } : {}),
     ...(postGate ? { postGate: true } : {}),
     ...(steps?.hasPlan ? { plan: { done: steps.done, total: steps.total, progress: steps.progress, pill: steps.pill, postGate: steps.postGate } } : {}),
     latest: logText(lang, t.latest), updated: String(t.updated || ''), ...(!postGate && t.offline ? { offline: true } : {}),
     ...(closed ? { closed } : {}),
+    ...(t.folder_alias ? { folderAlias: String(t.folder_alias) } : {}),
     branch: String(t.branch || ''), working: !isOffline && group === 'working' && taskWorking(t, atWork, terms, live),
     ...(ctx ? { contextTokens: ctx } : {}) };
 };
@@ -2603,7 +2733,11 @@ export function parentThread(tasks, task) {
 const trimFolder = path => typeof path === 'string' && path ? path.replace(/\/+$/, '') || '/' : '';
 function threadSessionsAndFinished(pm, mine, openIds, events, terms = [], live = [], tabs = []) {
   const local = (terms || []).filter(x => x.state === 'live' && x.address && !x.address.includes('/'));
-  const roots = [trimFolder(pm?.repo), trimFolder(pm?.worktrees)].filter(Boolean);
+  const roots = [...new Set([
+    ...projectFolders(pm).map(f => trimFolder(f.path)),
+    trimFolder(pm?.repo),
+    trimFolder(pm?.worktrees),
+  ].filter(Boolean))];
   const within = cwd => roots.some(root => cwd === root || cwd.startsWith(root === '/' ? root : `${root}/`));
   const pmAddress = pm ? terminalFor(pmRow(pm), terms || [])?.address : '';
   const pmHelperTasks = new Map();
@@ -2650,16 +2784,20 @@ function threadSessionsAndFinished(pm, mine, openIds, events, terms = [], live =
     if (ended(status)) {
       const num = taskNumber(t) || taskNumber(e);
       const ctx = contextTokens(t?.context_tokens);
+      const commit = shortCommit(t) || shortCommit(e);
       over.set(e.task, { task: e.task, ...(num ? { number: num } : {}), title: t?.title || e.title || e.task, status, cleanup: Boolean(t?.cleanup),
-        at: String(e.at || ''), ...(ctx ? { contextTokens: ctx } : {}) });
+        ...(t?.folder_alias ? { folderAlias: String(t.folder_alias) } : {}),
+        at: String(e.at || ''), ...(commit ? { commit } : {}), ...(ctx ? { contextTokens: ctx } : {}) });
     } else over.delete(e.task);
   }
   for (const t of mine) {
     if (ended(t.status) && !over.has(t.id) && !questions.has(t.id)) {
       const num = taskNumber(t);
       const ctx = contextTokens(t.context_tokens);
+      const commit = shortCommit(t);
       over.set(t.id, { task: t.id, ...(num ? { number: num } : {}), title: t.title || t.id, status: t.status, cleanup: Boolean(t.cleanup),
-        at: String(t.updated || ''), ...(ctx ? { contextTokens: ctx } : {}) });
+        ...(t.folder_alias ? { folderAlias: String(t.folder_alias) } : {}),
+        at: String(t.updated || ''), ...(commit ? { commit } : {}), ...(ctx ? { contextTokens: ctx } : {}) });
     }
   }
   const finished = [...over.values()].sort((a, b) => b.at.localeCompare(a.at)).slice(0, FINISHED_LIMIT)
@@ -3096,24 +3234,40 @@ export function incidentRowView(lang, item) {
   const status = String(item?.status || 'open').trim().toLowerCase();
   const folded = status === 'resolved' && Boolean(item?.folded);
   const stepLabel = recoveryStepLabel(lang, item?.step || '');
-  const rawDetail = String(item?.text || '').trim()
+  const rawDetail = String(item?.text || '').replace(/\s+/g, ' ').trim()
     || [item?.incidentClass, item?.reason, item?.error].filter(Boolean).join(' · ');
   const detail = clipSingleLine(rawDetail, 120);
   const hasPrefix = INCIDENT_PREFIX_RE.test(detail);
+  const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const extraTip = (label, { truncatedRow = false } = {}) => {
+    const nLabel = norm(label);
+    const nRaw = norm(rawDetail);
+    if (!nRaw) return '';
+    if (nRaw !== detail) return nRaw;
+    if (nRaw === nLabel || nLabel.includes(nRaw)) {
+      return truncatedRow && nLabel.length > 80 ? nRaw : '';
+    }
+    return nRaw;
+  };
   if (folded) {
-    return { label: hasPrefix ? detail : word(lang, 'incidentFolded', detail), detail, tone: 'muted', folded: true, icon: 'check' };
+    const label = hasPrefix ? detail : word(lang, 'incidentFolded', detail);
+    return { label, detail, tooltip: extraTip(label, { truncatedRow: true }), tone: 'muted', folded: true, icon: 'check' };
   }
   if (status === 'resolved') {
-    return { label: hasPrefix ? detail : word(lang, 'incidentRecovered', detail), detail, tone: 'resolved', folded: false, icon: 'check' };
+    const label = hasPrefix ? detail : word(lang, 'incidentRecovered', detail);
+    return { label, detail, tooltip: extraTip(label, { truncatedRow: true }), tone: 'resolved', folded: false, icon: 'check' };
   }
   if (status === 'notified') {
-    return { label: hasPrefix ? detail : word(lang, 'incidentNotified', detail), detail, tone: 'alert', folded: false, icon: 'bell' };
+    const label = hasPrefix ? detail : word(lang, 'incidentNotified', detail);
+    return { label, detail, tooltip: extraTip(label), tone: 'alert', folded: false, icon: 'bell' };
   }
+  const label = stepLabel
+    ? word(lang, 'incidentRecovering', stepLabel)
+    : (hasPrefix ? detail : word(lang, 'incidentRecovering', detail));
   return {
-    label: stepLabel
-      ? word(lang, 'incidentRecovering', stepLabel)
-      : (hasPrefix ? detail : word(lang, 'incidentRecovering', detail)),
+    label,
     detail,
+    tooltip: extraTip(label),
     tone: 'recovering',
     folded: false,
     icon: 'refresh',
@@ -4485,6 +4639,95 @@ export function remotePmArgv(args, scripts = PM_SCRIPTS) {
     'echo "pm.py not found" >&2; exit 127', 'sh', ...args]];
 }
 
+export const REMOTE_PROBE_SH = [
+  'printf "HOME\\t%s\\n" "$HOME"',
+  'pm_found=""',
+  `for rel in ${PM_SCRIPTS.join(' ')}; do if [ -f "$HOME/$rel" ]; then pm_found="$HOME/$rel"; break; fi; done`,
+  'printf "PM\\t%s\\n" "$pm_found"',
+  'if [ -n "$PM_HOME" ]; then ledger="$PM_HOME"; elif [ -d "$HOME/.claude/pm" ] && ! [ "$HOME/.claude/pm" -ef "$HOME/.dudu" ]; then ledger="$HOME/.claude/pm"; else ledger="$HOME/.dudu"; fi',
+  'printf "LEDGER\\t%s\\n" "$ledger"',
+  'for raw in "$@"; do',
+  '  p="$raw"; case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#??}";; esac',
+  '  if [ -d "$p" ]; then',
+  '    resolved=$(cd "$p" 2>/dev/null && pwd -P) || resolved="$p"',
+  '    is_git=0; branch=""',
+  '    if command -v git >/dev/null 2>&1 && git -C "$resolved" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      is_git=1; branch=$(git -C "$resolved" symbolic-ref --short HEAD 2>/dev/null || git -C "$resolved" rev-parse --short HEAD 2>/dev/null || true)',
+  '    fi',
+  '    printf "DIR\\t1\\t%s\\t%s\\t%s\\t%s\\n" "$raw" "$resolved" "$is_git" "$branch"',
+  '  else',
+  '    printf "DIR\\t0\\t%s\\t%s\\t0\\t\\n" "$raw" "$p"',
+  '  fi',
+  'done',
+].join('\n');
+
+export const REMOTE_LIST_DIRS_SH = [
+  'target="${1:-$HOME}"',
+  'case "$target" in "") target="$HOME";; "~") target="$HOME";; "~/"*) target="$HOME/${target#??}";; esac',
+  'if [ ! -d "$target" ]; then parent=$(dirname "$target"); if [ -d "$parent" ]; then target="$parent"; else target="$HOME"; fi; fi',
+  'cur=$(cd "$target" 2>/dev/null && pwd -P) || cur="$target"',
+  'printf "BASE\\t%s\\t%s\\n" "$cur" "$HOME"',
+  'for d in "$cur"/*/; do',
+  '  [ -d "$d" ] || continue',
+  '  base=$(basename "$d")',
+  '  case "$base" in .*|node_modules|target|__pycache__) continue;; esac',
+  '  full="${cur%/}/$base"',
+  '  is_git=0; branch=""',
+  '  if command -v git >/dev/null 2>&1 && git -C "$full" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '    is_git=1; branch=$(git -C "$full" symbolic-ref --short HEAD 2>/dev/null || git -C "$full" rev-parse --short HEAD 2>/dev/null || true)',
+  '  fi',
+  '  printf "ENTRY\\t%s\\t%s\\t%s\\t%s\\n" "$base" "$full" "$is_git" "$branch"',
+  'done',
+].join('\n');
+
+export const REMOTE_MKDIR_SH = [
+  'p="$1"',
+  'case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#??}";; esac',
+  'mkdir -p "$p" && resolved=$(cd "$p" && pwd -P) && printf "%s\\n" "$resolved"',
+].join('\n');
+
+export function parseRemoteProbe(stdout) {
+  const out = { home: '', pmScript: '', ledgerHome: '', dirs: [] };
+  for (const line of String(stdout || '').split('\n')) {
+    if (!line) continue;
+    const parts = line.split('\t');
+    if (parts[0] === 'HOME') out.home = parts[1] || '';
+    else if (parts[0] === 'PM') out.pmScript = parts[1] || '';
+    else if (parts[0] === 'LEDGER') out.ledgerHome = parts[1] || '';
+    else if (parts[0] === 'DIR') {
+      out.dirs.push({
+        exists: parts[1] === '1',
+        raw: parts[2] || '',
+        path: parts[3] || parts[2] || '',
+        git: parts[4] === '1',
+        branch: parts[5] || '',
+      });
+    }
+  }
+  return out;
+}
+
+export function parseRemoteDirs(stdout) {
+  const out = { base: '', home: '', entries: [] };
+  for (const line of String(stdout || '').split('\n')) {
+    if (!line) continue;
+    const parts = line.split('\t');
+    if (parts[0] === 'BASE') {
+      out.base = parts[1] || '';
+      out.home = parts[2] || '';
+    } else if (parts[0] === 'ENTRY') {
+      out.entries.push({
+        name: parts[1] || '',
+        path: parts[2] || '',
+        git: parts[3] === '1',
+        branch: parts[4] || '',
+      });
+    }
+  }
+  out.entries.sort((a, b) => Number(b.git) - Number(a.git) || a.name.localeCompare(b.name));
+  return out;
+}
+
 // A PM from `pm.py state` as a row the terminal lookup understands (as pm-list builds it).
 export function pmRow(pm) {
   return pm ? { ...pm, type: 'pm', machine: '', sourceName: pm.name } : null;
@@ -4790,6 +5033,100 @@ const inDir = (path, root) => {
   return Boolean(p && r && (p === r || p.startsWith(r === '/' ? '/' : `${r}/`)));
 };
 
+export const folderName = path => String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+
+export function projectFolders(pm) {
+  if (!pm || typeof pm !== 'object') return [];
+  if (Array.isArray(pm.folders)) {
+    const out = [];
+    for (const raw of pm.folders) {
+      if (!raw || typeof raw !== 'object') continue;
+      const path = String(raw.path || '').trim();
+      if (!path) continue;
+      const alias = String(raw.alias || '').trim() || folderName(path) || 'folder';
+      out.push({
+        path,
+        alias,
+        git: Boolean(raw.git),
+        default_branch: String(raw.default_branch || ''),
+        exists: raw.exists !== false,
+      });
+    }
+    return out;
+  }
+  const repo = String(pm.repo || '').trim();
+  if (!repo) return [];
+  return [{
+    path: repo,
+    alias: folderName(repo) || 'repo',
+    git: true,
+    default_branch: '',
+    exists: pm.repo_ok !== false,
+  }];
+}
+
+export function foldersSignature(pm) {
+  return projectFolders(pm).map(f => `${f.alias}\0${f.path}`).join('\n');
+}
+
+export function headerFoldersView(pm, { machine = '', homeDir = '', lang = 'en' } = {}) {
+  const folders = projectFolders(pm);
+  const count = folders.length;
+  if (count === 0) {
+    return {
+      count: 0,
+      mode: 'empty',
+      primaryLabel: machine ? `${machine} · ${word(lang, 'addFolderShort')}` : word(lang, 'addFolderShort'),
+      extraCount: 0,
+      folders,
+      tooltip: word(lang, 'workspaceFoldersEmptyTip'),
+    };
+  }
+  const firstLabel = machine ? `${machine} · ${folders[0].path}` : shortPath(folders[0].path, homeDir);
+  if (count === 1) {
+    return {
+      count: 1,
+      mode: 'single',
+      primaryLabel: firstLabel,
+      extraCount: 0,
+      folder: folders[0],
+      folders,
+      tooltip: word(lang, 'workspaceFoldersTip', 1),
+    };
+  }
+  return {
+    count,
+    mode: 'multi',
+    primaryLabel: firstLabel,
+    extraCount: count - 1,
+    folders,
+    tooltip: word(lang, 'workspaceFoldersTip', count),
+  };
+}
+
+const FOLDER_ACTIVE_STATUSES = new Set(['blocked', 'in_progress', 'review', 'proposed', 'paused']);
+
+export function activeThreadsInFolder(tasks, folder) {
+  if (!Array.isArray(tasks) || !folder) return [];
+  const alias = String(folder.alias || '').trim();
+  const fPath = normDir(folder.path || '');
+  return tasks.filter(t => {
+    if (!t || !FOLDER_ACTIVE_STATUSES.has(t.status)) return false;
+    const tAlias = String(t.folder_alias || t.folderAlias || '').trim();
+    const tRepo = normDir(t.repo || '');
+    return Boolean((alias && tAlias === alias) || (fPath && tRepo && tRepo === fPath));
+  });
+}
+
+export function threadFolderBadge(taskOrRow, folders = []) {
+  const alias = String(taskOrRow?.folder_alias || taskOrRow?.folderAlias || '').trim();
+  if (!alias) return '';
+  const list = Array.isArray(folders) ? folders : [];
+  if (list.length >= 2) return alias;
+  if (list.length === 1 && list[0]?.alias && list[0].alias !== alias) return alias;
+  return '';
+}
+
 // Which open space belongs to this project on `machine`, or null when none does.
 // Never falls back to another project's space (even the currently active one):
 // terminal.keep on an unrelated space would put the PM tab into that project and expose it.
@@ -4797,49 +5134,63 @@ export function projectSpaceFor(pm, spaceList, paneList = [], machine = '', pmTe
   const wantMachine = String(machine || '');
   const same = (spaceList || []).filter(s => s && s.id && String(s.machine || '') === wantMachine);
   if (!same.length) return null;
+  const explicitSpaceId = String(pm?.space_id || '').trim();
+  if (explicitSpaceId) {
+    const qualified = onMachine(explicitSpaceId, wantMachine);
+    const hit = same.find(s => s.id === qualified || s.id === explicitSpaceId);
+    if (hit) return hit;
+  }
   const labelled = String(pmTerm?.labels?.['herdr.space'] || '').trim();
   if (labelled) {
     const qualified = onMachine(labelled, wantMachine);
     const hit = same.find(s => s.id === qualified || s.id === labelled);
     if (hit) return hit;
   }
-  const repo = normDir(pm?.repo);
+  const repoRoots = [...new Set([
+    ...projectFolders(pm).map(f => normDir(f.path)),
+    normDir(pm?.repo),
+  ].filter(Boolean))];
   const worktrees = normDir(pm?.worktrees);
-  if (repo) {
-    const byFolder = same.find(s => normDir(s.folder) === repo);
+  if (repoRoots.length) {
+    const byFolder = same.find(s => repoRoots.includes(normDir(s.folder)));
     if (byFolder) return byFolder;
   }
-  if (repo || worktrees) {
+  if (repoRoots.length || worktrees) {
     const tabToSpace = new Map();
     for (const s of same) {
       for (const tab of s.tabs || []) {
         if (tab?.id) tabToSpace.set(tab.id, s);
       }
     }
-    if (repo) {
+    if (repoRoots.length) {
       for (const p of paneList || []) {
-        if (p?.tab && normDir(p.cwd) === repo && tabToSpace.has(p.tab)) return tabToSpace.get(p.tab);
+        if (p?.tab && repoRoots.includes(normDir(p.cwd)) && tabToSpace.has(p.tab)) return tabToSpace.get(p.tab);
       }
     }
     for (const p of paneList || []) {
-      if (p?.tab && tabToSpace.has(p.tab) && (inDir(p.cwd, repo) || inDir(p.cwd, worktrees))) {
+      if (p?.tab && tabToSpace.has(p.tab) && (repoRoots.some(r => inDir(p.cwd, r)) || inDir(p.cwd, worktrees))) {
         return tabToSpace.get(p.tab);
       }
     }
-    const bySubFolder = same.find(s => inDir(s.folder, repo) || inDir(s.folder, worktrees));
+    const bySubFolder = same.find(s => repoRoots.some(r => inDir(s.folder, r)) || inDir(s.folder, worktrees));
     if (bySubFolder) return bySubFolder;
   }
-  const names = new Set([pm?.space_name, pm?.project].map(v => String(v || '').trim()).filter(Boolean));
+  const names = new Set([pm?.display_name, pm?.space_name, pm?.project].map(v => String(v || '').trim()).filter(Boolean));
   if (names.size) {
     const byName = same.find(s => names.has(String(s.name || '').trim())
-      && (!s.folder || !repo || inDir(s.folder, repo)));
+      && (!s.folder || !repoRoots.length || repoRoots.some(r => inDir(s.folder, r))));
     if (byName) return byName;
   }
   return null;
 }
 
+export function projectName(pm) {
+  return String(pm?.display_name || pm?.space_name || pm?.project || '').trim()
+    || String(pm?.sourceName || pm?.name || '').replace(/^pm-/, '');
+}
+
 export function pmTabNameFor(pm) {
-  const base = String(pm?.project || '').trim()
+  const base = String(pm?.display_name || pm?.space_name || pm?.project || '').trim()
     || normDir(pm?.repo).split('/').filter(Boolean).pop()
     || '';
   return base ? `PM-${base}` : '';
@@ -4862,7 +5213,7 @@ export function pmKeepPlan(address, { pm = null, pmTerminal = null, machine = ''
       ['layout.select', { stack: 'pm-stage', child: 'work' }],
     ];
   }
-  const name = String(pm?.space_name || pm?.project || '').trim();
+  const name = String(pm?.display_name || pm?.space_name || pm?.project || '').trim();
   const folder = String(pm?.repo || '').trim();
   if (!name && !folder) return [];
   const spaceArgs = { machine: String(machine || '') };
@@ -4934,6 +5285,75 @@ export function isDarkTheme(theme) {
   return luminance(theme.foreground) > luminance(theme.background);
 }
 
+export function mixHex(baseColor, targetColor, ratio) {
+  const parse = c => {
+    if (typeof c !== 'string' || !c.startsWith('#')) return null;
+    const h = c.slice(1);
+    const hex = h.length === 3 ? [...h].map(x => x + x).join('') : h.slice(0, 6);
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
+    return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+  };
+  const a = parse(baseColor), b = parse(targetColor);
+  if (!a || !b) return baseColor || targetColor || '#000000';
+  const r = Math.max(0, Math.min(1, Number(ratio) || 0));
+  const ch = i => Math.round(a[i] + (b[i] - a[i]) * r).toString(16).padStart(2, '0');
+  return `#${ch(0)}${ch(1)}${ch(2)}`;
+}
+
+// Micro-surface tonal ladder derived from active theme tokens (Plan B: Tonal Layering).
+// Dark themes step cleanly from recessed well -> panel base -> elevated pod/card without border boxes;
+// light themes step cleanly in the opposite direction while preserving contrast.
+export function tonalSurfaces(t) {
+  const dark = isDarkTheme({
+    foreground: t?.foreground || '#eeeeee',
+    background: t?.background || t?.surface || '#111318',
+  });
+  const bg = t?.background || t?.surface || (dark ? '#111318' : '#ffffff');
+  const surface = t?.surface || (dark ? '#1a1d24' : '#f7f6f3');
+  const accent = t?.accent || '#58a6ff';
+  const fg = t?.foreground || (dark ? '#eeeeee' : '#1e1f22');
+  const border = t?.border || (dark ? '#333333' : '#dedcd5');
+  if (dark) {
+    const sameSurface = surface.toLowerCase() === bg.toLowerCase();
+    const pod = sameSurface ? mixHex(bg, '#ffffff', 0.045) : mixHex(bg, surface, 0.42);
+    const card = sameSurface ? mixHex(bg, '#ffffff', 0.055) : mixHex(bg, surface, 0.52);
+    return {
+      dark: true,
+      well: mixHex(bg, '#000000', 0.36),
+      tabBar: mixHex(bg, '#000000', 0.18),
+      pod,
+      podWell: mixHex(bg, '#000000', 0.24),
+      card,
+      chip: mixHex(bg, '#000000', 0.30),
+      chipHover: mixHex(bg, '#ffffff', 0.065),
+      chipOpen: withAlpha(accent, 0.16),
+      chipOpenBorder: withAlpha(accent, 0.34),
+      segActive: t.raised || mixHex(bg, '#ffffff', 0.10),
+      softChip: withAlpha(fg, 0.075),
+      softChipHover: withAlpha(fg, 0.045),
+      pillMuted: withAlpha(fg, 0.065),
+      hairline: withAlpha(border, 0.42),
+    };
+  }
+  return {
+    dark: false,
+    well: mixHex(bg, '#000000', 0.055),
+    tabBar: surface,
+    pod: mixHex(bg, '#000000', 0.03),
+    podWell: bg,
+    card: mixHex(bg, '#000000', 0.032),
+    chip: mixHex(bg, '#000000', 0.055),
+    chipHover: mixHex(bg, '#000000', 0.09),
+    chipOpen: withAlpha(accent, 0.12),
+    chipOpenBorder: withAlpha(accent, 0.30),
+    segActive: bg,
+    softChip: withAlpha(fg, 0.068),
+    softChipHover: withAlpha(fg, 0.04),
+    pillMuted: withAlpha(fg, 0.06),
+    hairline: withAlpha(border, 0.65),
+  };
+}
+
 // Use only supplied theme tokens, choosing their higher-contrast foreground
 // for each solid fill rather than assuming white also works in a dark theme.
 export function solidText(fill, theme) {
@@ -4952,9 +5372,11 @@ export function solidText(fill, theme) {
 // narrow window (listOpen) closes. Otherwise nothing:
 // the conversation is the top (its board is pm-dash's page, which goes back here by itself).
 export function escapeStep({
+  imageLightbox = false,
   mentionSub = false,
   mention = false,
   projectSearch = false,
+  foldersPopover = false,
   tabMenu = false,
   selectionBar = false,
   answering = false,
@@ -4974,9 +5396,11 @@ export function escapeStep({
   doc = false,
   listOpen = false,
 } = {}) {
+  if (imageLightbox) return 'imageLightbox';
   if (mentionSub) return 'mentionSub';
   if (mention) return 'mention';
   if (projectSearch) return 'projectSearch';
+  if (foldersPopover) return 'foldersPopover';
   if (tabMenu) return 'tabMenu';
   if (selectionBar) return 'selectionBar';
   if (answering) return 'answer';
@@ -5219,6 +5643,7 @@ const SLUG_SHAPE = /^[a-z0-9_][a-z0-9_-]*$/;
 // else its PM name without `pm-`, else its project name slugified as pm.py's project_slug.
 export function projectSlug(pm) {
   if (!pm || typeof pm !== 'object') return '';
+  if (typeof pm.slug === 'string' && SLUG_SHAPE.test(pm.slug)) return pm.slug;
   const conv = String(pm.conversation || '').replace(/\\/g, '/');
   const m = /(?:^|\/)projects\/([^/]+)\/conversation\.jsonl$/.exec(conv);
   if (m && SLUG_SHAPE.test(m[1])) return m[1];
@@ -5232,7 +5657,7 @@ export function projectSlug(pm) {
 export function isOldPmCommand(result) {
   if (!result || result.code === 0) return false;
   const text = `${result.stderr || ''}\n${result.stdout || ''}`;
-  return /invalid choice:\s*['"]?(?:project|events|log|tasks|context|library|memory|file|files|save|delete|restore|history|add|retopic|session|change|send|interrupt)['"]?|unknown (?:project )?command|unrecognized arguments/i.test(text);
+  return /invalid choice:\s*['"]?(?:project|events|log|tasks|context|library|memory|file|files|save|delete|restore|history|add|retopic|session|change|send|interrupt|folders|set-space)['"]?|unknown (?:project )?command|unrecognized arguments/i.test(text);
 }
 
 export const TASKS_PAGE_LIMIT = 30;
@@ -5275,6 +5700,7 @@ export function normalizeProjectTaskRow(raw) {
     updated: String(raw.updated || ''),
     branch: String(raw.branch || ''),
     parent: String(raw.parent || ''),
+    ...(raw.folder_alias ? { folderAlias: String(raw.folder_alias) } : {}),
     ...(raw.commit ? { commit: String(raw.commit) } : {}),
     ...(raw.landed && typeof raw.landed === 'object' ? { landed: raw.landed } : {}),
     ...(raw.retired ? { retired: true } : {}),
@@ -5955,8 +6381,8 @@ const NON_TEXT_EXT = /\.(png|jpe?g|gif|webp|bmp|avif|svg|pdf)$/i;
 
 export function contextShowMode(file, path = '') {
   const p = String(file?.path || path || '');
-  if (file && Number(file.size) > DOC_MAX_BYTES) return 'large';
   if (file?.show === 'image' || NON_TEXT_EXT.test(p)) return 'binary';
+  if (file && Number(file.size) > DOC_MAX_BYTES) return 'large';
   return 'text';
 }
 
@@ -7059,23 +7485,94 @@ export function isMissingSessionModule(result) {
   return /pm_sessions\.py is missing/i.test(`${result.stderr || ''}\n${result.stdout || ''}`);
 }
 
+export function isUnsupportedSessionError(result) {
+  if (!result || result.code === 0) return false;
+  return /is not supported/i.test(`${result.stderr || ''}\n${result.stdout || ''}`);
+}
+
 export function isQuietNoSession(result) {
   if (!result || result.code === 0) return false;
   const text = `${result.stderr || ''}\n${result.stdout || ''}`;
-  return /is not supported|no session (?:found|recorded)|transcript not found|no unambiguous claude session|no task |not a task id/i.test(text);
+  return /is not supported|no session (?:found|recorded)|transcript not found|no unambiguous \w+ session|no task |not a task id/i.test(text);
 }
 
 export function isReplacedSessionError(text) {
   return /was replaced|shorter than|no line of the transcript starts at byte/i.test(String(text || ''));
 }
 
-// True when the task's current worker is known to be a non-Claude agent (`codex`, `agy`, `pi`, …),
-// so `pm_sessions` cannot read it and no subprocess needs to be spawned.
-export function knownUnsupportedSession(task) {
-  const e = taskEngine(task);
-  if (e?.kind) return String(e.kind) !== 'claude';
-  const skind = task?.session && typeof task.session === 'object' ? String(task.session.kind || '') : '';
-  return Boolean(skind && skind !== 'claude');
+// Runtimes whose session transcripts `pm.py project session` can read.
+export const SUPPORTED_SESSION_KINDS = Object.freeze(new Set(['claude', 'agy']));
+
+export function normalizeSessionKind(kind) {
+  const k = String(kind || '').trim().toLowerCase();
+  return k === 'antigravity' ? 'agy' : k;
+}
+
+export function supportedSessionKind(kind) {
+  return SUPPORTED_SESSION_KINDS.has(normalizeSessionKind(kind));
+}
+
+// Effective runtime kind of a thread: current worker's kind first (`engine.kind`, `worker.kind`,
+// or top-level `kind`), falling back to a recorded `session.kind` when no worker kind is set.
+export function taskSessionKind(stateTask, task = null) {
+  const fromTask = taskEngine(task)?.kind || (typeof task?.kind === 'string' ? task.kind : '');
+  const fromState = taskEngine(stateTask)?.kind || (typeof stateTask?.kind === 'string' ? stateTask.kind : '');
+  const active = normalizeSessionKind(fromTask || fromState);
+  if (active) return active;
+  const fromTaskSession = task?.session && typeof task.session === 'object' ? task.session.kind : '';
+  const fromStateSession = stateTask?.session && typeof stateTask.session === 'object' ? stateTask.session.kind : '';
+  return normalizeSessionKind(fromTaskSession || fromStateSession);
+}
+
+// True when the task's current worker is known to be an agent runtime whose transcripts
+// `pm.py project session` does not read (e.g. `codex`, `pi`), so no subprocess needs to be spawned.
+export function knownUnsupportedSession(task, stateTask = null) {
+  const kind = taskSessionKind(stateTask, task);
+  return Boolean(kind && !supportedSessionKind(kind));
+}
+
+// Whether the thread detail panel should show the Log / Conversation switcher.
+export function sessionTabAvailable({
+  sessionSupported = true,
+  stateTask = null,
+  task = null,
+  threadId = '',
+  sessionTask = '',
+  sessionState = '',
+  hasSession = false,
+} = {}) {
+  if (!sessionSupported || knownUnsupportedSession(task, stateTask)) return false;
+  const knownSupported = supportedSessionKind(taskSessionKind(stateTask, task));
+  const hasTokens = contextTokens(stateTask?.context_tokens) > 0;
+  if (sessionTask && sessionTask === threadId) {
+    if (sessionState === 'unavailable') return false;
+    if (sessionState === 'ready' || sessionState === 'empty') return true;
+    if (sessionState === 'loading' || sessionState === 'error') {
+      return Boolean(hasSession || hasTokens || knownSupported);
+    }
+  }
+  return Boolean(hasTokens || knownSupported);
+}
+
+// Whether `syncThreadSession` should actively read/poll the thread's session transcript now.
+export function wantThreadSession({
+  threadTab = 'log',
+  stateTask = null,
+  task = null,
+  threadId = '',
+  sessionTask = '',
+  sessionState = '',
+} = {}) {
+  if (threadTab !== 'session') return false;
+  const hasTokens = contextTokens(stateTask?.context_tokens) > 0;
+  const knownSupported = supportedSessionKind(taskSessionKind(stateTask, task));
+  return Boolean(
+    hasTokens
+    || knownSupported
+    || sessionTask !== threadId
+    || sessionState === 'ready'
+    || sessionState === 'empty'
+  );
 }
 
 export function projectSessionArgv(id, { before = null, after = null, limit = SESSION_LIMIT } = {}) {
@@ -7279,12 +7776,12 @@ export function toolsSummary(lang, calls) {
   if (!list.length) return '';
   const names = list.map(c => String(c?.name || ''));
   const groups = [
-    [/^Bash$/i, 'toolRunBash'],
-    [/^Read$/i, 'toolRunRead'],
-    [/^(?:Edit|Write|MultiEdit|NotebookEdit)$/i, 'toolRunEdit'],
-    [/^(?:Grep|Glob)$/i, 'toolRunSearch'],
-    [/^(?:Agent|Task)$/i, 'toolRunAgent'],
-    [/^Web/i, 'toolRunWeb'],
+    [/^(?:Bash|run_command)$/i, 'toolRunBash'],
+    [/^(?:Read|read_file)$/i, 'toolRunRead'],
+    [/^(?:Edit|Write|MultiEdit|NotebookEdit|edit_file|write_file)$/i, 'toolRunEdit'],
+    [/^(?:Grep|Glob|grep_search|find_by_name)$/i, 'toolRunSearch'],
+    [/^(?:Agent|Task|invoke_subagent)$/i, 'toolRunAgent'],
+    [/^(?:Web|search_web)/i, 'toolRunWeb'],
   ];
   const parts = [];
   let rest = names.length;
@@ -7413,6 +7910,34 @@ export function projectFilesArgv(slug, { limit = REPO_FILES_LIMIT } = {}) {
   return ['project', 'files', String(slug), '--limit', String(limit)];
 }
 
+export function projectFoldersLsArgv(slug) {
+  return ['project', 'folders', 'ls', String(slug)];
+}
+
+export function projectFoldersAddArgv(slug, path, { alias = '' } = {}) {
+  const args = ['project', 'folders', 'add', String(slug), String(path)];
+  const cleanAlias = String(alias || '').trim();
+  if (cleanAlias) args.push('--alias', cleanAlias);
+  return args;
+}
+
+export function projectFoldersRemoveArgv(slug, target, { force = false } = {}) {
+  const args = ['project', 'folders', 'remove', String(slug), String(target)];
+  if (force) args.push('--force');
+  return args;
+}
+
+export function projectFoldersRenameAliasArgv(slug, target, newAlias) {
+  return ['project', 'folders', 'rename-alias', String(slug), String(target), String(newAlias)];
+}
+
+export function projectSetSpaceArgv(slug, spaceId, { spaceName = '' } = {}) {
+  const args = ['project', 'set-space', String(slug), String(spaceId)];
+  const name = String(spaceName || '').trim();
+  if (name) args.push('--space-name', name);
+  return args;
+}
+
 export function encodeRefTarget(target) {
   return String(target ?? '').replace(/[% ()<>\r\n\\]/g, ch => {
     const code = ch.charCodeAt(0);
@@ -7535,6 +8060,16 @@ function resolveAbsoluteFileRef(absPath, ctx) {
     }
   }
 
+  const foldersList = Array.isArray(ctx.folders) ? ctx.folders : [];
+  if (foldersList.length >= 2) {
+    for (const f of foldersList) {
+      const rel = stripBasePrefix(norm, f?.path || '');
+      if (rel && validRelParts(rel)) {
+        const target = `${f.alias || folderName(f.path)}/${rel}`;
+        return { kind: 'file', target, path: target };
+      }
+    }
+  }
   const repoRel = stripBasePrefix(norm, ctx.repo || '');
   if (repoRel) {
     if (!validRelParts(repoRel)) return null;
@@ -7923,6 +8458,7 @@ def read_verified(base_dir, rel_path, max_bytes):
         fail('not a file')
       if st.st_size > max_bytes:
         fail('too large')
+      mtime_ns = int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9)))
       data = f.read(max_bytes + 1)
   except OSError:
     fail('read error')
@@ -7932,7 +8468,7 @@ def read_verified(base_dir, rel_path, max_bytes):
   if not dims:
     fail('invalid image')
   h = hashlib.sha256(data).hexdigest()[:20]
-  return data, ext, dims[0], dims[1], h
+  return data, ext, dims[0], dims[1], h, mtime_ns
 
 def write_cache(cache_dir, rel_prefix, h, ext, data, max_keep=80):
   os.makedirs(cache_dir, exist_ok=True)
@@ -7968,15 +8504,40 @@ def write_cache(cache_dir, rel_prefix, h, ext, data, max_keep=80):
 
 const STAGE_LOCAL_IMAGE_PY = `${IMAGE_PROBE_PY_COMMON}
 base_dir, rel_path, cache_dir, rel_prefix, max_bytes = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
-data, ext, w, h, digest = read_verified(base_dir, rel_path, max_bytes)
+data, ext, w, h, digest, mtime_ns = read_verified(base_dir, rel_path, max_bytes)
 rel = write_cache(cache_dir, rel_prefix, digest, ext, data)
-print(json.dumps({'ok': True, 'rel': rel, 'width': w, 'height': h, 'size': len(data), 'hash': digest}, ensure_ascii=False))
+print(json.dumps({'ok': True, 'rel': rel, 'width': w, 'height': h, 'size': len(data), 'hash': digest, 'mtime_ns': mtime_ns}, ensure_ascii=False))
 `;
 
 const READ_REMOTE_IMAGE_PY = `${IMAGE_PROBE_PY_COMMON}
 base_dir, rel_path, max_bytes = sys.argv[1], sys.argv[2], int(sys.argv[3])
-data, ext, w, h, digest = read_verified(base_dir, rel_path, max_bytes)
-print(json.dumps({'ok': True, 'ext': ext, 'width': w, 'height': h, 'size': len(data), 'hash': digest, 'b64': base64.b64encode(data).decode('ascii')}, ensure_ascii=False))
+data, ext, w, h, digest, mtime_ns = read_verified(base_dir, rel_path, max_bytes)
+print(json.dumps({'ok': True, 'ext': ext, 'width': w, 'height': h, 'size': len(data), 'hash': digest, 'mtime_ns': mtime_ns, 'b64': base64.b64encode(data).decode('ascii')}, ensure_ascii=False))
+`;
+
+const STAT_IMAGES_PY = `${IMAGE_PROBE_PY_COMMON}
+req = json.loads(sys.argv[1])
+out = {}
+for item in req if isinstance(req, list) else []:
+  key = str(item.get('key') or '')
+  base_dir = str(item.get('baseDir') or '')
+  rel_path = str(item.get('relPath') or '')
+  if not key or not base_dir or not rel_path:
+    continue
+  try:
+    fd, _ext = walk_safe(base_dir, rel_path)
+    try:
+      st = os.fstat(fd)
+    finally:
+      os.close(fd)
+    if not stat.S_ISREG(st.st_mode):
+      out[key] = {'ok': False, 'error': 'not a file'}
+    else:
+      mtime_ns = int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9)))
+      out[key] = {'ok': True, 'mtime_ns': mtime_ns, 'size': int(st.st_size)}
+  except OSError:
+    out[key] = {'ok': False, 'error': 'not found'}
+print(json.dumps({'ok': True, 'items': out}, ensure_ascii=False))
 `;
 
 const WRITE_STAGED_IMAGE_PY = `${IMAGE_PROBE_PY_COMMON}
@@ -7996,6 +8557,11 @@ rel = write_cache(cache_dir, rel_prefix, digest, ext, raw)
 print(json.dumps({'ok': True, 'rel': rel, 'width': dims[0], 'height': dims[1], 'size': len(raw), 'hash': digest}, ensure_ascii=False))
 `;
 
+export const IMAGE_REVALIDATE_LOCAL_MS = 10000;
+export const IMAGE_REVALIDATE_REMOTE_MS = 25000;
+export const IMAGE_LIGHTBOX_REVALIDATE_MS = 400;
+export const IMAGE_FAIL_BACKOFF_MS = 30000;
+
 export function stageLocalImageArgv(baseDir, relPath, cacheDir, { relPrefix = INLINE_IMAGE_CACHE_DIR, maxBytes = INLINE_IMAGE_MAX_BYTES } = {}) {
   return ['-c', STAGE_LOCAL_IMAGE_PY, String(baseDir), String(relPath), String(cacheDir), String(relPrefix), String(maxBytes)];
 }
@@ -8004,8 +8570,271 @@ export function readRemoteImageArgv(baseDir, relPath, { maxBytes = INLINE_IMAGE_
   return ['python3', ['-c', READ_REMOTE_IMAGE_PY, String(baseDir), String(relPath), String(maxBytes)]];
 }
 
+export function statLocalImagesArgv(items = []) {
+  const payload = (Array.isArray(items) ? items : []).map(it => ({
+    key: String(it?.key || ''),
+    baseDir: String(it?.baseDir || ''),
+    relPath: String(it?.relPath || ''),
+  })).filter(it => it.key && it.baseDir && it.relPath);
+  return ['-c', STAT_IMAGES_PY, JSON.stringify(payload)];
+}
+
+export function statRemoteImagesArgv(items = []) {
+  return ['python3', statLocalImagesArgv(items)];
+}
+
 export function writeStagedImageArgv(cacheDir, digest, ext, b64File, { relPrefix = INLINE_IMAGE_CACHE_DIR } = {}) {
   return ['-c', WRITE_STAGED_IMAGE_PY, String(cacheDir), String(relPrefix), String(digest), String(ext), String(b64File)];
+}
+
+// Checks whether a cached staged image entry is still valid against known doc metadata or disk stat.
+// Unlike the old `(!version || !cached.version || ...)` check, a newly observed non-empty version
+// or a changed disk (mtime_ns, size) strictly invalidates the cache so overwritten same-name files refresh.
+export function isImageEntryFresh(entry, { version = '', mtimeNs = 0, size = 0 } = {}) {
+  if (!entry || !entry.rel || entry.stale) return false;
+  if (version && entry.version !== version) return false;
+  if (mtimeNs > 0 && Number(entry.mtimeNs || 0) !== Number(mtimeNs)) return false;
+  if (size > 0 && Number(entry.size || 0) !== Number(size)) return false;
+  return true;
+}
+
+export function needsImageRevalidate(entry, now = Date.now(), { remote = false, minAgeMs = null } = {}) {
+  if (!entry || !entry.rel) return false;
+  if (entry.stale) return true;
+  const threshold = Number.isFinite(minAgeMs) ? minAgeMs : (remote ? IMAGE_REVALIDATE_REMOTE_MS : IMAGE_REVALIDATE_LOCAL_MS);
+  const checkedAt = Number(entry.checkedAt || 0);
+  return !checkedAt || (Number(now) - checkedAt) >= threshold;
+}
+
+// Returns true while a recorded image load/refresh failure is still within its backoff window
+// and the underlying file has not changed again (by version, mtime_ns, or size).
+export function isImageFailActive(failed, {
+  version = '',
+  mtimeNs = 0,
+  size = 0,
+  now = Date.now(),
+  backoffMs = IMAGE_FAIL_BACKOFF_MS,
+} = {}) {
+  if (!failed || !Number.isFinite(Number(failed.at))) return false;
+  if ((Number(now) - Number(failed.at)) >= Number(backoffMs)) return false;
+  if (version && failed.version && failed.version !== version) return false;
+  if (mtimeNs > 0 && Number(failed.mtimeNs || 0) > 0 && Number(failed.mtimeNs) !== Number(mtimeNs)) return false;
+  if (size > 0 && Number(failed.size || 0) > 0 && Number(failed.size) !== Number(size)) return false;
+  return true;
+}
+
+export function reconcileImageCache(cacheMap, files = [], { machine = 'local', slug = '' } = {}) {
+  if (!(cacheMap instanceof Map) || !cacheMap.size) return cacheMap;
+  const byDocKey = new Map();
+  for (const f of Array.isArray(files) ? files : []) {
+    if (f?.root && f?.path) byDocKey.set(`${f.root}/${f.path}`, f);
+  }
+  const prefix = `${machine || 'local'}|${slug}|`;
+  let changed = false;
+  const next = new Map(cacheMap);
+  for (const [cKey, entry] of cacheMap.entries()) {
+    if (!entry) continue;
+    if (slug && !cKey.startsWith(prefix)) continue;
+    const targetKey = cKey.slice(cKey.indexOf('|', cKey.indexOf('|') + 1) + 1);
+    const meta = byDocKey.get(targetKey);
+    if (!meta) continue;
+    const version = String(meta.version || '');
+    const metaSize = Number(meta.size || 0);
+    if ((version && entry.version !== version) || (metaSize > 0 && Number(entry.size || 0) > 0 && Number(entry.size) !== metaSize)) {
+      next.set(cKey, { ...entry, stale: true, checkedAt: 0 });
+      changed = true;
+    }
+  }
+  return changed ? next : cacheMap;
+}
+
+// ---- Full-window image lightbox zoom, 2D scroll canvas & system preview ----
+export const LIGHTBOX_ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+export const LIGHTBOX_MIN_ZOOM = 0.1;
+export const LIGHTBOX_MAX_ZOOM = 4;
+export const LIGHTBOX_TOOLBAR_HEIGHT = 48;
+export const LIGHTBOX_CANVAS_PADDING = 24;
+
+export function createImageLightboxState(opts = {}) {
+  const src = opts && typeof opts === 'object' ? opts : {};
+  const mode = src.mode === 'scale' ? 'scale' : 'fit';
+  const rawScale = Number(src.scale);
+  const scale = Number.isFinite(rawScale) && rawScale > 0
+    ? Math.min(LIGHTBOX_MAX_ZOOM, Math.max(LIGHTBOX_MIN_ZOOM, rawScale))
+    : 1;
+  return {
+    rel: String(src.rel || ''),
+    width: Math.max(0, Math.round(Number(src.width) || 0)),
+    height: Math.max(0, Math.round(Number(src.height) || 0)),
+    size: Math.max(0, Math.round(Number(src.size) || 0)),
+    mtimeNs: Math.max(0, Math.round(Number(src.mtimeNs || src.mtime_ns) || 0)),
+    hash: String(src.hash || ''),
+    name: String(src.name || fileName(src.path || src.relPath || '') || 'image'),
+    root: String(src.root || ''),
+    path: String(src.path || ''),
+    baseDir: String(src.baseDir || ''),
+    relPath: String(src.relPath || ''),
+    ext: String(src.ext || ''),
+    key: String(src.key || ''),
+    machine: String(src.machine || ''),
+    absPath: String(src.absPath || ''),
+    lang: String(src.lang || ''),
+    mode,
+    scale,
+    error: String(src.error || ''),
+  };
+}
+
+// Computes aspect-ratio-preserving image size and 2D scroll canvas geometry.
+// Uses explicit canvas padding instead of flex-centering on an overflowing container so GPUI
+// never pushes top/left edges into unreachable negative scroll coordinates when zoomed in.
+export function computeLightboxLayout({
+  naturalW = 0,
+  naturalH = 0,
+  viewportW = 960,
+  viewportH = 640,
+  mode = 'fit',
+  scale = 1,
+  padding = LIGHTBOX_CANVAS_PADDING,
+} = {}) {
+  const vpW = Math.max(240, Math.round(Number(viewportW) || 960));
+  const vpH = Math.max(180, Math.round(Number(viewportH) || 640));
+  const pad = Math.max(0, Math.round(Number(padding) || 0));
+  const availW = Math.max(64, vpW - pad * 2);
+  const availH = Math.max(64, vpH - pad * 2);
+  const nw = Math.max(0, Number(naturalW) || 0);
+  const nh = Math.max(0, Number(naturalH) || 0);
+  const fitScale = (nw > 0 && nh > 0)
+    ? Math.min(1, availW / nw, availH / nh)
+    : 1;
+  const isFit = mode !== 'scale';
+  const clampedScale = Math.min(LIGHTBOX_MAX_ZOOM, Math.max(LIGHTBOX_MIN_ZOOM, Number(scale) || 1));
+  const effectiveScale = isFit ? fitScale : clampedScale;
+  const width = (nw > 0 && nh > 0) ? Math.max(1, Math.round(nw * effectiveScale)) : Math.min(availW, 480);
+  const height = (nw > 0 && nh > 0) ? Math.max(1, Math.round(nh * effectiveScale)) : Math.min(availH, 320);
+  const canvasWidth = Math.max(vpW, width + pad * 2);
+  const canvasHeight = Math.max(vpH, height + pad * 2);
+  const padLeft = Math.max(pad, Math.floor((canvasWidth - width) / 2));
+  const padTop = Math.max(pad, Math.floor((canvasHeight - height) / 2));
+  const overflowX = width + pad * 2 > vpW + 1;
+  const overflowY = height + pad * 2 > vpH + 1;
+  return {
+    fitScale,
+    effectiveScale,
+    percent: Math.max(1, Math.round(effectiveScale * 100)),
+    width,
+    height,
+    canvasWidth,
+    canvasHeight,
+    padLeft,
+    padTop,
+    overflowX,
+    overflowY,
+    scrollable: overflowX || overflowY,
+    isFit,
+    isActual: !isFit && Math.abs(effectiveScale - 1) < 0.005,
+    canZoomIn: effectiveScale < LIGHTBOX_MAX_ZOOM - 0.005,
+    canZoomOut: effectiveScale > LIGHTBOX_MIN_ZOOM + 0.005,
+  };
+}
+
+export function stepLightboxZoom(state, direction, fitScale = 1) {
+  const cur = state?.mode === 'scale'
+    ? Math.min(LIGHTBOX_MAX_ZOOM, Math.max(LIGHTBOX_MIN_ZOOM, Number(state.scale) || 1))
+    : (Number(fitScale) > 0 ? Number(fitScale) : 1);
+  let next = cur;
+  if (direction > 0) {
+    const found = LIGHTBOX_ZOOM_STEPS.find(s => s > cur * 1.02);
+    next = found !== undefined ? found : LIGHTBOX_MAX_ZOOM;
+  } else if (direction < 0) {
+    let found = null;
+    for (let i = LIGHTBOX_ZOOM_STEPS.length - 1; i >= 0; i--) {
+      if (LIGHTBOX_ZOOM_STEPS[i] < cur / 1.02) {
+        found = LIGHTBOX_ZOOM_STEPS[i];
+        break;
+      }
+    }
+    next = found !== null ? found : LIGHTBOX_MIN_ZOOM;
+  }
+  next = Math.min(LIGHTBOX_MAX_ZOOM, Math.max(LIGHTBOX_MIN_ZOOM, next));
+  return { ...(state || {}), mode: 'scale', scale: next };
+}
+
+export function toggleLightboxFitActual(state, fitScale = 1) {
+  if (!state || state.mode !== 'scale') {
+    return { ...(state || {}), mode: 'scale', scale: 1 };
+  }
+  return { ...state, mode: 'fit', scale: Number(fitScale) > 0 ? Number(fitScale) : 1 };
+}
+
+export function cycleLightboxZoomPreset(state, fitScale = 1) {
+  if (!state || state.mode !== 'scale') {
+    return { ...(state || {}), mode: 'scale', scale: 1 };
+  }
+  const cur = Number(state.scale) || 1;
+  if (cur < 0.98) return { ...state, mode: 'scale', scale: 1 };
+  if (cur < 1.48) return { ...state, mode: 'scale', scale: 1.5 };
+  if (cur < 1.98) return { ...state, mode: 'scale', scale: 2 };
+  return { ...state, mode: 'fit', scale: Number(fitScale) > 0 ? Number(fitScale) : 1 };
+}
+
+export function applyLightboxPinch(state, delta, fitScale = 1) {
+  const d = Number(delta);
+  if (!Number.isFinite(d) || Math.abs(d) < 1e-4) return state;
+  const base = state?.mode === 'scale'
+    ? Math.min(LIGHTBOX_MAX_ZOOM, Math.max(LIGHTBOX_MIN_ZOOM, Number(state.scale) || 1))
+    : (Number(fitScale) > 0 ? Number(fitScale) : 1);
+  const clampedDelta = Math.max(-0.5, Math.min(0.5, d));
+  const next = Math.min(LIGHTBOX_MAX_ZOOM, Math.max(LIGHTBOX_MIN_ZOOM, base * (1 + clampedDelta)));
+  return { ...(state || {}), mode: 'scale', scale: Math.round(next * 1000) / 1000 };
+}
+
+const STAGED_CACHE_FILE_RE = /^[0-9a-f]{8,64}\.(png|jpe?g|webp|gif)$/i;
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+
+export function resolveSystemPreviewPath({ target = null, entry = null, appHomeDir = '', machine = '' } = {}) {
+  // Always prefer the staged cache file verified by walk_safe (O_NOFOLLOW, .git rejected, magic-byte checked)
+  // so local and remote projects share one symlink-safe, containment-enforced path for system Preview.
+  const rel = String(entry?.rel || '').replace(/\\/g, '/').trim();
+  const prefix = `${INLINE_IMAGE_CACHE_DIR}/`;
+  const appDir = normalizeFsPath(appHomeDir).replace(/\/+$/, '');
+  if (appDir && rel.startsWith(prefix) && /^(\/|[a-zA-Z]:\/)/.test(appDir) && !CONTROL_CHAR_RE.test(appDir)) {
+    const file = rel.slice(prefix.length);
+    if (STAGED_CACHE_FILE_RE.test(file)) {
+      return `${appDir}/${prefix}${file}`;
+    }
+  }
+  const isRemote = Boolean(String(machine || '').trim());
+  if (!isRemote && target?.baseDir && target?.relPath) {
+    const base = normalizeFsPath(target.baseDir).replace(/\/+$/, '');
+    const parts = validRelParts(target.relPath, { allowGit: true });
+    if (base && parts && !parts.includes('.git') && !CONTROL_CHAR_RE.test(base) && /^(\/|[a-zA-Z]:\/)/.test(base)) {
+      const joined = `${base}/${parts.join('/')}`;
+      if (isPreviewableImage(joined) && !CONTROL_CHAR_RE.test(joined)) return joined;
+    }
+  }
+  return '';
+}
+
+export function systemOpenFileArgv(filePath, platform = 'macos') {
+  const p = String(filePath || '').trim();
+  if (!p || CONTROL_CHAR_RE.test(p)) return null;
+  if (!/^(\/|[a-zA-Z]:[\\/])/.test(p)) return null;
+  const os = String(platform || 'macos').toLowerCase();
+  if (os === 'windows' || os === 'win32') return ['cmd', ['/c', 'start', '', p]];
+  if (os === 'linux') return ['xdg-open', [p]];
+  return ['open', [p]];
+}
+
+export function imageLightboxOverlaySpec(payload) {
+  return {
+    mod: 'pm-project',
+    props: { imageLightbox: payload },
+    kind: 'dialog',
+    frame: 'none',
+    width: 0.98,
+    height: 0.96,
+  };
 }
 
 // ---- Auto-open right side tab for newly arriving PM replies / open questions ----
@@ -8283,20 +9112,42 @@ export function parseGitLsFiles(stdout) {
   return out;
 }
 
-export function indexRepoFiles(paths) {
+export function indexRepoFiles(paths, folders = []) {
   const list = Array.isArray(paths) ? paths : [];
+  const aliases = new Set(
+    Array.isArray(folders) && folders.length >= 2
+      ? folders.map(f => String(f?.alias || '').trim()).filter(Boolean)
+      : [],
+  );
   const out = [];
   for (const item of list) {
-    if (item && typeof item === 'object' && typeof item.path === 'string' && typeof item.nameLow === 'string') {
+    const path = typeof item === 'string' ? item : String(item?.path || '');
+    if (!path) continue;
+    if (
+      item &&
+      typeof item === 'object' &&
+      typeof item.path === 'string' &&
+      typeof item.nameLow === 'string' &&
+      (aliases.size < 2 || typeof item.alias === 'string')
+    ) {
       out.push(item);
       continue;
     }
-    const path = typeof item === 'string' ? item : String(item?.path || '');
-    if (!path) continue;
-    const slash = path.lastIndexOf('/');
-    const name = slash >= 0 ? path.slice(slash + 1) : path;
-    const dir = slash >= 0 ? path.slice(0, slash) : '';
-    out.push({ path, name, dir, pathLow: path.toLowerCase(), nameLow: name.toLowerCase() });
+    let alias = '';
+    let relPath = path;
+    if (aliases.size >= 2) {
+      const firstSlash = path.indexOf('/');
+      const head = firstSlash > 0 ? path.slice(0, firstSlash) : '';
+      if (aliases.has(head)) {
+        alias = head;
+        relPath = path.slice(firstSlash + 1);
+      }
+    }
+    const slash = relPath.lastIndexOf('/');
+    const name = slash >= 0 ? relPath.slice(slash + 1) : relPath;
+    const relDir = slash >= 0 ? relPath.slice(0, slash) : '';
+    const dir = relDir;
+    out.push({ path, name, dir, alias, relPath, pathLow: path.toLowerCase(), nameLow: name.toLowerCase() });
   }
   return out;
 }
@@ -8363,6 +9214,8 @@ export function buildMentionMenu({
   taskNumbers = null,
   libraryFiles = [],
   repoFiles = [],
+  folders = [],
+  foldersEmpty = false,
   excludeThread = '',
   filesLoading = false,
   filesError = '',
@@ -8380,6 +9233,7 @@ export function buildMentionMenu({
     const task = byTask.get(r.task);
     const num = taskNumber(task) || taskNumber(r) || taskNumber(taskNumbers?.[r.task]);
     const engine = task ? engineLabel(task) : '';
+    const folderAlias = String(task?.folder_alias || r.folderAlias || '').trim();
     const active = ['waiting', 'review', 'working'].includes(r.group);
     const numTag = formatTaskNumber(num);
     const item = buildMentionCandidate({
@@ -8388,6 +9242,7 @@ export function buildMentionMenu({
       kind: 'thread',
       target: r.task,
       ...(num ? { number: num } : {}),
+      ...(folderAlias ? { folderAlias } : {}),
       label: r.title || r.task,
       subtitle: [numTag, r.branch, engine].filter(Boolean).join(' · ') || r.task,
       typeLabel: word(lang, 'mentionTypeThread'),
@@ -8400,7 +9255,7 @@ export function buildMentionMenu({
       active,
       tieRank: active ? 0 : 3,
       searchPrimary: numTag ? `${numTag} ${r.title || r.task}` : (r.title || r.task),
-      searchSecondary: `${num ? `${num} #${num} ` : ''}${r.task} ${r.branch || ''} ${r.latest || ''}`,
+      searchSecondary: `${num ? `${num} #${num} ` : ''}${r.task} ${r.branch || ''} ${folderAlias} ${r.latest || ''}`,
     });
     threadItems.push(item);
     if (active) activeThreads.push(item);
@@ -8514,13 +9369,15 @@ export function buildMentionMenu({
     });
   });
 
-  const indexedFiles = indexRepoFiles(repoFiles);
+  const folderList = Array.isArray(folders) ? folders : [];
+  const indexedFiles = indexRepoFiles(repoFiles, folderList);
   const fileTypeLabel = word(lang, 'mentionTypeFile');
   const buildFileItem = f => buildMentionCandidate({
     key: `file:${f.path}`,
     category: 'files',
     kind: 'file',
     path: f.path,
+    folderAlias: f.alias || '',
     target: f.path,
     label: f.name,
     subtitle: f.dir,
@@ -8569,7 +9426,11 @@ export function buildMentionMenu({
     return score;
   };
   if (activeCat !== 'all') {
-    const title = word(lang, activeCat === 'threads' ? 'mentionThreads' : activeCat === 'library' ? 'mentionLibrary' : 'mentionFiles');
+    const title = activeCat === 'threads'
+      ? word(lang, 'mentionThreads')
+      : activeCat === 'library'
+        ? word(lang, 'mentionLibrary')
+        : (folderList.length >= 2 ? word(lang, 'mentionFilesMultiTitle', folderList.length) : word(lang, 'mentionFiles'));
     const error = activeCat === 'files' ? String(filesError || '')
       : activeCat === 'library' ? String(libraryError || '')
       : '';
@@ -8616,7 +9477,7 @@ export function buildMentionMenu({
         ? 'mentionEmptyThreads'
         : activeCat === 'library'
           ? 'mentionEmptyLibrary'
-          : 'mentionEmptyFiles';
+          : (foldersEmpty && folderList.length === 0 ? 'mentionEmptyFilesNoFolders' : 'mentionEmptyFiles');
     return {
       mode: 'category',
       category: activeCat,
@@ -9753,8 +10614,10 @@ export function taskDependencies(task, allTasks = [], { terms = [], live = [] } 
     const isBlocked = !isMet && !isBroken && status === 'blocked' && !target?.answered;
     const isWorking = !isMet && !isBroken && !target?.offline &&
       (status === 'in_progress' || (status === 'blocked' && Boolean(target?.answered)));
+    const depNum = taskNumber(target) || taskNumber(entry);
     items.push({
       id: depId,
+      ...(depNum ? { number: depNum } : {}),
       targetId: target?.id || (taskMachine ? `${taskMachine}/${depId}` : depId),
       sourceId: target?.sourceId || depId,
       pm: target?.pm || task?.pm || '',
@@ -9788,6 +10651,23 @@ export function taskDependencies(task, allTasks = [], { terms = [], live = [] } 
     ready,
     broken: items.some(i => i.isBroken),
   };
+}
+
+// Short dependency reference (`#338` whenever numbered; otherwise concise title/id, never a sprawling slug).
+export function formatDepRef(item, resolveNumber = null) {
+  if (!item || typeof item !== 'object') return '';
+  const direct = formatTaskNumber(taskNumber(item));
+  if (direct) return direct;
+  if (typeof resolveNumber === 'function') {
+    const resolved = formatTaskNumber(resolveNumber(item.targetId) || resolveNumber(item.id) || resolveNumber(item.sourceId));
+    if (resolved) return resolved;
+  }
+  const title = String(item.title || '').trim();
+  if (title && title !== item.id && title !== item.sourceId) {
+    return title.length > 14 ? `${title.slice(0, 13)}…` : title;
+  }
+  const id = String(item.id || '').trim();
+  return id.length > 14 ? `${id.slice(0, 13)}…` : id;
 }
 
 // ---- Thread sub-agents (`worker`, `review`, `helpers`) & default small-window mode --------
@@ -10513,6 +11393,7 @@ export function taskTree(pm, tasks, events = [], { terms = [], live = [], tabs =
     if (seenFinished.has(t.id)) continue;
     seenFinished.add(t.id);
     const ctx = contextTokens(t.context_tokens);
+    const commit = shortCommit(t);
     const list = finishedByParent.get(t.parent) || [];
     list.push({
       task: t.id,
@@ -10523,6 +11404,8 @@ export function taskTree(pm, tasks, events = [], { terms = [], live = [], tabs =
       group: 'finished',
       cleanup: Boolean(t.cleanup),
       updated: String(t.updated || ''),
+      ...(t.folder_alias ? { folderAlias: String(t.folder_alias) } : {}),
+      ...(commit ? { commit } : {}),
       ...(ctx ? { contextTokens: ctx } : {}),
     });
     finishedByParent.set(t.parent, list);
@@ -10576,7 +11459,7 @@ export function taskTree(pm, tasks, events = [], { terms = [], live = [], tabs =
       summary = { waiting: 0, review: 0, working: 0, offline: 0, paused: 0, parked: 0, done: finishedChildren.length };
       for (const c of children) {
         if (c.group === 'waiting') summary.waiting++;
-        else if (c.group === 'working' && (c.reviewing || c.status === 'review')) summary.review++;
+        else if (c.group === 'review' || (c.group === 'working' && (c.reviewing || c.status === 'review'))) summary.review++;
         else if (c.group === 'working') summary.working++;
         else if (c.group === 'offline') summary.offline++;
         else if (c.group === 'paused') summary.paused++;
@@ -11380,6 +12263,14 @@ export function sideTabKey(spec) {
   return '';
 }
 
+// Compact strip label for thread tabs: shows `#NNN` when numbered so the full task title
+// lives once in the detail header without duplicating across tab bar + header.
+export function threadTabStripLabel({ number, title = '', taskId = '' } = {}) {
+  const num = formatTaskNumber(number);
+  if (num) return { text: num, compact: true };
+  return { text: String(title || taskId || '').trim(), compact: false };
+}
+
 export function createSideTabsState() {
   return {
     tabs: [],
@@ -11960,4 +12851,63 @@ export function serializeProjectTabs(store, pmName, rawState, {
     return JSON.stringify({ v: 1, projects: pruned });
   }
   return JSON.stringify({ v: 1, projects: base });
+}
+
+// Estimates the rendered pixel width of an open detail tab in the unified 40px right-panel header.
+export function estimateSideTabWidth(strip, { isActive = false, narrow = false } = {}) {
+  const text = String(strip?.text || '');
+  const compact = Boolean(strip?.compact);
+  if (compact) {
+    const textW = Math.ceil(text.length * 7.4);
+    return Math.min(120, 15 + 12 + 5 + textW + (isActive ? 21 : 0));
+  }
+  let units = 0;
+  for (const ch of text) {
+    units += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe6f\uff01-\uff60\uffe0-\uffe6]/u.test(ch) ? 2 : 1;
+  }
+  const est = Math.ceil(units * 6.4) + 16 + 13 + 5 + (isActive ? 21 : 0);
+  const minW = narrow ? 72 : 84;
+  const maxW = narrow ? 124 : 156;
+  return Math.max(minW, Math.min(maxW, est));
+}
+
+// Computes real tab overflow for the unified 40px right-panel header.
+// Only reports overflow when the sum of tab widths genuinely exceeds available stripWidth;
+// always keeps the active tab visible when overflowing.
+export function computeSideTabOverflow({ tabs = [], activeId = null, stripWidth = 0, narrow = false, stripInfoOf = null } = {}) {
+  const list = Array.isArray(tabs) ? tabs : [];
+  if (!list.length) return { visibleIds: [], hiddenCount: 0, overflow: false };
+  const gap = 3;
+  const widths = list.map(tab => {
+    const info = typeof stripInfoOf === 'function'
+      ? stripInfoOf(tab)
+      : { text: tab.title || tab.taskId || tab.path || '', compact: tab.kind === 'thread' };
+    return estimateSideTabWidth(info, { isActive: tab.id === activeId, narrow });
+  });
+  const totalWidth = widths.reduce((sum, w) => sum + w, 0) + Math.max(0, list.length - 1) * gap;
+  const avail = Number(stripWidth) || 0;
+  if (avail <= 0 || totalWidth <= avail) {
+    return { visibleIds: list.map(t => t.id), hiddenCount: 0, overflow: false };
+  }
+  const overflowBtnW = 44;
+  const budget = Math.max(0, avail - overflowBtnW);
+  const picked = new Set();
+  let used = 0;
+  const tryAdd = idx => {
+    const w = widths[idx];
+    const extra = picked.size > 0 ? gap + w : w;
+    if (picked.size > 0 && used + extra > budget) return false;
+    picked.add(idx);
+    used += extra;
+    return true;
+  };
+  const activeIdx = activeId ? list.findIndex(t => t.id === activeId) : -1;
+  if (activeIdx >= 0) tryAdd(activeIdx);
+  for (let i = 0; i < list.length; i++) {
+    if (picked.has(i)) continue;
+    tryAdd(i);
+  }
+  const visibleIds = list.filter((_, i) => picked.has(i)).map(t => t.id);
+  const hiddenCount = Math.max(0, list.length - visibleIds.length);
+  return { visibleIds, hiddenCount, overflow: hiddenCount > 0 };
 }

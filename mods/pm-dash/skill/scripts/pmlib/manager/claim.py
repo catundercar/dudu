@@ -2,6 +2,7 @@
 new terminal. Layer 3."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..context import Context
@@ -9,6 +10,7 @@ from ..ledger.ledger import Ledger
 from ..ledger.task import ACTIVE, pm_started
 from ..project.project import ProjectRegistry, in_scope
 from ..project.readmodel import owner_of
+from ..store import registration_slug
 
 
 def move_pm_tasks_to_pane(
@@ -16,6 +18,7 @@ def move_pm_tasks_to_pane(
     old_panes: Iterable[str | None],
     new_pane: str,
     *,
+    slug: str | None = None,
     ctx: Context | None = None,
 ) -> None:
     """When a desktop-app PM moves to a new terminal (legacy-to-seat rotation, crash recovery rotate, start, restore
@@ -32,7 +35,10 @@ def move_pm_tasks_to_pane(
             continue
         if task.get("worker_pane") in olds or pm_started(task):
             continue
-        if not (in_scope(task.get("repo"), repo) or in_scope((owner_of(task, pms) or {}).get("repo"), repo)):
+        owner_rec = owner_of(task, pms) or {}
+        slug_match = bool(slug and (task.get("project_slug") == slug or registration_slug(owner_rec) == slug))
+        repo_match = bool(repo and (in_scope(task.get("repo"), repo) or in_scope(owner_rec.get("repo"), repo)))
+        if not (slug_match or repo_match):
             continue
 
         def _repoint(cur: Any, _ch: Any, _olds: set[str] = olds) -> dict[str, Any] | None:
@@ -59,7 +65,19 @@ def end_pm(rec: dict[str, Any], name: str, *, ctx: Context | None = None) -> str
     if rec.get("runtime") == "hc":
         term = rec.get("terminal") or ""
         info = (c.hc.get_raw(term) or {}) if term else {}
-        if not info or (info.get("labels") or {}).get("pm") != name:
+        pm_label = (info.get("labels") or {}).get("pm")
+        repo_str = str(rec.get("repo") or "")
+        expected_labels = {
+            x
+            for x in (
+                name,
+                registration_slug(rec),
+                str(rec.get("project") or ""),
+                Path(repo_str).name if repo_str else "",
+            )
+            if x
+        }
+        if not info or not pm_label or pm_label not in expected_labels:
             return tr(f"PM hc:{term} is not running", f"PM hc:{term} 不在运行")
         c.hc.label(term, "pm=", "pm.seat=")
         if (info.get("state") != "live" or c.hc.kill(term) is not None) and c.hc.remove(term) is not None:

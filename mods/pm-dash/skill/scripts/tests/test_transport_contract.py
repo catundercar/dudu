@@ -1,4 +1,6 @@
-"""`TransportContractTest` suite across `FakeTransport`, `LocalHcTransport`, and `LocalTuiTransport` (§5, §10.3)."""
+"""`TransportContractTest` suite across `FakeTransport`, `LocalHcTransport`, `RemoteHcTransport`,
+`SelfHostedPullTransport` and `LocalTuiTransport` (§5, §10.3). `TransportContractMixin` is the one contract: the first
+four run exactly the same tests through it."""
 from __future__ import annotations
 
 import json
@@ -17,10 +19,18 @@ from pmlib.home import Home
 from pmlib.messaging.address import Endpoint, LogicalAddress
 from pmlib.messaging.envelope import P1_USER, Envelope, new_env_id
 from pmlib.messaging.mailbox import MailboxItem
+from pmlib.messaging.nodes import NodeRegistry, NodeStreams
 from pmlib.messaging.principal import Principal
-from pmlib.messaging.transports import FakeTransport, LocalHcTransport, LocalTuiTransport
+from pmlib.messaging.transports import (
+    FakeTransport,
+    LocalHcTransport,
+    LocalTuiTransport,
+    RemoteHcTransport,
+    SelfHostedPullTransport,
+)
 from pmlib.terminals.hc import HcHost
 from tests.fakes import FakeClock, FakeTui
+from tests.sim_hc import SimHc
 
 
 def _make_item(text: str = "hello PM") -> MailboxItem:
@@ -338,6 +348,240 @@ class TestTransportContractLocalTui(unittest.TestCase):
         del self.tui._panes["%1"]
         gone = self.tr.deliver(self.ep, _make_item("hello gone"))
         self.assertEqual(gone.status, "endpoint_gone")
+
+
+INTERRUPT_STATES = {"stopped", "exited", "still_working", "unknown", "unsupported", "partitioned", "endpoint_gone"}
+
+
+class TransportContractMixin:
+    """The `Transport` contract (§10.4), run unchanged against every implementation. A subclass provides `tr`, `ep`
+    and the scenario setters; the tests below never look at which transport they drive."""
+
+    tr: Any
+    ep: Endpoint
+
+    # scenario setters each subclass implements
+    def set_idle(self) -> None: raise NotImplementedError
+    def set_working(self) -> None: raise NotImplementedError
+    def set_blocked(self) -> None: raise NotImplementedError
+    def set_stateless(self) -> None: raise NotImplementedError
+    def set_gone(self) -> None: raise NotImplementedError
+    def set_partitioned(self) -> None: raise NotImplementedError
+    def set_reconnected(self) -> None: raise NotImplementedError
+    def typed_count(self) -> int: raise NotImplementedError
+
+    def test_contract_idle_reporting_endpoint_types_and_supports_if_idle(self) -> None:
+        self.set_idle()
+        caps = self.tr.capabilities(self.ep)
+        self.assertTrue(caps.can_report_status)
+        self.assertTrue(caps.supports_if_idle)
+        before = self.typed_count()
+        out = self.tr.deliver(self.ep, _make_item("contract"), if_idle=True)
+        self.assertEqual(out.status, "typed")
+        self.assertEqual(self.typed_count(), before + 1)
+
+    def test_contract_if_idle_on_a_busy_endpoint_is_status_mismatch_and_types_nothing(self) -> None:
+        self.set_working()
+        before = self.typed_count()
+        out = self.tr.deliver(self.ep, _make_item("busy"), if_idle=True)
+        self.assertEqual(out.status, "status_mismatch")
+        self.assertEqual(self.typed_count(), before)
+
+    def test_contract_blocked_prompt_is_reported_not_typed(self) -> None:
+        self.set_blocked()
+        before = self.typed_count()
+        self.assertEqual(self.tr.deliver(self.ep, _make_item("x")).status, "blocked_prompt")
+        self.assertEqual(self.typed_count(), before)
+
+    def test_contract_stateless_endpoint_never_claims_if_idle(self) -> None:
+        self.set_stateless()
+        caps = self.tr.capabilities(self.ep)
+        self.assertFalse(caps.can_report_status)
+        self.assertFalse(caps.supports_if_idle)
+        out = self.tr.interrupt(self.ep)
+        self.assertIn(out.status, ("unknown", "exited"))
+
+    def test_contract_gone_endpoint(self) -> None:
+        self.set_gone()
+        self.assertEqual(self.tr.deliver(self.ep, _make_item("x")).status, "endpoint_gone")
+        self.assertEqual(self.tr.interrupt(self.ep).status, "endpoint_gone")
+
+    def test_contract_partition_is_never_gone_or_stalled(self) -> None:
+        self.set_idle()
+        self.set_partitioned()
+        before = self.typed_count()
+        self.assertEqual(self.tr.deliver(self.ep, _make_item("x")).status, "partitioned")
+        self.assertEqual(self.tr.interrupt(self.ep).status, "partitioned")
+        self.assertFalse(self.tr.unblock_prompt(self.ep, ("enter",)))
+        batch = self.tr.observe(self.ep, {"obs_seq": 3})
+        self.assertNotEqual(batch.link_state, "connected")
+        self.assertFalse([o for o in batch.observations if o.get("kind") == "hc_state"],
+                         "no terminal state may be reported across a partition")
+        self.assertEqual(self.typed_count(), before)
+        self.set_reconnected()
+        self.assertEqual(self.tr.deliver(self.ep, _make_item("after")).status, "typed")
+
+    def test_contract_observe_cursors_never_go_back(self) -> None:
+        self.set_idle()
+        cur = {"obs_seq": 5, "transcript_seq": 9}
+        batch = self.tr.observe(self.ep, cur)
+        self.assertEqual(batch.link_state, "connected")
+        for key, val in cur.items():
+            self.assertGreaterEqual(int(batch.next_cursors.get(key, val)), val)
+
+    def test_contract_interrupt_outcome_is_one_of_the_real_states(self) -> None:
+        self.set_working()
+        caps = self.tr.capabilities(self.ep)
+        out = self.tr.interrupt(self.ep)
+        self.assertIn(out.status, INTERRUPT_STATES)
+        if caps.can_interrupt:
+            self.assertNotEqual(out.status, "unsupported")
+
+
+class TestContractFake(TransportContractMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self.tr = FakeTransport(clock=FakeClock())
+        self.ep = Endpoint(runtime="fake", machine="local", workspace="/repo", terminal="t1")
+        self.tr.configure(self.ep)
+
+    def set_idle(self) -> None: self.tr.configure(self.ep, agent_state="idle", can_report_status=True, live=True)
+    def set_working(self) -> None: self.tr.configure(self.ep, agent_state="working", can_report_status=True)
+    def set_blocked(self) -> None: self.tr.configure(self.ep, agent_state="blocked")
+    def set_stateless(self) -> None: self.tr.configure(self.ep, can_report_status=False, agent_state="")
+    def set_gone(self) -> None: self.tr.configure(self.ep, live=False)
+    def set_partitioned(self) -> None: self.tr.configure(self.ep, link_state="disconnected")
+    def set_reconnected(self) -> None: self.tr.configure(self.ep, link_state="connected", agent_state="idle")
+    def typed_count(self) -> int: return len(self.tr.deliveries)
+
+
+class _SimHcContract(TransportContractMixin):
+    ADDR = "t1"
+
+    def _make(self, transport_cls: Any) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.clock = FakeClock()
+        self.sim = SimHc(pathlib.Path(self._tmp.name), clock=self.clock)
+        self.ctx = Context(home=Home(pathlib.Path(self._tmp.name) / "home"), clock=self.clock,
+                           hc=HcHost(runner=self.sim, clock=self.clock))
+        self.tr = transport_cls(self.ctx)
+        self.sim.add_term(self.ADDR)
+
+    def _term(self) -> dict:
+        return self.sim.terms[self.ADDR]
+
+    def set_idle(self) -> None: self._term().update(status="idle", reported=True, state="live")
+    def set_working(self) -> None: self._term().update(status="working", reported=True)
+    def set_blocked(self) -> None: self._term().update(status="blocked")
+    def set_stateless(self) -> None: self._term().update(status=None, reported=False)
+    def set_gone(self) -> None: self.sim.terms.pop(self.ADDR)
+    def typed_count(self) -> int: return len(self.sim.typed_to(self.ADDR))
+
+
+class TestContractLocalHc(_SimHcContract, unittest.TestCase):
+    """This machine's herdr-core: a partition is the core answering `unavailable` (a machine-less endpoint has
+    no `machine ls` line of its own)."""
+
+    def setUp(self) -> None:
+        self._make(LocalHcTransport)
+        self.ep = Endpoint(runtime="hc", machine=None, workspace="/repo", terminal="t1")
+        self._real = self.sim.__call__
+
+    def set_partitioned(self) -> None:
+        sim = self.sim
+
+        def down(*argv: str, **kw: Any) -> Any:
+            if argv and argv[0] in ("get", "send", "keys", "interrupt"):
+                return {"error": {"kind": "unavailable", "message": "core unreachable"}}
+            return SimHc.__call__(sim, *argv, **kw)
+        self.ctx.hc._runner = down
+
+    def set_reconnected(self) -> None:
+        self.ctx.hc._runner = self.sim
+        self.set_idle()
+
+
+class TestContractRemoteHc(_SimHcContract, unittest.TestCase):
+    """Another machine's terminal through herdr-core's bridge (`dev/t7`): the machine's line decides."""
+
+    ADDR = "dev/t7"
+
+    def setUp(self) -> None:
+        self._make(RemoteHcTransport)
+        self.sim.add_machine("dev")
+        self.ep = Endpoint(runtime="hc", machine="dev", workspace="/w", terminal="t7")
+
+    def set_partitioned(self) -> None:
+        self.sim.set_machine("dev", "unreachable")
+        self.tr.forget_machine_state()
+
+    def set_reconnected(self) -> None:
+        self.sim.set_machine("dev", "connected")
+        self.tr.forget_machine_state()
+        self.set_idle()
+
+
+class TestContractSelfHostedPull(TransportContractMixin, unittest.TestCase):
+    """Self-hosted pull worker (`sh:<node>/<slot>`, §5.3 column 3, phase 6b): runs the exact same contract."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.clock = FakeClock()
+        self.ctx = Context(home=Home(pathlib.Path(self._tmp.name) / "home"), clock=self.clock)
+        reg = NodeRegistry(self.ctx.home.tokens, clock=self.clock)
+        enr = reg.enroll("pull-box", ["proj"])
+        node = reg.join(
+            enr.token,
+            capabilities={
+                "can_report_status": True,
+                "can_interrupt": True,
+                "can_unblock_keys": True,
+                "can_observe_screen": True,
+                "can_observe_procs": False,
+                "can_observe_transcript": False,
+            },
+        )
+        self.node_id = node["node_id"]
+        self.ep = Endpoint(runtime="self_hosted", machine=self.node_id, workspace="", terminal="slot-1")
+        self.tr = SelfHostedPullTransport(self.ctx, lease_timeout_s=30.0)
+        self.streams = NodeStreams(self.ctx.home.nodes, self.node_id)
+        self._heartbeat()
+
+    def _now_ms(self) -> int:
+        return int(float(self.clock.time()) * 1000)
+
+    def _heartbeat(self) -> None:
+        self.streams.record_sync(self._now_ms(), inbox_acked=0)
+
+    def set_idle(self) -> None:
+        self._heartbeat()
+        self.streams.set_slot(self.ep.terminal, status="idle", reported=True, gone=False)
+
+    def set_working(self) -> None:
+        self._heartbeat()
+        self.streams.set_slot(self.ep.terminal, status="working", reported=True, gone=False)
+
+    def set_blocked(self) -> None:
+        self._heartbeat()
+        self.streams.set_slot(self.ep.terminal, status="blocked", reported=True, gone=False)
+
+    def set_stateless(self) -> None:
+        self._heartbeat()
+        self.streams.set_slot(self.ep.terminal, status="", reported=False, gone=False)
+
+    def set_gone(self) -> None:
+        self._heartbeat()
+        self.streams.set_slot(self.ep.terminal, status="", reported=False, gone=True)
+
+    def set_partitioned(self) -> None:
+        self.clock.advance(60.0)  # past the 30 s lease
+
+    def set_reconnected(self) -> None:
+        self.set_idle()
+
+    def typed_count(self) -> int:
+        return self.tr.queued_count(self.ep)
 
 
 if __name__ == "__main__":

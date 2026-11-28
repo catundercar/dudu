@@ -2124,6 +2124,165 @@ class ThinDispatchAskTests(unittest.TestCase):
                 )
             )
 
+    def test_multifolder_dispatch_selection_outside_reads_and_verify_alias(self):
+        from pmlib.review.land import verify_commands_for
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = make_ctx(root / "ledger")
+            ctx.pane = "hc:pm1"
+            repo_a = root / "repos/backend"
+            repo_b = root / "repos/frontend"
+            docs_only = root / "repos/specs"
+            for d in (repo_a, repo_b, docs_only):
+                d.mkdir(parents=True)
+            ctx.git.roots[str(repo_a.resolve())] = str(repo_a.resolve())
+            ctx.git.roots[str(repo_b.resolve())] = str(repo_b.resolve())
+            # `docs_only` is a non-Git folder (no entry in `ctx.git.roots`)
+            ctx.home.registrations.mkdir(parents=True, exist_ok=True)
+            ctx.home.project("single-git").root.mkdir(parents=True, exist_ok=True)
+            ctx.home.registration("single-git").write_text(json.dumps({
+                "name": "pm-single-git", "slug": "single-git", "project": "Single Git",
+                "folders": [
+                    {"path": str(docs_only), "alias": "specs", "git": False},
+                    {"path": str(repo_a), "alias": "backend", "git": True},
+                ],
+                "repo": str(docs_only),
+            }), encoding="utf-8")
+
+            # 1) 1 Git + 1 non-Git folder: `--branch` auto-selects the single Git repo & adds sibling to reads.
+            plan1 = Workers(ctx).dispatch(
+                dispatch_cmd._request_from_args(
+                    cli.build_parser().parse_args([
+                        "dispatch", "Auto Git", "--repo", str(docs_only), "--branch", "feat/a",
+                        "--kind", "claude", "--ask", "build endpoint", "--dry-run",
+                    ])
+                )
+            ).dry_run_plan
+            assert plan1 is not None
+            self.assertEqual(plan1["project_slug"], "single-git")
+            self.assertEqual(plan1["folder"], "backend")
+            settings_idx = plan1["argv"].index("--settings") + 1
+            settings_text = Path(plan1["argv"][settings_idx]).read_text(encoding="utf-8")
+            self.assertIn(str(docs_only.resolve()), settings_text)
+
+            # 2) >=2 folders: `--here` without `--folder` via slug or `.` refuses with folder choices.
+            with self.assertRaises(Refused) as err_here:
+                Workers(ctx).dispatch(
+                    dispatch_cmd._request_from_args(
+                        cli.build_parser().parse_args([
+                            "dispatch", "Ambig Here", "--repo", "single-git", "--here",
+                            "--ask", "inspect", "--dry-run",
+                        ])
+                    )
+                )
+            self.assertIn("--folder backend", str(err_here.exception))
+            self.assertIn("--folder specs", str(err_here.exception))
+
+            # 3) >=2 Git repos: `--branch` with slug or `.` without `--folder` refuses and lists both Git aliases.
+            ctx.home.registration("two-git").write_text(json.dumps({
+                "name": "pm-two-git", "slug": "two-git", "project": "Two Git",
+                "folders": [
+                    {"path": str(repo_a), "alias": "backend", "git": True},
+                    {"path": str(repo_b), "alias": "frontend", "git": True},
+                    {"path": str(docs_only), "alias": "specs", "git": False},
+                ],
+                "repo": str(repo_a),
+            }), encoding="utf-8")
+            with self.assertRaises(Refused) as err_two:
+                Workers(ctx).dispatch(
+                    dispatch_cmd._request_from_args(
+                        cli.build_parser().parse_args([
+                            "dispatch", "Pick Repo", "--repo", "two-git", "--branch", "feat/b",
+                            "--ask", "update ui", "--dry-run",
+                        ])
+                    )
+                )
+            self.assertIn("--folder backend", str(err_two.exception))
+            self.assertIn("--folder frontend", str(err_two.exception))
+            self.assertNotIn("--folder specs", str(err_two.exception))
+
+            # 3b) Explicit `--repo` matching an exact linked folder path auto-selects it without `--folder`,
+            # while cwd `--repo .` without `--folder` still refuses.
+            plan_exact = Workers(ctx).dispatch(
+                dispatch_cmd._request_from_args(
+                    cli.build_parser().parse_args([
+                        "dispatch", "Direct Repo B", "--repo", str(repo_b), "--branch", "feat/direct",
+                        "--kind", "claude", "--ask", "update ui", "--dry-run",
+                    ])
+                )
+            ).dry_run_plan
+            assert plan_exact is not None
+            self.assertEqual(plan_exact["project_slug"], "two-git")
+            self.assertEqual(plan_exact["folder"], "frontend")
+            settings_exact = Path(plan_exact["argv"][plan_exact["argv"].index("--settings") + 1]).read_text(encoding="utf-8")
+            self.assertIn(str(repo_a.resolve()), settings_exact)
+            self.assertIn(str(docs_only.resolve()), settings_exact)
+            old_cwd = os.getcwd()
+            os.chdir(repo_b)
+            try:
+                with self.assertRaises(Refused) as err_dot:
+                    Workers(ctx).dispatch(
+                        dispatch_cmd._request_from_args(
+                            cli.build_parser().parse_args([
+                                "dispatch", "Dot Ambig", "--repo", ".", "--branch", "feat/dot",
+                                "--ask", "update ui", "--dry-run",
+                            ])
+                        )
+                    )
+                self.assertIn("--folder backend", str(err_dot.exception))
+                self.assertIn("--folder frontend", str(err_dot.exception))
+            finally:
+                os.chdir(old_cwd)
+
+            # 4) Explicit `--folder frontend` succeeds, persists `project_slug` & `folder_alias`, includes siblings.
+            res_b = Workers(ctx).dispatch(
+                dispatch_cmd._request_from_args(
+                    cli.build_parser().parse_args([
+                        "dispatch", "Frontend Feature", "--repo", "two-git", "--folder", "frontend",
+                        "--branch", "feat/ui", "--ask", "build ui", "--async",
+                    ])
+                )
+            )
+            saved = ctx.store.task(res_b.task_id)
+            assert saved is not None
+            self.assertEqual((saved["project_slug"], saved["folder_alias"], saved["repo"]),
+                             ("two-git", "frontend", str(repo_b.resolve())))
+            sent_text = ctx.home.sent(res_b.task_id).read_text(encoding="utf-8")
+            self.assertIn("backend", sent_text)
+            self.assertIn("specs", sent_text)
+
+            # 5) 0-folder project `--here` runs in `projects/<slug>/` without requiring a repo folder.
+            ctx.home.registration("empty-proj").write_text(json.dumps({
+                "name": "pm-empty-proj", "slug": "empty-proj", "project": "Empty",
+                "folders": [], "repo": "",
+            }), encoding="utf-8")
+            plan0 = Workers(ctx).dispatch(
+                dispatch_cmd._request_from_args(
+                    cli.build_parser().parse_args([
+                        "dispatch", "Zero Here", "--repo", "empty-proj", "--here",
+                        "--ask", "organize notes", "--dry-run",
+                    ])
+                )
+            ).dry_run_plan
+            assert plan0 is not None
+            self.assertEqual(plan0["project_slug"], "empty-proj")
+            self.assertEqual(Path(plan0["cwd"]), ctx.home.project("empty-proj").root)
+
+            # 6) `verify.<alias>` takes precedence over `verify`.
+            pdir = ctx.home.project("two-git").root
+            pdir.mkdir(parents=True, exist_ok=True)
+            (pdir / "verify").write_text("pytest default\n", encoding="utf-8")
+            (pdir / "verify.frontend").write_text("npm test\n", encoding="utf-8")
+            self.assertEqual(
+                verify_commands_for(ctx, repo_b, project_slug_val="two-git", folder_alias="frontend"),
+                ["npm test"],
+            )
+            self.assertEqual(
+                verify_commands_for(ctx, repo_a, project_slug_val="two-git", folder_alias="backend"),
+                ["pytest default"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

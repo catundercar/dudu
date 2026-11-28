@@ -661,6 +661,19 @@
      "options": [],
      "required": false,
      "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "json",
+     "nargs": 0,
+     "options": [
+      "--json"
+     ],
+     "required": false,
+     "type": null
     }
    ]
   },
@@ -1515,6 +1528,19 @@
      "choices": null,
      "const": null,
      "default": null,
+     "dest": "folder",
+     "nargs": null,
+     "options": [
+      "--folder"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
      "dest": "branch",
      "nargs": null,
      "options": [
@@ -1857,6 +1883,32 @@
      "nargs": 0,
      "options": [
       "--no-review"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "on",
+     "nargs": null,
+     "options": [
+      "--on"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "remote_repo",
+     "nargs": null,
+     "options": [
+      "--remote-repo"
      ],
      "required": false,
      "type": null
@@ -3833,6 +3885,37 @@
     }
    ]
   },
+  "mailbox-sync": {
+   "arguments": [
+    {
+     "action": "_HelpAction",
+     "choices": null,
+     "const": null,
+     "default": "==SUPPRESS==",
+     "dest": "help",
+     "nargs": 0,
+     "options": [
+      "-h",
+      "--help"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "stdio",
+     "nargs": 0,
+     "options": [
+      "--stdio"
+     ],
+     "required": false,
+     "type": null
+    }
+   ]
+  },
   "memory": {
    "arguments": [
     {
@@ -4831,6 +4914,217 @@
       }
      ]
     },
+    "folders": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_SubParsersAction",
+       "required": true,
+       "subcommands": "folders_cmd"
+      }
+     ],
+     "subcommands": {
+      "add": {
+       "arguments": [
+        {
+         "action": "_HelpAction",
+         "choices": null,
+         "const": null,
+         "default": "==SUPPRESS==",
+         "dest": "help",
+         "nargs": 0,
+         "options": [
+          "-h",
+          "--help"
+         ],
+         "required": false,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "slug",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "path",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "alias",
+         "nargs": null,
+         "options": [
+          "--alias"
+         ],
+         "required": false,
+         "type": null
+        }
+       ]
+      },
+      "ls": {
+       "arguments": [
+        {
+         "action": "_HelpAction",
+         "choices": null,
+         "const": null,
+         "default": "==SUPPRESS==",
+         "dest": "help",
+         "nargs": 0,
+         "options": [
+          "-h",
+          "--help"
+         ],
+         "required": false,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "slug",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        }
+       ]
+      },
+      "remove": {
+       "arguments": [
+        {
+         "action": "_HelpAction",
+         "choices": null,
+         "const": null,
+         "default": "==SUPPRESS==",
+         "dest": "help",
+         "nargs": 0,
+         "options": [
+          "-h",
+          "--help"
+         ],
+         "required": false,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "slug",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "target",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        },
+        {
+         "action": "_StoreTrueAction",
+         "choices": null,
+         "const": true,
+         "default": false,
+         "dest": "force",
+         "nargs": 0,
+         "options": [
+          "--force"
+         ],
+         "required": false,
+         "type": null
+        }
+       ]
+      },
+      "rename-alias": {
+       "arguments": [
+        {
+         "action": "_HelpAction",
+         "choices": null,
+         "const": null,
+         "default": "==SUPPRESS==",
+         "dest": "help",
+         "nargs": 0,
+         "options": [
+          "-h",
+          "--help"
+         ],
+         "required": false,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "slug",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "target",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        },
+        {
+         "action": "_StoreAction",
+         "choices": null,
+         "const": null,
+         "default": null,
+         "dest": "new_alias",
+         "nargs": null,
+         "options": [],
+         "required": true,
+         "type": null
+        }
+       ]
+      }
+     }
+    },
     "history": {
      "arguments": [
       {
@@ -5023,6 +5317,46 @@
        "const": null,
        "default": null,
        "dest": "slug",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      }
+     ]
+    },
+    "rename": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "slug",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "name",
        "nargs": null,
        "options": [],
        "required": true,
@@ -5597,6 +5931,59 @@
       }
      ]
     },
+    "set-space": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "slug",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "space_id",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "space_name",
+       "nargs": null,
+       "options": [
+        "--space-name"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    },
     "tasks": {
      "arguments": [
       {
@@ -5992,6 +6379,35 @@
     }
    ]
   },
+  "remote-sync": {
+   "arguments": [
+    {
+     "action": "_HelpAction",
+     "choices": null,
+     "const": null,
+     "default": "==SUPPRESS==",
+     "dest": "help",
+     "nargs": 0,
+     "options": [
+      "-h",
+      "--help"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "id",
+     "nargs": "?",
+     "options": [],
+     "required": false,
+     "type": null
+    }
+   ]
+  },
   "restore": {
    "arguments": [
     {
@@ -6041,6 +6457,32 @@
      "nargs": null,
      "options": [
       "--model"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "no_app_space",
+     "nargs": 0,
+     "options": [
+      "--no-app-space"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "json",
+     "nargs": 0,
+     "options": [
+      "--json"
      ],
      "required": false,
      "type": null
@@ -6686,11 +7128,24 @@
      "action": "_StoreAction",
      "choices": null,
      "const": null,
-     "default": ".",
+     "default": null,
      "dest": "repo",
      "nargs": null,
      "options": [
       "--repo"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_AppendAction",
+     "choices": null,
+     "const": null,
+     "default": [],
+     "dest": "folder",
+     "nargs": null,
+     "options": [
+      "--folder"
      ],
      "required": false,
      "type": null
@@ -6736,6 +7191,19 @@
     },
     {
      "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "slug",
+     "nargs": null,
+     "options": [
+      "--slug"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
      "choices": [
       "new",
       "current"
@@ -6746,6 +7214,32 @@
      "nargs": null,
      "options": [
       "--space"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "no_app_space",
+     "nargs": 0,
+     "options": [
+      "--no-app-space"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "json",
+     "nargs": 0,
+     "options": [
+      "--json"
      ],
      "required": false,
      "type": null
@@ -6821,6 +7315,79 @@
      "nargs": null,
      "options": [
       "--repo"
+     ],
+     "required": false,
+     "type": null
+    }
+   ]
+  },
+  "tokens": {
+   "arguments": [
+    {
+     "action": "_HelpAction",
+     "choices": null,
+     "const": null,
+     "default": "==SUPPRESS==",
+     "dest": "help",
+     "nargs": 0,
+     "options": [
+      "-h",
+      "--help"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "project",
+     "nargs": "?",
+     "options": [],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "all",
+     "nargs": 0,
+     "options": [
+      "--all"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": [
+      "today",
+      "7d",
+      "30d",
+      "all"
+     ],
+     "const": null,
+     "default": null,
+     "dest": "range",
+     "nargs": null,
+     "options": [
+      "--range"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "json",
+     "nargs": 0,
+     "options": [
+      "--json"
      ],
      "required": false,
      "type": null
@@ -7630,6 +8197,535 @@
      "nargs": null,
      "options": [
       "--interval"
+     ],
+     "required": false,
+     "type": "int"
+    }
+   ]
+  },
+  "worker": {
+   "arguments": [
+    {
+     "action": "_HelpAction",
+     "choices": null,
+     "const": null,
+     "default": "==SUPPRESS==",
+     "dest": "help",
+     "nargs": 0,
+     "options": [
+      "-h",
+      "--help"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_SubParsersAction",
+     "required": true,
+     "subcommands": "worker_cmd"
+    }
+   ],
+   "subcommands": {
+    "enroll": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "name",
+       "nargs": null,
+       "options": [
+        "--name"
+       ],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_AppendAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "projects",
+       "nargs": null,
+       "options": [
+        "--projects"
+       ],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": "15m",
+       "dest": "ttl",
+       "nargs": null,
+       "options": [
+        "--ttl"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "hub",
+       "nargs": null,
+       "options": [
+        "--hub"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "json",
+       "nargs": 0,
+       "options": [
+        "--json"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    },
+    "join": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "hub",
+       "nargs": null,
+       "options": [
+        "--hub"
+       ],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "token",
+       "nargs": null,
+       "options": [
+        "--token"
+       ],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "state",
+       "nargs": null,
+       "options": [
+        "--state"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_AppendAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "repo",
+       "nargs": null,
+       "options": [
+        "--repo"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "worktrees",
+       "nargs": null,
+       "options": [
+        "--worktrees"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "pm_command",
+       "nargs": null,
+       "options": [
+        "--pm-command"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_AppendAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "worker_cmd_argv",
+       "nargs": null,
+       "options": [
+        "--worker-cmd"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_AppendAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "hub_cmd",
+       "nargs": null,
+       "options": [
+        "--hub-cmd"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": [
+        "auto",
+        "hc",
+        "file"
+       ],
+       "const": null,
+       "default": "auto",
+       "dest": "driver",
+       "nargs": null,
+       "options": [
+        "--driver"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "force",
+       "nargs": 0,
+       "options": [
+        "--force"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "json",
+       "nargs": 0,
+       "options": [
+        "--json"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    },
+    "list": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "all",
+       "nargs": 0,
+       "options": [
+        "--all"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "json",
+       "nargs": 0,
+       "options": [
+        "--json"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    },
+    "revoke": {
+     "arguments": [
+      {
+       "action": "_HelpAction",
+       "choices": null,
+       "const": null,
+       "default": "==SUPPRESS==",
+       "dest": "help",
+       "nargs": 0,
+       "options": [
+        "-h",
+        "--help"
+       ],
+       "required": false,
+       "type": null
+      },
+      {
+       "action": "_StoreAction",
+       "choices": null,
+       "const": null,
+       "default": null,
+       "dest": "node",
+       "nargs": null,
+       "options": [],
+       "required": true,
+       "type": null
+      },
+      {
+       "action": "_StoreTrueAction",
+       "choices": null,
+       "const": true,
+       "default": false,
+       "dest": "json",
+       "nargs": 0,
+       "options": [
+        "--json"
+       ],
+       "required": false,
+       "type": null
+      }
+     ]
+    }
+   }
+  },
+  "worker-agent": {
+   "arguments": [
+    {
+     "action": "_HelpAction",
+     "choices": null,
+     "const": null,
+     "default": "==SUPPRESS==",
+     "dest": "help",
+     "nargs": 0,
+     "options": [
+      "-h",
+      "--help"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "state",
+     "nargs": null,
+     "options": [
+      "--state"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "hub",
+     "nargs": null,
+     "options": [
+      "--hub"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_AppendAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "hub_cmd",
+     "nargs": null,
+     "options": [
+      "--hub-cmd"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": [
+      "auto",
+      "hc",
+      "file"
+     ],
+     "const": null,
+     "default": "auto",
+     "dest": "driver",
+     "nargs": null,
+     "options": [
+      "--driver"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "once",
+     "nargs": 0,
+     "options": [
+      "--once"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": 5.0,
+     "dest": "interval",
+     "nargs": null,
+     "options": [
+      "--interval"
+     ],
+     "required": false,
+     "type": "float"
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": null,
+     "dest": "max_cycles",
+     "nargs": null,
+     "options": [
+      "--max-cycles"
+     ],
+     "required": false,
+     "type": "int"
+    },
+    {
+     "action": "_StoreTrueAction",
+     "choices": null,
+     "const": true,
+     "default": false,
+     "dest": "json",
+     "nargs": 0,
+     "options": [
+      "--json"
+     ],
+     "required": false,
+     "type": null
+    }
+   ]
+  },
+  "worker-hub": {
+   "arguments": [
+    {
+     "action": "_HelpAction",
+     "choices": null,
+     "const": null,
+     "default": "==SUPPRESS==",
+     "dest": "help",
+     "nargs": 0,
+     "options": [
+      "-h",
+      "--help"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": "127.0.0.1",
+     "dest": "host",
+     "nargs": null,
+     "options": [
+      "--host"
+     ],
+     "required": false,
+     "type": null
+    },
+    {
+     "action": "_StoreAction",
+     "choices": null,
+     "const": null,
+     "default": 8765,
+     "dest": "port",
+     "nargs": null,
+     "options": [
+      "--port"
      ],
      "required": false,
      "type": "int"

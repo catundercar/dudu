@@ -162,6 +162,12 @@ def evaluate_batch_readiness(
             return True, False, ""
         return False, False, "pm_working"
 
+    # Tier 2/3 recovery pass: `recovery_hold` above is already False, so `turn_phase == "recovering"` means the
+    # active incident explicitly released a `deliver` batch (`continue_turn` or `retype_submitted`); do not block
+    # no-status terminals on the v1 `recovering -> working` compat mapping or black-box cooldown.
+    if ep_snap.turn_phase == "recovering":
+        return True, False, ""
+
     # Tier 2: no terminal status word, but hook/transcript turn evidence exists.
     if ep_snap.last_turn_stopped is True or (ep_snap.last_turn_stopped is None and ep_snap.turn_phase == "idle"):
         return True, False, ""
@@ -657,7 +663,8 @@ def wake_fields_for(
 
 def wake_fields(task: Mapping[str, Any], status: str, reported: bool = False, *, ctx: Any = None) -> dict[str, Any]:
     caller = ctx.caller if ctx is not None else Caller.current()
-    has_app_pm = bool(ProjectRegistry(ctx).app_pm(task.get("repo")) if ctx is not None else app_pm(task.get("repo")))
+    pm_target = ctx.store.task_project_slug(task) if ctx is not None else (task.get("project_slug") or task.get("repo"))
+    has_app_pm = bool(ProjectRegistry(ctx).app_pm(pm_target) if ctx is not None else app_pm(pm_target))
     return wake_fields_for(task, status, reported, caller, has_app_pm)
 
 
@@ -761,6 +768,13 @@ def pending_items(
             old = latest.get(task)
             if old and e.get("status") != old["event"].get("status"):
                 items.remove(latest.pop(task))
+            if e.get("status") and e.get("status") != "review":
+                for rev_key in [
+                    k for k, v in list(latest.items())
+                    if isinstance(k, str) and k != task
+                    and (v["event"].get("review_of") or task_of(k).get("review_of")) == task
+                ]:
+                    items.remove(latest.pop(rev_key))
             continue
         if not is_news(e, pms, task_of):
             continue
@@ -793,6 +807,10 @@ def pending_items(
             return st != "proposed"
         if e.get("type") == "event" and e.get("source") == "rollup":
             return st == "done" or st in MOVED_ON
+        rev_parent = e.get("review_of") or task_of(task_id).get("review_of")
+        if e.get("type") == "thread" and rev_parent:
+            if task_of(task_id).get("retired") or task_of(rev_parent).get("status") in MOVED_ON:
+                return True
         return st in MOVED_ON
 
     return end, [i for i in items if not moved_on(i)]

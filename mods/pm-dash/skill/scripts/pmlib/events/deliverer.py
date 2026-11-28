@@ -20,6 +20,7 @@ from ..project.conversation import Conversation
 from ..project.turn_reducer import incident_holds_batch, record_endpoint
 from ..project.turn_state import TurnTracker
 from ..terminals.screen import classify_stuck_screen
+from .agy_watch import agy_compact_sync_pending, clear_agy_compact_sync, format_agy_compact_sync
 from .deliver import Delivery
 from .stalls import StallWatcher
 from .supervisor import HEARTBEAT_INTERVAL_S, EndpointDriver, ProjectSupervisor, _status_parts, touch_heartbeat
@@ -47,8 +48,9 @@ class Deliverer(Delivery):
     def __init__(
         self,
         ctx: Context,
-        repo: str | Path,
+        repo: str | Path = "",
         *,
+        slug: str | None = None,
         watchers: Iterable[Any] | None = None,
         holds: Iterable[Any] | None = None,
         settle: float | None = None,
@@ -59,7 +61,7 @@ class Deliverer(Delivery):
         unknown_wait: float | None = None,
         script_mark_fn: Callable[[], Any] | None = None,
     ) -> None:
-        super().__init__(ctx, repo, watchers=watchers, holds=holds, settle=settle)
+        super().__init__(ctx, repo, slug=slug, watchers=watchers, holds=holds, settle=settle)
         self._pause = DELIVER_PAUSE if pause is None else pause
         self._gone = DELIVER_GONE if gone is None else gone
         self._gap = DELIVER_GAP if gap is None else gap
@@ -67,8 +69,9 @@ class Deliverer(Delivery):
         self._unknown_wait_override = unknown_wait
         self._script_mark_fn = script_mark_fn
         self._stalls = StallWatcher(ctx)
-        self._supervisor = ProjectSupervisor(ctx, repo)
-        self._driver = EndpointDriver(ctx, repo)
+        sup_target = self.slug or self.repo
+        self._supervisor = ProjectSupervisor(ctx, sup_target)
+        self._driver = EndpointDriver(ctx, sup_target)
         self._waiting_since: float | None = None
         self._stall_warned: bool = False
         self._bg_sent_stop_offset: int | None = None
@@ -179,7 +182,7 @@ class Deliverer(Delivery):
             f"{count} pending event(s) undelivered to hc:{term} for {mins} min ({detail_en}).",
             f"有 {count} 条待投递事件已等待 {mins} 分钟未能送达 hc:{term}（{detail_zh}）。",
         )
-        Conversation(self.ctx, self.repo).record(
+        Conversation(self.ctx, self.repo, slug=self.slug or None).record(
             "event",
             by=f"hc:{term}",
             source="deliver-stall",
@@ -230,8 +233,8 @@ class Deliverer(Delivery):
         every RECONCILE s covers missed notifications. While the PM works it waits for its turn to end; hc holds a
         send back while the user has an unsent draft in that terminal."""
         script, seen, d = self.current_script_mark(), None, self._project_dir()
-        rec_path = self.ctx.home.registration(project_slug(self.repo))
-        self.start_mark(self._projects.app_pm(self.repo))
+        rec_path = self.ctx.home.registration(self.slug or project_slug(self.repo))
+        self.start_mark(self._projects.app_pm(self.slug or self.repo))
         stops: dict[Any, Any] = {}
         bases: dict[Any, Any] = {}
         gone: float | None = None
@@ -286,30 +289,34 @@ class Deliverer(Delivery):
         """One look: the PM, the workers, then the batch. Returns how long to wait for a change before the next
         look, or None when there is no PM to deliver to (no registration, archived, not a desktop-app terminal,
         not live)."""
-        rec = self._projects.app_pm(self.repo)
+        rec = self._projects.app_pm(self.slug or self.repo)
         if not rec:
             return None
         term = rec["terminal"]
-        tasks = [t.raw for t in self._ledger.project_tasks(self.repo) if self._stalls.watched_worker(t.raw)]
+        tasks = [
+            t.raw
+            for t in self._ledger.project_tasks(self.slug or self.repo)
+            if self._stalls.watched_worker(t.raw)
+        ]
         # Follow the terminals before looking at them: a change between the look and the follow would wake nobody.
         changes.terminals = {term, *(hc_terminal_of(t) for t in tasks), *self.watched_terminals()}
         extra_files = self.watched_files()
         if extra_files and hasattr(changes, "files") and isinstance(getattr(changes, "files", None), (list, set)):
             d = self._project_dir()
-            rec_path = self.ctx.home.registration(project_slug(self.repo))
+            rec_path = self.ctx.home.registration(self.slug or project_slug(self.repo))
             base_files = [d / "conversation.jsonl", d / "pm-turn.json", d / "pm-turn-journal.jsonl", rec_path, *extra_files]
             changes.files = list(dict.fromkeys(base_files))
         info = self.ctx.hc.get_raw(term, errors=True)
         if not info:
             return None
-        seat_dead = info.get("state") == "live" and not self._projects.seat_says_alive(self.repo, rec, info)
+        seat_dead = info.get("state") == "live" and not self._projects.seat_says_alive(self.repo or self.slug, rec, info)
         if info.get("state") != "live" or seat_dead:
             eff_info = {**info, "state": "exited"} if seat_dead else info
             st_off, sup_due = self._supervisor.observe_and_reduce(rec, eff_info)
             if (st_off.get("incident") or {}).get("status") in ("open", "recovering"):
                 return sup_due or self._pause
             return None
-        tracker = TurnTracker(self.ctx, self.repo)
+        tracker = TurnTracker(self.ctx, self.slug or self.repo, slug=self.slug or None)
         due = self._stalls.watch_workers(tasks, stops, {} if bases is None else bases)
         due = self.watchers_look(stops, bases, due)  # helpers, agy transcript, then dependencies (injected watchers)
         st_sup, sup_due = self._supervisor.observe_and_reduce(rec, info)
@@ -436,6 +443,15 @@ class Deliverer(Delivery):
                         )
                 batch_env_id = new_env_id(now_ms)
                 payload_text = self.batch_text(start, end, items, env_id=batch_env_id)
+                compact_sync_attached = False
+                if agy_compact_sync_pending(self.ctx, self.repo):
+                    sync_block = format_agy_compact_sync(self.ctx, self.repo)
+                    if sync_block:
+                        payload_text = f"{payload_text}\n\n{sync_block}"
+                        compact_sync_attached = True
+                batch_body: dict[str, Any] = {"text": payload_text, "start": start, "end": end}
+                if compact_sync_attached:
+                    batch_body["compact_sync"] = True
                 batch_env = Envelope(
                     env_id=batch_env_id,
                     idempotency_key=idem_key,
@@ -447,7 +463,7 @@ class Deliverer(Delivery):
                     project=slug,
                     cause={"kind": "deliver_batch", "start": start, "end": end},
                     priority=P4_BATCH,
-                    body={"text": payload_text, "start": start, "end": end},
+                    body=batch_body,
                     require_reply=True,
                 )
                 tracker.pm_mailbox.enqueue(
@@ -467,7 +483,7 @@ class Deliverer(Delivery):
             on_typed=lambda it, out: typed_events.append((it, out)),
             on_undelivered_alert=self._undelivered_alert,
         )
-        if items and typed_events and (self._projects.app_pm(self.repo) or {}).get("terminal") == term:
+        if items and typed_events and (self._projects.app_pm(self.slug or self.repo) or {}).get("terminal") == term:
             typed_item, _ = typed_events[0]
             if typed_item.envelope.kind == "event.batch" or (
                 batch_env_id and typed_item.envelope.env_id == batch_env_id
@@ -487,16 +503,11 @@ class Deliverer(Delivery):
                     if best_log > 0 or best_seq > 0:
                         self._bg_sent_stop_offset = best_log if best_log > 0 else None
                         self._bg_sent_stop_seq = best_seq if best_seq > 0 else None
-                if typed_item.state == "typed":
-                    # Not when the hook took the batch while `hc send` was still in flight: it opened the turn.
-                    tracker.begin_turn(
-                        terminal=term,
-                        agent_kind=str(rec.get("agent") or ""),
-                        cause="deliver",
-                        batch=[t_start, t_end],
-                        terminal_turn=int(info.get("turn") or 0),
-                        from_hook=False,
-                    )
+                # `EndpointDriver._settle_deliver_outcome` already recorded `send_submitted` with the real
+                # `started_turn` flag when transitioning `accepted -> typed`; do not emit a duplicate `started=True`
+                # observation here.
+                if tb.get("compact_sync"):
+                    unfailing(clear_agy_compact_sync, self.ctx, self.repo)
                 self.advance_delivered(t_end)
                 return 0
             return 0 if drv_due == 0 else min(due, drv_due or due)

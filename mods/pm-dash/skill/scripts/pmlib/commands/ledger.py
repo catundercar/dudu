@@ -27,7 +27,8 @@ from ..ledger.transition import FIELDS, UpdateRequest, plan_input
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
-from ..reports import LocalFacts, ReportClient, task_update_report
+from ..reports import LocalFacts, RemoteReportSync, ReportClient, task_update_report
+from ..store import project_folders, registration_slug
 from ..workers.sessions import remember_session_for
 from .emit import exit_with, sayer
 
@@ -83,16 +84,36 @@ def cmd_new(a, ctx=None):
     repo = ctx.git.project_root(a.repo)
     if not repo:
         sys.exit(f"{a.repo} is not a directory")
-    project = Path(repo).name
     ledger = Ledger(ctx)
     projects = ProjectRegistry(ctx)
+    pm_rec = projects.pm_record(repo)
+    pslug = registration_slug(pm_rec) if pm_rec else ctx.home.project_for(repo).root.name
+    project = str(pm_rec.get("project") or "") if pm_rec else ""
+    project = project or Path(repo).name
+    falias = ""
+    if pm_rec:
+        try:
+            r_res = str(Path(repo).resolve())
+        except OSError:
+            r_res = repo
+        for f in project_folders(pm_rec):
+            try:
+                fp_res = str(Path(f["path"]).resolve())
+            except OSError:
+                fp_res = str(f["path"])
+            if fp_res == r_res:
+                falias = str(f.get("alias") or "")
+                break
     pm = projects.find_pm()
     task = {"id": ledger.new_id(project, a.slug or a.branch or a.title), "title": a.title, "project": project,
+            "project_slug": pslug,
             "repo": repo, "status": a.status, "base": a.base or ctx.git.base_branch(repo),
             "owner": a.owner or ("pm" if pm and pm.get("pane_id") == ctx.pane else "self"),
             # An explicit empty --pane/--workspace records work that is not tied to this session.
             "workspace": ctx.workspace if a.workspace is None else a.workspace,
             "pane": ctx.pane if a.pane is None else a.pane, "created": ctx.clock.now()}
+    if falias:
+        task["folder_alias"] = falias
     for f in ("agent", "branch", "worktree", "brief", "kind"):
         if getattr(a, f, None):
             task[f] = getattr(a, f)
@@ -145,8 +166,8 @@ def cmd_new(a, ctx=None):
     entry = {"at": ctx.clock.now(), "by": ctx.pane or "user", "text": entry_text}
     task.setdefault("log", []).append(entry)
     ledger.save(task)
-    if task.get("repo"):
-        Conversation(ctx, task["repo"]).record(
+    if task.get("repo") or pslug:
+        Conversation(ctx, task["repo"], slug=pslug or None).record(
             "thread", task=task["id"], title=task.get("title", ""), status=task.get("status", ""),
             by=entry["by"], text=entry_text,
             **({"number": task["number"]} if task.get("number") else {}),
@@ -155,7 +176,7 @@ def cmd_new(a, ctx=None):
     if task.get("parent"):
         ledger.clear_rollup_notified(task["parent"])
     if told.get("wake"):
-        Delivery(ctx, task["repo"]).ensure_running()
+        Delivery(ctx, task["repo"], slug=pslug or None).ensure_running()
     if already_ready_note:
         ctx.out.err_line(already_ready_note)
     ctx.out.line(task["id"])
@@ -297,6 +318,29 @@ def register_task_commands(sub):
     u.add_argument("--outer-plan", action="append", metavar="STEPS", help="explicitly replace outer task plan steps")
     u.add_argument("--subplan", action="append", metavar="STEPS", help="explicitly replace worker subplan steps")
     u.add_argument("--no-review", action="store_true", help="disable plan-driven automatic review on this task")
+
+
+def cmd_remote_sync(a, ctx=None):
+    """`pm.py remote-sync`: pull the report outboxes of remote `<machine>/t7` workers now (the deliverer does this
+    on its own with idle backoff), applying each report once; one line per outbox."""
+    ctx = Context.from_env() if ctx is None else ctx
+    sync = RemoteReportSync(ctx)
+    tasks = sync.remote_tasks(None)
+    if getattr(a, "id", None):
+        tid = Ledger(ctx).resolve_id(a.id)
+        tasks = [t for t in tasks if t.get("id") == tid]
+        if not tasks:
+            exit_with(ctx, Refused(ctx.config.tr(f"{tid} has no remote worker outbox", f"{tid} 没有远端 worker 发件箱")))
+            return
+    for task in tasks:
+        for res in sync.sync_task(task, force=True):
+            ctx.out.line(f"{res.task_id} e{res.epoch}: {res.link_state} applied={res.applied} late={res.late} "
+                         f"dup={res.duplicates} rejected={res.rejected} seq={res.cursor}")
+
+
+def register_remote_sync_command(sub):
+    rs = sub.add_parser("remote-sync", help="pull remote (<machine>/t7) workers' report outboxes now and apply them")
+    rs.add_argument("id", nargs="?", help="only this task")
 
 
 def register_guard_command(sub):

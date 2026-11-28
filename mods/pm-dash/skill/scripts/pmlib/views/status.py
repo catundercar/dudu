@@ -22,6 +22,7 @@ from ..osutil import clip
 from ..project.project import ProjectRegistry, in_scope
 from ..project.readmodel import owner_of, task_offline
 from ..reports import ReportClient, task_log_report
+from ..store import registration_slug
 from ..workers.lifecycle import active_review_of_for, term_status
 
 
@@ -192,11 +193,12 @@ def cmd_status(a, ctx=None):
     if not pm_panes and not in_hc:
         ctx.out.line("  (none)")
     for rec in hc_recs:
-        if rec.get("archived") or not rec.get("repo"):
+        rslug = registration_slug(rec)
+        if rec.get("archived") or not (rec.get("repo") or rslug):
             continue
         live_pm = live_hc_by_name.get(rec.get("name"))
         live_state = str(live_pm.get("agent_status") or "") if live_pm else "offline"
-        undel = Delivery(ctx, rec["repo"]).undelivered_status(live_state=live_state)
+        undel = Delivery(ctx, rec.get("repo") or "", slug=rslug or None).undelivered_status(live_state=live_state)
         if undel:
             mins = max(1, int(undel["waiting_seconds"] // 60))
             pane = rec.get("pane") or f"hc:{rec.get('terminal') or '?'}"

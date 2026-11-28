@@ -278,6 +278,18 @@ class Home:
         return self.root / "cache" / "context-tokens.json"
 
     @property
+    def token_usage_db(self) -> Path:
+        return self.root / "cache" / "token-usage-v1.db"
+
+    @property
+    def token_usage_lock(self) -> Path:
+        return self.root / "cache" / "token-usage-v1.lock"
+
+    @property
+    def token_analytics_cache(self) -> Path:
+        return self.root / "cache" / "token-analytics.json"
+
+    @property
     def turn_log(self) -> Path:
         return self.root / "turns.log"
 
@@ -304,6 +316,11 @@ class Home:
     @property
     def tokens(self) -> Path:
         return self.root / "tokens"
+
+    @property
+    def nodes(self) -> Path:
+        """Self-hosted worker nodes' pull queues, pushed observations and heartbeats (phase 6b), one folder each."""
+        return self.root / "nodes"
 
     @property
     def typists(self) -> Path:

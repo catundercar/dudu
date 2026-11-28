@@ -1,12 +1,12 @@
 import test from 'node:test';
-import { summary, waitingCount, navText, estimateTextWidth, focusKey, shouldReturnToWork, WRITE_REMOTE_CACHE } from '../pm-nav/model.js';
+import { summary, waitingCount, navText, estimateTextWidth, focusKey, shouldReturnToWork, ENSURE_DIR_PY, remoteCacheSig, WRITE_REMOTE_CACHE } from '../pm-nav/model.js';
 import * as nav from '../pm-nav/model.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { setupState, shouldRecheckSetup, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, tooltipLayout, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, focusPlan, pmId, taskId, counts, eventText, word, label, taskSteps, taskDependencies, taskNumber, formatTaskNumber, DROPPED, disconnected, isClosedTask, taskStatusText, pmColor, wireFlows, reviewWorking, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText, scopeState, projectCards, projectCounts, countChips, pageTotals, unclaimedBlocked, startArgv, folderName, ledgerOpen, lastPmLine, boardGroups, endedList, endedDays, endedTime, previousDay } from './model.js';
+import { setupState, shouldRecheckSetup, layout, boardFrame, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, tooltipLayout, mergeStates, cachedRemoteStates, newEvents, pointAt, terminalFor, terminalTargetFor, focusPlan, pmId, taskId, counts, eventText, word, label, taskSteps, taskDependencies, taskNumber, formatTaskNumber, DROPPED, disconnected, isClosedTask, taskStatusText, pmColor, wireFlows, reviewWorking, sampleWire, arcHops, PACKET_SPEED, PACKET_STEP, LEDGER_HOME_SH, PM_SCRIPTS, remoteStateCommand, pmStatusText, scopeState, projectCards, projectCounts, countChips, pageTotals, unclaimedBlocked, startArgv, folderName, ledgerOpen, lastPmLine, boardGroups, endedList, endedDays, endedTime, previousDay, TOKENS_EXPANDED_KEY, readTokensExpanded, writeTokensExpanded, parseTokenAnalytics, formatTokens, formatUsd, formatPct, formatCompactInt, selectTokenScope, filterTokenSlice, sparklineBars, KINDS, AGENT_NAMES, remotePmArgv, REMOTE_PROBE_SH, REMOTE_LIST_DIRS_SH, REMOTE_MKDIR_SH, parseRemoteProbe, parseRemoteDirs, normalizeMachines, initialMachineForDialog, addFolderEntry, removeFolderEntry, canSubmitNewProject, shouldCloseSpaceAfterArchive, resolveRestoreSpace } from './model.js';
 import { renderStepsCard, renderDepsCard } from './steps.js';
 
 const setupSummary = (installed = [], ready = [], outdated = []) =>
@@ -122,7 +122,8 @@ test('recheckSetupIfNeeded auto-updates when external install completes and stop
 const PYTHON3 = { execPython: (run, args, options) => run('python3', args, options), NO_PYTHON: 'no-python',
   appWindow: () => ({ platform: 'macos' }) };
 function modWithIO(file, bindings) {
-  bindings = { ...PYTHON3, ...bindings };
+  // pm-nav's main.js imports its model by name: bind what the test does not stand in for.
+  bindings = { ...PYTHON3, ...(file.includes('pm-nav') ? { shouldWriteRemoteCache: nav.shouldWriteRemoteCache, showsSummary: nav.showsSummary } : {}), ...bindings };
   const source = readFileSync(new URL(file, import.meta.url), 'utf8')
     .replace(/^import .*;$/gm, '').replace('export default class ', 'return class ');
   const Mod = new Function('View', ...Object.keys(bindings), source)(class {}, ...Object.values(bindings));
@@ -180,26 +181,34 @@ test('board checks are read-only, setup failures retry, and success refreshes st
   }
 });
 
-test('sidebar keeps remote reads but suppresses cache writes until setup is available', async () => {
+test('sidebar writes no cache before Set up with nothing remote, but caches other machines without Set up', async () => {
   const calls = [];
-  const nav = modWithIO('../pm-nav/main.js', {
-    home: () => '/test home', WRITE_REMOTE_CACHE,
+  let machines = [];
+  const sidebar = modWithIO('../pm-nav/main.js', {
+    home: () => '/test home', WRITE_REMOTE_CACHE, remoteStateCommand: nav.remoteStateCommand,
     exec: async (program, args) => {
       calls.push({ program, args });
-      return { code: 0, stdout: '[]' };
+      if (args[0] === 'machine') return { code: 0, stdout: JSON.stringify(machines) };
+      return { code: 0, stdout: JSON.stringify({ pms: [{ name: 'pm-dudu' }], tasks: [], events: [] }) };
     },
   });
-  nav.remoteStates = {}; nav.publish = () => {};
+  sidebar.remoteStates = {}; sidebar.publish = () => {};
   const { cx, drain } = asyncContext();
-  nav.setupAvailable = false; nav.ledgerHome = '/test home/.dudu';
-  nav.refreshRemote(cx);
+  sidebar.setupAvailable = false; sidebar.ledgerHome = '/test home/.dudu';
+  sidebar.refreshRemote(cx);
   await drain();
   assert.deepEqual(calls.map(call => call.program), ['hc']);
-  nav.setupAvailable = true;
-  nav.refreshRemote(cx);
+  sidebar.setupAvailable = true;
+  sidebar.refreshRemote(cx);
   await drain();
   assert.deepEqual(calls.map(call => call.program), ['hc', 'hc', 'python3']);
   assert.equal(calls[2].args[2], '/test home/.dudu/cache/remote-states.json');
+  // Windows host: Set up unavailable here (skill folder unreadable), another machine connected.
+  calls.length = 0; sidebar.setupAvailable = false; sidebar.remoteCacheExists = undefined; machines = [{ name: 'box', state: 'connected' }];
+  sidebar.refreshRemote(cx);
+  await drain();
+  assert.deepEqual(calls.map(call => call.program), ['hc', 'hc', 'python3']);
+  assert.ok(calls[2].args[3].includes('pm-dudu'));
 });
 
 test('both mods read other machines with the same command and follow the ledger home', async () => {
@@ -222,23 +231,28 @@ test('both mods read other machines with the same command and follow the ledger 
     mod.refreshRemote(cx);
     await drain();
     assert.deepEqual(calls[1], { program: 'hc', args: ['exec', '--on', 'box', remoteStateCommand()] }, file);
-    // The watcher follows `home`; repeating the same home keeps one watcher, a new one re-arms.
+    // The watcher follows `home`; repeating the same home keeps one watcher per subdir, a new one re-arms.
     mod.ledgerHome = '';
     mod.setLedgerHome('/test home/.dudu', cx);
     mod.setLedgerHome('/test home/.dudu', cx);
     await Promise.resolve();
-    assert.deepEqual(watched, ['/test home/.dudu/tasks'], file);
-    wakes.shift()();
+    assert.deepEqual(watched, ['/test home/.dudu/tasks', '/test home/.dudu/pms'], file);
+    wakes.shift()(); // /tasks change
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(refreshed, 1, file);
-    assert.deepEqual(watched, ['/test home/.dudu/tasks', '/test home/.dudu/tasks'], file);
+    assert.deepEqual(watched, ['/test home/.dudu/tasks', '/test home/.dudu/pms', '/test home/.dudu/tasks'], file);
+    wakes.shift()(); // /pms change (e.g. project rename)
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(refreshed, 2, file);
+    assert.deepEqual(watched, ['/test home/.dudu/tasks', '/test home/.dudu/pms', '/test home/.dudu/tasks', '/test home/.dudu/pms'], file);
     mod.setLedgerHome('/test home/.claude/pm', cx);
     await Promise.resolve();
-    assert.equal(watched.at(-1), '/test home/.claude/pm/tasks', file);
-    wakes.shift()(); // the old watcher wakes once more, then stops without refreshing
+    assert.deepEqual(watched.slice(-2), ['/test home/.claude/pm/tasks', '/test home/.claude/pm/pms'], file);
+    wakes.shift()(); // old /tasks watcher wakes once more, then stops without refreshing
+    wakes.shift()(); // old /pms watcher wakes once more, then stops without refreshing
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(refreshed, 1, file);
-    assert.equal(watched.length, 3, file);
+    assert.equal(refreshed, 2, file);
+    assert.equal(watched.length, 6, file);
   }
 });
 
@@ -458,6 +472,8 @@ test('taskInfoCard withholds Popup until offscreen probe measures, resists zoom=
     dialogView: () => makeEl('dialog'), initDialog: () => {}, restoreProject: () => {}, readLines: async () => ({}),
     archivePopup: () => ({}), NEW_DIALOG: {}, openProject: () => {}, showPage: () => {},
     FlowLayer: class {}, boardVisible: () => true, renderStepsCard, renderDepsCard,
+    renderTokenPulsePill: () => makeEl('div'), renderTokenShelf: () => makeEl('div'),
+    readTokensExpanded, writeTokensExpanded, parseTokenAnalytics,
   });
   let notifications = 0;
   const cx = { notify() { notifications++; }, timer: { after() { return { cancel() {} }; }, every() {} } };
@@ -1331,16 +1347,112 @@ test('a project board keeps only that project; the all-projects board leaves arc
   assert.equal(layout(all, 980).rows[0].id, 'you');
 });
 
-test('the new-project form runs pm.py start with its folder, name, agent and space', () => {
+test('the new-project form runs pm.py start with 0..N equal folders, name, agy/claude/codex/pi, and no --space', () => {
   const script = '/app/mods/pm-dash/skill/scripts/pm.py';
-  assert.deepEqual(startArgv(script, { repo: '/Users/x/project/repos/homenet', name: '', kind: 'claude', space: 'new' }),
-    [script, 'start', '--repo', '/Users/x/project/repos/homenet', '--name', 'homenet', '--kind', 'claude', '--space', 'new']);
-  assert.deepEqual(startArgv(script, { repo: '/r/a/', name: ' home net ', kind: 'pi', space: 'current' }).slice(4),
-    ['--name', 'home net', '--kind', 'pi', '--space', 'current']);
+  assert.deepEqual(KINDS, ['claude', 'agy', 'codex', 'pi']);
+  assert.equal(AGENT_NAMES.agy, 'agy');
+  assert.deepEqual(startArgv(script, { folders: [{ path: '/Users/x/project/repos/homenet', alias: 'homenet' }], name: '', kind: 'claude' }),
+    [script, 'start', '--folder', '/Users/x/project/repos/homenet', '--name', 'homenet', '--kind', 'claude']);
+  assert.deepEqual(startArgv(script, { folders: [{ path: '/r/a' }, { path: '/r/b' }], name: ' home net ', kind: 'agy' }, { noAppSpace: true, json: true }),
+    [script, 'start', '--folder', '/r/a', '--folder', '/r/b', '--name', 'home net', '--kind', 'agy', '--no-app-space', '--json']);
+  assert.deepEqual(startArgv(script, { folders: [], name: 'Q3 Planning', kind: 'pi' }),
+    [script, 'start', '--name', 'Q3 Planning', '--kind', 'pi']);
   assert.equal(folderName('/r/homenet/'), 'homenet');
   const open = ledgerOpen({ tasks: [{ project: 'homenet', status: 'blocked' }, { project: 'HomeNet', status: 'paused' },
-    { project: 'homenet', status: 'merged' }, { project: 'other', status: 'blocked' }] }, 'homenet');
+    { project: 'homenet', status: 'merged' }, { project: 'other', status: 'blocked' }] }, 'homenet', ['/tmp/homenet']);
   assert.equal(open.length, 2);
+
+  // Equal folders helper: no primary role, auto-disambiguates duplicate dir names, any folder removable down to 0
+  let fs = addFolderEntry([], { path: '/a/api', git: true, branch: 'main' });
+  fs = addFolderEntry(fs, { path: '/b/api', git: false });
+  assert.equal(fs.length, 2);
+  assert.deepEqual(fs.map(f => f.alias), ['api', 'b-api']);
+  assert.equal('primary' in fs[0], false);
+  fs = removeFolderEntry(fs, '/a/api');
+  fs = removeFolderEntry(fs, '/b/api');
+  assert.deepEqual(fs, []);
+
+  // Zero-folder submit allowed when name is non-empty
+  assert.equal(canSubmitNewProject({ folders: [], name: 'Plan', machine: '' }), true);
+  assert.equal(canSubmitNewProject({ folders: [], name: '   ', machine: '' }), false);
+  assert.equal(canSubmitNewProject({ folders: [], name: 'Plan', machine: 'dev' }, { remoteReady: false }), false);
+
+  // Machine normalization & active remote space preselection
+  const machines = normalizeMachines({ machines: [{ name: 'mbp', state: 'unreachable' }, { name: 'dev', state: 'connected' }] });
+  assert.deepEqual(machines.map(m => [m.name, m.connected]), [['dev', true], ['mbp', false]]);
+  assert.equal(initialMachineForDialog(machines, [{ id: 'dev/sp1', active: true, machine: 'dev' }]), 'dev');
+  assert.equal(initialMachineForDialog(machines, [{ id: 'mbp/sp1', active: true, machine: 'mbp' }]), '');
+
+  // Probe & remote dir parsing
+  const probe = parseRemoteProbe('HOME\t/home/dev\nPM\t/home/dev/.dudu/pm.py\nLEDGER\t/home/dev/.dudu\nDIR\t1\t~/repo\t/home/dev/repo\t1\tmain\nDIR\t0\t~/miss\t/home/dev/miss\t0\t\n');
+  assert.equal(probe.home, '/home/dev');
+  assert.equal(probe.dirs[0].git, true);
+  assert.equal(probe.dirs[0].branch, 'main');
+  assert.equal(probe.dirs[1].exists, false);
+  const dirs = parseRemoteDirs('BASE\t/home/dev/repos\t/home/dev\nENTRY\tzeta\t/home/dev/repos/zeta\t0\t\nENTRY\talpha\t/home/dev/repos/alpha\t1\tmain\n');
+  assert.deepEqual(dirs.entries.map(e => e.name), ['alpha', 'zeta']);
+
+  // D1 space close & restore space reuse helpers (fail-closed semantics)
+  // Remote space: closes only when only PM (and optionally confirmed finished terminals) remain.
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: 'dev', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'dev/sp1', tabs: [{ id: 'dev/tb1', panes: 1, terminals: [{ terminal: 'dev/t1' }] }] }],
+    terminals: [],
+  }), { close: true, spaceId: 'dev/sp1' });
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: 'dev', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'dev/sp1', tabs: [{ id: 'dev/tb1', panes: 1, terminals: [{ terminal: 'dev/t1' }] }, { id: 'dev/tb2', panes: 1, terminals: [{ terminal: 'dev/t2' }] }] }],
+    terminals: [{ address: 'dev/t2', state: 'finished' }],
+  }), { close: true, spaceId: 'dev/sp1' });
+  // Remote space with non-PM terminal (even if program.shell: true, remote foreground process is unknown) -> keep Space!
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: 'dev', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'dev/sp1', tabs: [{ id: 'dev/tb1', panes: 1, terminals: [{ terminal: 'dev/t1' }] }, { id: 'dev/tb2', panes: 1, terminals: [{ terminal: 'dev/t2' }] }] }],
+    terminals: [{ address: 'dev/t2', state: 'live', status: 'idle', program: { shell: true } }],
+  }), { close: false, spaceId: 'dev/sp1' });
+  // Missing terminal from terminals() list (remote & local) -> fail-closed (close: false)!
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: 'dev', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'dev/sp1', tabs: [{ id: 'dev/tb1', panes: 1, terminals: [{ terminal: 'dev/t1' }] }, { id: 'dev/tb2', panes: 1, terminals: [{ terminal: 'dev/t_unseen' }] }] }],
+    terminals: [],
+  }), { close: false, spaceId: 'dev/sp1' });
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: '', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'sp1', tabs: [{ id: 'tb1', panes: 1, terminals: [{ terminal: 't1' }] }, { id: 'tb2', panes: 1, terminals: [{ terminal: 't_missing' }] }] }],
+    terminals: [],
+  }), { close: false, spaceId: 'sp1' });
+  // Unknown state / missing terminal address -> fail-closed (close: false)!
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: '', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'sp1', tabs: [{ id: 'tb1', panes: 1, terminals: [{ terminal: 't1' }] }, { id: 'tb2', panes: 1, terminals: [{ terminal: 't2' }] }] }],
+    terminals: [{ address: 't2', status: 'idle', program: { shell: true } }],
+  }), { close: false, spaceId: 'sp1' });
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: '', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'sp1', tabs: [{ id: 'tb1', panes: 1, terminals: [{}] }] }],
+    terminals: [],
+  }), { close: false, spaceId: 'sp1' });
+  // Local space with confirmed idle shell closes; active non-shell keeps
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: '', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'sp1', tabs: [{ id: 'tb1', panes: 1, terminals: [{ terminal: 't1' }] }, { id: 'tb2', panes: 1, terminals: [{ terminal: 't2' }] }] }],
+    terminals: [{ address: 't2', state: 'live', status: 'idle', program: { shell: true } }],
+  }), { close: true, spaceId: 'sp1' });
+  assert.deepEqual(shouldCloseSpaceAfterArchive({
+    machine: '', spaceId: 'sp1', pmTerminal: 't1',
+    spaces: [{ id: 'sp1', tabs: [{ id: 'tb1', panes: 1, terminals: [{ terminal: 't1' }] }, { id: 'tb2', panes: 1, terminals: [{ terminal: 't2' }] }] }],
+    terminals: [{ address: 't2', state: 'live', status: 'idle', program: { shell: false } }],
+  }), { close: false, spaceId: 'sp1' });
+  // Copy polish: empty project name omits `…` and Machine hint avoids `hc exec --on` debug string
+  assert.equal(word('en', 'dedicatedSpaceHint', '', '').includes('…'), false);
+  assert.equal(word('zh', 'dedicatedSpaceHint', '', 'dev').includes('…'), false);
+  assert.equal(word('en', 'machineConnected'), 'Connected');
+  assert.equal(word('zh', 'machineConnected'), '已连接');
+  assert.deepEqual(resolveRestoreSpace({ machine: 'dev', spaceId: 'sp1', spaces: [{ id: 'dev/sp1' }] }),
+    { reuse: true, qualifiedSpaceId: 'dev/sp1' });
+  assert.deepEqual(resolveRestoreSpace({ machine: 'dev', spaceId: 'sp1', spaces: [] }),
+    { reuse: false, qualifiedSpaceId: '' });
+  assert.equal(remotePmArgv(['start', '--name', 'x'])[0], 'sh');
 });
 
 test('a card shows the PM\'s newest line, links as their titles', () => {
@@ -1910,7 +2022,7 @@ test('Board UI renders Reviewing inside Working bundle, step progress chips, pos
   assert.match(stepsText, /Detail steps/, 'doing step shows active substep');
   assert.match(stepsText, /check-mark\.svg/);
   assert.match(stepsText, /spinner\.svg/);
-  assert.match(stepsText, /tree-branch\.svg/);
+  assert.doesNotMatch(stepsText, /tree-branch\.svg/, 'Plan B substeps drop curved tree-branch wires');
   assert.doesNotMatch(stepsText, /→/, 'no arrow chain in hover card');
   assert.doesNotMatch(stepsText, /window-pop\.svg/, 'read-only hover card omits window toggle');
   assert.equal(nodes.get('info-log:task:ip-steps')?.allTexts().join(' '), 'wiring steps view second line collapsed');
@@ -2445,4 +2557,1025 @@ test('pm-dash renders window controls on Windows/Linux headers (Board/Projects/A
   curProps = { overlay: 'ov-1' };
   assert.equal(findById(proj.pageHeader(fakeView, 'board', theme).__node, 'pm-window-controls'), null);
   assert.equal(findById(dash.setupView(theme).__node, 'setup-header'), null);
+});
+
+test('board token analytics helpers: formatting, scope, chart buckets, breakdown, persistence, Esc, and i18n', async () => {
+  const { escapeTarget } = await import('./model.js');
+  // 1. Formatting
+  assert.equal(formatTokens(0), '0');
+  assert.equal(formatTokens(842), '842');
+  assert.equal(formatTokens(12400), '12.4K');
+  assert.equal(formatTokens(520300000), '520.3M');
+  assert.equal(formatTokens(6740000000), '6.74B');
+  assert.equal(formatUsd(0), '$0.00');
+  assert.equal(formatUsd(0.002), '<$0.01');
+  assert.equal(formatUsd(1234.5), '$1,234.50');
+  assert.equal(formatPct(0.9716, 2), '97.16%');
+  assert.equal(formatPct(0.9716, 0), '97%');
+  assert.equal(formatCompactInt(2105), '2,105');
+
+  // 2. Persistence defaults collapsed (false) and survives missing/throwing localStorage
+  const map = new Map();
+  const fakeStorage = { getItem: k => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)) };
+  assert.equal(readTokensExpanded(fakeStorage), false);
+  writeTokensExpanded(fakeStorage, true);
+  assert.equal(map.get(TOKENS_EXPANDED_KEY), '1');
+  assert.equal(readTokensExpanded(fakeStorage), true);
+  writeTokensExpanded(fakeStorage, false);
+  assert.equal(readTokensExpanded(fakeStorage), false);
+  assert.equal(readTokensExpanded({ getItem() { throw new Error('denied'); } }), false);
+  writeTokensExpanded({ setItem() { throw new Error('quota'); } }, true);
+
+  // 3. parseTokenAnalytics & selectTokenScope
+  assert.equal(parseTokenAnalytics('not json'), null);
+  assert.equal(parseTokenAnalytics(JSON.stringify({ version: 2, projects: {} })), null);
+  const sample = {
+    version: 1,
+    scan_ms: 6,
+    projects: {
+      __all__: {
+        ranges: {
+          today: {
+            range: 'today',
+            bucket_mode: 'hour',
+            kpi: {
+              total_tokens: 3000000, input_tokens: 200000, output_tokens: 100000, cache_read_tokens: 2500000, cache_write_tokens: 200000,
+              prompt_tokens: 2900000, requests: 20, errors: 1, tasks: 2, sessions: 3, cost_usd: 12.5, cache_savings_usd: 25.0,
+              cache_hit_rate: 0.862, by_agent_hit_rate: { claude: 0.9, agy: 0.8 }, by_agent_requests: { claude: 12, agy: 8 },
+            },
+            buckets: [
+              {
+                key: '08:00', label: '08:00', total_tokens: 1000000, cost_usd: 4.0, requests: 8,
+                by_agent_tokens: { claude: 600000, agy: 400000 },
+                by_agent_cost: { claude: 3.0, agy: 1.0 },
+                by_agent_requests: { claude: 5, agy: 3 },
+                advisor_tokens: 150000, advisor_cost: 1.2,
+              },
+              {
+                key: '09:00', label: '09:00', total_tokens: 2000000, cost_usd: 8.5, requests: 12,
+                by_agent_tokens: { claude: 1400000, agy: 600000 },
+                by_agent_cost: { claude: 6.5, agy: 2.0 },
+                by_agent_requests: { claude: 7, agy: 5 },
+                advisor_tokens: 0, advisor_cost: 0,
+              },
+            ],
+            by_model: [
+              { model: 'claude-opus-5-5', agent: 'claude', is_advisor: false, requests: 10, total_tokens: 1850000, input_tokens: 100000, output_tokens: 50000, cache_read_tokens: 1500000, cache_write_tokens: 200000, cache_write_available: true, cache_hit_rate: 0.83, cost_usd: 8.3 },
+              { model: 'claude-fable-5-2', agent: 'claude', is_advisor: true, requests: 2, total_tokens: 150000, input_tokens: 50000, output_tokens: 10000, cache_read_tokens: 90000, cache_write_tokens: 0, cache_write_available: true, cache_hit_rate: 0.64, cost_usd: 1.2 },
+              { model: 'gemini-4-neon-high', agent: 'agy', is_advisor: false, requests: 8, total_tokens: 1000000, input_tokens: 50000, output_tokens: 40000, cache_read_tokens: 910000, cache_write_tokens: 0, cache_write_available: false, cache_hit_rate: 0.95, cost_usd: 3.0 },
+            ],
+            by_task: [
+              { id: 'dudu-1', number: 1, title: 'Task 1', project: 'dudu', pm: 'pm-dudu', role: 'worker', agents: ['claude', 'agy'], models: ['claude-opus-5-5'], requests: 15, total_tokens: 2200000, work_tokens: 1600000, review_tokens: 600000, cost_usd: 10.0, work_cost_usd: 7.5, review_cost_usd: 2.5, share: 0.733, by_agent: { claude: 1400000, agy: 800000 }, by_agent_cost: { claude: 7.5, agy: 2.5 }, by_agent_requests: { claude: 9, agy: 6 } },
+              { id: 'pm:dudu', number: 0, title: 'dudu · PM', project: 'dudu', pm: 'pm-dudu', role: 'pm', agents: ['claude'], models: ['claude-opus-5-5'], requests: 5, total_tokens: 800000, work_tokens: 800000, review_tokens: 0, cost_usd: 2.5, work_cost_usd: 2.5, review_cost_usd: 0, share: 0.267, by_agent: { claude: 800000 }, by_agent_cost: { claude: 2.5 }, by_agent_requests: { claude: 5 } },
+            ],
+            by_agent: [
+              { agent: 'claude', label: 'Claude Code', requests: 12, errors: 1, sessions: 2, tasks: 1, total_tokens: 2000000, input_tokens: 150000, output_tokens: 60000, cache_read_tokens: 1590000, cache_write_tokens: 200000, cache_write_available: true, cache_hit_rate: 0.82, cost_usd: 9.5, cache_savings_usd: 20.0 },
+              { agent: 'agy', label: 'Antigravity (agy)', requests: 8, errors: 0, sessions: 1, tasks: 1, total_tokens: 1000000, input_tokens: 50000, output_tokens: 40000, cache_read_tokens: 910000, cache_write_tokens: 0, cache_write_available: false, cache_hit_rate: 0.95, cost_usd: 3.0, cache_savings_usd: 5.0 },
+              { agent: 'codex', label: 'Codex CLI', requests: 0, errors: 0, sessions: 0, tasks: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cache_write_available: true, cache_hit_rate: 0, cost_usd: 0, cache_savings_usd: 0 },
+              { agent: 'pi', label: 'pi Agent', requests: 0, errors: 0, sessions: 0, tasks: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cache_write_available: true, cache_hit_rate: 0, cost_usd: 0, cache_savings_usd: 0 },
+            ],
+          },
+        },
+      },
+      dudu: { pm_name: 'pm-dudu', project: 'dudu', ranges: { today: { kpi: { total_tokens: 3000000, requests: 20, cost_usd: 12.5, cache_hit_rate: 0.862 }, buckets: [], by_model: [], by_task: [], by_agent: [] } } },
+    },
+  };
+  assert.ok(parseTokenAnalytics(JSON.stringify(sample)));
+  assert.equal(selectTokenScope(sample, '', []).key, '__all__');
+  assert.equal(selectTokenScope(sample, 'pm-dudu', [{ name: 'pm-dudu', project: 'dudu' }]).key, 'dudu');
+  assert.equal(selectTokenScope(sample, 'pm-missing', [{ name: 'pm-missing', project: 'missing' }]).ranges, null);
+
+  // 4. filterTokenSlice & sparklineBars
+  const allSlice = sample.projects.__all__.ranges.today;
+  const fAll = filterTokenSlice(allSlice, { agent: 'all', metric: 'tokens', dim: 'task' });
+  assert.equal(fAll.maxBucket, 2000000);
+  assert.equal(fAll.peakBucket.key, '09:00');
+  assert.deepEqual(fAll.buckets[0].segments.map(s => [s.key, s.value]), [['claude', 450000], ['fable', 150000], ['agy', 400000]]);
+  assert.equal(fAll.rows[0].id, 'dudu-1');
+
+  const fAgy = filterTokenSlice(allSlice, { agent: 'agy', metric: 'cost', dim: 'model' });
+  assert.equal(fAgy.kpi.total_tokens, 1000000);
+  assert.equal(fAgy.rows.length, 1);
+  assert.equal(fAgy.rows[0].cache_write_available, false);
+
+  // PM summary & breakdown preservation (both backwards-compatible fallback and explicit pm object)
+  assert.equal(fAll.pm.total_tokens, 800000);
+  assert.equal(fAll.pm.cost_usd, 2.5);
+  const { selectBreakdownRows } = await import('./model.js');
+  const sliceWithPm = {
+    ...allSlice,
+    pm: {
+      total_tokens: 800000, input_tokens: 50000, output_tokens: 20000, cache_read_tokens: 700000, cache_write_tokens: 30000,
+      requests: 5, sessions: 1, cost_usd: 2.5, share: 0.267, agents: ['claude'], models: ['claude-opus-5-5'],
+      by_agent: { claude: { total_tokens: 800000, input_tokens: 50000, output_tokens: 20000, cache_read_tokens: 700000, cache_write_tokens: 30000, requests: 5, sessions: 1, cost_usd: 2.5, models: ['claude-opus-5-5'] } },
+    },
+    by_task: [
+      ...Array.from({ length: 7 }, (_, i) => ({
+        id: `dudu-big-${i}`, number: i + 1, title: `Big ${i}`, project: 'dudu', pm: 'pm-dudu', role: 'worker',
+        agents: ['agy'], models: ['gemini-4-neon-high'], requests: 10, total_tokens: 5000000 - i * 100000,
+        work_tokens: 5000000 - i * 100000, review_tokens: 0, cost_usd: 4.0, share: 0.12,
+        by_agent: { agy: 5000000 - i * 100000 }, by_agent_cost: { agy: 4.0 }, by_agent_requests: { agy: 10 },
+      })),
+      {
+        id: 'pm:dudu', number: 0, title: 'dudu · PM', project: 'dudu', pm: 'pm-dudu', role: 'pm',
+        agents: ['claude'], models: ['claude-opus-5-5'], requests: 5, total_tokens: 800000,
+        input_tokens: 50000, output_tokens: 20000, cache_read_tokens: 700000, cache_write_tokens: 30000,
+        work_tokens: 800000, review_tokens: 0, cost_usd: 2.5, share: 0.05,
+        by_agent: { claude: 800000 }, by_agent_cost: { claude: 2.5 }, by_agent_requests: { claude: 5 },
+        by_agent_io: { claude: { input_tokens: 50000, output_tokens: 20000, cache_read_tokens: 700000, cache_write_tokens: 30000, models: ['claude-opus-5-5'] } },
+      },
+    ],
+  };
+  const fPmAll = filterTokenSlice(sliceWithPm, { agent: 'all', metric: 'tokens', dim: 'task' });
+  const visibleRows = selectBreakdownRows(fPmAll.rows, 'task', 6);
+  assert.equal(visibleRows.length, 6);
+  assert.ok(visibleRows.some(r => r.id === 'pm:dudu'), 'PM row must stay visible even when > 6 larger tasks exist');
+  const fPmClaude = filterTokenSlice(sliceWithPm, { agent: 'claude', metric: 'tokens', dim: 'task' });
+  assert.equal(fPmClaude.pm.total_tokens, 800000);
+  assert.equal(fPmClaude.rows.length, 1);
+  assert.equal(fPmClaude.rows[0].input_tokens, 50000);
+  const fPmAgy = filterTokenSlice(sliceWithPm, { agent: 'agy', metric: 'tokens', dim: 'task' });
+  assert.equal(fPmAgy.pm.total_tokens, 0);
+
+  const spark = sparklineBars(allSlice.buckets, 12);
+  assert.equal(spark.length, 12);
+  assert.equal(spark[11], 1);
+  assert.equal(spark[10], 0.5);
+  assert.equal(spark[0], 0);
+
+  // 5. escapeTarget folds expanded tokens shelf before leaving board
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: 'pm-dudu' }, { tokens: true }), { tokens: true });
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: '' }, { tokens: true }), { tokens: true });
+  assert.deepEqual(escapeTarget(true, { view: 'board', project: 'pm-dudu' }, { hoverCard: true, tokens: true }), { hoverCard: true });
+  assert.deepEqual(escapeTarget(true, { view: 'list', project: '' }, { tokens: true }), { back: true });
+
+  // 6. EN & ZH i18n keys
+  for (const lang of ['en', 'zh']) {
+    for (const k of ['tokUsage', 'tokAnalytics', 'tokRangeToday', 'tokRange7d', 'tokRange30d', 'tokRangeAll',
+      'tokAgentAll', 'tokDimModel', 'tokDimTask', 'tokDimAgent', 'tokMetricTokens', 'tokMetricCost',
+      'tokMetricRequests', 'tokKpiTotal', 'tokKpiReqs', 'tokKpiCost', 'tokKpiHit', 'tokCacheWriteUnavail', 'tokAdapterReady',
+      'tokPmInline', 'tokPmCostSub', 'tokPmAgentSub', 'tokPmModelSub']) {
+      assert.ok(word(lang, k, '1M', '$1', '10%'), `${lang}.${k} should exist`);
+    }
+  }
+
+  // 7. fitBoard scale invariance (token shelf sits outside fixedHeight)
+  const boardState = { lang: 'en', pms: [{ name: 'pm-dudu', project: 'dudu', status: 'working' }], tasks: [{ id: 't1', pm: 'pm-dudu', title: 'Task', status: 'in_progress', updated: '2026-11-27 12:00' }], events: [] };
+  const g1 = fitBoard(boardState, 1280, 720, 160);
+  const g2 = fitBoard(boardState, 1280, 720, 160);
+  assert.equal(g1.scale, g2.scale);
+});
+
+test('board refreshTokens applies exponential backoff on failure so board renders never loop spawning Python', async () => {
+  const makeEl = () => {
+    const proxy = new Proxy({}, { get: (_t, prop) => (prop === '__node' ? {} : () => proxy) });
+    return proxy;
+  };
+  let calls = 0;
+  let nextResp = { code: 1, stderr: 'boom' };
+  const scheduledTimers = [];
+  const view = modWithIO('./main.js', {
+    div: () => makeEl(), v_flex: () => makeEl(), h_flex: () => makeEl(), svg: () => makeEl(),
+    PathBuilder: { stroke: () => ({ move_to: () => ({ cubic_bezier_to() {}, build: () => ({}) }) }) },
+    Scrollbar: { new: () => makeEl() }, Popup: { new: () => makeEl() },
+    theme: () => ({ canvas: '#111', background: '#111', surface: '#1b1b1f', raised: '#27272d',
+      foreground: '#fff', muted: '#aaa', dim: '#666', border: '#333', accent: '#4da3ff', blocked: '#ff6b6b',
+      ansi1: '#ff6b6b', ansi2: '#4cd964', ansi3: '#ffcc00', ansi4: '#4da3ff', ansi5: '#bf5af2', ansi6: '#5ac8fa' }),
+    home: () => '/h', appHome: () => '/a',
+    execPython: async () => { calls++; if (nextResp instanceof Error) throw nextResp; return nextResp; },
+    exec: async () => ({ code: 0, stdout: '' }),
+    readTextFile: async () => '', watchFolder: async () => {}, terminals: () => [], agents: () => [], panes: () => [],
+    run: () => {}, props: () => ({}), closeOverlay: () => {}, openOverlay: () => {}, desktopLayout: () => ({}),
+    setupState, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents,
+    pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts,
+    wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, taskSteps, taskDependencies, taskNumber, formatTaskNumber, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand,
+    pmStatusText, scopeState, archiveThreads: () => [], disconnected, escapeTarget: () => null, DROPPED, endedTime,
+    page: () => ({ view: 'board', project: 'pm-dudu' }), pageView: () => makeEl(),
+    pageHeader: () => makeEl(), projectHeader: () => makeEl(), keepPress: (_v, el) => el,
+    dialogView: () => makeEl(), initDialog: () => {}, restoreProject: () => {}, readLines: async () => ({}),
+    archivePopup: () => ({}), NEW_DIALOG: {}, openProject: () => {}, showPage: () => {},
+    FlowLayer: class {}, boardVisible: () => true, renderStepsCard, renderDepsCard,
+    renderTokenPulsePill: () => makeEl(), renderTokenShelf: () => makeEl(),
+    readTokensExpanded, writeTokensExpanded, parseTokenAnalytics,
+  });
+  const pending = [];
+  const cx = {
+    notify() {},
+    spawn(task) { pending.push(task(cx)); },
+    timer: {
+      after(_ms, fn) { scheduledTimers.push(fn); return { cancel() {} }; },
+      every() {},
+    },
+  };
+  const drainAll = async () => {
+    while (scheduledTimers.length || pending.length) {
+      while (scheduledTimers.length) scheduledTimers.shift()(cx);
+      while (pending.length) await pending.shift();
+    }
+  };
+  view.state = { lang: 'en', project: 'pm-dudu', pms: [{ name: 'pm-dudu', project: 'dudu' }], tasks: [], events: [] };
+  view.size = { width: 1200, height: 800 };
+  view.tokensFetchedAt = 0; view.tokensLoading = false; view.tokensRetryAfter = 0; view.tokensFailedCount = 0; view.tokensScheduled = false;
+  view.shown = {}; view.shownStatus = {}; view.shownLive = {}; view.statuses = {}; view.tags = {}; view.nudges = {};
+  view.queue = []; view.endedOpen = new Set(); view.showDropped = new Set(); view.hoverEnded = null; view.hoverPm = null;
+  view.flowLayer = { set_props() {} };
+  globalThis.window = { paint_path: () => makeEl() };
+
+  // Multiple board() renders before timer runs only schedule once, and failure sets tokensFetchedAt + backoff.
+  view.board(cx);
+  view.board(cx);
+  assert.equal(view.tokensScheduled, true);
+  await drainAll();
+  assert.equal(view.tokensScheduled, false);
+  assert.equal(calls, 1);
+  assert.ok(view.tokensFetchedAt > 0);
+  assert.equal(view.tokensFailedCount, 1);
+  assert.ok(view.tokensRetryAfter > Date.now());
+
+  // Re-rendering board() or calling non-forced refreshTokens() during backoff does NOT spawn Python again.
+  view.board(cx);
+  view.refreshTokens(cx);
+  await drainAll();
+  assert.equal(calls, 1);
+
+  // Manual force refresh bypasses backoff; thrown error (e.g., NO_PYTHON) increments backoff safely.
+  nextResp = new Error('no-python');
+  view.refreshTokens(cx, { force: true });
+  await drainAll();
+  assert.equal(calls, 2);
+  assert.equal(view.tokensFailedCount, 2);
+
+  // Subsequent forced success resets backoff counters.
+  nextResp = { code: 0, stdout: JSON.stringify({ version: 1, projects: { __all__: { ranges: {} } } }) };
+  view.refreshTokens(cx, { force: true });
+  await drainAll();
+  assert.equal(calls, 3);
+  assert.equal(view.tokensFailedCount, 0);
+  assert.equal(view.tokensRetryAfter, 0);
+  assert.equal(view.tokenData?.version, 1);
+});
+
+// ---- Persistent mod error log (error_log.js) ---------------------------------
+import * as errorLog from './error_log.js';
+
+test('error_log.js is identical across pm-dash, pm-nav and pm-project and wired into each main.js', () => {
+  const here = dirname(new URL(import.meta.url).pathname);
+  const source = readFileSync(join(here, 'error_log.js'), 'utf8');
+  for (const mod of ['pm-nav', 'pm-project']) {
+    assert.equal(readFileSync(join(here, '..', mod, 'error_log.js'), 'utf8'), source, mod);
+  }
+  for (const mod of ['pm-dash', 'pm-nav', 'pm-project']) {
+    const main = readFileSync(join(here, '..', mod, 'main.js'), 'utf8');
+    assert.match(main, /import \{ createErrorLogger \} from '\.\/error_log\.js';/, mod);
+    assert.match(main, /this\.logModError\(/, mod);
+  }
+});
+
+test('error_log.js formats local timestamps, normalizes errors, throttles duplicates, and rotates log file', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'dudu-mod-errlog-'));
+  try {
+    let clock = new Date(2026, 10, 28, 1, 30, 5, 42).getTime();
+    assert.equal(errorLog.formatLocalTimestamp(clock), '2026-11-28 01:30:05.042');
+    assert.equal(errorLog.normalizeErrorMessage(new Error('  line1\n\tline2  ')), 'line1 line2');
+    assert.equal(errorLog.normalizeErrorMessage(''), '');
+    assert.equal(errorLog.normalizeErrorMessage('x'.repeat(20), 10), 'xxxxxxxxx…');
+
+    const realExec = async (cmd, args) => {
+      const stdout = execFileSync(cmd, args, { encoding: 'utf8' });
+      return { code: 0, stdout, stderr: '' };
+    };
+    const execPy = (run, args, opts) => run('python3', args, opts);
+    const logger = errorLog.createErrorLogger({
+      mod: 'pm-project',
+      exec: realExec,
+      execPy,
+      getLedgerHome: () => tmp,
+      now: () => clock,
+      throttleMs: 60_000,
+      maxLines: 5,
+      maxBytes: 4096,
+    });
+
+    // First error is recorded; identical error within throttleMs is suppressed.
+    assert.equal(logger.record('refresh', new Error('pm.py: 1\nboom')), true);
+    clock += 10_000;
+    assert.equal(logger.record('refresh', new Error('pm.py: 1 boom')), false);
+    clock += 10_000;
+    assert.equal(logger.record('refresh', 'pm.py: 1 boom'), false);
+
+    // Different message on same source flushes the suppressed repeat count of the previous error
+    // before recording the new error, and keeps the previous error's throttle window active.
+    clock += 5_000;
+    assert.equal(logger.record('refresh', 'timeout'), true);
+    // Interleaved A within its original 60s window is still throttled (prevents A/B flapping spam).
+    clock += 5_000;
+    assert.equal(logger.record('refresh', 'pm.py: 1 boom'), false);
+
+    // Same original message on a different source is recorded immediately.
+    assert.equal(logger.record('readLog', 'pm.py: 1 boom'), true);
+
+    // After throttle window passes, repeated identical error is logged again with its repeat count.
+    clock += 65_000;
+    assert.equal(logger.record('refresh', 'timeout'), true);
+    clock += 5_000;
+    assert.equal(logger.record('refresh', 'timeout'), false);
+    clock += 65_000;
+    assert.equal(logger.record('refresh', 'timeout'), true);
+
+    await logger.flush();
+    const logPath = join(tmp, 'cache', 'mod-errors.log');
+    const lines = readFileSync(logPath, 'utf8').trim().split('\n');
+    // maxLines is 5, so the 6 emitted lines keep the newest 5:
+    // [flushed (repeated 2x) pm.py: 1 boom, timeout, readLog pm.py: 1 boom, flushed (repeated 1x) pm.py: 1 boom, timeout, (repeated 1x) timeout] -> tail 5
+    assert.equal(lines.length, 5);
+    assert.match(lines[0], /\[pm-project\] \[refresh\] timeout$/);
+    assert.match(lines[1], /\[pm-project\] \[readLog\] pm\.py: 1 boom$/);
+    assert.match(lines[2], /\[pm-project\] \[refresh\] \(repeated 1x\) pm\.py: 1 boom$/);
+    assert.match(lines[3], /\[pm-project\] \[refresh\] timeout$/);
+    assert.match(lines[4], /\[pm-project\] \[refresh\] \(repeated 1x\) timeout$/);
+
+    // Explicit A/A/B interleaving check with large maxLines verifies the first flushed repeat count too.
+    const tmp2 = mkdtempSync(join(tmpdir(), 'dudu-mod-errlog-ab-'));
+    try {
+      let c2 = new Date(2026, 10, 28, 2, 0, 0, 0).getTime();
+      const logger2 = errorLog.createErrorLogger({
+        mod: 'pm-nav', exec: realExec, execPy, getLedgerHome: () => tmp2,
+        now: () => c2, throttleMs: 60_000, maxLines: 20, maxBytes: 4096,
+      });
+      assert.equal(logger2.record('refresh', 'errA'), true);
+      c2 += 5_000;
+      assert.equal(logger2.record('refresh', 'errA'), false);
+      c2 += 5_000;
+      assert.equal(logger2.record('refresh', 'errA'), false);
+      c2 += 5_000;
+      assert.equal(logger2.record('refresh', 'errB'), true);
+      await logger2.flush();
+      const abLines = readFileSync(join(tmp2, 'cache', 'mod-errors.log'), 'utf8').trim().split('\n');
+      assert.equal(abLines.length, 3);
+      assert.match(abLines[0], /\[pm-nav\] \[refresh\] errA$/);
+      assert.match(abLines[1], /\[pm-nav\] \[refresh\] \(repeated 2x\) errA$/);
+      assert.match(abLines[2], /\[pm-nav\] \[refresh\] errB$/);
+    } finally {
+      rmSync(tmp2, { recursive: true, force: true });
+    }
+
+    // Line rotation caps at maxLines (5) and leaves no temp files behind.
+    for (let i = 0; i < 6; i++) {
+      clock += 1000;
+      logger.record('refresh', `err-${i}`);
+    }
+    await logger.flush();
+    const rotated = readFileSync(logPath, 'utf8').trim().split('\n');
+    assert.equal(rotated.length, 5);
+    assert.match(rotated[0], /err-1$/);
+    assert.match(rotated[4], /err-5$/);
+    const cacheEntries = readdirSync(join(tmp, 'cache'));
+    assert.equal(cacheEntries.filter(f => f.startsWith('.mod-errors-') && f !== '.mod-errors.lock').length, 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('error_log.js swallows write failures and never throws or blocks callers', async () => {
+  let attempts = 0;
+  const logger = errorLog.createErrorLogger({
+    mod: 'pm-dash',
+    exec: async () => { attempts += 1; throw new Error('EACCES'); },
+    execPy: (run, args, opts) => run('python3', args, opts),
+    getLedgerHome: () => '/nonexistent/readonly',
+    throttleMs: 0,
+  });
+  assert.equal(logger.record('refresh', new Error('disk offline')), true);
+  assert.equal(logger.record('refreshTokens', 'bad json'), true);
+  await assert.doesNotReject(() => logger.flush());
+  assert.ok(attempts >= 1);
+});
+
+test('Plan B projectHeader replaces Conversation|Board capsule with single chat icon back to pm-project', async () => {
+  const dash = await import('./model.js');
+  const source = readFileSync(new URL('./projects.js', import.meta.url), 'utf8')
+    .replace(/^import[\s\S]*?from\s+['"][^'"]+['"];\s*$/gm, '')
+    .replace(/^export\s+/gm, '');
+  const rendered = new Map();
+  const runs = [];
+  const sharedWrites = [];
+  const makeEl = (tag) => {
+    const rec = { tag, id: '', svgs: [], texts: [], click: null };
+    const p = new Proxy(rec, {
+      get(target, prop) {
+        if (prop === '__rec') return target;
+        if (prop === 'id') return v => { target.id = v; rendered.set(v, target); return p; };
+        if (prop === 'child') return c => { if (typeof c === 'string') target.texts.push(c); return p; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (typeof c === 'string') target.texts.push(c); return p; };
+        if (prop === 'when') return (cond, fn) => (cond ? fn(p) : p);
+        if (prop === 'on_click') return fn => { target.click = fn; return p; };
+        return () => p;
+      },
+    });
+    return p;
+  };
+  const bindings = {
+    ...dash,
+    div: () => makeEl('div'), v_flex: () => makeEl('v_flex'), h_flex: () => makeEl('h_flex'),
+    svg: path => { const el = makeEl('svg'); el.__rec.svgs.push(path); return el; },
+    InputState: {}, Input: {}, Scrollbar: {},
+    home: () => '/Users/alice', appHome: () => '/Users/alice/.config/herdr-app',
+    exec: async () => ({ code: 0, stdout: '' }), execPython: async () => ({ code: 0, stdout: '' }),
+    run: (cmd, args) => runs.push([cmd, args]), props: () => ({}), closeOverlay: () => {},
+    layout: () => ({ id: 'pm-stage', active: 'pm-board', children: [{ id: 'work' }, { id: 'pm-board' }, { id: 'pm-project' }] }),
+    shared: () => ({}), setShared: (k, v) => sharedWrites.push([k, v]), spaces: () => [],
+    pickFolder: async () => null, notify: () => {}, appWindow: () => ({ platform: 'macos', buttons: false }),
+  };
+  const { projectHeader } = new Function(...Object.keys(bindings), `${source}\nreturn { projectHeader };`)(...Object.values(bindings));
+  const t = { border: '#333', foreground: '#eee', muted: '#999', dim: '#666', raised: '#222', hover: '#2a2a2a' };
+  const v = { state: { lang: 'zh' }, keys: { focus() {} } };
+  projectHeader(v, { name: 'pm-dudu', project: 'dudu', repo: '/Users/alice/repos/dudu' }, t);
+  assert.equal(rendered.has('project-view'), false, 'segmented Conversation|Board capsule is removed');
+  assert.ok(rendered.get('project-view-chat'), 'single chat icon button renders in project board header');
+  rendered.get('project-view-chat').click({}, { stop_propagation() {} });
+  assert.deepEqual(sharedWrites.at(-1), ['pm-project', { pm: 'pm-dudu' }]);
+  assert.deepEqual(runs.at(-1), ['layout.select', { stack: 'pm-stage', child: 'pm-project' }]);
+});
+
+test('pm-dash displays project display_name/space_name over folder basename and supports project rename dialog', async () => {
+  const dash = await import('./model.js');
+  const { projectName, validateProjectName, renameArgv, projectCards, layout, counts, selectTokenScope, ledgerOpen } = dash;
+
+  const pmCustom = { name: 'pm-web', project: 'webapp-dir', display_name: '前端工作台', repo: '/Users/alice/webapp-dir' };
+  const pmLegacy = { name: 'pm-api', project: 'api-dir', space_name: 'API Gateway', repo: '/Users/alice/api-dir' };
+  const pmPlain = { name: 'pm-ops', project: 'ops', repo: '/Users/alice/ops' };
+  assert.equal(projectName(pmCustom), '前端工作台');
+  assert.equal(projectName(pmLegacy), 'API Gateway');
+  assert.equal(projectName(pmPlain), 'ops');
+
+  // Validation: empty, control chars, >80, duplicate across other projects, allow case-only on self.
+  assert.equal(validateProjectName('   ', 'zh', { pms: [pmCustom, pmLegacy], currentPm: pmCustom }).ok, false);
+  assert.equal(validateProjectName('bad\nname', 'en', { pms: [pmCustom, pmLegacy], currentPm: pmCustom }).ok, false);
+  assert.equal(validateProjectName('a'.repeat(81), 'en', { pms: [pmCustom, pmLegacy], currentPm: pmCustom }).ok, false);
+  assert.equal(validateProjectName('api gateway', 'en', { pms: [pmCustom, pmLegacy], currentPm: pmCustom }).ok, false);
+  assert.deepEqual(validateProjectName('  前端工作台 v2  ', 'zh', { pms: [pmCustom, pmLegacy], currentPm: pmCustom }), { ok: true, name: '前端工作台 v2', error: '' });
+  assert.deepEqual(validateProjectName('api gateway', 'en', { pms: [pmCustom, pmLegacy], currentPm: pmLegacy }), { ok: true, name: 'api gateway', error: '' });
+  assert.deepEqual(renameArgv('/app/pm.py', pmCustom, '新名字'), ['/app/pm.py', 'project', 'rename', '/Users/alice/webapp-dir', '新名字']);
+  assert.deepEqual(renameArgv('/app/pm.py', 'pm-web', '新名字'), ['/app/pm.py', 'project', 'rename', 'pm-web', '新名字']);
+
+  const state = {
+    pms: [pmCustom, { ...pmLegacy, archived: '2026-11-20' }],
+    tasks: [{ id: 't1', pm: 'pm-web', project: 'webapp-dir', title: 'Fix', status: 'blocked', updated: '2026-11-28 04:00' }],
+    events: [],
+  };
+  const cards = projectCards(state);
+  assert.equal(cards.active[0].name, '前端工作台');
+  assert.equal(cards.archived[0].name, 'API Gateway');
+  const laid = layout(state, 1100, 700, 1);
+  assert.equal(laid.rows.find(r => r.type === 'pm' && r.name === 'pm-web')?.title, '前端工作台');
+  assert.match(counts(state).conclusion, /前端工作台/);
+  const tokData = { projects: { __all__: { ranges: {} }, 'pm-web': { project_name: 'webapp-dir', ranges: {} } } };
+  assert.equal(selectTokenScope(tokData, 'pm-web', state.pms).label, '前端工作台');
+  assert.equal(ledgerOpen(state, '全新显示名', '/Users/alice/webapp-dir').length, 1);
+
+  // projects.js UI: projectHeader shows display_name + rename button; renameDialog validates & calls pm.py project rename.
+  const source = readFileSync(new URL('./projects.js', import.meta.url), 'utf8')
+    .replace(/^import[\s\S]*?from\s+['"][^'"]+['"];\s*$/gm, '')
+    .replace(/^export\s+/gm, '');
+  const rendered = new Map();
+  const execCalls = [];
+  let closedOverlay = false;
+  const makeEl = (tag) => {
+    const rec = { tag, id: '', texts: [], click: null };
+    const p = new Proxy(rec, {
+      get(target, prop) {
+        if (prop === '__rec') return target;
+        if (prop === 'id') return v => { target.id = v; rendered.set(v, target); return p; };
+        if (prop === 'child') return c => { if (typeof c === 'string') target.texts.push(c); return p; };
+        if (prop === 'children') return arr => { for (const c of arr || []) if (typeof c === 'string') target.texts.push(c); return p; };
+        if (prop === 'when') return (cond, fn) => (cond ? fn(p) : p);
+        if (prop === 'on_click') return fn => { target.click = fn; return p; };
+        return () => p;
+      },
+    });
+    return p;
+  };
+  let inputVal = '';
+  const bindings = {
+    ...dash,
+    div: () => makeEl('div'), v_flex: () => makeEl('v_flex'), h_flex: () => makeEl('h_flex'),
+    svg: () => makeEl('svg'),
+    InputState: { new: () => ({ set_value: v => { inputVal = v; }, value: () => inputVal, focus() {}, on() {}, set_placeholder() {} }) },
+    Input: { new: () => makeEl('Input') },
+    Scrollbar: {},
+    home: () => '/Users/alice', appHome: () => '/app',
+    exec: async () => ({ code: 0, stdout: '' }),
+    execPython: async (_exec, args) => {
+      execCalls.push(args);
+      if (args[1] === 'state') return { code: 0, stdout: JSON.stringify({ lang: 'zh', pms: [pmCustom, pmLegacy], tasks: [], events: [] }) };
+      return { code: 0, stdout: JSON.stringify({ ok: true }) };
+    },
+    run: () => {}, props: () => ({ dialog: 'rename', pm: 'pm-web' }),
+    closeOverlay: () => { closedOverlay = true; },
+    layout: () => ({ id: 'pm-stage', active: 'pm-board', children: [{ id: 'pm-board' }, { id: 'pm-project' }] }),
+    shared: () => ({}), setShared: () => {}, spaces: () => [],
+    pickFolder: async () => null, notify: () => {}, appWindow: () => ({ platform: 'macos', buttons: false }),
+  };
+  const mod = new Function(...Object.keys(bindings), `${source}\nreturn { projectHeader, initDialog, dialogView, submitRename, renameDialogSpec };`)(...Object.values(bindings));
+  const t = { border: '#333', foreground: '#eee', muted: '#999', dim: '#666', raised: '#222', hover: '#2a2a2a', chrome: '#111', surface: '#1a1a1a', accent: '#58a6ff', blocked: '#f85149' };
+  const openedOverlays = [];
+  const v = {
+    state: { lang: 'zh', pms: [pmCustom, pmLegacy], tasks: [] },
+    local: { lang: 'zh', pms: [pmCustom, pmLegacy], tasks: [] },
+    keys: { focus() {} },
+    openRename: pm => openedOverlays.push(pm),
+  };
+  mod.projectHeader(v, pmCustom, t);
+  assert.ok(rendered.get('project-rename'), 'local project board header renders rename icon button');
+  rendered.get('project-rename').click({}, { stop_propagation() {} });
+  assert.deepEqual(openedOverlays, ['pm-web']);
+  assert.deepEqual(mod.renameDialogSpec('pm-web'), { mod: 'pm-dash', props: { dialog: 'rename', pm: 'pm-web' }, kind: 'dialog', width: 420, height: 224 });
+
+  const { cx, drain } = asyncContext();
+  cx.subscribe = () => {};
+  cx.focus_handle = () => ({ focus() {} });
+  mod.initDialog(v, cx);
+  await drain();
+  mod.dialogView(v, t, cx);
+  assert.equal(inputVal, '前端工作台');
+  inputVal = '前端总台';
+  v.form.name = '前端总台';
+  mod.submitRename(v, cx);
+  await drain();
+  assert.deepEqual(execCalls.at(-1), ['/app/mods/pm-dash/skill/scripts/pm.py', 'project', 'rename', '/Users/alice/webapp-dir', '前端总台']);
+  assert.equal(closedOverlay, true);
+});
+
+test('Slice 2 projects.js New project dialog: Machine preselect, 0..N equal folders, agy, remote picker/mkdir & remote archive/restore', async () => {
+  const dash = await import('./model.js');
+  const source = readFileSync(new URL('./projects.js', import.meta.url), 'utf8')
+    .replace(/^import[\s\S]*?from\s+['"][^'"]+['"];\s*$/gm, '')
+    .replace(/^export\s+/gm, '');
+
+  const makeHarness = (overrides = {}) => {
+    const rendered = new Map();
+    const execCalls = [];
+    const pyCalls = [];
+    const runCalls = [];
+    const openedProjects = [];
+    const openedArchives = [];
+    const states = {
+      name: '',
+      remotePath: '',
+      spaces: overrides.spaces || [],
+      terminals: overrides.terminals || [],
+      machines: overrides.machines ?? { machines: [{ name: 'dev', state: 'connected' }, { name: 'mbp', state: 'unreachable' }] },
+      probeDirs: overrides.probeDirs || { '/home/dev/repos/api': { exists: true, git: true, branch: 'main' } },
+      listDirs: overrides.listDirs || 'BASE\t/home/dev/repos\t/home/dev\nENTRY\tapi\t/home/dev/repos/api\t1\tmain\nENTRY\tdocs\t/home/dev/repos/docs\t0\t\n',
+    };
+    const makeEl = (tag) => {
+      const rec = { tag, id: '', texts: [], click: null, hover: null };
+      const p = new Proxy(rec, {
+        get(target, prop) {
+          if (prop === '__rec') return target;
+          if (prop === 'id') return v => { target.id = v; rendered.set(v, target); return p; };
+          if (prop === 'child') return c => { if (typeof c === 'string') target.texts.push(c); return p; };
+          if (prop === 'children') return arr => { for (const c of arr || []) if (typeof c === 'string') target.texts.push(c); return p; };
+          if (prop === 'when') return (cond, fn) => (cond ? fn(p) : p);
+          if (prop === 'on_click') return fn => { target.click = fn; return p; };
+          if (prop === 'on_hover') return fn => { target.hover = fn; return p; };
+          return () => p;
+        },
+      });
+      return p;
+    };
+    let inputIndex = 0;
+    let closedOverlay = false;
+    const bindings = {
+      ...dash,
+      div: () => makeEl('div'), v_flex: () => makeEl('v_flex'), h_flex: () => makeEl('h_flex'),
+      svg: () => makeEl('svg'),
+      InputState: {
+        new: () => {
+          const idx = inputIndex++;
+          const key = idx === 0 ? 'name' : 'remotePath';
+          const handlers = {};
+          return {
+            set_value: v => { states[key] = v; },
+            value: () => states[key],
+            focus() {},
+            set_placeholder() {},
+            on: (ev, fn) => { handlers[ev] = fn; },
+            trigger: (ev, cx) => handlers[ev]?.({}, cx),
+          };
+        },
+      },
+      Input: { new: () => makeEl('Input') },
+      Scrollbar: { new: () => makeEl('Scrollbar') },
+      home: () => '/Users/alice', appHome: () => '/app',
+      exec: async (cmd, args, opts) => {
+        execCalls.push({ cmd, args, opts });
+        if (cmd === 'hc' && args[0] === 'machine' && args[1] === 'ls') {
+          return { code: 0, stdout: JSON.stringify(states.machines), stderr: '' };
+        }
+        if (cmd === 'hc' && args[0] === 'label') {
+          const spArg = args.find(a => String(a).startsWith('herdr.space='));
+          const tbArg = args.find(a => String(a).startsWith('herdr.tab='));
+          const spId = spArg ? String(spArg).slice('herdr.space='.length) : 'sp-remote-1';
+          const tbId = tbArg ? String(tbArg).slice('herdr.tab='.length) : 'tb-1';
+          const qSp = `dev/${spId}`;
+          const prev = states.spaces.find(s => s.id === qSp);
+          if (prev) {
+            prev.tabs = [...(prev.tabs || []), { id: `dev/${tbId}`, terminals: [{ terminal: args[1] }] }];
+          } else {
+            states.spaces = [{ id: qSp, name: 'NewDev', tabs: [{ id: `dev/${tbId}`, terminals: [{ terminal: args[1] }] }] }];
+          }
+          return { code: 0, stdout: '{}', stderr: '' };
+        }
+        if (cmd === 'sh' && args[0] === '-c') {
+          const scriptStr = String(args[1] || '');
+          if (scriptStr.includes('mkdir -p')) {
+            const p = args[3];
+            states.probeDirs[p] = { exists: true, git: false, branch: '' };
+            return { code: 0, stdout: p + '\n', stderr: '' };
+          }
+          if (scriptStr.includes('ENTRY\\t')) {
+            return { code: 0, stdout: states.listDirs, stderr: '' };
+          }
+          if (scriptStr.includes('LEDGER\\t')) {
+            const paths = args.slice(3);
+            const lines = ['HOME\t/home/dev', 'PM\t/home/dev/.dudu/pm.py', 'LEDGER\t/home/dev/.dudu'];
+            for (const p of paths) {
+              const info = states.probeDirs[p];
+              lines.push(info?.exists
+                ? `DIR\t1\t${p}\t${p}\t${info.git ? 1 : 0}\t${info.branch || ''}`
+                : `DIR\t0\t${p}\t${p}\t0\t`);
+            }
+            return { code: 0, stdout: lines.join('\n') + '\n', stderr: '' };
+          }
+          if (scriptStr.includes('env -u HC_TERMINAL_ID')) {
+            const pmArgs = args.slice(3);
+            if (pmArgs[0] === 'state') return { code: 0, stdout: JSON.stringify({ lang: 'en', pms: [{ name: 'pm-api', slug: 'api', space_id: 'sp1', terminal: 't1', display_name: 'API' }], tasks: [{ id: 't1', pm: 'pm-api', title: 'Task 1', status: 'in_progress' }], events: [] }), stderr: '' };
+            if (pmArgs[0] === 'start') return { code: 0, stdout: JSON.stringify({ ok: true, slug: 'remote-plan', name: 'pm-remote-plan', display_name: 'Remote Plan', terminal: 't77', cwd: '/home/dev/repos/api' }), stderr: '' };
+            if (pmArgs[0] === 'project' && pmArgs[1] === 'set-space') return { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' };
+            if (pmArgs[0] === 'archive') return { code: 0, stdout: JSON.stringify({ ok: true, slug: 'api', space_id: 'sp1', terminal: 't1' }), stderr: '' };
+            if (pmArgs[0] === 'restore') return { code: 0, stdout: JSON.stringify({ ok: true, slug: 'api', name: 'pm-api', display_name: 'API', terminal: 't88', space_id: 'sp1' }), stderr: '' };
+          }
+        }
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      execPython: async (_exec, args) => {
+        pyCalls.push(args);
+        if (args[1] === 'state') return { code: 0, stdout: JSON.stringify({ lang: 'en', home: '/Users/alice/.dudu', pms: [], tasks: [], events: [] }), stderr: '' };
+        if (args[1] === 'start') return { code: 0, stdout: JSON.stringify({ ok: true, slug: 'zero-plan', name: 'pm-zero-plan' }), stderr: '' };
+        return { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' };
+      },
+      run: (name, args) => runCalls.push([name, args]),
+      props: () => overrides.props || { dialog: 'new' },
+      closeOverlay: () => { closedOverlay = true; },
+      layout: () => ({ id: 'pm-stage', active: 'pm-board', children: [{ id: 'pm-board' }, { id: 'pm-project' }] }),
+      shared: () => ({}), setShared: (k, val) => { if (k === 'pm-project') openedProjects.push(val); },
+      spaces: () => states.spaces,
+      panes: () => [],
+      terminals: () => states.terminals,
+      knownAgents: async () => [{ key: 'claude', installed: true, run: ['claude'] }, { key: 'agy', installed: true, run: ['agy'] }, { key: 'codex', installed: true, run: ['codex'] }, { key: 'pi', installed: false, run: ['pi'] }],
+      pickFolder: async () => null,
+      readTextFile: async () => null,
+      notify: () => {},
+      appWindow: () => ({ platform: 'macos', buttons: false }),
+    };
+    const mod = new Function(...Object.keys(bindings), `${source}\nreturn { initDialog, dialogView, pageView, restoreProject, NEW_DIALOG, archivePopup };`)(...Object.values(bindings));
+    return { mod, rendered, execCalls, pyCalls, runCalls, openedProjects, openedArchives, states, getClosed: () => closedOverlay };
+  };
+
+  const t = { border: '#333', input: '#444', popover: '#181818', background: '#111', foreground: '#eee', muted: '#999', dim: '#666', raised: '#222', hover: '#2a2a2a', chrome: '#111', surface: '#1a1a1a', canvas: '#141414', accent: '#58a6ff', blocked: '#f85149', ansi2: '#3fb950', ansi3: '#d29922', solid: '#eee', solid_foreground: '#111' };
+
+  // 1. No remote machines configured: Machine row hidden, Where row completely removed, 0-folder submit works with agy
+  const h1 = makeHarness({ machines: { machines: [] } });
+  const { cx: cx1, drain: drain1 } = asyncContext();
+  cx1.focus_handle = () => ({ focus() {} });
+  cx1.stop_propagation = () => {};
+  const v1 = {};
+  h1.mod.initDialog(v1, cx1);
+  await drain1();
+  h1.mod.dialogView(v1, t, cx1);
+  assert.equal(h1.rendered.get('new-machine'), undefined, 'Machine row hidden when no remote machines exist');
+  assert.equal(h1.rendered.get('new-space'), undefined, 'Where row is completely removed');
+  assert.ok(h1.rendered.get('new-kind-agy'), 'Manager includes agy');
+  v1.form.name = 'Zero Plan';
+  v1.form.kind = 'agy';
+  h1.mod.dialogView(v1, t, cx1);
+  h1.rendered.get('new-submit').click({}, cx1);
+  await drain1();
+  assert.deepEqual(h1.pyCalls.at(-1), ['/app/mods/pm-dash/skill/scripts/pm.py', 'start', '--name', 'Zero Plan', '--kind', 'agy', '--json']);
+  assert.equal(h1.getClosed(), true);
+
+  // 2. Active remote space preselects `dev`, supports Not found -> Create folder, Browse picker drill-down + Add, and 2-phase submit without space.select
+  const h2 = makeHarness({ spaces: [{ id: 'dev/sp0', active: true, machine: 'dev', tabs: [] }] });
+  const { cx: cx2, drain: drain2 } = asyncContext();
+  cx2.focus_handle = () => ({ focus() {} });
+  cx2.stop_propagation = () => {};
+  const v2 = {};
+  h2.mod.initDialog(v2, cx2);
+  await drain2();
+  assert.equal(v2.form.machine, 'dev', 'active space on dev auto-selects dev machine');
+  h2.mod.dialogView(v2, t, cx2);
+  assert.ok(h2.rendered.get('new-machine-dev'), 'Machine selector renders dev');
+
+  // Missing remote path -> Not found -> Create folder
+  h2.states.remotePath = '/home/dev/repos/new-dir';
+  v2.remotePath = '/home/dev/repos/new-dir';
+  h2.mod.dialogView(v2, t, cx2);
+  h2.rendered.get('remote-add-btn').click({}, cx2);
+  await drain2();
+  h2.mod.dialogView(v2, t, cx2);
+  assert.ok(h2.rendered.get('remote-not-found'), 'Missing remote path shows Not found banner');
+  assert.ok(h2.rendered.get('remote-create-folder'), 'Shows Create folder button');
+  h2.rendered.get('remote-create-folder').click({}, cx2);
+  await drain2();
+  assert.equal(v2.form.folders.length, 1);
+  assert.equal(v2.form.folders[0].path, '/home/dev/repos/new-dir');
+
+  // Remote subfolder picker -> Add equal second folder (no primary badge)
+  h2.mod.dialogView(v2, t, cx2);
+  h2.rendered.get('remote-browse-btn').click({}, cx2);
+  await drain2();
+  h2.mod.dialogView(v2, t, cx2);
+  assert.ok(h2.rendered.get('remote-picker'), 'Remote subfolder picker opens');
+  h2.rendered.get('remote-dir-add-0').click({}, cx2);
+  assert.equal(v2.form.folders.length, 2);
+  assert.deepEqual(v2.form.folders.map(f => f.alias), ['new-dir', 'api']);
+
+  // Submit remote project: Stage 1 --no-app-space --json, Stage 2 hc label + set-space, NO space.select
+  h2.mod.dialogView(v2, t, cx2);
+  h2.rendered.get('new-submit').click({}, cx2);
+  await drain2();
+  assert.ok(h2.execCalls.some(c => c.cmd === 'hc' && c.args[0] === 'label' && c.args[1] === 'dev/t77'));
+  assert.ok(h2.runCalls.some(([name]) => name === 'space.rename'));
+  assert.ok(h2.runCalls.some(([name]) => name === 'tab.rename'));
+  assert.equal(h2.runCalls.some(([name]) => name === 'space.select'), false, 'D4: must never call space.select on create');
+  assert.deepEqual(h2.openedProjects[0], { pm: 'dev/pm-remote-plan', machine: 'dev' });
+
+  // 3. Remote cards & archived cards allow Archive & Restore; confirmArchive closes idle remote Space via D1
+  const h3 = makeHarness({
+    props: { dialog: 'archive', pm: 'dev/pm-api', machine: 'dev' },
+    spaces: [{ id: 'dev/sp1', name: 'API', tabs: [{ id: 'dev/tb1', panes: 1, terminals: [{ terminal: 'dev/t1' }] }] }],
+  });
+  const listView = {
+    state: { lang: 'en' },
+    allState: { pms: [{ name: 'dev/pm-api', sourceName: 'pm-api', slug: 'api', display_name: 'API', machine: 'dev', repo: '/home/dev/repos/api', space_id: 'sp1', status: 'idle' }], tasks: [], events: [] },
+    lines: {}, hoverCard: 'dev/pm-api', restoring: '', today: () => '2026-11-28',
+    keys: { focus() {} }, openNew() {}, openRename() {}, openArchive: (k, m) => h3.openedArchives.push([k, m]), restore() {},
+  };
+  const { cx: cx3, drain: drain3 } = asyncContext();
+  cx3.focus_handle = () => ({ focus() {} });
+  cx3.stop_propagation = () => {};
+  h3.mod.pageView(listView, 'list', t);
+  assert.ok(h3.rendered.get('archive-dev/pm-api'), 'hovered remote active card renders archive icon button');
+  h3.rendered.get('archive-dev/pm-api').click({}, cx3);
+  assert.deepEqual(h3.openedArchives, [['dev/pm-api', 'dev']]);
+
+  const v3 = {};
+  h3.mod.initDialog(v3, cx3);
+  await drain3();
+  h3.mod.dialogView(v3, t, cx3);
+  h3.rendered.get('archive-confirm').click({}, cx3);
+  await drain3();
+  assert.ok(h3.runCalls.some(([name, arg]) => name === 'space.close' && arg?.id === 'dev/sp1' && arg?.confirmed === true));
+
+  // Fail-closed: remote space with an extra unseen terminal (empty terminals()) keeps Space without calling space.close
+  const h4 = makeHarness({
+    props: { dialog: 'archive', pm: 'dev/pm-api', machine: 'dev' },
+    spaces: [{ id: 'dev/sp2', name: 'API2', tabs: [{ id: 'dev/tb1', panes: 1, terminals: [{ terminal: 'dev/t1' }] }, { id: 'dev/tb2', panes: 1, terminals: [{ terminal: 'dev/t_unseen' }] }] }],
+    terminals: [],
+  });
+  const { cx: cx4, drain: drain4 } = asyncContext();
+  cx4.focus_handle = () => ({ focus() {} });
+  cx4.stop_propagation = () => {};
+  const v4 = {};
+  h4.mod.initDialog(v4, cx4);
+  await drain4();
+  h4.mod.dialogView(v4, t, cx4);
+  h4.rendered.get('archive-confirm').click({}, cx4);
+  await drain4();
+  assert.equal(h4.runCalls.some(([name]) => name === 'space.close'), false, 'fail-closed: unseen non-PM terminal must keep Space');
+
+  // Remote archived card renders Restore button and triggers Stage 1 + Stage 2 restore
+  listView.allState.pms[0].archived = '2026-11-28';
+  listView.hoverCard = null;
+  h3.rendered.clear();
+  listView.hoverCard = 'dev/pm-api';
+  h3.mod.pageView(listView, 'archived', t);
+  assert.ok(h3.rendered.get('restore-dev/pm-api'), 'remote archived card renders Restore button');
+  await h3.mod.restoreProject({ state: { lang: 'en' }, restoring: '', refresh() {}, refreshRemote() {} }, { key: 'dev/pm-api', sourceName: 'pm-api', slug: 'api', name: 'API', machine: 'dev', spaceId: 'sp1' }, cx3);
+  await drain3();
+  assert.ok(h3.execCalls.some(c => c.cmd === 'hc' && c.args[0] === 'label' && c.args[1] === 'dev/t88'));
+});
+
+test('WRITE_REMOTE_CACHE --from-file writes 200KB+ remote state atomically, skips unchanged, and removes staging file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pm-remote-cache-file-'));
+  try {
+    const cacheDir = join(dir, 'cache with spaces');
+    const path = join(cacheDir, 'remote-states.json');
+    const bigPad = 'x'.repeat(210_000);
+    const remote = { pms: [{ name: 'pm-dudu', project: 'dudu', helpers: bigPad }], tasks: [], events: [] };
+    const states = { '198.51.100.10': remote };
+    const writeFromFile = (value, at, name = '.remote-states-in.tmp') => {
+      mkdirSync(cacheDir, { recursive: true });
+      const staged = join(cacheDir, name);
+      writeFileSync(staged, JSON.stringify(value), 'utf8');
+      execFileSync('python3', ['-c', WRITE_REMOTE_CACHE, path, '--from-file', staged, String(at)]);
+    };
+    writeFromFile(states, 1_000_000);
+    const original = readFileSync(path, 'utf8'), modified = statSync(path).mtimeMs;
+    assert.ok(original.length > 210_000);
+    assert.deepEqual(cachedRemoteStates(original, 1_000_000), states);
+    assert.deepEqual(readdirSync(cacheDir), ['remote-states.json'], 'staging temp file is removed after commit');
+
+    // Unchanged remote state skips rewriting target and still cleans up staging file.
+    writeFromFile({ '198.51.100.10': { events: [], tasks: [], pms: remote.pms } }, 2_000_000, '.remote-states-in-2.tmp');
+    assert.equal(readFileSync(path, 'utf8'), original);
+    assert.equal(statSync(path).mtimeMs, modified);
+    assert.deepEqual(readdirSync(cacheDir), ['remote-states.json']);
+
+    // Corrupt staging JSON still cleans up staging file and fails cleanly without touching target.
+    const badStaged = join(cacheDir, '.remote-states-bad.tmp');
+    writeFileSync(badStaged, '{broken', 'utf8');
+    assert.throws(() => execFileSync('python3', ['-c', WRITE_REMOTE_CACHE, path, '--from-file', badStaged, '2000001'], { stdio: 'pipe' }));
+    assert.deepEqual(readdirSync(cacheDir), ['remote-states.json']);
+    assert.equal(readFileSync(path, 'utf8'), original);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('pm-nav stages 200KB+ remote cache via writeTextFile to bypass Windows 32KB argv limit and publishes remoteCacheSig', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pm-nav-win-remote-'));
+  try {
+    const winHome = join(dir, 'win-ledger');
+    const calls = [], sharedWrites = [], logged = [];
+    const sharedStore = new Map();
+    const bigRemoteState = {
+      pms: [
+        { name: 'pm-dudu', project: 'dudu', pane: 'hc:t1k6', status: 'idle', helpers: 'h'.repeat(200_000) },
+        { name: 'pm-nova', project: 'Nova', pane: 'hc:t2', status: 'idle' },
+        { name: 'pm-issues', project: 'issues', pane: 'hc:t3', status: 'idle' },
+      ],
+      tasks: [],
+      events: [],
+    };
+    let allowCacheWrite = true;
+    const navView = modWithIO('../pm-nav/main.js', {
+      home: () => dir, appHome: () => dir,
+      ENSURE_DIR_PY, remoteCacheSig, WRITE_REMOTE_CACHE, remoteStateCommand: nav.remoteStateCommand,
+      shared: k => sharedStore.get(k),
+      setShared: (k, v) => { sharedStore.set(k, v); sharedWrites.push([k, v]); },
+      writeTextFile: async (path, text) => {
+        if (!allowCacheWrite) throw new Error('disk full');
+        // Mirror Herdr's writeTextFile: fails if parent directory does not exist yet.
+        writeFileSync(path, text, 'utf8');
+        return null;
+      },
+      exec: async (program, args, options) => {
+        const cmdLineLen = [program, ...args].join(' ').length;
+        // Enforce Windows CreateProcessW 32,767-char command-line limit.
+        if (cmdLineLen > 32_767) {
+          throw new Error(`WinError 206: command line too long (${cmdLineLen} chars)`);
+        }
+        calls.push({ program, args, options });
+        if (program === 'hc' && args[0] === 'machine') {
+          return { code: 0, stdout: JSON.stringify({ machines: [{ name: '198.51.100.10', state: 'connected' }] }) };
+        }
+        if (program === 'hc' && args[0] === 'exec') {
+          return { code: 0, stdout: JSON.stringify(bigRemoteState) };
+        }
+        if (program === 'python3' && args[0] === '-c') {
+          execFileSync('python3', args, { stdio: 'pipe' });
+          return { code: 0, stdout: '', stderr: '' };
+        }
+        if (program === 'python3' && args[0].endsWith('setup.py')) {
+          return { code: 0, stdout: JSON.stringify(setupSummary(['claude'], ['claude'])) };
+        }
+        return { code: 0, stdout: '{}' };
+      },
+    });
+    navView.remoteStates = {};
+    navView.localState = { pms: [], tasks: [], events: [] };
+    navView.publish = () => {};
+    navView.logModError = (src, err) => logged.push([src, String(err)]);
+    navView.ledgerHome = winHome;
+    const { cx, drain } = asyncContext();
+
+    // Case 1: Set up not available here (Windows host: the skill folder is unreadable) — another
+    // machine's projects need no local Set up, so remote-states.json is written right away.
+    navView.setupAvailable = false;
+    navView.refreshRemote(cx);
+    await drain();
+    assert.equal(Object.keys(navView.remoteStates).length, 1);
+    assert.equal(sharedWrites.length, 1);
+
+    navView.checkSetup(cx);
+    await drain();
+    assert.equal(navView.setupAvailable, true);
+    const cachePath = join(winHome, 'cache', 'remote-states.json');
+    const written = JSON.parse(readFileSync(cachePath, 'utf8'));
+    assert.deepEqual(written.states['198.51.100.10'].pms.map(p => p.name), ['pm-dudu', 'pm-nova', 'pm-issues']);
+    assert.deepEqual(readdirSync(join(winHome, 'cache')), ['remote-states.json']);
+    assert.deepEqual(sharedWrites, [['pm-remote-cache', '198.51.100.10:pm-dudu:0,pm-issues:0,pm-nova:0']]);
+    assert.ok(calls.some(c => c.program === 'python3' && c.args[3] === '--from-file'), 'uses --from-file instead of argv JSON');
+
+    // Unchanged project set does not re-write shared('pm-remote-cache') on subsequent polls.
+    navView.refreshRemote(cx);
+    await drain();
+    assert.equal(sharedWrites.length, 1);
+
+    // Case 2: writeRemoteCache errors are logged via logModError instead of silently swallowed.
+    allowCacheWrite = false;
+    navView.refreshRemote(cx);
+    await drain();
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0][0], 'writeRemoteCache');
+    assert.match(logged[0][1], /disk full/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('pm-dash warms remote cache and refreshes with 6s/10s timeouts when becoming visible on stage', async () => {
+  const execCalls = [];
+  let visible = false, focused = false;
+  const scheduled = [];
+  const remoteState = { pms: [{ name: 'pm-dudu', project: 'dudu' }], tasks: [], events: [] };
+  const board = modWithIO('./main.js', {
+    home: () => '/h', appHome: () => '/a',
+    FlowLayer: class {},
+    boardVisible: () => visible,
+    desktopLayout: () => ({ id: 'pm-stage', active: visible ? 'pm-board' : 'work' }),
+    props: () => ({}),
+    readTextFile: async path => (path === '/h/.dudu/cache/remote-states.json'
+      ? JSON.stringify({ at: Date.now(), states: { '198.51.100.10': remoteState } })
+      : null),
+    cachedRemoteStates, remoteStateCommand, mergeStates, scopeState,
+    exec: async (program, args, options) => {
+      execCalls.push({ program, args, options });
+      if (args[0] === 'machine') return { code: 0, stdout: JSON.stringify([{ name: '198.51.100.10', state: 'connected' }]) };
+      return { code: 0, stdout: JSON.stringify(remoteState) };
+    },
+    v_flex: () => { const p = new Proxy({}, { get: () => () => p }); return p; },
+    theme: () => ({}),
+  });
+  board.dialog = null;
+  board.onStage = false;
+  board.ledgerHome = '/h/.dudu';
+  board.homeKnown = Promise.resolve('/h/.dudu');
+  board.localState = { pms: [], tasks: [], events: [] };
+  board.remoteStates = {};
+  board.keys = { focus() { focused = true; } };
+  board.content = () => ({});
+  board.publish = () => {};
+  const { cx, drain } = asyncContext();
+  cx.timer = { after: (_ms, fn) => scheduled.push(fn) };
+
+  // Transition false -> true schedules focus, warmRemoteCache, and refreshRemote.
+  visible = true;
+  board.render(cx);
+  assert.equal(scheduled.length, 1);
+  scheduled.shift()(cx);
+  await drain();
+  assert.equal(focused, true);
+  assert.deepEqual(Object.keys(board.remoteStates), ['198.51.100.10']);
+  assert.equal(execCalls[0].options?.timeout, 6000);
+  assert.equal(execCalls[1].options?.timeout, 10000);
+});
+
+test('remote sh scripts expand ~/ cleanly in real /bin/sh without creating literal ~ directories', () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), 'pm-dash-tilde-'));
+  try {
+    mkdirSync(join(fakeHome, 'proj', 'repo'), { recursive: true });
+    mkdirSync(join(fakeHome, 'my dir', 'sub'), { recursive: true });
+    const env = { ...process.env, HOME: fakeHome };
+    const probeOut = execFileSync('/bin/sh', ['-c', REMOTE_PROBE_SH, 'sh', '~/proj/repo', '~/my dir/sub', '~/missing/dir'], { env, encoding: 'utf8' });
+    const probed = parseRemoteProbe(probeOut);
+    assert.equal(probed.home, fakeHome);
+    assert.equal(probed.dirs.length, 3);
+    assert.equal(probed.dirs[0].exists, true);
+    assert.equal(probed.dirs[0].path, realpathSync(join(fakeHome, 'proj', 'repo')));
+    assert.equal(probed.dirs[1].exists, true);
+    assert.equal(probed.dirs[1].path, realpathSync(join(fakeHome, 'my dir', 'sub')));
+    assert.equal(probed.dirs[2].exists, false);
+    assert.equal(probed.dirs[2].path, join(fakeHome, 'missing/dir'));
+
+    const dirsOut = execFileSync('/bin/sh', ['-c', REMOTE_LIST_DIRS_SH, 'sh', '~/proj'], { env, encoding: 'utf8' });
+    const listed = parseRemoteDirs(dirsOut);
+    assert.equal(listed.base, realpathSync(join(fakeHome, 'proj')));
+    assert.deepEqual(listed.entries.map(e => e.name), ['repo']);
+
+    const createdOut = execFileSync('/bin/sh', ['-c', REMOTE_MKDIR_SH, 'sh', '~/new proj/sub'], { env, encoding: 'utf8' }).trim();
+    assert.equal(createdOut, realpathSync(join(fakeHome, 'new proj', 'sub')));
+    assert.throws(() => statSync(join(fakeHome, '~')));
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test('setupCoversPage: Set up missing covers the page only when no other machine has projects', async () => {
+  const { setupCoversPage } = await import('./model.js');
+  const remote = { pms: [{ name: 'pm-dudu', machine: '198.51.100.10' }] };
+  assert.equal(setupCoversPage('missing', { pms: [] }), true);
+  assert.equal(setupCoversPage(null, undefined), true);
+  assert.equal(setupCoversPage('missing', remote), false);
+  assert.equal(setupCoversPage(null, remote), false);
+  assert.equal(setupCoversPage('ready', { pms: [] }), false);
+  assert.equal(setupCoversPage('outdated', { pms: [] }), false);
 });

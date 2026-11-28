@@ -432,16 +432,20 @@ def stored_undelivered(summary: Mapping[str, Any] | None) -> dict[str, Any] | No
 class TurnTracker:
     """Storage & facade for per-project PM turn snapshots (`pm-turn.json` v2) and observation journal."""
 
-    def __init__(self, ctx: Context, repo_or_slug: str | Path) -> None:
+    def __init__(self, ctx: Context, repo_or_slug: str | Path, *, slug: str | None = None) -> None:
         self.ctx = ctx
         raw = str(repo_or_slug or "").strip()
-        if valid_slug(raw) and (ctx.store.registration(raw) is not None or ctx.home.project(raw).root.is_dir()):
+        if slug and valid_slug(slug):
+            self.slug = slug
+            reg = ctx.store.registration(slug) or {}
+            self.repo = str(reg.get("repo") or (raw if raw != slug else "") or "")
+        elif valid_slug(raw) and (ctx.store.registration(raw) is not None or ctx.home.project(raw).root.is_dir()):
             self.slug = raw
             reg = ctx.store.registration(raw) or {}
             self.repo = str(reg.get("repo") or "")
         else:
             self.repo = raw
-            self.slug = project_slug(raw) if raw else "project"
+            self.slug = (ctx.store.folder_project_slug(raw) or project_slug(raw)) if raw else "project"
         self.files = ctx.home.project(self.slug)
         self.lock_path = self.files.pm_turn_lock
         self.pm_mailbox = MailboxStore(self.files.pm_mailbox, clock=ctx.clock, typist_dir=ctx.home.typists)

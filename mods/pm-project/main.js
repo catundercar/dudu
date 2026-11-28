@@ -1,6 +1,6 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { v_flex, h_flex, TextView, TextareaState, Textarea, InputState, Input, ScrollHandle, Scrollbar, Popup } from 'gpui-base';
-import { theme, home, appHome, exec, readTextFile, writeTextFile, watchFolder, layout, run, terminals, agents, panes, spaces, shared, setShared, props, openOverlay, closeOverlay, window as appWindow } from 'herdr';
+import { theme, home, appHome, exec, readTextFile, writeTextFile, watchFolder, nextCommand, layout, run, terminals, agents, panes, spaces, shared, setShared, props, openOverlay, closeOverlay, pickFolder, window as appWindow } from 'herdr';
 import {
   word, timeline, parseConversation, settlePending, answeredTasks, markAnswered, bellStops, bellNext, bellCount, bellThread, detailQuestion, askKey, timelineRows, rowOf, rowOfKey, blockIndexForKey, riseAfterWheel, riseAfterJump, answerText, clock, dayLabel, shortPath,
   terminalSendArgv, rejectsOption, SEND_WAIT_SECONDS, makeClientMsgId, projectSendArgv, projectInterruptArgv, rotatePmArgs,
@@ -9,14 +9,17 @@ import {
   isDialogOrDraftSendError, isTargetGoneSendError, isQueueableSendError, reconcilePendingSends, classifyPmDialog, pmBlockedBannerText, undeliveredBannerText,
   QUEUE_KEY, readQueuedSends, keepQueuedSends, restoreQueuedPending, RESEND_VERIFY_WAIT_MS, logKey,
   mergeReceipts, receiptsFromTurn2Inbox, settledReceiptIndices, findReceiptMatch, findCoalescedReceiptMatches, confirmReceiptBubble,
-  withoutTerminalEnv, SEND_ENV, REATTACH_ENV, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, pmKeepPlan, pmKeepFollowUp, pmTabNameFor, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
+  withoutTerminalEnv, SEND_ENV, REATTACH_ENV, pmRow, taskRow, terminalFor, terminalTargetFor, focusPlan, pmKeepPlan, pmKeepFollowUp, projectName, pmTabNameFor, cleanTaskLog, statusLabel, tone, turns, newestReply, threadList,
   disconnected, isClosedTask, closedDetailText, closedTip, terminalAction, reattachArgv,
   pmStartState, startPmArgs, startPmArgv, lostShown, mergeDismissedLost, lostSummary, bringBackSteps,
   engineLabel, engineTip, engineChip, wasEscalated, endedEngine, escapeStep, searchShortcutLabel,
   subThreads, parentThread, foldParts, PARTS_LIMIT, foldReviews, threadFor,
-  taskTree, taskSteps, taskDependencies, threadAgents, threadAgentLayout, inlineAgentBadgeParts, inlineAgentBadgeText, agentActionLabel, resolveAgentProgram, AGENT_WINDOW_MAX, normalizeAgentWindowSize, nextAgentWindowSize, agentWindowDimensions, agentWindowTerminalAddresses, agentWindowOpen, toggleAgentWindow, focusAgentWindow, closeAgentWindow, setAgentWindowOverlay, toggleAgentWindowMode, setAgentWindowSize, reconcileAgentWindows, resolveHelperResultPath,
+  taskTree, taskSteps, taskDependencies, formatDepRef, threadAgents, threadAgentLayout, inlineAgentBadgeParts, inlineAgentBadgeText, agentActionLabel, resolveAgentProgram, AGENT_WINDOW_MAX, normalizeAgentWindowSize, nextAgentWindowSize, agentWindowDimensions, agentWindowTerminalAddresses, agentWindowOpen, toggleAgentWindow, focusAgentWindow, closeAgentWindow, setAgentWindowOverlay, toggleAgentWindowMode, setAgentWindowSize, reconcileAgentWindows, resolveHelperResultPath,
   age, eventTime, workingTasks, reviewWorking, taskNumber, formatTaskNumber, threadLink, resolveThreadRef, decorateThreadLinks, logText, compactLogLine, draftKey, draftText, readDrafts, keepDraft,
   validInputTokens, draftTokens, projectFilesArgv, parseRefLink, parseMentionSpans, splitMentionSegments,
+  projectFoldersLsArgv, projectFoldersAddArgv, projectFoldersRemoveArgv, projectFoldersRenameAliasArgv, projectSetSpaceArgv,
+  REMOTE_PROBE_SH, REMOTE_LIST_DIRS_SH, REMOTE_MKDIR_SH, parseRemoteProbe, parseRemoteDirs,
+  folderName, projectFolders, foldersSignature, headerFoldersView, activeThreadsInFolder, threadFolderBadge,
   detectMentionQuery, parseGitLsFiles, indexRepoFiles, buildMentionMenu, REPO_FILES_LIMIT, MENTION_KEY_BINDINGS, SEARCH_KEY_BINDINGS,
   plainTextToHtml, markdownToPlain, extractClipboardQuote, withQuote, withoutQuote, quotePreviewLine, quoteCardPreview,
   splitMarkdownParagraphs, locateQuoteRange, quoteScope, quoteScopeLabel, quoteScopeTip,
@@ -26,7 +29,7 @@ import {
   CHOOSE_FILES, SAVE_CLIPBOARD_IMAGE, PANEL_WIDTH, PANEL_MIN, panelWidth, draggedWidth, readPanelWidth, keepPressHandler,
   SPLIT_WIDE_MIN, SPLIT_MEDIUM_MIN, SPLIT_CARD_MARGIN_R, SPLIT_GRIP_OVERHANG,
   resolvePanelMode, resolveSplitLayout, readPanelSizes, updatePanelSizes, resetPanelModeSize,
-  withAlpha, solidText, isDarkTheme, viewMarkdown, LEDGER_HOME_SH, EVENT_LIMIT, LOG_LIMIT,
+  withAlpha, solidText, isDarkTheme, tonalSurfaces, viewMarkdown, LEDGER_HOME_SH, EVENT_LIMIT, LOG_LIMIT,
   projectRef, machineView, onMachine, remotePmArgv,
   projectSlug, isOldPmCommand, isReplacedLogError, projectEventsArgv, projectLogArgv,
   FINISHED_LIMIT, TASKS_PAGE_LIMIT, projectTasksArgv, parseProjectTasksPage, normalizeProjectTaskRow, mergeFinishedRows, filterLocalThreads,
@@ -42,35 +45,45 @@ import {
   makeDocFailEntry, isFreshDocFailure, reconcileDocCache, reconcileDocFailures, keepDocCache,
   documentView, resolveContextLink, markdownChunks, parseFrontmatter, buildMemoryMarkdown,
   INLINE_IMAGE_CACHE_DIR, INLINE_IMAGE_MAX_BYTES, INLINE_IMAGE_REMOTE_MAX_BYTES,
+  IMAGE_REVALIDATE_LOCAL_MS, IMAGE_REVALIDATE_REMOTE_MS, IMAGE_LIGHTBOX_REVALIDATE_MS, IMAGE_FAIL_BACKOFF_MS,
   isPreviewableImage, resolveImageTarget, extractInlineImageRefs, rewriteMarkdownImagesForDisplay,
   fitImageBox, stageLocalImageArgv, readRemoteImageArgv, writeStagedImageArgv,
+  statLocalImagesArgv, statRemoteImagesArgv, isImageEntryFresh, needsImageRevalidate, isImageFailActive, reconcileImageCache,
+  LIGHTBOX_TOOLBAR_HEIGHT, LIGHTBOX_CANVAS_PADDING, createImageLightboxState,
+  computeLightboxLayout, stepLightboxZoom, toggleLightboxFitActual, cycleLightboxZoomPreset,
+  applyLightboxPinch, resolveSystemPreviewPath, systemOpenFileArgv, imageLightboxOverlaySpec,
   autoOpenEventKey, extractAutoOpenDocRefs, seedAutoOpenState, markAutoOpenHistory, pickAutoOpenTarget,
   memoryFromDroppedFile, slugifyMemoryName, uniqueMemorySlug, retopicPlan,
   SESSION_LIMIT, SESSION_POLL_LOCAL_MS, SESSION_POLL_REMOTE_MS,
   contextTokens, contextShort, contextLabel, pmContextLevel, pmContextTip, workerContextTip,
-  isMissingSessionModule, isQuietNoSession, isReplacedSessionError, knownUnsupportedSession, projectSessionArgv,
+  isMissingSessionModule, isUnsupportedSessionError, isQuietNoSession, isReplacedSessionError,
+  supportedSessionKind, taskSessionKind, knownUnsupportedSession,
+  sessionTabAvailable, wantThreadSession, projectSessionArgv,
   takeSessionWindow, trimSessionWindow, workedDuration, sessionTurns,
   CHANGE_DIFF_LIMIT, CHANGE_TIMEOUT_LOCAL_MS, CHANGE_TIMEOUT_REMOTE_MS,
   projectChangeArgv, changeDiffKey, createChangeState, openChangeView, closeChangeView,
   enterChangeFiles, enterChangeFileDiff, stepBackChangeView, appendDiffPage, toggleDiffHunk, toggleAllDiffHunks,
   tooltipLayout, pendingSignature, hostLiveSignature, windowControlButtons,
-  SIDE_TABS_KEY, SIDE_TABS_MAX, sideTabKey, createSideTabsState,
+  SIDE_TABS_KEY, SIDE_TABS_MAX, sideTabKey, threadTabStripLabel, createSideTabsState,
   openSideTab, activateSideTab, showSideIndex, toggleSideIndex,
   closeSideTab, closeOtherSideTabs, closeRightSideTabs, closeAllSideTabs,
   updateSideTab, upgradeDraftTab, cycleSideTab,
   readSideTabsStore, hydrateProjectTabs, serializeProjectTabs,
+  estimateSideTabWidth, computeSideTabOverflow,
 } from './model.js';
 import { execPython } from './python.js';
+import { createErrorLogger } from './error_log.js';
 import { renderThreadChangeView } from './change_view.js';
 import {
   buildProjectSearch, stepSearchSelection, stepSearchScope, stepSearchEscape, renderProjectSearchOverlay,
 } from './search.js';
-import { renderStepsCard, renderDepsCard, treeBranchList } from './steps.js';
+import { renderStepsCard, renderDepsCard } from './steps.js';
 
 // The project view reads the ledger through the original pm-dash bundle, like pm-list.
 const PM_SCRIPT = '/mods/pm-dash/skill/scripts/pm.py';
 const STAGE = 'pm-stage', WORK = 'work', BOARD = 'pm-board';
 const PARA_HOVER_SHOW_MS = 120, PARA_HOVER_HIDE_MS = 80;
+const HOVER_CARD_OPEN_MS = 650, HOVER_CARD_SWAP_MS = 80, HOVER_CARD_LEAVE_MS = 300;
 // pm-list names the project to show here: shared('pm-project') = {pm: <PM name>}, or for a PM on
 // another machine {pm: '<machine>/<PM name>', machine} (see projectRef).
 const SHARED = 'pm-project';
@@ -170,6 +183,7 @@ function findStage(node) {
 export default class PmProject extends View {
   init(_props, cx) {
     const p = typeof props === 'function' ? props() : null;
+    if (p?.imageLightbox) { this.initImageLightbox(p, cx); return; }
     if (p?.agentWindow === 'titlebar' || p?.agentWindow === 'chat') { this.initAgentWindow(p, cx); return; }
     if (p?.header) { this.initHeaderOnly(cx); return; }
     this.bodyOnly = Boolean(p?.body);
@@ -199,7 +213,9 @@ export default class PmProject extends View {
     this.expandedDone = new Set();
     this.substepsToggle = {};
     this.hoverKey = '';
+    this.hoverPendingKey = '';
     this.hoverCardOver = '';
+    this.hoverShowTimer = null;
     this.hoverHideTimer = null;
     this.highlightThread = '';
     this.highlightTimer = null;
@@ -240,6 +256,11 @@ export default class PmProject extends View {
     this.activeDoc = null; this.docCache = new Map(); this.docFailed = new Map();
     this.imageCache = new Map(); this.imageLoading = new Set(); this.imageFailed = new Map();
     this._imageQueue = new Map(); this._imageFlushScheduled = false;
+    this._imageStatQueue = new Map(); this._imageStatScheduled = false; this._imageStatRunning = new Set();
+    this.imageLightbox = null; this.lightboxOverlayId = ''; this.lightboxOverlayMode = false;
+    this.lightboxViewport = { width: 0, height: 0 }; this.lightboxOpeningExternal = false;
+    this.inlineFilterOpen = false;
+    this._sideTabStripW = 0;
     this.autoOpenSeenByLog = new Map();
     this.docLoading = ''; this.docError = ''; this.docShownBytes = DOC_INITIAL_BYTES;
     this.docFindOpen = false; this.docFindQuery = ''; this.docJumpQuery = ''; this.docFindJump = false; this.docMatchPos = 0;
@@ -320,6 +341,8 @@ export default class PmProject extends View {
     this.tabStripScroll = ScrollHandle.new();
     this.mentionScroll = ScrollHandle.new();
     this.searchScroll = ScrollHandle.new();
+    this.lightboxScroll = ScrollHandle.new();
+    this.lightboxFocus = cx.focus_handle();
     this.searchOpen = false;
     this.searchQuery = '';
     this.searchScope = 'all';
@@ -335,9 +358,18 @@ export default class PmProject extends View {
     this.mentionTasksLoading = false;
     this.mentionTasksSeq = 0;
     this.mentionTasksTimer = null;
-    this.repoFilesSlug = ''; this.repoFilesRepo = ''; this.repoFiles = [];
+    this.repoFilesSlug = ''; this.repoFilesRepo = ''; this.repoFilesSig = ''; this.repoFiles = [];
     this.repoFilesRead = false; this.repoFilesLoading = false; this.repoFilesAgain = false;
     this.repoFilesError = ''; this.repoFilesTruncated = false; this.repoFilesAt = 0;
+    this.foldersOpen = false;
+    this.foldersLive = null; this.foldersLiveSlug = '';
+    this.foldersLoading = false; this.foldersBusy = '';
+    this.foldersError = ''; this.foldersUnsupported = '';
+    this.foldersEditingAlias = null;
+    this.foldersConfirmRemove = null;
+    this.foldersRemoteOpen = false; this.foldersRemotePath = '';
+    this.foldersRemoteCheck = null;
+    this.foldersRemotePicker = { open: false, loading: false, error: '', base: '', home: '', entries: [] };
     this.pathCopiedAt = 0;
     this.quotes = []; this.quoteSeq = 0; this.hoveredMsg = ''; this.hoverClipboard = null; this.selectionBar = null;
     this.hoveredPara = ''; this.pendingHoverPara = ''; this.paraHoverShowTimer = null; this.paraHoverHideTimer = null; this.paraHoverSeq = 0; this.flashPara = '';
@@ -439,22 +471,22 @@ export default class PmProject extends View {
       this.threadsQuery = this.threadsInput.value();
       this.scheduleThreadsSearch(cx);
     });
-    this.threadsInput.on('focus', () => { this.typing = 'threadsSearch'; });
-    this.threadsInput.on('blur', () => { if (this.typing === 'threadsSearch') this.typing = ''; });
+    this.threadsInput.on('focus', (_e, cx) => { this.typing = 'threadsSearch'; this.notifyPanes(cx, { shell: false, side: true }); });
+    this.threadsInput.on('blur', (_e, cx) => { if (this.typing === 'threadsSearch') { this.typing = ''; this.notifyPanes(cx, { shell: false, side: true }); } });
     this.libraryInput = InputState.new();
     this.libraryInput.on('change', (_e, cx) => {
       this.libraryQuery = this.libraryInput.value();
       cx.notify();
     });
-    this.libraryInput.on('focus', () => { this.typing = 'librarySearch'; });
-    this.libraryInput.on('blur', () => { if (this.typing === 'librarySearch') this.typing = ''; });
+    this.libraryInput.on('focus', (_e, cx) => { this.typing = 'librarySearch'; this.notifyPanes(cx, { shell: false, side: true }); });
+    this.libraryInput.on('blur', (_e, cx) => { if (this.typing === 'librarySearch') { this.typing = ''; this.notifyPanes(cx, { shell: false, side: true }); } });
     this.memoryInput = InputState.new();
     this.memoryInput.on('change', (_e, cx) => {
       this.memoryQuery = this.memoryInput.value();
       cx.notify();
     });
-    this.memoryInput.on('focus', () => { this.typing = 'memorySearch'; });
-    this.memoryInput.on('blur', () => { if (this.typing === 'memorySearch') this.typing = ''; });
+    this.memoryInput.on('focus', (_e, cx) => { this.typing = 'memorySearch'; this.notifyPanes(cx, { shell: false, side: true }); });
+    this.memoryInput.on('blur', (_e, cx) => { if (this.typing === 'memorySearch') { this.typing = ''; this.notifyPanes(cx, { shell: false, side: true }); } });
     this.docFindInput = InputState.new();
     this.docFindInput.on('change', (_e, cx) => {
       this.docFindQuery = this.docFindInput.value();
@@ -502,6 +534,32 @@ export default class PmProject extends View {
     });
     this.searchInput.on('focus', () => { this.typing = 'projectSearch'; });
     this.searchInput.on('blur', () => { if (this.typing === 'projectSearch') this.typing = ''; });
+    this.folderAliasInput = InputState.new();
+    this.folderAliasInput.on('change', () => {
+      if (this.foldersEditingAlias) this.foldersEditingAlias.value = this.folderAliasInput.value();
+    });
+    this.folderAliasInput.on('submit', (_e, cx) => {
+      this.commitRenameFolderAlias(cx);
+    });
+    this.folderAliasInput.on('focus', () => { this.typing = 'folderAlias'; });
+    this.folderAliasInput.on('blur', () => { if (this.typing === 'folderAlias') this.typing = ''; });
+    this.folderRemoteInput = InputState.new();
+    this.folderRemoteInput.on('change', (_e, cx) => {
+      this.foldersRemotePath = this.folderRemoteInput.value();
+      this.foldersRemoteCheck = null;
+      this.foldersError = '';
+      cx?.notify?.();
+    });
+    this.folderRemoteInput.on('submit', (_e, cx) => {
+      this.probeRemoteFolderPath(this.foldersRemotePath, cx, { addIfExists: true });
+    });
+    this.folderRemoteInput.on('focus', () => { this.typing = 'folderRemote'; });
+    this.folderRemoteInput.on('blur', (_e, cx) => {
+      if (this.typing === 'folderRemote') this.typing = '';
+      if (this.machine && this.foldersRemoteOpen && String(this.foldersRemotePath || '').trim() && !this.foldersRemoteCheck) {
+        this.probeRemoteFolderPath(this.foldersRemotePath, cx, { addIfExists: false });
+      }
+    });
     cx.spawn(async cx => {
       // Until the first state reports `home`, apply pm.py's rule without waiting for it.
       let fallback = home() + '/.dudu';
@@ -514,6 +572,15 @@ export default class PmProject extends View {
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
     cx.timer.every(SESSION_POLL_LOCAL_MS, cx => { if (this.shouldPollThreadSession()) this.readThreadSession(cx); });
+    if (!this.__renderCheckOwnsCommands && typeof nextCommand === 'function' && typeof cx?.spawn === 'function') {
+      cx.spawn(async cmdCx => {
+        for (;;) {
+          let command;
+          try { command = await nextCommand(); } catch (_) { break; }
+          this.handleModCommand(command, cmdCx);
+        }
+      });
+    }
   }
 
   // One watcher per folder; a different ledger home arms new ones and the old ones stop at their next wake.
@@ -540,6 +607,7 @@ export default class PmProject extends View {
   arm(cx) {
     if (!this.ledgerHome) return;
     this.watch(this.ledgerHome + '/tasks', (_paths, cx) => this.refresh(cx), cx);
+    this.watch(this.ledgerHome + '/pms', (_paths, cx) => this.refresh(cx), cx);
     // The conversation logs, project documents and project memories live in <ledger home>/projects/<project>/.
     this.watch(this.ledgerHome + '/projects', (paths, cx) => {
       if (!this.machine && (!this.logPath || paths.some(p => p === this.logPath || !p.endsWith('.jsonl')))) this.readLog(cx);
@@ -606,6 +674,18 @@ export default class PmProject extends View {
     return typeof w === 'boolean' ? w : pmLiveStatus(pmTerm, live) === 'working';
   }
 
+  logModError(source, error) {
+    if (typeof createErrorLogger !== 'function') return;
+    if (!this.errorLogger) {
+      this.errorLogger = createErrorLogger({
+        mod: 'pm-project',
+        exec,
+        getLedgerHome: () => this.ledgerHome || (home() + '/.dudu'),
+      });
+    }
+    this.errorLogger.record(source, error);
+  }
+
   refresh(cx) {
     const now = this.nowMs();
     const token = this._enterGate('refreshGate', now, 18000);
@@ -649,7 +729,12 @@ export default class PmProject extends View {
           }
           if (this.pending?.length) this.reconcilePending(cx);
         }
-      } catch (e) { if (machine === this.machine) this.error = String(e?.message || e).trim(); }
+      } catch (e) {
+        if (machine === this.machine) {
+          this.error = String(e?.message || e).trim();
+          this.logModError(machine ? `refresh:${machine}` : 'refresh', e);
+        }
+      }
       finally {
         const { rerun, busy } = this._leaveGate('refreshGate', token);
         if (!busy) this.loading = false;
@@ -720,6 +805,12 @@ export default class PmProject extends View {
               const gotAt = this.nowMs();
               this.logState = after != null ? appendEventWindow(this.logState, got) : freshEventWindow(got);
               this.events = this.logState.events;
+              if (Array.isArray(got.events) && got.events.length > 0 && this.imageCache?.size) {
+                const pref = `${machine || 'local'}|${slug}|`;
+                for (const [k, entry] of this.imageCache.entries()) {
+                  if (k.startsWith(pref) && entry) this.imageCache.set(k, { ...entry, checkedAt: 0 });
+                }
+              }
               this.logReceipts = Array.isArray(got.receipts) ? got.receipts : [];
               if (got.turn && typeof got.turn === 'object') this.logTurn = got.turn;
               if (got.turn2 && typeof got.turn2 === 'object') this.logTurn2 = got.turn2;
@@ -763,7 +854,12 @@ export default class PmProject extends View {
             if (path === this.logPath && ls?.code === 0) this.pastes = pastesIn(dir, ls.stdout);
           } catch (_) { /* Marks then show without their screenshots. */ }
         }
-      } catch (e) { if (path === this.logPath && machine === this.machine) this.logError = String(e?.message || e); }
+      } catch (e) {
+        if (path === this.logPath && machine === this.machine) {
+          this.logError = String(e?.message || e);
+          this.logModError(machine ? `readLog:${machine}` : 'readLog', e);
+        }
+      }
       finally {
         const { rerun, busy } = this._leaveGate('logGate', token);
         if (!busy) this.logLoading = false;
@@ -818,7 +914,10 @@ export default class PmProject extends View {
           if (anchor) this.earlierAnchor = { anchor, left: SETTLE };
         }
       } catch (e) {
-        if (path === this.logPath && machine === this.machine) this.earlierError = String(e?.message || e).trim();
+        if (path === this.logPath && machine === this.machine) {
+          this.earlierError = String(e?.message || e).trim();
+          this.logModError(machine ? `loadEarlier:${machine}` : 'loadEarlier', e);
+        }
       } finally {
         if (path === this.logPath && machine === this.machine) this.earlierLoading = false;
         cx.notify();
@@ -1115,15 +1214,15 @@ export default class PmProject extends View {
   }
 
   sessionTabAvailable(stateTask, task) {
-    if (!this.sessionSupported() || knownUnsupportedSession(task)) return false;
-    if (this.threadSessionTask === this.thread) {
-      if (this.threadSessionState === 'unavailable') return false;
-      if (this.threadSessionState === 'ready') return true;
-      if (this.threadSessionState === 'error') {
-        return Boolean(this.threadSession) || contextTokens(stateTask?.context_tokens) > 0 || task?.session?.kind === 'claude';
-      }
-    }
-    return contextTokens(stateTask?.context_tokens) > 0 || task?.session?.kind === 'claude';
+    return sessionTabAvailable({
+      sessionSupported: this.sessionSupported(),
+      stateTask,
+      task,
+      threadId: this.thread,
+      sessionTask: this.threadSessionTask,
+      sessionState: this.threadSessionState,
+      hasSession: Boolean(this.threadSession),
+    });
   }
 
   activeThreadTab(stateTask, task) {
@@ -1167,15 +1266,23 @@ export default class PmProject extends View {
     const id = this.thread;
     if (!id || !this.detail) return;
     const { stateTask, task } = this.currentThreadPair();
-    if (!this.sessionSupported() || knownUnsupportedSession(task)) {
-      if (knownUnsupportedSession(task) && this.threadSessionTask !== id) {
+    if (!this.sessionSupported() || knownUnsupportedSession(task, stateTask)) {
+      if (knownUnsupportedSession(task, stateTask) && this.threadSessionTask !== id) {
         this.threadSessionTask = id;
         this.threadSessionState = 'unavailable';
       }
       return;
     }
     const knownFromState = contextTokens(stateTask?.context_tokens) > 0;
-    const wantSession = (this.threadTab === 'session') && (knownFromState || task?.session?.kind === 'claude' || this.threadSessionTask !== id || this.threadSessionState === 'ready');
+    const knownSupported = supportedSessionKind(taskSessionKind(stateTask, task));
+    const wantSession = wantThreadSession({
+      threadTab: this.threadTab,
+      stateTask,
+      task,
+      threadId: id,
+      sessionTask: this.threadSessionTask,
+      sessionState: this.threadSessionState,
+    });
     if (wantSession) {
       const freshOrStale = !this.threadSession || this.threadSession.taskId !== id || this.threadSessionStale;
       const recentlySent = Boolean(this.lastThreadSendAt && Date.now() - this.lastThreadSendAt < 15000);
@@ -1186,11 +1293,12 @@ export default class PmProject extends View {
       }
       return;
     }
-    // On the Log tab: if `state` already reports `context_tokens`, we already know the Conversation tab is
-    // available without spawning `pm.py project session` until the user opens that tab. Only probe when
-    // `state` has no `context_tokens` (e.g. an older closed task off the board, or a session not yet indexed).
-    if (knownFromState) {
-      if (this.threadSession && this.threadSession.taskId === id && this.threadSession.context !== contextTokens(stateTask.context_tokens)) {
+    // On the Log tab: if `state` already reports `context_tokens` (or this is a local thread with a
+    // known supported runtime such as Claude / agy), we already know the Conversation tab is available
+    // without spawning `pm.py project session` until the user opens that tab. Remote machines without
+    // `context_tokens` still probe once so an older remote `pm.py` can set `remoteNoSession`.
+    if (knownFromState || (!this.machine && knownSupported)) {
+      if (knownFromState && this.threadSession && this.threadSession.taskId === id && this.threadSession.context !== contextTokens(stateTask.context_tokens)) {
         this.threadSessionStale = true;
       }
       if (this.threadSessionState === 'unavailable' && this.threadSessionTask === id) {
@@ -1200,7 +1308,7 @@ export default class PmProject extends View {
       return;
     }
     // Wait until tasks/<id>.json settles when opening a local/remote thread with an existing home, unless
-    // no home is known yet (so we avoid probing an agy/codex closed task whose worker kind is in its file).
+    // no home is known yet (so we avoid probing an unsupported closed task whose worker kind is in its file).
     const home = this.machine ? this.remoteHome : this.ledgerHome;
     if (!stateTask && home && !this.threadTask && this.threadSessionTask !== id) return;
     if (this.threadSessionTask !== id) {
@@ -1216,8 +1324,8 @@ export default class PmProject extends View {
   readThreadSession(cx) {
     const id = this.thread, machine = this.machine;
     if (!id || !this.detail || !this.sessionSupported()) return;
-    const { task } = this.currentThreadPair();
-    if (knownUnsupportedSession(task)) {
+    const { stateTask, task } = this.currentThreadPair();
+    if (knownUnsupportedSession(task, stateTask)) {
       this.threadSessionTask = id;
       this.threadSessionState = 'unavailable';
       return;
@@ -1252,9 +1360,13 @@ export default class PmProject extends View {
             return;
           }
           if (isQuietNoSession(r)) {
+            const pair = this.currentThreadPair();
+            const keepTabEmpty = !isUnsupportedSessionError(r)
+              && supportedSessionKind(taskSessionKind(pair.stateTask, pair.task))
+              && pair.task?.status !== 'proposed';
             this.threadSession = null;
             this.threadSessionTask = id;
-            this.threadSessionState = 'unavailable';
+            this.threadSessionState = keepTabEmpty ? 'empty' : 'unavailable';
             this.threadSessionError = '';
             return;
           }
@@ -1431,12 +1543,14 @@ export default class PmProject extends View {
     this.editingDoc = null;
     this.confirmDeleteKey = '';
     this.retopicOpen = false;
+    this.inlineFilterOpen = false;
     this.historyView = null;
   }
 
   readLibrary(cx) {
     const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
     if (slug !== this.librarySlug) {
+      const prevSlug = this.librarySlug;
       this.librarySlug = slug;
       this.libraryRoots = [];
       this.libraryFiles = [];
@@ -1444,9 +1558,11 @@ export default class PmProject extends View {
       this.libraryProbed = false;
       this.libraryStale = false;
       this.libraryError = '';
-      if (this.activeDoc?.tab === 'library') this.activeDoc = null;
-      if (this.editingDoc?.tab === 'library') this.editingDoc = null;
-      if (this.historyView?.tab === 'library') this.historyView = null;
+      if (prevSlug) {
+        if (this.activeDoc?.tab === 'library') this.activeDoc = null;
+        if (this.editingDoc?.tab === 'library') this.editingDoc = null;
+        if (this.historyView?.tab === 'library') this.historyView = null;
+      }
     }
     if (!pm || !slug || !this.librarySupported()) {
       if (!this.librarySupported() && (this.sideTab === 'library' || this.sideTab === 'memory')) this.sideTab = 'threads';
@@ -1480,6 +1596,7 @@ export default class PmProject extends View {
           const all = this.allKnownFiles();
           this.docCache = reconcileDocCache(this.docCache, all);
           this.docFailed = reconcileDocFailures(this.docFailed, all);
+          this.imageCache = reconcileImageCache(this.imageCache, all, { machine: machine || 'local', slug });
           this.libraryRead = true;
           this.libraryStale = false;
           this.libraryError = '';
@@ -1549,6 +1666,7 @@ export default class PmProject extends View {
           const all = this.allKnownFiles();
           this.docCache = reconcileDocCache(this.docCache, all);
           this.docFailed = reconcileDocFailures(this.docFailed, all);
+          this.imageCache = reconcileImageCache(this.imageCache, all, { machine: machine || 'local', slug });
           this.memoryRead = true;
           this.memoryStale = false;
           this.memoryError = '';
@@ -1737,16 +1855,30 @@ export default class PmProject extends View {
     const cKey = this.imageCacheKey(target);
     const meta = this.findDocMeta(target.root, target.path);
     const version = meta?.version || '';
+    const now = Date.now();
+    const failed = failedMap.get(cKey);
     const cached = cache.get(cKey);
-    if (cached && (!version || !cached.version || cached.version === version)) {
+    if (cached) {
+      if (!isImageEntryFresh(cached, { version })) {
+        if (!isImageFailActive(failed, { version, now }) && !loadingSet.has(cKey) && cx?.timer?.after) {
+          queue.set(cKey, { target, force: true, background: true });
+          if (!this._imageFlushScheduled) {
+            this._imageFlushScheduled = true;
+            cx.timer.after(0, liveCx => this.flushImageQueue(liveCx));
+          }
+        }
+        return { status: 'ready', entry: cached };
+      }
+      if (needsImageRevalidate(cached, now, { remote: Boolean(this.machine) }) && cx?.timer?.after) {
+        this.scheduleImageRevalidate(target, cKey, cx);
+      }
       return { status: 'ready', entry: cached };
     }
-    const failed = failedMap.get(cKey);
-    if (failed && (!version || !failed.version || failed.version === version) && (Date.now() - failed.at < 30000)) {
+    if (isImageFailActive(failed, { version, now })) {
       return { status: 'error', error: failed.error || 'failed' };
     }
     if (!loadingSet.has(cKey) && cx?.timer?.after) {
-      queue.set(cKey, target);
+      queue.set(cKey, { target, force: false, background: false });
       if (!this._imageFlushScheduled) {
         this._imageFlushScheduled = true;
         cx.timer.after(0, liveCx => this.flushImageQueue(liveCx));
@@ -1755,18 +1887,112 @@ export default class PmProject extends View {
     return { status: 'loading' };
   }
 
+  scheduleImageRevalidate(target, cKey, cx) {
+    if (!target?.baseDir || !target?.relPath) return;
+    const loadingSet = (this.imageLoading ||= new Set());
+    const statRunning = (this._imageStatRunning ||= new Set());
+    if (loadingSet.has(cKey) || statRunning.has(cKey)) return;
+    const statQueue = (this._imageStatQueue ||= new Map());
+    statQueue.set(cKey, target);
+    if (!this._imageStatScheduled && cx?.timer?.after) {
+      this._imageStatScheduled = true;
+      cx.timer.after(0, liveCx => this.flushImageStatQueue(liveCx));
+    }
+  }
+
+  flushImageStatQueue(cx) {
+    this._imageStatScheduled = false;
+    const statQueue = (this._imageStatQueue ||= new Map());
+    if (!statQueue.size) return;
+    const batch = Array.from(statQueue.entries());
+    statQueue.clear();
+    const statRunning = (this._imageStatRunning ||= new Set());
+    const machine = this.machine;
+    const items = [];
+    const byKey = new Map();
+    for (const [cKey, target] of batch) {
+      if (statRunning.has(cKey) || this.imageLoading?.has(cKey)) continue;
+      statRunning.add(cKey);
+      byKey.set(cKey, target);
+      items.push({ key: cKey, baseDir: target.baseDir, relPath: target.relPath });
+    }
+    if (!items.length || !cx?.spawn) {
+      for (const [cKey] of batch) statRunning.delete(cKey);
+      return;
+    }
+    cx.spawn(async liveCx => {
+      try {
+        const r = machine
+          ? await exec(...statRemoteImagesArgv(items), { on: machine, timeout: 10000 })
+          : await execPython(exec, statLocalImagesArgv(items), { timeout: 10000 });
+        const now = Date.now();
+        if (r.code !== 0) {
+          for (const cKey of byKey.keys()) {
+            const entry = this.imageCache?.get(cKey);
+            if (entry) this.imageCache.set(cKey, { ...entry, checkedAt: now, stale: false });
+          }
+          return;
+        }
+        const parsed = JSON.parse(String(r.stdout || '').trim());
+        const results = parsed?.items && typeof parsed.items === 'object' ? parsed.items : {};
+        for (const [cKey, target] of byKey.entries()) {
+          const entry = this.imageCache?.get(cKey);
+          if (!entry) continue;
+          const info = results[cKey];
+          if (info?.ok) {
+            const diskMtime = Number(info.mtime_ns) || 0;
+            const diskSize = Number(info.size) || 0;
+            const changed = !isImageEntryFresh(entry, { mtimeNs: diskMtime, size: diskSize });
+            const meta = this.findDocMeta(target.root, target.path);
+            const version = meta?.version || '';
+            const failed = this.imageFailed?.get(cKey);
+            if (changed && !isImageFailActive(failed, { version, mtimeNs: diskMtime, size: diskSize, now })) {
+              this.loadImagePreview(target, liveCx, { force: true, background: true, diskMtimeNs: diskMtime, diskSize });
+            } else {
+              this.imageCache.set(cKey, {
+                ...entry,
+                ...(changed ? {} : { mtimeNs: diskMtime || entry.mtimeNs || 0 }),
+                checkedAt: now,
+                stale: false,
+              });
+            }
+          } else {
+            this.imageCache.set(cKey, { ...entry, checkedAt: now, stale: false });
+          }
+        }
+      } catch (_) {
+        const now = Date.now();
+        for (const cKey of byKey.keys()) {
+          const entry = this.imageCache?.get(cKey);
+          if (entry) this.imageCache.set(cKey, { ...entry, checkedAt: now, stale: false });
+        }
+      } finally {
+        for (const cKey of byKey.keys()) statRunning.delete(cKey);
+      }
+    });
+  }
+
   flushImageQueue(cx) {
     this._imageFlushScheduled = false;
     const queue = (this._imageQueue ||= new Map());
     if (!queue.size) return;
     const batch = Array.from(queue.values());
     queue.clear();
-    for (const target of batch) {
-      this.loadImagePreview(target, cx);
+    for (const item of batch) {
+      if (item && item.target) {
+        this.loadImagePreview(item.target, cx, {
+          force: Boolean(item.force),
+          background: Boolean(item.background),
+          diskMtimeNs: Number(item.diskMtimeNs) || 0,
+          diskSize: Number(item.diskSize) || 0,
+        });
+      } else {
+        this.loadImagePreview(item, cx);
+      }
     }
   }
 
-  loadImagePreview(target, cx, { force = false } = {}) {
+  loadImagePreview(target, cx, { force = false, background = false, diskMtimeNs = 0, diskSize = 0 } = {}) {
     const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
     if (!pm || !slug || !target?.baseDir || !target?.relPath) return;
     const cache = (this.imageCache ||= new Map());
@@ -1777,17 +2003,38 @@ export default class PmProject extends View {
     const version = meta?.version || '';
     if (!force) {
       const cached = cache.get(cKey);
-      if (cached && (!version || !cached.version || cached.version === version)) return;
+      if (cached && isImageEntryFresh(cached, { version })) return;
       if (loadingSet.has(cKey)) return;
     } else {
-      failedMap.delete(cKey);
+      if (loadingSet.has(cKey)) return;
+      if (background) {
+        if (isImageFailActive(failedMap.get(cKey), { version, mtimeNs: diskMtimeNs, size: diskSize, now: Date.now() })) return;
+      } else {
+        failedMap.delete(cKey);
+      }
     }
     loadingSet.add(cKey);
-    if (force) cx?.notify?.();
+    if (force && !background) cx?.notify?.();
     const cacheDir = `${appHome()}/${INLINE_IMAGE_CACHE_DIR}`;
     cx.spawn(async liveCx => {
+      let succeeded = false;
+      const recordFailure = errMsg => {
+        const failAt = Date.now();
+        this.imageFailed.set(cKey, {
+          error: String(errMsg || 'failed'),
+          at: failAt,
+          version,
+          mtimeNs: Number(diskMtimeNs) || 0,
+          size: Number(diskSize) || 0,
+        });
+        const existing = this.imageCache.get(cKey);
+        if (existing) {
+          this.imageCache.set(cKey, { ...existing, checkedAt: failAt, stale: false });
+        }
+      };
       try {
         let parsed = null;
+        let remoteMtimeNs = 0;
         if (!machine) {
           const r = await execPython(exec, stageLocalImageArgv(target.baseDir, target.relPath, cacheDir, {
             relPrefix: INLINE_IMAGE_CACHE_DIR,
@@ -1802,6 +2049,7 @@ export default class PmProject extends View {
           const r = await exec(cmd, args, { on: machine, timeout: 25000 });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.code}`).trim());
           const remote = JSON.parse(String(r.stdout || '').trim());
+          remoteMtimeNs = Number(remote?.mtime_ns) || 0;
           if (!remote?.ok) {
             parsed = remote;
           } else {
@@ -1815,31 +2063,41 @@ export default class PmProject extends View {
           }
         }
         if (parsed?.ok && parsed.rel) {
+          succeeded = true;
           this.imageFailed.delete(cKey);
-          this.imageCache.set(cKey, {
+          const nextEntry = {
             rel: parsed.rel,
             width: Number(parsed.width) || 0,
             height: Number(parsed.height) || 0,
             size: Number(parsed.size) || 0,
             hash: String(parsed.hash || ''),
+            mtimeNs: Number(parsed.mtime_ns) || remoteMtimeNs || 0,
+            checkedAt: Date.now(),
+            stale: false,
             version,
-          });
+          };
+          this.imageCache.set(cKey, nextEntry);
+          if (this.imageLightbox && this.imageLightbox.key === target.key) {
+            this.imageLightbox = {
+              ...this.imageLightbox,
+              rel: nextEntry.rel,
+              width: nextEntry.width,
+              height: nextEntry.height,
+              size: nextEntry.size,
+              hash: nextEntry.hash,
+              mtimeNs: nextEntry.mtimeNs,
+            };
+          }
         } else {
-          this.imageFailed.set(cKey, {
-            error: String(parsed?.error || 'failed'),
-            at: Date.now(),
-            version,
-          });
+          recordFailure(parsed?.error || 'failed');
         }
       } catch (e) {
-        this.imageFailed.set(cKey, {
-          error: String(e?.message || e || 'failed'),
-          at: Date.now(),
-          version,
-        });
+        recordFailure(e?.message || e || 'failed');
       } finally {
         this.imageLoading.delete(cKey);
-        this.notifyPanes(liveCx, { shell: false, conv: true, side: true });
+        if (succeeded || !background) {
+          this.notifyPanes(liveCx, { shell: Boolean(this.imageLightbox), conv: true, side: true });
+        }
       }
     });
   }
@@ -1855,23 +2113,24 @@ export default class PmProject extends View {
     const cards = refs.map((ref, idx) => {
       const id = `img-prev-${keyPrefix}-${idx}`;
       const st = this.imagePreviewState(ref, cx);
-      const openTarget = clickCx => this.openDoc({ tab: 'library', root: ref.root, path: ref.path }, clickCx);
       if (st.status === 'ready') {
         const box = fitImageBox(st.entry.width, st.entry.height, { maxWidth: effectiveMaxW, maxHeight });
-        const tip = `${word(lang, 'imageOpenPreview')} · ${ref.name}`;
+        const tip = `${word(lang, 'imageZoomLightbox')} · ${ref.name}`;
         const card = v_flex().id(id).w(box.width + 2).rounded(10).overflow_hidden()
           .border_1().border_color(t.border).bg(t.surface).cursor_pointer()
           .hover(s => s.border_color(withAlpha(t.accent, .55)))
           .accessibility_label(tip)
-          .on_click((_e, clickCx) => openTarget(clickCx))
+          .on_click((_e, clickCx) => this.openImageLightbox(ref, st.entry, clickCx))
           .child(image(st.entry.rel).w(box.width).h(box.height))
           .child(h_flex().w_full().px(8).py(5).gap(6).items_center().justify_between()
             .bg(withAlpha(t.raised, .75)).border_t_1().border_color(t.border)
             .child(h_flex().min_w(0).flex_1().gap(5).items_center()
               .child(this.icon('image', 12).flex_none().text_color(t.dim))
               .child(div().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(ref.name)))
-            .child(div().flex_none().text_size(11).text_color(t.dim)
-              .child(word(lang, 'imageDimensions', st.entry.width, st.entry.height))));
+            .child(h_flex().flex_none().gap(5).items_center()
+              .child(div().flex_none().text_size(11).text_color(t.dim)
+                .child(word(lang, 'imageDimensions', st.entry.width, st.entry.height)))
+              .child(this.icon('zoom-in', 11.5).flex_none().text_color(t.dim))));
         return this.withTip(id, card, tip, t, { placement: 'above-left' });
       }
       if (st.status === 'loading') {
@@ -1886,13 +2145,425 @@ export default class PmProject extends View {
         .hover(s => s.bg(t.hover).text_color(t.muted))
         .on_click((_e, clickCx) => {
           this.loadImagePreview(ref, clickCx, { force: true });
-          openTarget(clickCx);
+          this.openDoc({ tab: 'library', root: ref.root, path: ref.path }, clickCx);
         })
         .child(this.icon('image', 13).flex_none())
         .child(div().min_w(0).truncate().child(ref.name));
       return this.withTip(id, chip, errTip, t, { placement: 'above-left' });
     });
     return v_flex().id(`img-strip-${keyPrefix}`).w_full().mt(8).gap(8).items_start().children(cards);
+  }
+
+  // ---- Full-window image lightbox (zoom, 2D scroll & system preview) ----
+  initImageLightbox(p, cx) {
+    this.lightboxOverlayMode = true;
+    this.lightboxOverlayId = String(p?.overlay || '');
+    this.imageLightbox = createImageLightboxState(p.imageLightbox || {});
+    this.lang = this.imageLightbox.lang || 'en';
+    this.machine = this.imageLightbox.machine || '';
+    this.lightboxFocus = cx.focus_handle();
+    this.lightboxScroll = ScrollHandle.new();
+    this.lightboxViewport = { width: 0, height: 0 };
+    this.viewWidth = 0;
+    this.hoverKey = '';
+    this.hoverPendingKey = '';
+    this.hoverCardOver = '';
+    this.hoverShowTimer = null;
+    this.hoverHideTimer = null;
+    cx.timer?.after?.(0, () => this.lightboxFocus?.focus?.());
+    this.refreshLightboxImageIfChanged(cx);
+  }
+
+  refreshLightboxImageIfChanged(cx) {
+    const lb = this.imageLightbox;
+    if (!lb?.baseDir || !lb?.relPath || this.machine || !cx?.spawn) return;
+    const key = lb.key || `${lb.root}/${lb.path}`;
+    const cacheDir = `${appHome()}/${INLINE_IMAGE_CACHE_DIR}`;
+    cx.spawn(async liveCx => {
+      try {
+        const sr = await execPython(exec, statLocalImagesArgv([{ key, baseDir: lb.baseDir, relPath: lb.relPath }]), { timeout: 8000 });
+        if (sr.code !== 0) return;
+        const statParsed = JSON.parse(String(sr.stdout || '').trim());
+        const info = statParsed?.items?.[key];
+        if (!info?.ok) return;
+        const diskMtime = Number(info.mtime_ns) || 0;
+        const diskSize = Number(info.size) || 0;
+        if (isImageEntryFresh(lb, { mtimeNs: diskMtime, size: diskSize })) return;
+        const r = await execPython(exec, stageLocalImageArgv(lb.baseDir, lb.relPath, cacheDir, {
+          relPrefix: INLINE_IMAGE_CACHE_DIR,
+          maxBytes: INLINE_IMAGE_MAX_BYTES,
+        }), { timeout: 15000 });
+        if (r.code !== 0) return;
+        const parsed = JSON.parse(String(r.stdout || '').trim());
+        if (parsed?.ok && parsed.rel && this.imageLightbox) {
+          this.imageLightbox = {
+            ...this.imageLightbox,
+            rel: parsed.rel,
+            width: Number(parsed.width) || this.imageLightbox.width,
+            height: Number(parsed.height) || this.imageLightbox.height,
+            size: Number(parsed.size) || this.imageLightbox.size,
+            hash: String(parsed.hash || ''),
+            mtimeNs: Number(parsed.mtime_ns) || diskMtime || 0,
+          };
+          liveCx.notify?.();
+        }
+      } catch (_) { /* Keep current lightbox image. */ }
+    });
+  }
+
+  openImageLightbox(target, entry, cx) {
+    if (!target && !entry?.rel) return;
+    this.hoverKey = '';
+    const lang = this.lang || this.state?.lang || 'en';
+    const cKey = target ? this.imageCacheKey(target) : '';
+    const freshEntry = (cKey && this.imageCache?.get(cKey)) || entry;
+    if (target && cKey && cx?.timer?.after && needsImageRevalidate(freshEntry, Date.now(), { remote: Boolean(this.machine), minAgeMs: IMAGE_LIGHTBOX_REVALIDATE_MS })) {
+      this.scheduleImageRevalidate(target, cKey, cx);
+    }
+    const absPath = resolveSystemPreviewPath({
+      target,
+      entry: freshEntry,
+      appHomeDir: typeof appHome === 'function' ? appHome() : '',
+      machine: this.machine || '',
+    });
+    const payload = createImageLightboxState({
+      rel: freshEntry?.rel || '',
+      width: freshEntry?.width || 0,
+      height: freshEntry?.height || 0,
+      size: freshEntry?.size || 0,
+      mtimeNs: freshEntry?.mtimeNs || 0,
+      hash: freshEntry?.hash || '',
+      name: target?.name || fileName(target?.path || target?.relPath || ''),
+      root: target?.root || '',
+      path: target?.path || '',
+      baseDir: target?.baseDir || '',
+      relPath: target?.relPath || '',
+      ext: target?.ext || '',
+      key: target?.key || '',
+      machine: this.machine || '',
+      absPath,
+      lang,
+      mode: 'fit',
+      scale: 1,
+    });
+    if (this.lightboxOverlayId && typeof closeOverlay === 'function') {
+      closeOverlay(this.lightboxOverlayId);
+      this.lightboxOverlayId = '';
+    }
+    const ovId = typeof openOverlay === 'function' ? openOverlay(imageLightboxOverlaySpec(payload)) : '';
+    if (ovId) {
+      this.lightboxOverlayId = ovId;
+      this.imageLightbox = null;
+      return;
+    }
+    this.imageLightbox = payload;
+    this.lightboxViewport = {
+      width: this.viewWidth || 0,
+      height: Math.max(0, (this.high || 0) - LIGHTBOX_TOOLBAR_HEIGHT),
+    };
+    cx?.timer?.after?.(0, () => this.lightboxFocus?.focus?.());
+    this.notifyPanes(cx, { shell: true, conv: false, side: false });
+  }
+
+  closeImageLightbox(cx, { restoreFocus = true } = {}) {
+    this.hoverKey = '';
+    if (this.lightboxOverlayMode) {
+      const ovId = this.lightboxOverlayId || (typeof props === 'function' ? String(props()?.overlay || '') : '');
+      if (ovId && typeof closeOverlay === 'function') {
+        closeOverlay(ovId);
+      }
+      this.imageLightbox = null;
+      return;
+    }
+    if (this.lightboxOverlayId && typeof closeOverlay === 'function') {
+      closeOverlay(this.lightboxOverlayId);
+      this.lightboxOverlayId = '';
+    }
+    if (!this.imageLightbox) return;
+    this.imageLightbox = null;
+    if (restoreFocus) this.keyFocus?.focus?.();
+    this.notifyPanes(cx, { shell: true, conv: false, side: false });
+  }
+
+  currentLightboxLayout() {
+    const lb = this.imageLightbox;
+    const vpW = this.lightboxViewport?.width || this.viewWidth || 960;
+    const vpH = this.lightboxViewport?.height || Math.max(240, (this.high || 688) - LIGHTBOX_TOOLBAR_HEIGHT);
+    return computeLightboxLayout({
+      naturalW: lb?.width || 0,
+      naturalH: lb?.height || 0,
+      viewportW: vpW,
+      viewportH: vpH,
+      mode: lb?.mode || 'fit',
+      scale: lb?.scale || 1,
+      padding: LIGHTBOX_CANVAS_PADDING,
+    });
+  }
+
+  notifyLightbox(cx) {
+    if (this.lightboxOverlayMode) {
+      cx?.notify?.();
+    } else {
+      this.notifyPanes(cx, { shell: true, conv: false, side: false });
+    }
+  }
+
+  stepLightboxZoomBy(direction, cx) {
+    if (!this.imageLightbox) return;
+    const lay = this.currentLightboxLayout();
+    this.imageLightbox = stepLightboxZoom(this.imageLightbox, direction, lay.fitScale);
+    this.notifyLightbox(cx);
+  }
+
+  setLightboxFit(cx) {
+    if (!this.imageLightbox) return;
+    const lay = this.currentLightboxLayout();
+    this.imageLightbox = { ...this.imageLightbox, mode: 'fit', scale: lay.fitScale };
+    this.notifyLightbox(cx);
+  }
+
+  setLightboxActual(cx) {
+    if (!this.imageLightbox) return;
+    this.imageLightbox = { ...this.imageLightbox, mode: 'scale', scale: 1 };
+    this.notifyLightbox(cx);
+  }
+
+  toggleLightboxFitActual(cx) {
+    if (!this.imageLightbox) return;
+    const lay = this.currentLightboxLayout();
+    this.imageLightbox = toggleLightboxFitActual(this.imageLightbox, lay.fitScale);
+    this.notifyLightbox(cx);
+  }
+
+  cycleLightboxZoom(cx) {
+    if (!this.imageLightbox) return;
+    const lay = this.currentLightboxLayout();
+    this.imageLightbox = cycleLightboxZoomPreset(this.imageLightbox, lay.fitScale);
+    this.notifyLightbox(cx);
+  }
+
+  openImageInSystem(target, entry, cx, { inLightbox = false } = {}) {
+    const filePath = (inLightbox && this.imageLightbox?.absPath)
+      || resolveSystemPreviewPath({
+        target,
+        entry,
+        appHomeDir: typeof appHome === 'function' ? appHome() : '',
+        machine: inLightbox ? (this.imageLightbox?.machine || '') : (this.machine || ''),
+      });
+    const platform = (typeof appWindow === 'function' ? appWindow()?.platform : '') || 'macos';
+    const spec = systemOpenFileArgv(filePath, platform);
+    if (!spec) return;
+    const [cmd, args] = spec;
+    if (inLightbox && this.imageLightbox) {
+      this.imageLightbox = { ...this.imageLightbox, error: '' };
+      this.notifyLightbox(cx);
+    }
+    cx.spawn(async liveCx => {
+      try {
+        const r = await exec(cmd, args, { timeout: 10000 });
+        if (r && r.code !== 0) {
+          throw new Error((r.stderr || r.stdout || `exit ${r.code}`).trim());
+        }
+      } catch (e) {
+        if (inLightbox && this.imageLightbox) {
+          this.imageLightbox = {
+            ...this.imageLightbox,
+            error: word(this.lang || 'en', 'imageOpenExternalFailed', String(e?.message || e || 'error')),
+          };
+          this.notifyLightbox(liveCx);
+        }
+      }
+    });
+  }
+
+  handleLightboxKeyDown(e, cx) {
+    if (!this.imageLightbox) return false;
+    const ks = String(e?.keystroke || '').toLowerCase();
+    if (ks === 'escape') {
+      cx?.stop_propagation?.();
+      this.closeImageLightbox(cx);
+      return true;
+    }
+    if (ks === '=' || ks === '+' || ks === 'shift-=' || ks === 'cmd-=' || ks === 'cmd-+' || ks === 'ctrl-=' || ks === 'ctrl-+') {
+      cx?.stop_propagation?.();
+      this.stepLightboxZoomBy(1, cx);
+      return true;
+    }
+    if (ks === '-' || ks === 'cmd--' || ks === 'ctrl--') {
+      cx?.stop_propagation?.();
+      this.stepLightboxZoomBy(-1, cx);
+      return true;
+    }
+    if (ks === '0' || ks === 'cmd-0' || ks === 'ctrl-0') {
+      cx?.stop_propagation?.();
+      this.setLightboxFit(cx);
+      return true;
+    }
+    if (ks === '1' || ks === 'cmd-1' || ks === 'ctrl-1') {
+      cx?.stop_propagation?.();
+      this.setLightboxActual(cx);
+      return true;
+    }
+    if (ks === 'o' || ks === 'cmd-o' || ks === 'ctrl-o') {
+      cx?.stop_propagation?.();
+      this.openImageInSystem(this.imageLightbox, { rel: this.imageLightbox.rel }, cx, { inLightbox: true });
+      return true;
+    }
+    return false;
+  }
+
+  lightboxIconBtn(id, name, tip, action, t, { size = 14, active = false } = {}) {
+    return this.withTip(id, h_flex().id(id).size(28).flex_none().rounded(7).items_center().justify_center()
+      .text_color(active ? t.accent : t.muted)
+      .when(active, el => el.bg(withAlpha(t.accent, .16)))
+      .accessibility_label(tip)
+      .on_mouse_down('left', (_e, cx) => cx.stop_propagation?.())
+      .when(Boolean(action), el => el.cursor_pointer()
+        .hover(s => active ? s.bg(withAlpha(t.accent, .22)) : s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation?.(); this.hoverKey = ''; action(cx); }))
+      .when(!action, el => el.opacity(.35))
+      .child(this.icon(name, size)), tip, t, { placement: 'below-right' });
+  }
+
+  renderImageLightbox(cx, { inProject = false } = {}) {
+    const t = theme();
+    const dark = isDarkTheme(t);
+    const lb = this.imageLightbox;
+    const lang = this.lang || lb?.lang || this.state?.lang || 'en';
+    if (!lb) return v_flex().size_full();
+    const lay = this.currentLightboxLayout();
+    const openPath = lb.absPath || resolveSystemPreviewPath({
+      target: lb,
+      entry: { rel: lb.rel },
+      appHomeDir: typeof appHome === 'function' ? appHome() : '',
+      machine: lb.machine || '',
+    });
+    const toggleId = lay.isFit ? 'lightbox-zoom-actual' : 'lightbox-zoom-fit';
+    const toggleIcon = lay.isFit ? 'zoom-actual' : 'zoom-fit';
+    const toggleTip = word(lang, lay.isFit ? 'imageZoomActual' : 'imageZoomFit');
+    const percentTip = word(lang, 'imageZoomCycle');
+    const percentBtn = this.withTip('lightbox-zoom-percent', h_flex().id('lightbox-zoom-percent').min_w(48).h(26).px(7)
+      .flex_none().rounded(7).items_center().justify_center().cursor_pointer()
+      .bg(t.raised).border_1().border_color(withAlpha(t.border, .8))
+      .font_family('monospace').text_size(11.5).text_color(t.foreground)
+      .hover(s => s.bg(t.hover).border_color(withAlpha(t.accent, .5)))
+      .accessibility_label(percentTip)
+      .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation?.())
+      .on_click((_e, cCx) => { cCx.stop_propagation?.(); this.hoverKey = ''; this.cycleLightboxZoom(cCx); })
+      .child(`${lay.percent}%`), percentTip, t, { placement: 'below-right' });
+
+    const topBar = h_flex().id('image-lightbox-toolbar').h(LIGHTBOX_TOOLBAR_HEIGHT).w_full().flex_none()
+      .px(14).gap(10).items_center().justify_between()
+      .bg(t.chrome || t.surface).border_b(1).border_color(withAlpha(t.border, .85))
+      .on_mouse_down('left', (_e, mCx) => { mCx.stop_propagation?.(); this.lightboxFocus?.focus?.(); })
+      .on_click((_e, cCx) => cCx.stop_propagation?.())
+      .child(h_flex().min_w(0).flex_1().gap(8).items_center()
+        .child(this.icon('image', 14).flex_none().text_color(t.muted))
+        .child(div().min_w(0).truncate().text_size(13).font_medium().text_color(t.foreground).child(lb.name))
+        .when(lb.width > 0 && lb.height > 0, el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim)
+          .child(word(lang, 'imageDimensions', lb.width, lb.height))))
+        .when(lb.size > 0, el => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(formatBytes(lb.size))))
+        .when(Boolean(lb.error), el => el.child(div().min_w(0).truncate().text_size(11.5).text_color(t.blocked).child(lb.error))))
+      .child(h_flex().id('image-lightbox-actions').flex_none().gap(4).items_center()
+        .child(this.lightboxIconBtn('lightbox-zoom-out', 'minus', word(lang, 'imageZoomOut'),
+          lay.canZoomOut ? cCx => this.stepLightboxZoomBy(-1, cCx) : null, t, { size: 13.5 }))
+        .child(percentBtn)
+        .child(this.lightboxIconBtn('lightbox-zoom-in', 'plus', word(lang, 'imageZoomIn'),
+          lay.canZoomIn ? cCx => this.stepLightboxZoomBy(1, cCx) : null, t, { size: 13.5 }))
+        .child(this.lightboxIconBtn(toggleId, toggleIcon, toggleTip,
+          cCx => this.toggleLightboxFitActual(cCx), t, { size: 14, active: !lay.isFit }))
+        .child(div().w(1).h(16).mx(3).flex_none().bg(t.border))
+        .child(this.lightboxIconBtn('lightbox-open-external', 'external-open', word(lang, 'imageOpenExternal'),
+          openPath ? cCx => this.openImageInSystem(lb, { rel: lb.rel }, cCx, { inLightbox: true }) : null, t, { size: 14 }))
+        .child(this.lightboxIconBtn('lightbox-close', 'close', word(lang, 'imageCloseLightbox'),
+          cCx => this.closeImageLightbox(cCx), t, { size: 14 })));
+
+    const stage = v_flex().id('image-lightbox-viewport').relative().flex_1().min_h(0).min_w(0).w_full()
+      .on_size_change((size, sCx) => {
+        const w = Math.round(size?.width || 0);
+        const h = Math.round(size?.height || 0);
+        if (w <= 0 || h <= 0) return;
+        const prev = this.lightboxViewport || { width: 0, height: 0 };
+        if (Math.abs(w - prev.width) > 1 || Math.abs(h - prev.height) > 1) {
+          this.lightboxViewport = { width: w, height: h };
+          if (this.lightboxOverlayMode) this.viewWidth = w;
+          this.notifyLightbox(sCx);
+        }
+      })
+      .on_pinch((e, pCx) => {
+        if (!this.imageLightbox || !e) return;
+        const curLay = this.currentLightboxLayout();
+        const next = applyLightboxPinch(this.imageLightbox, e.delta, curLay.fitScale);
+        if (next !== this.imageLightbox) {
+          this.imageLightbox = next;
+          this.notifyLightbox(pCx);
+        }
+      });
+
+    if (!lb.rel) {
+      stage.items_center().justify_center()
+        .on_click((_e, cCx) => { cCx.stop_propagation?.(); this.closeImageLightbox(cCx); })
+        .child(h_flex().gap(8).items_center().px(14).py(10).rounded(10)
+          .bg(t.surface).border_1().border_color(t.border).text_size(12.5).text_color(t.muted)
+          .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation?.())
+          .on_click((_e, cCx) => cCx.stop_propagation?.())
+          .child(div().child(lb.error === 'too large' ? word(lang, 'imageTooLarge') : word(lang, 'imageLoadFailed'))));
+    } else {
+      const frame = div().id('image-lightbox-frame').flex_none().w(lay.width).h(lay.height)
+        .rounded(lay.scrollable ? 4 : 8).overflow_hidden()
+        .bg(t.surface).border_1().border_color(withAlpha(t.border, .75)).shadow_md()
+        .cursor_pointer()
+        .on_mouse_down('left', (e, mCx) => {
+          mCx.stop_propagation?.();
+          this.lightboxFocus?.focus?.();
+          if ((e?.click_count || 0) >= 2) this.toggleLightboxFitActual(mCx);
+        })
+        .on_click((_e, cCx) => cCx.stop_propagation?.())
+        .child(image(lb.rel).w(lay.width).h(lay.height));
+
+      const canvas = v_flex().id('image-lightbox-canvas').flex_none()
+        .w(lay.canvasWidth).h(lay.canvasHeight)
+        .pl(lay.padLeft).pt(lay.padTop)
+        .child(frame);
+
+      const scrollArea = div().id('image-lightbox-scroll').size_full().overflow_scroll()
+        .when(Boolean(this.lightboxScroll), el => el.track_scroll(this.lightboxScroll))
+        .on_click((_e, cCx) => { cCx.stop_propagation?.(); this.closeImageLightbox(cCx); })
+        .child(canvas);
+
+      stage.child(scrollArea)
+        .when(Boolean(Scrollbar?.new), el => el.child(
+          Scrollbar.new('image-lightbox-scroll').absolute().inset_0().mode(lay.scrollable ? 'always' : 'hover'),
+        ));
+    }
+
+    const hintBar = h_flex().id('image-lightbox-hint').h(26).w_full().flex_none().px(14)
+      .items_center().justify_center()
+      .bg(t.chrome || t.surface).border_t(1).border_color(withAlpha(t.border, .65))
+      .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation?.())
+      .on_click((_e, cCx) => cCx.stop_propagation?.())
+      .child(div().truncate().text_size(11).text_color(t.dim).child(word(lang, 'imageLightboxHint')));
+
+    const container = inProject
+      ? v_flex().id('image-lightbox-backdrop').absolute().left(0).right(0).top(0).bottom(0)
+      : v_flex().id('image-lightbox-backdrop').size_full().rounded(12).overflow_hidden()
+          .border_1().border_color(withAlpha(t.border, .85)).shadow_lg();
+
+    return container
+      .bg(withAlpha(dark ? (t.canvas || '#0d0f12') : (t.background || '#f8f9fb'), dark ? .96 : .97))
+      .text_size(13).text_color(t.foreground)
+      .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation?.())
+      .on_hover((over, hCx) => {
+        if (!over && this.hoverKey) {
+          this.hoverKey = '';
+          this.notifyLightbox(hCx);
+        }
+      })
+      .when(Boolean(this.lightboxFocus), el => el.track_focus(this.lightboxFocus))
+      .on_key_down((e, kCx) => this.handleLightboxKeyDown(e, kCx))
+      .child(topBar)
+      .child(stage)
+      .child(hintBar);
   }
 
   // ---- Right Sidebar Multi-Tab Workspace Controller -------------------------
@@ -2176,6 +2847,7 @@ export default class PmProject extends View {
     this.snapshotActiveTabInputs();
     this.confirmCloseTabId = '';
     this.tabMenu = null;
+    this.inlineFilterOpen = false;
     const res = activateSideTab(this.sideTabsState(), tabId);
     if (!res.activated) return;
     this.tabState = res.state;
@@ -2431,6 +3103,7 @@ export default class PmProject extends View {
     }
     this.confirmDeleteKey = '';
     this.retopicOpen = false;
+    this.inlineFilterOpen = false;
     if (tab === 'library') {
       if (this.machine || !this.libraryRead || this.libraryStale) this.readLibrary(cx);
       else this.prefetchLibraryDocs(cx);
@@ -2483,6 +3156,7 @@ export default class PmProject extends View {
   startNewDoc(tab, cx) {
     this.confirmDeleteKey = '';
     this.retopicOpen = false;
+    this.inlineFilterOpen = false;
     this.historyView = null;
     this.deletedBanner = null;
     this.confirmCloseTabId = '';
@@ -2563,6 +3237,7 @@ export default class PmProject extends View {
     if (!meta || !isWritableDoc(meta) || !cached) return;
     this.confirmDeleteKey = '';
     this.retopicOpen = false;
+    this.inlineFilterOpen = false;
     const isMem = docRef.tab === 'memory' || docRef.root === 'memory' || docRef.root === 'personal';
     const version = cached.version || meta.version || '';
     if (isMem) {
@@ -2918,6 +3593,7 @@ export default class PmProject extends View {
     if (!slug) return;
     this.confirmDeleteKey = '';
     this.retopicOpen = false;
+    this.inlineFilterOpen = false;
     const hv = { tab, scope, root, path, items: [], loading: true, error: '', restoring: '' };
     this.panelClosing = false;
     this.historyView = hv;
@@ -3180,10 +3856,11 @@ export default class PmProject extends View {
     });
     cx.notify();
   }
-  // Start a fresh PM session for the current offline project (`pm.py start --repo <repo>`).
+  // Start a fresh PM session for the current offline project (`pm.py start --repo <repo>` or `--name <name>` for 0 folders).
   startPm(cx) {
     const pm = this.pm(), pmKey = this.pmName;
-    if (!pm || !pm.repo || this.startingPm || this.bringingBack) return;
+    const hasZeroFolders = Array.isArray(pm?.folders) && pm.folders.length === 0;
+    if (!pm || (!pm.repo && !hasZeroFolders) || this.startingPm || this.bringingBack) return;
     const stayOnProject = findStage(layout())?.active === 'pm-project';
     this.startingPm = pmKey;
     this.startPmError = null;
@@ -3227,7 +3904,7 @@ export default class PmProject extends View {
   }
   openBringBack(pm, cx) {
     if (!pm?.lost) return;
-    const steps = bringBackSteps(this.lang, pm.lost, pm.project || pm.name).map(s => ({ ...s, state: 'pending', error: '' }));
+    const steps = bringBackSteps(this.lang, pm.lost, projectName(pm) || pm.name).map(s => ({ ...s, state: 'pending', error: '' }));
     if (!steps.length) return;
     this.bringBackOpen = true;
     this.bringBackProgress = { pmKey: this.pmName, key: String(pm.lost.key || ''), steps };
@@ -3244,7 +3921,7 @@ export default class PmProject extends View {
     if (!pm || this.bringingBack || this.startingPm) return;
     let progress = this.bringBackProgress && this.bringBackProgress.pmKey === pmKey ? this.bringBackProgress : null;
     if (!progress || !progress.steps?.length) {
-      const steps = bringBackSteps(this.lang, pm.lost, pm.project || pm.name).map(s => ({ ...s, state: 'pending', error: '' }));
+      const steps = bringBackSteps(this.lang, pm.lost, projectName(pm) || pm.name).map(s => ({ ...s, state: 'pending', error: '' }));
       if (!steps.length) return;
       progress = { pmKey, key: String(pm.lost?.key || ''), steps };
       this.bringBackProgress = progress;
@@ -3597,9 +4274,12 @@ export default class PmProject extends View {
   // ---- @ mentions: lazy sources, menu controller, token insertion & click navigation ----
   readRepoFiles(cx) {
     const pm = this.pm(), slug = projectSlug(pm), repo = pm?.repo || '', machine = this.machine;
-    if (slug !== this.repoFilesSlug || repo !== this.repoFilesRepo) {
+    const folders = projectFolders(pm);
+    const sig = foldersSignature(pm);
+    if (slug !== this.repoFilesSlug || repo !== this.repoFilesRepo || sig !== this.repoFilesSig) {
       this.repoFilesSlug = slug;
       this.repoFilesRepo = repo;
+      this.repoFilesSig = sig;
       this.repoFiles = [];
       this.repoFilesRead = false;
       this.repoFilesError = '';
@@ -3607,13 +4287,23 @@ export default class PmProject extends View {
       this.repoFilesAt = 0;
     }
     if (!pm || !slug) return;
+    if (Array.isArray(pm.folders) && pm.folders.length === 0) {
+      this.repoFiles = [];
+      this.repoFilesTruncated = false;
+      this.repoFilesRead = true;
+      this.repoFilesError = '';
+      this.repoFilesAt = Date.now();
+      cx?.notify?.();
+      return;
+    }
     if (this.repoFilesLoading) { this.repoFilesAgain = true; return; }
     this.repoFilesLoading = true;
     cx.spawn(async cx => {
       try {
         let paths = [];
         let truncated = false;
-        if (!machine && repo) {
+        const singleLocalGit = !machine && folders.length === 1 && folders[0].git !== false && repo;
+        if (singleLocalGit) {
           const r = await exec('git', ['-C', repo, 'ls-files', '-z'], { timeout: 10000 });
           if (r.code === 0) {
             const parsed = parseGitLsFiles(r.stdout);
@@ -3632,7 +4322,7 @@ export default class PmProject extends View {
             const got = JSON.parse(pr.stdout || '{}');
             paths = Array.isArray(got.files) ? got.files : [];
             truncated = Boolean(got.truncated);
-          } else if (machine && isOldPmCommand(pr) && repo) {
+          } else if (machine && isOldPmCommand(pr) && folders.length <= 1 && repo) {
             const r = await exec('git', ['-C', repo, 'ls-files', '-z'], { on: machine, timeout: 15000 });
             if (r.code !== 0) throw new Error((r.stderr || r.stdout || `git: ${r.code}`).trim().split('\n').pop());
             const parsed = parseGitLsFiles(r.stdout);
@@ -3642,8 +4332,9 @@ export default class PmProject extends View {
             throw new Error((pr.stderr || pr.stdout || `pm.py: ${pr.code}`).trim().split('\n').pop());
           }
         }
-        if (projectSlug(this.pm()) === slug && (this.pm()?.repo || '') === repo && machine === this.machine) {
-          this.repoFiles = indexRepoFiles(paths);
+        const curPm = this.pm();
+        if (projectSlug(curPm) === slug && foldersSignature(curPm) === sig && machine === this.machine) {
+          this.repoFiles = indexRepoFiles(paths, folders);
           this.repoFilesTruncated = truncated;
           this.repoFilesRead = true;
           this.repoFilesError = '';
@@ -3803,6 +4494,8 @@ export default class PmProject extends View {
       taskNumbers: this.state.task_numbers,
       libraryFiles: this.libraryFiles,
       repoFiles: this.repoFiles,
+      folders: projectFolders(pm),
+      foldersEmpty: Boolean(Array.isArray(pm?.folders) && pm.folders.length === 0),
       excludeThread: which === 'thread' ? this.thread : '',
       filesLoading: this.repoFilesLoading,
       filesError: this.repoFilesError,
@@ -3921,6 +4614,7 @@ export default class PmProject extends View {
     const pm = this.pm();
     return {
       repo: pm?.repo || '',
+      folders: projectFolders(pm),
       ledgerHome: this.machine ? this.remoteHome : this.ledgerHome,
       slug: projectSlug(pm),
       conversation: pm?.conversation || '',
@@ -5338,6 +6032,19 @@ export default class PmProject extends View {
     else this.openProjectSearch(cx);
   }
 
+  handleModCommand(command, cx) {
+    if (command === 'search') return this.handleSearchCommand(cx);
+    return false;
+  }
+
+  handleSearchCommand(cx) {
+    if (findStage(layout())?.active !== 'pm-project') return false;
+    if (this.imageLightbox) return false;
+    if (!this.pm()) return false;
+    this.toggleProjectSearch(cx);
+    return true;
+  }
+
   setSearchScope(scope, cx) {
     this.searchScope = scope || 'all';
     this.searchIndex = 0;
@@ -5486,6 +6193,7 @@ export default class PmProject extends View {
   }
 
   handleKeyDown(e, cx) {
+    if (this.imageLightbox && this.handleLightboxKeyDown(e, cx)) return;
     const ks = e?.keystroke || '';
     if (ks === 'cmd-k' || ks === 'ctrl-k') {
       cx.stop_propagation?.();
@@ -5538,7 +6246,69 @@ export default class PmProject extends View {
       this.openProjectSearch(cx);
       return;
     }
+    if (ks === '/' && !this.typing && !this.searchOpen && !this.mention && this.isPanelOpen() && !this.activeSideTab() && !this.detail && !this.activeDoc && !this.editingDoc && !this.historyView) {
+      cx.stop_propagation?.();
+      this.openInlineFilter(cx);
+      return;
+    }
     this.escape(e, cx);
+  }
+
+  activeIndexTabKey() {
+    if (this.sideTab === 'library' && this.librarySupported()) return 'library';
+    if (this.sideTab === 'memory' && this.memorySupported()) return 'memory';
+    return 'threads';
+  }
+
+  isInlineFilterVisible(tabKey) {
+    if (tabKey === 'library') return Boolean((this.inlineFilterOpen && this.activeIndexTabKey() === 'library') || String(this.libraryQuery || '').trim());
+    if (tabKey === 'memory') return Boolean((this.inlineFilterOpen && this.activeIndexTabKey() === 'memory') || String(this.memoryQuery || '').trim());
+    return Boolean((this.inlineFilterOpen && this.activeIndexTabKey() === 'threads') || String(this.threadsQuery || '').trim());
+  }
+
+  openInlineFilter(cx) {
+    this.inlineFilterOpen = true;
+    const key = this.activeIndexTabKey();
+    const input = key === 'library' ? this.libraryInput : key === 'memory' ? this.memoryInput : this.threadsInput;
+    cx?.timer?.after?.(0, () => input?.focus?.());
+    this.notifyPanes(cx, { shell: false, side: true });
+  }
+
+  closeInlineFilter(cx, { clear = true } = {}) {
+    this.inlineFilterOpen = false;
+    if (clear) {
+      const key = this.activeIndexTabKey();
+      if (key === 'library') {
+        this.libraryQuery = '';
+        this.libraryInput?.set_value?.('');
+      } else if (key === 'memory') {
+        this.memoryQuery = '';
+        this.memoryInput?.set_value?.('');
+      } else {
+        this.threadsQuery = '';
+        this.threadsInput?.set_value?.('');
+        this.scheduleThreadsSearch(cx);
+      }
+    }
+    this.keyFocus?.focus?.();
+    this.notifyPanes(cx, { shell: false, side: true });
+  }
+
+  inlineFilterBar(tabKey, id, state, query, placeholder, onClear, t, { focused = false } = {}) {
+    const lang = this.lang;
+    const surf = tonalSurfaces(t);
+    const hint = div().absolute().left(0).top(4).right(0).truncate().text_size(12).text_color(t.dim).child(placeholder);
+    return keepPress(h_flex().id(id)).w_full().h(30).px(12).gap(6).flex_none().items_center()
+      .bg(t.background)
+      .border_b(1).border_color(focused ? withAlpha(t.accent, .48) : surf.hairline)
+      .child(div().relative().flex_1().min_w(0).h(24).when(!query, el => el.child(hint))
+        .child(Input.new(state).w_full().h(24).items_center().text_size(12).text_color(t.foreground)))
+      .when(Boolean(query), el => el.child(this.withTip(`${id}-clear`, h_flex().id(`${id}-clear`).size(18).flex_none().rounded(5).items_center()
+        .justify_center().cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .accessibility_label(word(lang, 'clearSearch'))
+        .on_click((_e, cx) => { cx.stop_propagation(); onClear(cx); })
+        .child(this.icon('close', 10.5)), word(lang, 'clearSearch'), t, { panel: true, placement: 'below-right' })))
+      .child(div().flex_none().font_family('monospace').text_size(10.5).text_color(t.dim).child(word(lang, 'inlineFilterHint')));
   }
 
   projectSearchOverlay(pm, items, t, today, cx) {
@@ -5622,13 +6392,15 @@ export default class PmProject extends View {
     const tabQuery = onLib ? this.libraryQuery : onMem ? this.memoryQuery : onThreads ? this.threadsQuery : '';
     const searchTyping = onLib ? 'librarySearch' : onMem ? 'memorySearch' : 'threadsSearch';
     const inTabSearch = ((onSide && !hasDoc && !hasEdit && !hasHistory) || onThreads) &&
-      (this.typing === searchTyping || Boolean(tabQuery?.trim()));
+      (this.typing === searchTyping || Boolean(tabQuery?.trim()) || Boolean(this.inlineFilterOpen));
     const mentionOpen = Boolean(this.mention && this.typing === this.mention.which);
     const activeTab = this.activeSideTab();
     const step = escapeStep({
+      imageLightbox: Boolean(this.imageLightbox),
       mentionSub: mentionOpen && this.mention.category !== 'all',
       mention: mentionOpen,
       projectSearch: Boolean(this.searchOpen),
+      foldersPopover: Boolean(this.foldersOpen),
       tabMenu: Boolean(this.tabMenu),
       selectionBar: Boolean(this.selectionBar),
       answering: Boolean(this.answering) && this.typing !== 'thread',
@@ -5653,8 +6425,18 @@ export default class PmProject extends View {
     }
     cx.stop_propagation?.();
     this.clearHoverNow(null);
+    if (step === 'imageLightbox') { this.closeImageLightbox(cx); return; }
     if (step === 'mentionSub' || step === 'mention') { this.escapeMention(this.mention.which, cx); return; }
     if (step === 'projectSearch') { this.escapeProjectSearch(cx); return; }
+    if (step === 'foldersPopover') {
+      if (this.foldersEditingAlias) { this.foldersEditingAlias = null; this.keyFocus?.focus?.(); }
+      else if (this.foldersRemotePicker?.open) { this.foldersRemotePicker = { ...this.foldersRemotePicker, open: false }; }
+      else if (this.foldersRemoteOpen) { this.foldersRemoteOpen = false; this.foldersRemoteCheck = null; }
+      else if (this.foldersConfirmRemove) { this.foldersConfirmRemove = null; }
+      else { this.closeFoldersPopover(cx); return; }
+      cx.notify();
+      return;
+    }
     if (step === 'tabMenu') { this.tabMenu = null; this.notifyPanes(cx, { shell: false, side: true }); return; }
     if (step === 'selectionBar') { this.selectionBar = null; cx.notify(); return; }
     if (step === 'answer') this.answering = null;
@@ -5674,7 +6456,10 @@ export default class PmProject extends View {
         if (onLib) { this.libraryQuery = ''; this.libraryInput?.set_value(''); }
         else if (onMem) { this.memoryQuery = ''; this.memoryInput?.set_value(''); }
         else { this.threadsQuery = ''; this.threadsInput?.set_value(''); this.scheduleThreadsSearch(cx); }
+        this.inlineFilterOpen = false;
+        this.keyFocus.focus();
       } else {
+        this.inlineFilterOpen = false;
         this.keyFocus.focus();
       }
     } else if (step === 'history') { this.closeHistory(cx); return; }
@@ -5972,7 +6757,7 @@ export default class PmProject extends View {
       inTabBar: this.hasSideTabs(),
       actions: {
         onBack: cx => this.stepBackThreadChange(cx),
-        onClose: this.hasSideTabs() ? null : (cx => this.closeSidePanel(cx)),
+        onClose: null,
         onRefresh: cx => this.refreshThreadChange(cx),
         onPickAll: cx => this.pickChangeAll(cx),
         onPickCommit: (c, cx) => this.pickChangeCommit(c, cx),
@@ -6024,15 +6809,22 @@ export default class PmProject extends View {
   // never revealed.
   focusTerminal(address) {
     const plan = this.terminalPlace(address);
+    const pm = typeof this.pm === 'function' ? this.pm() : null;
+    const pmTerm = typeof this.pmTerminal === 'function' ? this.pmTerminal() : null;
+    const curSpaces = spaces();
     if (plan.focus) {
+      const targetAddr = onMachine(address, this.machine || '');
+      const pmAddr = onMachine(pmTerm?.address || '', this.machine || '');
+      if (targetAddr && pmAddr && targetAddr === pmAddr && pm?.space_id) {
+        const wantId = onMachine(pm.space_id, this.machine || '');
+        const bound = (curSpaces || []).find(s => s?.id === wantId || s?.id === pm.space_id);
+        if (bound?.id) run('space.select', { id: bound.id });
+      }
       run('pane.focus', { terminal: plan.focus });
       run('layout.select', { stack: STAGE, child: WORK });
       if (plan.peek) run('terminal.peek', { terminal: plan.peek });
       return;
     }
-    const pm = typeof this.pm === 'function' ? this.pm() : null;
-    const pmTerm = typeof this.pmTerminal === 'function' ? this.pmTerminal() : null;
-    const curSpaces = spaces();
     const keepSteps = pmKeepPlan(address, {
       pm,
       pmTerminal: pmTerm,
@@ -6056,10 +6848,26 @@ export default class PmProject extends View {
       this._pendingPmKeep = null;
       return;
     }
-    const followUp = pmKeepFollowUp(pending, spaces(), panes());
+    const curSpaces = spaces();
+    const curPanes = panes();
+    const followUp = pmKeepFollowUp(pending, curSpaces, curPanes);
     if (!Array.isArray(followUp)) return;
     this._pendingPmKeep = null;
     for (const [cmd, args] of followUp) run(cmd, args);
+    if (pending.createdSpace) {
+      const pm = typeof this.pm === 'function' ? this.pm() : null;
+      const slug = projectSlug(pm);
+      const pmPane = (curPanes || []).find(p => p?.terminal === pending.terminal);
+      const hostSpace = pmPane?.tab
+        ? (curSpaces || []).find(sp => (sp?.tabs || []).some(tb => tb?.id && tb.id === pmPane.tab))
+        : null;
+      const rawSpId = String(hostSpace?.id || '');
+      const prefix = this.machine ? `${this.machine}/` : '';
+      const bareSpId = prefix && rawSpId.startsWith(prefix) ? rawSpId.slice(prefix.length) : rawSpId;
+      if (slug && bareSpId && typeof this.runProject === 'function') {
+        this.runProject(projectSetSpaceArgv(slug, bareSpId, { spaceName: projectName(pm) })).catch(() => null);
+      }
+    }
   }
 
   // ---- pieces ---------------------------------------------------------------
@@ -6192,6 +7000,7 @@ export default class PmProject extends View {
     if (tab.kind === 'thread') return 'hook';
     if (tab.root === 'memory' || tab.root === 'personal' || tab.tab === 'memory') return 'memory';
     if (tab.root === 'research') return 'report';
+    if (isPreviewableImage(tab.path)) return 'image';
     return 'file';
   }
 
@@ -6211,107 +7020,203 @@ export default class PmProject extends View {
     return (meta ? libraryDocTitle(meta) : '') || tab.title || fileName(tab.path);
   }
 
-  sideTabBar(t, width, cx) {
-    const lang = this.lang;
+  sideTabStripInfo(tab) {
+    if (tab.kind === 'thread') {
+      const allTasks = this.tasks || this.state.tasks || [];
+      const st = allTasks.find(x => x.id === tab.taskId);
+      const num = taskNumber(st) || this.taskNumberFor(tab.taskId);
+      return threadTabStripLabel({ number: num, title: st?.title || tab.title, taskId: tab.taskId });
+    }
+    return { text: this.sideTabLabel(tab), compact: false };
+  }
+
+  sideTabThreadDot(tab, t) {
+    const allTasks = this.tasks || this.state.tasks || [];
+    const st = allTasks.find(x => x.id === tab.taskId);
+    const status = String(st?.status || '');
     const dark = isDarkTheme(t);
+    const doneColor = t.ansi2 ?? t.done ?? t.accent;
+    const workColor = t.working ?? t.ansi3 ?? t.accent;
+    if (['done', 'released', 'merged', 'abandoned', 'cancelled'].includes(status)) {
+      return div().size(6.5).flex_none().rounded_full().bg(doneColor);
+    }
+    if (status === 'blocked' && !st?.answered) {
+      return div().size(6.5).flex_none().rounded_full().bg(t.blocked);
+    }
+    if (status === 'review' || Boolean(st?.review && !['done', 'merged', 'released', 'abandoned', 'cancelled', 'paused', 'proposed'].includes(st.review.status))) {
+      return div().size(6.5).flex_none().rounded_full().bg(t.accent);
+    }
+    if (status === 'proposed') {
+      return div().size(6.5).flex_none().rounded_full().border(1.25).border_color(withAlpha(t.muted, dark ? .58 : .68));
+    }
+    if (status === 'paused' || Boolean(st?.offline)) {
+      return div().size(6.5).flex_none().rounded_full().bg(t.dim);
+    }
+    if (status === 'in_progress' || (status === 'blocked' && Boolean(st?.answered))) {
+      return div().size(6.5).flex_none().rounded_full().bg(workColor);
+    }
+    return div().size(6.5).flex_none().rounded_full().bg(t.muted);
+  }
+
+  // Plan B unified 40px right-panel header track:
+  // Frameless directory links (Threads / Library / Memory) + optional divider + open detail tabs (#NNN / doc)
+  // with a single subtle ~7% soft mist chip on whichever item is active, real +N overflow only when tabs exceed
+  // strip width, zero [≡] button, zero duplicate × close button, zero second magnifying glass.
+  sideHeaderBar(t, width, cx) {
+    const lang = this.lang;
+    const surf = tonalSurfaces(t);
+    const dark = surf.dark;
     const st = this.sideTabsState();
     const tabs = st.tabs;
     const activeId = st.activeId;
     const narrow = width < 440;
     const menuBg = [t.raised, t.popover, t.surface].find(c => c && c !== t.chrome) || t.raised;
 
-    const indexActive = activeId === null;
-    const indexBtn = this.withTip('side-tab-index', h_flex().id('side-tab-index').size(28).flex_none().rounded(7)
-      .items_center().justify_center().cursor_pointer()
-      .accessibility_label(word(lang, 'sideTabsIndex'))
-      .when(indexActive, el => el.bg(t.background).border_1().border_color(t.border).text_color(t.foreground))
-      .when(!indexActive, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
-      .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); this.showIndexView(cx, { toggle: true }); })
-      .child(this.icon('list', 14)), word(lang, 'sideTabsIndex'), t, { panel: true, placement: 'below-left' });
+    const inDetailView = Boolean(activeId !== null || this.detail || this.activeDoc || this.editingDoc || this.historyView);
+    const activeDirKey = this.activeIndexTabKey();
+    const compactDir = width < 320;
+    const dirTabs = this.librarySupported()
+      ? [
+          { key: 'threads', label: word(lang, 'threads') },
+          { key: 'library', label: word(lang, 'libraryTab') },
+          ...(this.memorySupported() ? [{ key: 'memory', label: word(lang, 'memoryTab') }] : []),
+        ]
+      : [{ key: 'threads', label: word(lang, 'threads') }];
+
+    const dirEls = dirTabs.map(item => {
+      const isDirActive = !inDetailView && item.key === activeDirKey;
+      return this.withTip(`panel-tab-${item.key}`, h_flex().id(`panel-tab-${item.key}`).flex_none().h(26)
+        .px(compactDir ? 7 : 9).rounded(6).items_center().justify_center()
+        .text_size(compactDir ? 12 : 12.5).accessibility_label(item.label)
+        .when(isDirActive, el => el.bg(surf.softChip).text_color(t.foreground).font_medium())
+        .when(!isDirActive, el => el.cursor_pointer().text_color(t.muted)
+          .hover(s => s.bg(surf.softChipHover).text_color(t.foreground))
+          .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation())
+          .on_click((_e, cCx) => { cCx.stop_propagation(); this.selectSideTab(item.key, cCx); }))
+        .child(item.label), item.label, t, { panel: true, placement: 'below-left' });
+    });
+
+    const showLibraryActions = !inDetailView && activeDirKey === 'library' && this.librarySupported();
+    const showMemoryActions = !inDetailView && activeDirKey === 'memory' && this.memorySupported();
+    const rightActions = showLibraryActions
+      ? h_flex().id('library-header-actions').flex_none().gap(2).items_center()
+          .child(this.splitIconBtn('library-new-doc', 'plus', word(lang, 'newDoc'), cCx => this.startNewDoc('library', cCx), t, 14))
+          .child(this.splitIconBtn('library-add-file', 'upload', word(lang, 'addFiles'), cCx => this.pickLibraryFiles(cCx), t, 14))
+          .child(this.splitIconBtn('library-history', 'history', word(lang, 'docHistory'),
+            cCx => this.openHistory('library', 'docs', '', 'all', cCx), t, 14))
+      : showMemoryActions
+        ? h_flex().id('memory-header-actions').flex_none().gap(2).items_center()
+            .child(this.splitIconBtn('memory-new', 'plus', word(lang, 'newMemory'), cCx => this.startNewDoc('memory', cCx), t, 14))
+            .child(this.splitIconBtn('memory-history', 'history', word(lang, 'docHistory'),
+              cCx => this.openHistory('memory', 'memory', '', 'all', cCx), t, 14))
+        : null;
+
+    // Estimate available strip width before first on_size_change measurement so frame 1 never flickers.
+    const dirEstW = dirTabs.reduce((sum, item) => sum + estimateSideTabWidth({ text: item.label, compact: false }, { narrow: true }), 0)
+      + Math.max(0, dirTabs.length - 1) * 2;
+    const rightEstW = showLibraryActions ? 92 : showMemoryActions ? 62 : 0;
+    const fallbackStripW = Math.max(80, (Number(width) || PANEL_WIDTH) - 24 - dirEstW - (tabs.length ? 15 : 0) - rightEstW);
+    const effectiveStripW = this._sideTabStripW > 0 ? this._sideTabStripW : fallbackStripW;
+    const overflowInfo = computeSideTabOverflow({
+      tabs,
+      activeId,
+      stripWidth: effectiveStripW,
+      narrow,
+      stripInfoOf: tab => this.sideTabStripInfo(tab),
+    });
+    const visibleIdSet = new Set(overflowInfo.visibleIds);
+    const visibleTabs = tabs.filter(tab => visibleIdSet.has(tab.id));
 
     const menuRow = (id, label, onClick, { danger = false, disabled = false } = {}) => h_flex().id(id)
       .w_full().h(26).px(8).gap(6).rounded(6).items_center()
       .text_size(12).text_color(danger ? t.blocked : disabled ? t.dim : t.foreground)
       .when(!disabled, el => el.cursor_pointer().hover(s => s.bg(t.hover))
-        .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); }))
+        .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation())
+        .on_click((_e, cCx) => { cCx.stop_propagation(); onClick(cCx); }))
       .child(div().flex_1().min_w(0).truncate().child(label));
 
     const stripItems = [];
-    for (let i = 0; i < tabs.length; i++) {
-      const tab = tabs[i];
+    for (let i = 0; i < visibleTabs.length; i++) {
+      const tab = visibleTabs[i];
+      const fullIdx = tabs.findIndex(x => x.id === tab.id);
       const isActive = tab.id === activeId;
       const isHovered = this.hoveredTabId === tab.id;
       const label = this.sideTabLabel(tab);
+      const strip = this.sideTabStripInfo(tab);
+      const isThread = tab.kind === 'thread';
       const showClose = isActive || isHovered;
       const tailEl = showClose
         ? h_flex().id(`side-tab-close-${tab.id}`).size(16).flex_none().rounded(4).items_center().justify_center()
             .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
             .accessibility_label(word(lang, 'sideTabClose'))
-            .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
-            .on_click((_e, cx) => { cx.stop_propagation(); this.closeTab(tab.id, cx); })
+            .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation())
+            .on_click((_e, cCx) => { cCx.stop_propagation(); this.closeTab(tab.id, cCx); })
             .child(this.icon('close', 10))
         : tab.dirty
           ? h_flex().size(16).flex_none().items_center().justify_center()
               .child(div().id(`side-tab-dirty-${tab.id}`).size(6).rounded_full().bg(t.accent))
-          : div().size(16).flex_none();
+          : (strip.compact ? null : div().size(16).flex_none());
 
       const ctxOpen = this.tabMenu?.kind === 'context' && this.tabMenu.tabId === tab.id;
-      const hasRight = i < tabs.length - 1;
+      const hasRight = fullIdx >= 0 && fullIdx < tabs.length - 1;
       const hasOthers = tabs.length > 1;
       const ctxPopup = ctxOpen ? Popup.new(`tab-ctx-menu-${tab.id}`, div().w(0).h(0)).anchor('top_left')
         .content(keepPress(v_flex().id('tab-ctx-menu').w(188).p(4).gap(2).rounded(9)
           .bg(menuBg).border_1().border_color(t.border).shadow_lg(), this.keyFocus)
-          .child(menuRow('tab-ctx-close', word(lang, 'sideTabClose'), cx => this.closeTab(tab.id, cx)))
-          .child(menuRow('tab-ctx-others', word(lang, 'sideTabCloseOthers'), cx => this.closeOtherTabs(tab.id, cx), { disabled: !hasOthers }))
-          .child(menuRow('tab-ctx-right', word(lang, 'sideTabCloseRight'), cx => this.closeRightTabs(tab.id, cx), { disabled: !hasRight }))
-          .child(menuRow('tab-ctx-all', word(lang, 'sideTabCloseAll'), cx => this.closeAllTabs(cx), { danger: true }))
+          .child(menuRow('tab-ctx-close', word(lang, 'sideTabClose'), cCx => this.closeTab(tab.id, cCx)))
+          .child(menuRow('tab-ctx-others', word(lang, 'sideTabCloseOthers'), cCx => this.closeOtherTabs(tab.id, cCx), { disabled: !hasOthers }))
+          .child(menuRow('tab-ctx-right', word(lang, 'sideTabCloseRight'), cCx => this.closeRightTabs(tab.id, cCx), { disabled: !hasRight }))
+          .child(menuRow('tab-ctx-all', word(lang, 'sideTabCloseAll'), cCx => this.closeAllTabs(cCx), { danger: true }))
           .when(tab.kind === 'doc' && Boolean(tab.path), el => el
             .child(div().w_full().h(1).my(2).bg(t.border))
-            .child(menuRow('tab-ctx-copy', word(lang, 'sideTabCopyPath'), cx => {
-              cx.write_to_clipboard?.(tab.path);
+            .child(menuRow('tab-ctx-copy', word(lang, 'sideTabCopyPath'), cCx => {
+              cCx.write_to_clipboard?.(tab.path);
               this.tabMenu = null;
-              this.notifyPanes(cx, { shell: false, side: true });
+              this.notifyPanes(cCx, { shell: false, side: true });
             })))) : null;
 
-      const tabEl = h_flex().id(`side-tab-${tab.id}`).relative().h(28).px(8).gap(5).rounded(7)
+      // Full-title preview tooltip on hovering an inactive compact `#NNN` thread tab.
+      const tabTipPopup = (!isActive && isHovered && !ctxOpen && strip.compact && label && label !== strip.text)
+        ? Popup.new(`side-tab-tip-${tab.id}`, div().w(0).h(0)).anchor('top_left')
+            .content(v_flex().max_w(260).px(9).py(5.5).rounded(8).bg(menuBg).border_1().border_color(t.border).shadow_lg()
+              .child(div().whitespace_normal().text_size(11.5).line_height('16px').text_color(t.foreground).child(label)))
+        : null;
+
+      const leadGlyph = isThread
+        ? h_flex().size(12).flex_none().items_center().justify_center().child(this.sideTabThreadDot(tab, t))
+        : this.icon(this.sideTabIcon(tab), 12.5).text_color(isActive ? t.foreground : t.dim);
+
+      const tabEl = h_flex().id(`side-tab-${tab.id}`).relative().h(26).px(strip.compact ? 7.5 : 8).gap(5).rounded(6)
         .flex_none().items_center().cursor_pointer()
-        .min_w(narrow ? 72 : 88).max_w(narrow ? 128 : 168)
+        .when(strip.compact, el => el.min_w(0).max_w(120))
+        .when(!strip.compact, el => el.min_w(narrow ? 72 : 84).max_w(narrow ? 124 : 156))
         .accessibility_label(tab.dirty ? word(lang, 'sideTabDirtyHint', label) : label)
-        .when(isActive, el => el.bg(t.background).border_1().border_color(withAlpha(t.border, dark ? .9 : .85))
-          .when(!dark, e => e.shadow_xs()).text_color(t.foreground).font_medium())
-        .when(!isActive, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
+        .when(isActive, el => el.bg(surf.softChip).text_color(t.foreground).font_medium())
+        .when(!isActive, el => el.text_color(t.muted).hover(s => s.bg(surf.softChipHover).text_color(t.foreground)))
         .when(Boolean(tab.missing), el => el.opacity(.6))
-        .on_hover((over, cx) => {
+        .on_hover((over, hCx) => {
           const next = over ? tab.id : (this.hoveredTabId === tab.id ? '' : this.hoveredTabId);
           if (next !== this.hoveredTabId) {
             this.hoveredTabId = next;
-            this.notifyPanes(cx, { shell: false, side: true });
+            this.notifyPanes(hCx, { shell: false, side: true });
           }
         })
-        .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
-        .on_mouse_down('middle', (_e, cx) => { cx.stop_propagation(); this.closeTab(tab.id, cx); })
-        .on_mouse_down('right', (_e, cx) => {
-          cx.stop_propagation();
+        .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation())
+        .on_mouse_down('middle', (_e, mCx) => { mCx.stop_propagation(); this.closeTab(tab.id, mCx); })
+        .on_mouse_down('right', (_e, mCx) => {
+          mCx.stop_propagation();
           this.tabMenu = ctxOpen ? null : { kind: 'context', tabId: tab.id };
-          this.notifyPanes(cx, { shell: false, side: true });
+          this.notifyPanes(mCx, { shell: false, side: true });
         })
-        .on_click((_e, cx) => { cx.stop_propagation(); this.activateTab(tab.id, cx); })
-        .child(this.icon(this.sideTabIcon(tab), 12.5).text_color(isActive ? t.foreground : t.dim))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).child(label))
-        .child(tailEl)
-        .when(Boolean(ctxPopup), el => el.child(div().absolute().left(0).bottom(0).w(0).h(0).child(ctxPopup)));
+        .on_click((_e, cCx) => { cCx.stop_propagation(); this.activateTab(tab.id, cCx); })
+        .child(leadGlyph)
+        .when(strip.compact, el => el.child(div().flex_none().font_family('monospace').text_size(12).child(strip.text)))
+        .when(!strip.compact, el => el.child(div().flex_1().min_w(0).truncate().text_size(12).child(strip.text)))
+        .when(Boolean(tailEl), el => el.child(tailEl))
+        .when(Boolean(ctxPopup), el => el.child(div().absolute().left(0).bottom(0).w(0).h(0).child(ctxPopup)))
+        .when(Boolean(tabTipPopup), el => el.child(div().absolute().left(0).bottom(-4).w(0).h(0).child(tabTipPopup)));
 
       stripItems.push(tabEl);
-      if (i < tabs.length - 1) {
-        const nextTab = tabs[i + 1];
-        const nextActive = nextTab.id === activeId;
-        const nextHovered = this.hoveredTabId === nextTab.id;
-        if (!isActive && !isHovered && !nextActive && !nextHovered) {
-          stripItems.push(div().w(1).h(14).flex_none().bg(withAlpha(t.border, dark ? .45 : .55)));
-        }
-      }
     }
 
     const overflowOpen = this.tabMenu?.kind === 'overflow';
@@ -6322,56 +7227,68 @@ export default class PmProject extends View {
           .children(tabs.map(tab => {
             const isAct = tab.id === activeId;
             const lbl = this.sideTabLabel(tab);
+            const rowGlyph = tab.kind === 'thread'
+              ? h_flex().size(12.5).flex_none().items_center().justify_center().child(this.sideTabThreadDot(tab, t))
+              : this.icon(this.sideTabIcon(tab), 12.5).text_color(isAct ? t.accent : t.dim);
             return h_flex().id(`overflow-tab-${tab.id}`).w_full().h(28).px(8).gap(6).rounded(7)
               .items_center().cursor_pointer()
-              .when(isAct, el => el.bg(withAlpha(t.accent, .14)).text_color(t.foreground).font_medium())
+              .when(isAct, el => el.bg(surf.softChip).text_color(t.foreground).font_medium())
               .when(!isAct, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
-              .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
-              .on_click((_e, cx) => { cx.stop_propagation(); this.activateTab(tab.id, cx); })
-              .child(this.icon(this.sideTabIcon(tab), 12.5).text_color(isAct ? t.accent : t.dim))
+              .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation())
+              .on_click((_e, cCx) => { cCx.stop_propagation(); this.activateTab(tab.id, cCx); })
+              .child(rowGlyph)
               .child(div().flex_1().min_w(0).truncate().text_size(12).child(lbl))
               .when(Boolean(tab.dirty), el => el.child(div().size(6).flex_none().rounded_full().bg(t.accent)))
               .child(h_flex().id(`overflow-close-${tab.id}`).size(18).flex_none().rounded(5).items_center().justify_center()
                 .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
-                .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
-                .on_click((_e, cx) => { cx.stop_propagation(); this.closeTab(tab.id, cx); })
+                .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation())
+                .on_click((_e, cCx) => { cCx.stop_propagation(); this.closeTab(tab.id, cCx); })
                 .child(this.icon('close', 10)));
           })))
         .child(div().w_full().h(1).my(2).bg(t.border))
         .when(Boolean(activeId && tabs.length > 1), el => el.child(
-          menuRow('overflow-close-others', word(lang, 'sideTabCloseOthers'), cx => this.closeOtherTabs(activeId, cx)),
+          menuRow('overflow-close-others', word(lang, 'sideTabCloseOthers'), cCx => this.closeOtherTabs(activeId, cCx)),
         ))
-        .child(menuRow('overflow-close-all', word(lang, 'sideTabCloseAll'), cx => this.closeAllTabs(cx), { danger: true }))) : null;
+        .child(menuRow('overflow-close-all', word(lang, 'sideTabCloseAll'), cCx => this.closeAllTabs(cCx), { danger: true }))) : null;
 
-    const overflowBtn = tabs.length >= 2
-      ? h_flex().id('side-tab-overflow').relative().h(26).px(6).gap(3).rounded(6).flex_none()
+    const overflowBtn = overflowInfo.overflow
+      ? h_flex().id('side-tab-overflow').relative().h(26).px(6).gap(2).rounded(6).flex_none()
           .items_center().cursor_pointer().text_size(11.5)
-          .when(overflowOpen, el => el.bg(t.raised).text_color(t.foreground))
-          .when(!overflowOpen, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
-          .accessibility_label(word(lang, 'sideTabsAll', tabs.length))
-          .on_mouse_down('left', (_e, cx) => cx.stop_propagation())
-          .on_click((_e, cx) => {
-            cx.stop_propagation();
+          .when(overflowOpen, el => el.bg(surf.softChip).text_color(t.foreground))
+          .when(!overflowOpen, el => el.text_color(t.muted).hover(s => s.bg(surf.softChipHover).text_color(t.foreground)))
+          .accessibility_label(word(lang, 'sideTabsOverflowTip', overflowInfo.hiddenCount))
+          .on_mouse_down('left', (_e, mCx) => mCx.stop_propagation())
+          .on_click((_e, cCx) => {
+            cCx.stop_propagation();
             this.tabMenu = overflowOpen ? null : { kind: 'overflow' };
-            this.notifyPanes(cx, { shell: false, side: true });
+            this.notifyPanes(cCx, { shell: false, side: true });
           })
-          .child(String(tabs.length))
+          .child(word(lang, 'sideTabsOverflow', overflowInfo.hiddenCount))
           .child(this.icon('expand', 10))
           .when(Boolean(overflowPopup), el => el.child(div().absolute().right(0).bottom(0).w(0).h(0).child(overflowPopup)))
       : null;
 
-    const closeBtn = this.splitIconBtn('split-close', 'close', word(lang, 'closeSidePanel'), cx => this.closeSidePanel(cx), t, 14, false, { placement: 'below-right' });
+    const tabStripEl = tabs.length > 0
+      ? h_flex().id('side-tab-strip').flex_1().min_w(0).h(40).gap(3).items_center().overflow_hidden()
+          .on_size_change((size, sCx) => {
+            const w = Math.round(Number(size?.width) || 0);
+            if (w > 0 && Math.abs(w - (this._sideTabStripW || 0)) >= 2) {
+              this._sideTabStripW = w;
+              this.notifyPanes(sCx, { shell: false, side: true });
+            }
+          })
+          .children(stripItems)
+      : div().flex_1().min_w(0);
 
-    return h_flex().id('side-tab-bar').h(36).w_full().flex_none().px(8).gap(4).items_center()
-      .bg(dark ? withAlpha(t.surface, .55) : t.surface)
-      .border_b(1).border_color(withAlpha(t.border, .7))
-      .child(indexBtn)
-      .child(div().w(1).h(16).flex_none().bg(withAlpha(t.border, .6)))
-      .child(h_flex().id('side-tab-strip').flex_1().min_w(0).h(36).gap(2).items_center().overflow_x_scroll()
-        .when(Boolean(this.tabStripScroll), el => el.track_scroll(this.tabStripScroll))
-        .children(stripItems))
+    return h_flex().id('side-header').h(40).w_full().flex_none().px(10).gap(4).items_center()
+      .bg(t.background)
+      .border_b(1).border_color(surf.hairline)
+      .child(h_flex().id('panel-tabs').flex_none().h(28).gap(2).items_center().children(dirEls))
+      .when(tabs.length > 0, el => el.child(div().id('side-header-divider').w(1).h(14).mx(4).flex_none()
+        .bg(withAlpha(t.border, dark ? .55 : .7))))
+      .child(tabStripEl)
       .when(Boolean(overflowBtn), el => el.child(overflowBtn))
-      .child(closeBtn);
+      .when(Boolean(rightActions), el => el.child(rightActions));
   }
 
   sideTabBanners(t, cx) {
@@ -6563,16 +7480,20 @@ export default class PmProject extends View {
             .child(this.icon('chevron', 12).text_color(t.dim));
         } else {
           const rowNum = row.kind === 'thread' ? formatTaskNumber(taskNumber(row) || this.taskNumberFor(row.target)) : '';
+          const surf = tonalSurfaces(t);
+          const folderAlias = row.kind === 'file' ? String(row.folderAlias || '').trim() : '';
           rowEl
             .child(h_flex().flex_1().min_w(0).gap(6).items_center()
               .when(Boolean(rowNum), el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(rowNum)))
               .child(div().min_w(0).truncate().text_size(13).font_medium()
                 .text_color(row.dimmed ? t.muted : t.foreground)
                 .when(!row.subtitle, s => s.flex_1())
-                .when(Boolean(row.subtitle), s => s.max_w(190))
+                .when(Boolean(row.subtitle), s => s.max_w(180))
                 .child(row.label))
               .when(Boolean(row.subtitle), el => el.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(row.subtitle))))
-            .child(div().flex_none().text_size(11).text_color(t.dim).child(row.typeLabel));
+            .when(Boolean(folderAlias), el => el.child(h_flex().id(`${id}-mention-folder-${i}`).h(18).px(5.5).rounded(4.5).flex_none()
+              .items_center().bg(surf.pillMuted).font_family('monospace').text_size(10.5).text_color(t.muted).child(folderAlias)))
+            .when(!folderAlias, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(row.typeLabel)));
         }
         listChildren.push(this.withTip(`${id}-mention-row-${i}`, rowEl, tip, t, { panel: id === 'say-thread', placement: 'above-left' }));
       });
@@ -6735,7 +7656,6 @@ export default class PmProject extends View {
     if (scope === 'selection') {
       return {
         icon: 'quote',
-        bar: t.accent,
         pillBg: withAlpha(t.accent, dark ? .24 : .16),
         pillText: t.accent,
         strong: true,
@@ -6744,7 +7664,6 @@ export default class PmProject extends View {
     if (scope === 'paragraph') {
       return {
         icon: 'quote-paragraph',
-        bar: withAlpha(t.accent, .6),
         pillBg: withAlpha(t.accent, dark ? .15 : .10),
         pillText: t.accent,
         strong: false,
@@ -6752,7 +7671,6 @@ export default class PmProject extends View {
     }
     return {
       icon: 'quote',
-      bar: withAlpha(t.muted, .55),
       pillBg: withAlpha(t.muted, dark ? .18 : .12),
       pillText: t.muted,
       strong: false,
@@ -7002,7 +7920,7 @@ export default class PmProject extends View {
         const st = this.quoteScopeStyle(q, t);
         const tip = [`${from} · ${scopeTip}`, q.text].filter(Boolean).join('\n');
         return this.withTip(`${id}-quote-${qi}`, h_flex().id(`${id}-quote-${qi}`).w_full().h(28).pl(9).pr(4).gap(6).rounded(8).items_center()
-          .bg(t.raised).border_l(2).border_color(st.bar)
+          .bg(t.raised).border_1().border_color(t.border)
           .accessibility_label(tip)
           .cursor_pointer().hover(s => s.bg(t.hover))
           .on_click((_e, cx) => this.jumpToMessage(q.targetKey, cx, q.range))
@@ -7164,8 +8082,7 @@ export default class PmProject extends View {
           const paraActive = this.hoveredPara === paraKey;
           const paraFlashed = this.flashPara === paraKey;
           return h_flex().id(`para-${item.key}-${seg.index}`).w_full().when(mt > 0, el => el.mt(mt)).items_start().gap(4)
-            .pl(6).pr(2).py(2).rounded(6).border_l(2)
-            .border_color(paraFlashed ? t.accent : paraActive ? withAlpha(t.accent, .5) : '#00000000')
+            .pl(6).pr(2).py(2).rounded(6)
             .when(paraFlashed, el => el.bg(withAlpha(t.accent, qDark ? .14 : .10)))
             .when(!paraFlashed && paraActive, el => el.bg(withAlpha(t.foreground, qDark ? .04 : .035)))
             .on_hover((over, cx) => this.setHoveredPara(paraKey, over, cx))
@@ -7282,8 +8199,7 @@ export default class PmProject extends View {
             const paraActive = this.hoveredPara === paraKey;
             const paraFlashed = this.flashPara === paraKey;
             return h_flex().id(`para-${item.key}-${seg.index}`).w_full().when(mt > 0, el => el.mt(mt)).items_start().gap(4)
-              .pl(6).pr(2).py(2).rounded(6).border_l(2)
-              .border_color(paraFlashed ? t.accent : paraActive ? withAlpha(t.accent, .5) : '#00000000')
+              .pl(6).pr(2).py(2).rounded(6)
               .when(paraFlashed, el => el.bg(withAlpha(t.accent, dark ? .14 : .10)))
               .when(!paraFlashed && paraActive, el => el.bg(withAlpha(t.foreground, dark ? .04 : .035)))
               .on_hover((over, cx) => this.setHoveredPara(paraKey, over, cx))
@@ -7432,7 +8348,7 @@ export default class PmProject extends View {
           .text_size(12).text_color(t.dim)
           .child(this.icon(iv.icon, 12).flex_none().text_color(t.muted))
           .child(div().flex_1().min_w(0).truncate().child(flatLabel));
-        return iv.detail ? this.withTip(rowId, quietRow, iv.detail, t, { placement: 'above-left' }) : quietRow;
+        return iv.tooltip ? this.withTip(rowId, quietRow, iv.tooltip, t, { placement: 'above-left' }) : quietRow;
       }
       if (iv.tone === 'alert') {
         const alertRow = h_flex().id(rowId).w_full().items_start().gap(8).px(12).py(9).rounded(10)
@@ -7440,14 +8356,14 @@ export default class PmProject extends View {
           .text_size(12.5).text_color(t.foreground)
           .child(this.icon(iv.icon, 13.5).flex_none().text_color(t.blocked))
           .child(div().flex_1().min_w(0).whitespace_normal().child(flatLabel));
-        return iv.detail ? this.withTip(rowId, alertRow, iv.detail, t, { placement: 'above-left' }) : alertRow;
+        return iv.tooltip ? this.withTip(rowId, alertRow, iv.tooltip, t, { placement: 'above-left' }) : alertRow;
       }
       const recRow = h_flex().id(rowId).w_full().items_start().gap(8).px(12).py(8).rounded(10)
         .bg(t.raised).border_1().border_color(t.border)
         .text_size(12.5).text_color(t.muted)
         .child(this.icon(iv.icon, 13).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).whitespace_normal().child(flatLabel));
-      return iv.detail ? this.withTip(rowId, recRow, iv.detail, t, { placement: 'above-left' }) : recRow;
+      return iv.tooltip ? this.withTip(rowId, recRow, iv.tooltip, t, { placement: 'above-left' }) : recRow;
     }
     if (b.kind === 'user') {
       // The files it carried are cards under its words (or alone, when it was only files).
@@ -7472,8 +8388,7 @@ export default class PmProject extends View {
             const paraActive = this.hoveredPara === paraKey;
             const paraFlashed = this.flashPara === paraKey;
             return h_flex().id(`para-${b.key}-${seg.index}`).max_w_full().when(mt > 0, el => el.mt(mt)).items_start().justify_between().gap(4)
-              .pl(5).pr(2).py(2).rounded(6).border_l(2)
-              .border_color(paraFlashed ? t.accent : paraActive ? withAlpha(t.accent, .5) : '#00000000')
+              .pl(5).pr(2).py(2).rounded(6)
               .when(paraFlashed, el => el.bg(withAlpha(t.accent, dark ? .16 : .11)))
               .when(!paraFlashed && paraActive, el => el.bg(withAlpha(t.foreground, dark ? .05 : .04)))
               .on_hover((over, cx) => this.setHoveredPara(paraKey, over, cx))
@@ -7500,7 +8415,7 @@ export default class PmProject extends View {
             const tip = `${canJump ? word(this.lang, 'quoteJump') : word(this.lang, 'quoteJumpMissing')}\n${from} · ${scopeTip}: ${q.text}`;
             const preview = quoteCardPreview(q.text, { maxLines: 3, maxWidthPx: quotePreviewW, fontSize: 12.5 });
             return this.withTip(`bubble-quote-${b.key}-${qi}`, v_flex().id(`bubble-quote-${b.key}-${qi}`).w_full().px(9).py(6).gap(2).rounded(9)
-              .bg(t.surface).border_l(2).border_color(st.bar)
+              .bg(t.surface).border_1().border_color(t.border)
               .accessibility_label(tip)
               .when(canJump, qel => qel.cursor_pointer().hover(s => s.bg(t.hover))
                 .on_click((e, cx) => { e?.stop_propagation?.(); cx?.stop_propagation?.(); this.jumpToMessage(q.targetKey, cx, q.range); }))
@@ -7635,6 +8550,8 @@ export default class PmProject extends View {
     } else if (act.kind === 'toggle-panel') {
       this.togglePanel(cx);
       this.keyFocus?.focus();
+    } else if (act.kind === 'toggle-folders') {
+      this.toggleFoldersPopover(cx);
     }
   }
 
@@ -7653,13 +8570,18 @@ export default class PmProject extends View {
     const panelOpen = this.isPanelOpen();
     const bgShellsCount = Number(this.activePmTurn2()?.bg_shells?.count ?? this.activePmTurn()?.bg_shells ?? 0) || 0;
     const pmTerminalTip = bgShellsCount > 0 ? word(lang, 'openPmBgShells', bgShellsCount) : word(lang, 'openPm');
+    const foldersView = headerFoldersView(pm, { machine: this.machine, homeDir: home(), lang });
     return {
       session: this.winSession,
       pmName: this.pmName,
       lang,
       hasPm: Boolean(pm),
-      title: pm?.project || pm?.name || 'PM',
+      isRemote: Boolean(this.machine),
+      title: projectName(pm) || 'PM',
+      renameTip: word(lang, 'renameProject'),
       pathText: this.machine ? `${this.machine} · ${pm?.repo || ''}` : shortPath(pm?.repo, home()),
+      foldersView,
+      foldersOpen: Boolean(this.foldersOpen),
       pmCtx,
       pmCtxLevel: pmContextLevel(pmCtx, compactTokens),
       pmCtxText: contextLabel(lang, pmCtx),
@@ -7720,6 +8642,10 @@ export default class PmProject extends View {
           .on_click((_e, cx) => action(cx)))
         .when(!action, el => el.opacity(.4))
         .child(this.icon(name, size)));
+    const boardBtn = hdrIconBtn('view-board', 'board', word(lang, 'switchToBoard'), () => {
+      setShared('pm-dash', { view: 'board', project: data.pmName });
+      run('layout.select', { stack: STAGE, child: BOARD });
+    }, 16);
     const searchBtn = hdrIconBtn('pm-search', 'search', data.searchTip, cx => actions.onToggleSearch?.(cx), 16)
       .when(Boolean(data.searchOpen), el => el.bg(t.raised).text_color(t.foreground));
     const bell = tipWrap('bell', h_flex().id('bell').relative().size(32).flex_none().rounded(10).items_center().justify_center()
@@ -7759,15 +8685,50 @@ export default class PmProject extends View {
     const bar = (standalone ? base.h(56).flex_none() : base.size_full().bg(t.canvas).text_size(14).text_color(t.foreground))
       .pl(28).pr(14).gap(10).items_center();
     const winControls = this.renderWindowControls(t, lang, { divider: true });
+    const renameTip = data.renameTip || word(lang, 'renameProject');
+    const renameBtn = (!data.isRemote && actions.onRename)
+      ? keepPress(
+        tipWrap('pm-project-rename', h_flex().id('pm-project-rename').size(26).flex_none().rounded(7).items_center().justify_center()
+          .cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+          .accessibility_label(renameTip)
+          .on_click((_e, cx) => { cx.stop_propagation(); actions.onRename(cx); })
+          .child(this.icon('pencil', 13)),
+        renameTip, { placement: 'below-left' }),
+        this.keyFocus)
+      : null;
+    const surf = tonalSurfaces(t);
+    const fv = data.foldersView || (data.pathText
+      ? { count: 1, mode: 'single', primaryLabel: data.pathText, extraCount: 0, tooltip: word(lang, 'workspaceFoldersTip', 1) }
+      : { count: 0, mode: 'empty', primaryLabel: word(lang, 'addFolderShort'), extraCount: 0, tooltip: word(lang, 'workspaceFoldersEmptyTip') });
+    const foldersPillEl = h_flex().id('pm-header-folders').h(26).px(7).gap(5).rounded(7).items_center().min_w(0)
+      .when(Boolean(actions.onToggleFolders), el => el.cursor_pointer()
+        .when(data.foldersOpen, s => s.bg(surf.softChip))
+        .hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => { cx.stop_propagation(); actions.onToggleFolders(cx); }))
+      .accessibility_label(fv.tooltip || fv.primaryLabel)
+      .child(this.icon(fv.mode === 'empty' ? 'folder-plus' : 'folder', 13.5)
+        .text_color(data.foldersOpen ? t.foreground : (fv.mode === 'empty' ? t.dim : t.muted)))
+      .when(fv.mode === 'empty', el => el.child(div().min_w(0).truncate().text_size(12)
+        .text_color(data.foldersOpen ? t.foreground : t.dim).child(`+ ${fv.primaryLabel}`)))
+      .when(fv.mode !== 'empty', el => el.child(div().min_w(0).truncate().font_family('monospace').text_size(12)
+        .text_color(data.foldersOpen ? t.foreground : t.muted).child(fv.primaryLabel)))
+      .when(fv.mode === 'multi' && fv.extraCount > 0, el => el
+        .child(h_flex().id('pm-header-folders-extra').h(18).px(5.5).rounded(5).flex_none().items_center()
+          .bg(withAlpha(t.accent, surf.dark ? .16 : .12))
+          .font_family('monospace').text_size(11).font_medium().text_color(t.accent)
+          .child(`+${fv.extraCount}`))
+        .child(this.icon('expand', 9.5).text_color(data.foldersOpen ? t.muted : t.dim)));
+    const foldersTrigger = div().flex_1().min_w(0).flex().items_center()
+      .child(keepPress(tipWrap('pm-header-folders', foldersPillEl, fv.tooltip || '', { placement: 'below-left', flexNone: false }), this.keyFocus));
     return bar
       .child(div().flex_none().text_size(15).font_semibold().child(data.title))
-      .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(12).text_color(t.dim)
-        .child(data.pathText))
+      .when(Boolean(renameBtn), el => el.child(renameBtn))
+      .child(foldersTrigger)
       .when(Boolean(pmCtxEl), el => el.child(pmCtxEl))
       .when(Boolean(data.errorTip), el => el.child(tipWrap('read-error', div().id('read-error').text_color(t.blocked)
         .child('!'), data.errorTip, { wrap: true, flexNone: true })))
-      .child(keepPress(this.views(t, data.pmName, lang), this.keyFocus))
       .child(keepPress(h_flex().id('pm-header-controls').gap(4).items_center(), this.keyFocus)
+        .child(boardBtn)
         .child(searchBtn)
         .child(bell)
         .child(pmControl)
@@ -7784,7 +8745,7 @@ export default class PmProject extends View {
       if (ks === 'escape' && s?.session) {
         this.emitHeaderAction('escape', s.session);
         cx.stop_propagation?.();
-      } else if ((ks === 'cmd-k' || ks === 'ctrl-k' || ks === 'cmd-f' || ks === 'ctrl-f') && s?.session) {
+      } else if ((ks === 'cmd-k' || ks === 'ctrl-k' || ks === 'cmd-f' || ks === 'ctrl-f' || ks === '/') && s?.session) {
         this.emitHeaderAction('key', s.session, { keystroke: ks });
         cx.stop_propagation?.();
       }
@@ -7797,6 +8758,8 @@ export default class PmProject extends View {
     }
     this.lang = s.lang || this.lang || 'en';
     return this.renderHeaderBar(s, {
+      onRename: s.isRemote ? null : () => openOverlay({ mod: 'pm-dash', props: { dialog: 'rename', pm: s.pmName }, kind: 'dialog', width: 420, height: 224 }),
+      onToggleFolders: () => this.emitHeaderAction('toggle-folders', s.session),
       onToggleSearch: () => this.emitHeaderAction('toggle-search', s.session),
       onBell: s.hasRing ? () => this.emitHeaderAction('bell', s.session) : null,
       onOpenPm: () => this.emitHeaderAction('focus-pm', s.session),
@@ -7813,6 +8776,8 @@ export default class PmProject extends View {
     const terminal = pm ? terminalTargetFor(pmRow(pm), this.terms()).terminal : null;
     const data = this.buildHeaderData(pm, waiting, Boolean(ring));
     return this.renderHeaderBar(data, {
+      onRename: this.machine ? null : () => openOverlay({ mod: 'pm-dash', props: { dialog: 'rename', pm: this.pmName }, kind: 'dialog', width: 420, height: 224 }),
+      onToggleFolders: cx => this.toggleFoldersPopover(cx),
       onToggleSearch: cx => this.toggleProjectSearch(cx),
       onBell: ring ? cx => {
         const row = ring(cx);
@@ -7824,10 +8789,554 @@ export default class PmProject extends View {
     }, t, { standalone: true });
   }
 
+  // ---- Equal-status Workspace folders popover ----
+
+  resetFoldersPopoverState() {
+    this.foldersOpen = false;
+    this.foldersLive = null;
+    this.foldersLiveSlug = '';
+    this.foldersLoading = false;
+    this.foldersBusy = '';
+    this.foldersError = '';
+    this.foldersUnsupported = '';
+    this.foldersEditingAlias = null;
+    this.foldersConfirmRemove = null;
+    this.foldersRemoteOpen = false;
+    this.foldersRemotePath = '';
+    this.foldersRemoteCheck = null;
+    this.foldersRemotePicker = { open: false, loading: false, error: '', base: '', home: '', entries: [] };
+  }
+
+  toggleFoldersPopover(cx) {
+    if (this.foldersOpen) {
+      this.closeFoldersPopover(cx);
+      return;
+    }
+    this.foldersOpen = true;
+    this.foldersError = '';
+    this.foldersEditingAlias = null;
+    this.foldersConfirmRemove = null;
+    this.foldersRemoteOpen = false;
+    this.foldersRemoteCheck = null;
+    this.foldersRemotePicker = { open: false, loading: false, error: '', base: '', home: '', entries: [] };
+    this.refreshLiveFolders(cx);
+    this.notifyPanes(cx, { shell: true, conv: true });
+  }
+
+  closeFoldersPopover(cx) {
+    if (!this.foldersOpen) return;
+    this.foldersOpen = false;
+    this.foldersEditingAlias = null;
+    this.foldersConfirmRemove = null;
+    this.foldersRemoteOpen = false;
+    this.foldersRemoteCheck = null;
+    this.foldersRemotePicker = { ...this.foldersRemotePicker, open: false };
+    this.foldersError = '';
+    this.keyFocus?.focus?.();
+    this.notifyPanes(cx, { shell: true, conv: true });
+  }
+
+  refreshLiveFolders(cx) {
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    if (!pm || !slug) return;
+    this.foldersLoading = true;
+    cx?.notify?.();
+    cx?.spawn?.(async cx => {
+      try {
+        const r = await this.runProject(projectFoldersLsArgv(slug));
+        if (r.code !== 0) {
+          if (machine && isOldPmCommand(r)) {
+            if (projectSlug(this.pm()) === slug && machine === this.machine) {
+              this.foldersUnsupported = word(this.lang, 'remoteFoldersUnsupported', machine);
+            }
+            return;
+          }
+          throw new Error((r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop());
+        }
+        const parsed = JSON.parse(r.stdout || '{}');
+        if (projectSlug(this.pm()) === slug && machine === this.machine && Array.isArray(parsed.folders)) {
+          this.foldersLive = parsed.folders;
+          this.foldersLiveSlug = slug;
+          this.foldersUnsupported = '';
+        }
+      } catch (e) {
+        if (projectSlug(this.pm()) === slug && machine === this.machine) {
+          this.foldersError = String(e?.message || e).trim();
+        }
+      } finally {
+        this.foldersLoading = false;
+        cx.notify();
+      }
+    });
+  }
+
+  applyFoldersMutationResult(slug, folders, cx) {
+    const nextList = Array.isArray(folders) ? folders : [];
+    this.foldersLive = nextList;
+    this.foldersLiveSlug = slug;
+    if (Array.isArray(this.state?.pms)) {
+      this.state.pms = this.state.pms.map(item => {
+        if (projectSlug(item) !== slug) return item;
+        return {
+          ...item,
+          folders: nextList,
+          repo: nextList[0]?.path || '',
+          repo_ok: true,
+        };
+      });
+    }
+    this.dropCachePrefix(['repo/']);
+    this.repoFilesRead = false;
+    this.repoFilesSig = '';
+    this.foldersError = '';
+    this.foldersUnsupported = '';
+    this.refresh(cx);
+    this.readRepoFiles(cx);
+    this.refreshLiveFolders(cx);
+    this.notifyPanes(cx, { shell: true, conv: true, side: true });
+  }
+
+  addWorkspaceFolder(rawPath, cx, { clearRemote = false } = {}) {
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    const folderPath = String(rawPath || '').trim();
+    if (!pm || !slug || !folderPath || this.foldersBusy) return;
+    this.foldersBusy = 'add';
+    this.foldersError = '';
+    cx?.notify?.();
+    cx?.spawn?.(async cx => {
+      try {
+        const r = await this.runProjectWrite(projectFoldersAddArgv(slug, folderPath));
+        if (r.code !== 0) {
+          if (machine && isOldPmCommand(r)) {
+            this.foldersUnsupported = word(this.lang, 'remoteFoldersUnsupported', machine);
+            return;
+          }
+          throw new Error((r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop());
+        }
+        const parsed = JSON.parse(r.stdout || '{}');
+        if (projectSlug(this.pm()) === slug && machine === this.machine) {
+          if (clearRemote) {
+            this.foldersRemotePath = '';
+            this.folderRemoteInput?.set_value?.('');
+            this.foldersRemoteCheck = null;
+            this.foldersRemoteOpen = false;
+            this.foldersRemotePicker = { ...this.foldersRemotePicker, open: false };
+          }
+          this.applyFoldersMutationResult(slug, parsed.folders, cx);
+        }
+      } catch (e) {
+        if (projectSlug(this.pm()) === slug && machine === this.machine) {
+          this.foldersError = String(e?.message || e).trim();
+        }
+      } finally {
+        this.foldersBusy = '';
+        cx.notify();
+      }
+    });
+  }
+
+  chooseLocalFolder(cx) {
+    if (typeof pickFolder !== 'function' || this.foldersBusy) return;
+    cx?.spawn?.(async cx => {
+      try {
+        const picked = await pickFolder({ prompt: word(this.lang, 'addFolder').replace(/[….]$/, '') });
+        if (picked) this.addWorkspaceFolder(picked, cx);
+      } catch (e) {
+        this.foldersError = String(e?.message || e).trim();
+        cx.notify();
+      }
+    });
+  }
+
+  requestRemoveFolder(folder, cx) {
+    if (!folder || this.foldersBusy) return;
+    const active = activeThreadsInFolder(this.projectTasks(), folder);
+    if (active.length > 0) {
+      this.foldersConfirmRemove = { alias: folder.alias, path: folder.path, count: active.length };
+      this.foldersEditingAlias = null;
+      this.foldersError = '';
+      cx?.notify?.();
+      return;
+    }
+    this.removeWorkspaceFolder(folder, { force: false }, cx);
+  }
+
+  removeWorkspaceFolder(folder, { force = false } = {}, cx) {
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    if (!pm || !slug || !folder || this.foldersBusy) return;
+    const target = folder.alias || folder.path;
+    this.foldersBusy = `remove:${target}`;
+    this.foldersError = '';
+    cx?.notify?.();
+    cx?.spawn?.(async cx => {
+      try {
+        const r = await this.runProjectWrite(projectFoldersRemoveArgv(slug, target, { force }));
+        if (r.code !== 0) {
+          if (machine && isOldPmCommand(r)) {
+            this.foldersUnsupported = word(this.lang, 'remoteFoldersUnsupported', machine);
+            return;
+          }
+          const errText = (r.stderr || r.stdout || `pm.py: ${r.code}`).trim();
+          if (!force && /--force/i.test(errText)) {
+            const countMatch = /(\d+)\s+(?:active|个进行中)/.exec(errText);
+            this.foldersConfirmRemove = {
+              alias: folder.alias,
+              path: folder.path,
+              count: countMatch ? Number(countMatch[1]) : 1,
+            };
+            return;
+          }
+          throw new Error(errText.split('\n').pop());
+        }
+        const parsed = JSON.parse(r.stdout || '{}');
+        if (projectSlug(this.pm()) === slug && machine === this.machine) {
+          this.foldersConfirmRemove = null;
+          this.applyFoldersMutationResult(slug, parsed.folders, cx);
+        }
+      } catch (e) {
+        if (projectSlug(this.pm()) === slug && machine === this.machine) {
+          this.foldersError = String(e?.message || e).trim();
+        }
+      } finally {
+        this.foldersBusy = '';
+        cx.notify();
+      }
+    });
+  }
+
+  startRenameFolderAlias(folder, cx) {
+    if (!folder || this.foldersBusy) return;
+    const current = String(folder.alias || '');
+    this.foldersConfirmRemove = null;
+    this.foldersError = '';
+    this.foldersEditingAlias = { target: current, original: current, value: current };
+    this.folderAliasInput?.set_value?.(current);
+    cx?.timer?.after?.(0, () => this.folderAliasInput?.focus?.());
+    cx?.notify?.();
+  }
+
+  commitRenameFolderAlias(cx) {
+    const ed = this.foldersEditingAlias;
+    const pm = this.pm(), slug = projectSlug(pm), machine = this.machine;
+    if (!ed || !pm || !slug || this.foldersBusy) return;
+    const nextAlias = String(this.folderAliasInput?.value?.() ?? ed.value ?? '').trim();
+    if (!nextAlias || nextAlias === ed.original) {
+      this.foldersEditingAlias = null;
+      this.keyFocus?.focus?.();
+      cx?.notify?.();
+      return;
+    }
+    this.foldersBusy = `rename:${ed.target}`;
+    this.foldersError = '';
+    cx?.notify?.();
+    cx?.spawn?.(async cx => {
+      try {
+        const r = await this.runProjectWrite(projectFoldersRenameAliasArgv(slug, ed.target, nextAlias));
+        if (r.code !== 0) {
+          if (machine && isOldPmCommand(r)) {
+            this.foldersUnsupported = word(this.lang, 'remoteFoldersUnsupported', machine);
+            return;
+          }
+          throw new Error((r.stderr || r.stdout || `pm.py: ${r.code}`).trim().split('\n').pop());
+        }
+        const parsed = JSON.parse(r.stdout || '{}');
+        if (projectSlug(this.pm()) === slug && machine === this.machine) {
+          this.foldersEditingAlias = null;
+          this.keyFocus?.focus?.();
+          this.applyFoldersMutationResult(slug, parsed.folders, cx);
+        }
+      } catch (e) {
+        if (projectSlug(this.pm()) === slug && machine === this.machine) {
+          this.foldersError = String(e?.message || e).trim();
+        }
+      } finally {
+        this.foldersBusy = '';
+        cx.notify();
+      }
+    });
+  }
+
+  probeRemoteFolderPath(rawPath, cx, { addIfExists = false } = {}) {
+    const machine = this.machine;
+    const trimmed = String(rawPath || '').trim();
+    if (!machine || !trimmed) return;
+    this.foldersRemoteCheck = { raw: trimmed, exists: false, path: trimmed, git: false, branch: '', checking: true, creating: false };
+    this.foldersError = '';
+    cx?.notify?.();
+    cx?.spawn?.(async cx => {
+      try {
+        const r = await exec('sh', ['-c', REMOTE_PROBE_SH, 'sh', trimmed], { on: machine, timeout: 5000 });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `probe: ${r.code}`).trim().split('\n').pop());
+        const parsed = parseRemoteProbe(r.stdout);
+        const dir = parsed.dirs[0] || { exists: false, raw: trimmed, path: trimmed, git: false, branch: '' };
+        if (dir.exists) {
+          if (addIfExists) {
+            this.foldersRemoteCheck = null;
+            this.addWorkspaceFolder(dir.path, cx, { clearRemote: true });
+          } else {
+            this.foldersRemoteCheck = { ...dir, checking: false, creating: false };
+          }
+        } else {
+          this.foldersRemoteCheck = { ...dir, exists: false, checking: false, creating: false };
+        }
+      } catch (e) {
+        this.foldersRemoteCheck = null;
+        this.foldersError = String(e?.message || e).trim();
+      } finally {
+        cx.notify();
+      }
+    });
+  }
+
+  createRemoteFolderPath(rawPath, cx) {
+    const machine = this.machine;
+    const target = String(rawPath || '').trim();
+    if (!machine || !target || this.foldersRemoteCheck?.creating) return;
+    this.foldersRemoteCheck = { ...(this.foldersRemoteCheck || { raw: target, path: target }), creating: true };
+    this.foldersError = '';
+    cx?.notify?.();
+    cx?.spawn?.(async cx => {
+      try {
+        const r = await exec('sh', ['-c', REMOTE_MKDIR_SH, 'sh', target], { on: machine, timeout: 5000 });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `mkdir: ${r.code}`).trim().split('\n').pop());
+        const createdPath = r.stdout.trim() || this.foldersRemoteCheck?.path || target;
+        this.foldersRemoteCheck = null;
+        this.addWorkspaceFolder(createdPath, cx, { clearRemote: true });
+      } catch (e) {
+        if (this.foldersRemoteCheck) this.foldersRemoteCheck.creating = false;
+        this.foldersError = String(e?.message || e).trim();
+        cx.notify();
+      }
+    });
+  }
+
+  openRemoteFolderPicker(prefix, cx) {
+    const machine = this.machine;
+    if (!machine) return;
+    this.foldersRemotePicker = { ...this.foldersRemotePicker, open: true, loading: true, error: '' };
+    cx?.notify?.();
+    cx?.spawn?.(async cx => {
+      try {
+        const target = String(prefix ?? (String(this.foldersRemotePath || '').trim() || '~'));
+        const r = await exec('sh', ['-c', REMOTE_LIST_DIRS_SH, 'sh', target], { on: machine, timeout: 5000 });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `ls: ${r.code}`).trim().split('\n').pop());
+        const parsed = parseRemoteDirs(r.stdout);
+        this.foldersRemotePicker = { open: true, loading: false, error: '', base: parsed.base, home: parsed.home, entries: parsed.entries };
+      } catch (e) {
+        this.foldersRemotePicker = { ...this.foldersRemotePicker, open: true, loading: false, error: String(e?.message || e).trim() };
+      } finally {
+        cx.notify();
+      }
+    });
+  }
+
+  renderFoldersPopover(pm, t, cx) {
+    const lang = this.lang;
+    const surf = tonalSurfaces(t);
+    const slug = projectSlug(pm);
+    const folders = (this.foldersLiveSlug === slug && Array.isArray(this.foldersLive))
+      ? this.foldersLive
+      : projectFolders(pm);
+    const gitCount = folders.filter(f => f.git).length;
+    const popoverBg = [t.popover, t.surface, t.raised].find(Boolean) || t.surface;
+    const homeDir = home();
+    const stop = (_e, clickCx) => clickCx?.stop_propagation?.();
+    const parentOf = p => {
+      const clean = String(p || '').replace(/\/+$/, '');
+      if (!clean || clean === '/') return '/';
+      const idx = clean.lastIndexOf('/');
+      return idx <= 0 ? '/' : clean.slice(0, idx);
+    };
+
+    const rowEls = [];
+    if (!folders.length) {
+      rowEls.push(h_flex().id('folders-empty-row').h(38).px(10).gap(8).rounded(8).items_center().bg(surf.well)
+        .child(this.icon('folder-plus', 14).text_color(t.dim))
+        .child(div().flex_1().min_w(0).text_size(12).text_color(t.dim).child(word(lang, 'noFoldersLinked'))));
+    } else {
+      folders.forEach((f, idx) => {
+        const isEditing = this.foldersEditingAlias?.target === f.alias;
+        const isConfirming = this.foldersConfirmRemove?.alias === f.alias;
+        const isBusy = this.foldersBusy === `remove:${f.alias}` || this.foldersBusy === `rename:${f.alias}`;
+        const pathLabel = this.machine ? f.path : shortPath(f.path, homeDir);
+        const badgeText = f.exists === false
+          ? word(lang, 'folderMissing')
+          : f.git
+            ? (f.default_branch ? `git · ${f.default_branch}` : 'git')
+            : word(lang, 'folderBadgeNonGit');
+
+        const row = h_flex().id(`folder-row-${idx}`).min_h(34).px(8).py(4).gap(8).rounded(8).items_center()
+          .bg(surf.well)
+          .child(this.icon('folder', 13.5).text_color(f.exists === false ? t.blocked : t.muted))
+          .when(isEditing, el => el
+            .child(h_flex().flex_none().w(124).h(24).px(6).rounded(6).items_center()
+              .bg(t.background).border_1().border_color(withAlpha(t.accent, .55))
+              .child(Input.new(this.folderAliasInput).w_full().h(20).items_center().font_family('monospace').text_size(11.5).text_color(t.foreground)))
+            .child(this.iconButton(`folder-alias-save-${idx}`, 'check', word(lang, 'saveEdit'),
+              clickCx => this.commitRenameFolderAlias(clickCx), t, 12))
+            .child(this.iconButton(`folder-alias-cancel-${idx}`, 'close', word(lang, 'cancel'),
+              clickCx => { this.foldersEditingAlias = null; this.keyFocus?.focus?.(); clickCx.notify(); }, t, 11)))
+          .when(!isEditing, el => el
+            .child(this.withTip(`folder-alias-${idx}`,
+              h_flex().id(`folder-alias-${idx}`).h(22).px(6.5).rounded(5.5).flex_none().items_center().cursor_pointer()
+                .bg(surf.pillMuted).hover(s => s.bg(t.hover))
+                .accessibility_label(word(lang, 'folderAliasRenameTip'))
+                .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.startRenameFolderAlias(f, clickCx); })
+                .child(div().max_w(120).truncate().font_family('monospace').text_size(11.5).font_medium()
+                  .text_color(t.foreground).child(f.alias)),
+              word(lang, 'folderAliasRenameTip'), t, { placement: 'above-left' })))
+          .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(11.5)
+            .text_color(f.exists === false ? t.blocked : t.muted).child(pathLabel))
+          .child(h_flex().h(20).px(6).rounded(5).flex_none().items_center()
+            .bg(f.exists === false ? withAlpha(t.blocked, surf.dark ? .15 : .10) : surf.pillMuted)
+            .font_family('monospace').text_size(10.5)
+            .text_color(f.exists === false ? t.blocked : t.dim)
+            .child(badgeText))
+          .child(isBusy
+            ? h_flex().size(24).flex_none().items_center().justify_center().child(svg(SPINNER).size(12).flex_none().spin(900))
+            : this.withTip(`folder-remove-${idx}`,
+              h_flex().id(`folder-remove-${idx}`).size(24).flex_none().rounded(6).items_center().justify_center()
+                .cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+                .accessibility_label(word(lang, 'unlinkFolderTip'))
+                .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.requestRemoveFolder(f, clickCx); })
+                .child(this.icon('close', 11.5)),
+              word(lang, 'unlinkFolderTip'), t, { placement: 'above-right' }));
+
+        rowEls.push(row);
+
+        if (isConfirming) {
+          rowEls.push(h_flex().id(`folder-remove-confirm-bar-${idx}`).px(10).py(6).gap(8).rounded(8).items_center()
+            .bg(withAlpha(t.blocked, surf.dark ? .12 : .08))
+            .child(div().flex_1().min_w(0).whitespace_normal().text_size(11.5).text_color(t.foreground)
+              .child(word(lang, 'unlinkFolderActiveWarn', f.alias, this.foldersConfirmRemove.count)))
+            .child(h_flex().id(`folder-remove-cancel-${idx}`).h(22).px(8).rounded(6).flex_none().items_center()
+              .cursor_pointer().bg(surf.well).hover(s => s.bg(t.hover))
+              .text_size(11.5).text_color(t.muted)
+              .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.foldersConfirmRemove = null; clickCx.notify(); })
+              .child(word(lang, 'cancel')))
+            .child(h_flex().id(`folder-remove-confirm-${idx}`).h(22).px(8).rounded(6).flex_none().items_center()
+              .cursor_pointer().bg(t.blocked).hover(s => s.opacity(.9))
+              .text_size(11.5).font_medium().text_color(solidText(t.blocked, t))
+              .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.removeWorkspaceFolder(f, { force: true }, clickCx); })
+              .child(word(lang, 'unlinkAnyway'))));
+        }
+      });
+    }
+
+    const remotePanel = (this.machine && this.foldersRemoteOpen) ? v_flex().id('folder-remote-add-panel').gap(6).pt(2)
+      .child(h_flex().gap(6).items_center()
+        .child(div().relative().flex_1().min_w(0).h(28).px(8).rounded(7).bg(surf.well).border_1()
+          .border_color(this.typing === 'folderRemote' ? withAlpha(t.accent, .5) : surf.hairline)
+          .flex().items_center()
+          .when(!this.foldersRemotePath, el => el.child(div().absolute().left(8).right(8).truncate()
+            .text_size(11.5).text_color(t.dim).child(word(lang, 'enterRemotePath', this.machine))))
+          .child(Input.new(this.folderRemoteInput).w_full().h(22).items_center().font_family('monospace').text_size(11.5).text_color(t.foreground)))
+        .child(h_flex().id('folder-remote-browse').h(28).px(9).gap(4).rounded(7).flex_none().items_center()
+          .cursor_pointer().bg(surf.softChip).hover(s => s.bg(t.hover))
+          .text_size(11.5).text_color(t.muted)
+          .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.openRemoteFolderPicker(this.foldersRemotePath || '~', clickCx); })
+          .child(word(lang, 'browseRemote', this.machine)))
+        .child(h_flex().id('folder-remote-add').h(28).px(10).rounded(7).flex_none().items_center()
+          .cursor_pointer().bg(withAlpha(t.accent, surf.dark ? .22 : .14)).hover(s => s.bg(withAlpha(t.accent, .28)))
+          .text_size(11.5).font_medium().text_color(t.accent)
+          .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.probeRemoteFolderPath(this.foldersRemotePath, clickCx, { addIfExists: true }); })
+          .child(word(lang, 'addBtn'))))
+      .when(Boolean(this.foldersRemoteCheck && !this.foldersRemoteCheck.checking && !this.foldersRemoteCheck.exists), el => el
+        .child(h_flex().id('folder-remote-missing').px(9).py(6).gap(8).rounded(7).items_center()
+          .bg(withAlpha(t.ansi3 || t.blocked, surf.dark ? .12 : .09))
+          .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground)
+            .child(word(lang, 'folderNotFoundRemote', this.machine)))
+          .child(h_flex().id('folder-remote-create').h(22).px(8).rounded(6).flex_none().items_center()
+            .cursor_pointer().bg(surf.softChip).hover(s => s.bg(t.hover))
+            .text_size(11.5).font_medium().text_color(t.foreground)
+            .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.createRemoteFolderPath(this.foldersRemoteCheck.raw || this.foldersRemotePath, clickCx); })
+            .child(word(lang, 'createRemoteFolder')))))
+      .when(Boolean(this.foldersRemotePicker?.open), el => {
+        const pk = this.foldersRemotePicker;
+        return v_flex().id('folder-remote-picker').rounded(8).p(6).gap(4).bg(surf.well).border_1().border_color(surf.hairline)
+          .child(h_flex().h(24).px(4).gap(6).items_center()
+            .when(Boolean(pk.base && pk.base !== '/'), row => row
+              .child(h_flex().id('folder-remote-up').h(20).px(6).rounded(5).flex_none().items_center()
+                .cursor_pointer().bg(surf.pillMuted).hover(s => s.bg(t.hover))
+                .font_family('monospace').text_size(11).text_color(t.muted)
+                .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.openRemoteFolderPicker(parentOf(pk.base), clickCx); })
+                .child('..')))
+            .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(11).text_color(t.dim).child(pk.base || '~'))
+            .child(this.iconButton('folder-remote-picker-close', 'close', word(lang, 'close'),
+              clickCx => { this.foldersRemotePicker = { ...pk, open: false }; clickCx.notify(); }, t, 11)))
+          .when(pk.loading, row => row.child(h_flex().px(6).py(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
+            .child(svg(SPINNER).size(11).spin(900)).child('…')))
+          .when(Boolean(pk.error), row => row.child(div().px(6).py(4).text_size(11.5).text_color(t.blocked).child(pk.error)))
+          .when(!pk.loading && !pk.error, row => row.child(v_flex().max_h(150).gap(2).overflow_y_scrollbar()
+            .children((pk.entries || []).slice(0, 40).map((ent, j) => h_flex().id(`folder-remote-entry-${j}`)
+              .h(26).px(6).gap(6).rounded(6).items_center().hover(s => s.bg(t.hover))
+              .child(h_flex().flex_1().min_w(0).gap(6).items_center().cursor_pointer()
+                .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.openRemoteFolderPicker(ent.path, clickCx); })
+                .child(this.icon('folder', 12.5).text_color(t.muted))
+                .child(div().flex_1().min_w(0).truncate().font_family('monospace').text_size(11.5).text_color(t.foreground).child(ent.name)))
+              .when(ent.git, badge => badge.child(div().flex_none().px(5).h(18).rounded(4).bg(surf.pillMuted)
+                .flex().items_center().font_family('monospace').text_size(10).text_color(t.dim)
+                .child(ent.branch ? `git · ${ent.branch}` : 'git')))
+              .child(h_flex().id(`folder-remote-pick-${j}`).h(20).px(6).rounded(5).flex_none().items_center()
+                .cursor_pointer().bg(surf.softChip).hover(s => s.bg(t.hover))
+                .text_size(11).text_color(t.foreground)
+                .on_click((_e, clickCx) => { clickCx.stop_propagation(); this.addWorkspaceFolder(ent.path, clickCx, { clearRemote: true }); })
+                .child(word(lang, 'addBtn')))))));
+      }) : null;
+
+    const errMsg = this.foldersUnsupported || this.foldersError;
+    const addLabel = this.machine ? word(lang, 'addFolderOn', this.machine) : word(lang, 'addFolder');
+    const popW = Math.min(460, Math.max(300, (this.viewWidth || 640) - 48));
+
+    return div().id('pm-folders-overlay').absolute().inset(0)
+      .child(div().id('pm-folders-backdrop').absolute().inset(0)
+        .on_mouse_down('left', (_e, clickCx) => { clickCx.stop_propagation(); this.closeFoldersPopover(clickCx); }))
+      .child(v_flex().id('pm-folders-popover').absolute().top(this.bodyOnly ? 6 : 52).left(24)
+        .w(popW).rounded(12).p(12).gap(8).bg(popoverBg).border_1().border_color(surf.hairline).shadow_lg()
+        .on_mouse_down('left', stop)
+        .child(h_flex().w_full().min_w(0).gap(8).items_center().justify_between()
+          .child(h_flex().gap(6).items_center()
+            .child(div().text_size(12.5).font_semibold().text_color(t.foreground)
+              .child(word(lang, 'workspaceFolders', folders.length)))
+            .when(this.foldersLoading, el => el.child(svg(SPINNER).size(11).flex_none().spin(900))))
+          .child(div().min_w(0).truncate().text_size(11).text_color(t.dim)
+            .child(word(lang, 'workspaceFoldersSub'))))
+        .child(v_flex().id('pm-folders-list').w_full().gap(4).children(rowEls))
+        .when(Boolean(remotePanel), el => el.child(remotePanel))
+        .when(Boolean(errMsg), el => el.child(h_flex().id('pm-folders-error').px(8).py(5).gap(6).rounded(7).items_center()
+          .bg(withAlpha(t.blocked, surf.dark ? .14 : .09))
+          .child(div().flex_1().min_w(0).whitespace_normal().text_size(11.5).text_color(t.blocked).child(errMsg))
+          .child(this.iconButton('pm-folders-err-close', 'close', word(lang, 'dismissNotice'),
+            clickCx => { this.foldersError = ''; clickCx.notify(); }, t, 11))))
+        .child(h_flex().w_full().min_w(0).pt(2).gap(8).items_center().justify_between()
+          .child(gitCount >= 2
+            ? div().flex_1().min_w(0).truncate().font_family('monospace').text_size(10.5).text_color(t.dim)
+              .child(word(lang, 'multiGitDispatchHint', gitCount))
+            : div().flex_1())
+          .child(h_flex().id('folder-add-btn').h(26).px(9).gap(5).rounded(7).flex_none().items_center()
+            .cursor_pointer().bg(surf.softChip).hover(s => s.bg(t.hover))
+            .text_size(12).font_medium().text_color(t.foreground)
+            .on_click((_e, clickCx) => {
+              clickCx.stop_propagation();
+              if (this.machine) {
+                this.foldersRemoteOpen = !this.foldersRemoteOpen;
+                this.foldersError = '';
+                if (this.foldersRemoteOpen) cx?.timer?.after?.(0, () => this.folderRemoteInput?.focus?.());
+                clickCx.notify();
+              } else {
+                this.chooseLocalFolder(clickCx);
+              }
+            })
+            .child(this.foldersBusy === 'add'
+              ? svg(SPINNER).size(12).flex_none().spin(900)
+              : this.icon('folder-plus', 13).text_color(t.muted))
+            .child(addLabel))));
+  }
+
   lostNotice(pm, t) {
     const lang = this.lang, lost = pm?.lost;
     const summary = lostSummary(lang, lost);
-    const rawSteps = bringBackSteps(lang, lost, pm?.project || pm?.name);
+    const rawSteps = bringBackSteps(lang, lost, projectName(pm) || pm?.name);
     const namesTip = rawSteps.map(s => s.title).filter(Boolean).join(' · ');
     if (!this.bringBackOpen && !this.bringingBack) {
       if (!summary) return null;
@@ -7982,48 +9491,57 @@ export default class PmProject extends View {
     return status === 'blocked' ? dot.bg(t.blocked) : status === 'done' ? dot.bg(t.done ?? t.accent) : dot.border(1.5).border_color(t.idle ?? t.dim);
   }
 
-  // What a thread is now, as a mark: an arc that turns while its worker is at work, a blue spinning
-  // outer arc with an inner dot while a reviewer is actively running (static double ring while waiting
-  // for PM verdict or after review ends), a red double ring while waiting, a dim double ring when
-  // paused, a bare ring when queued, a small dim ring once it is over.
+  // What a thread is now, as a mark (Plan B: crisp solid rings & smooth spinners, zero dashed jagged circles):
+  // - waiting: coral-red ring + inner dot (bullseye)
+  // - review: ice-blue double ring (outer arc spins while reviewer actively works; static ring + dot while awaiting verdict)
+  // - working: amber partial-arc spinner over subtle ring (spins while worker/helper actively works)
+  // - paused: muted circle with || pause bars
+  // - parked (not started): fine solid muted ring (zero border_dashed)
+  // - finished: emerald green circle-check
+  // - offline: unplug icon
   threadMark(row, t) {
-    const ring = color => h_flex().size(14).flex_none().rounded_full().items_center().justify_center().border(1.5).border_color(color);
-    if (row.group === 'working') {
-      if (row.reviewing || row.status === 'review') {
-        if (row.reviewWorking) {
-          return h_flex().relative().size(14).flex_none().items_center().justify_center()
-            .child(svg(SPINNER).size(14).absolute().left(0).top(0).text_color(t.accent).spin(900))
-            .child(div().size(5).rounded_full().bg(t.accent));
-        }
-        return ring(t.accent).child(div().size(5.5).rounded_full().bg(t.accent));
+    const dark = isDarkTheme(t);
+    const ring = (color, sz = 14, bw = 1.5) => h_flex().size(sz).flex_none().rounded_full().items_center().justify_center().border(bw).border_color(color);
+    const trackColor = withAlpha(t.border, dark ? .52 : .7);
+    const arcRing = (color, spin) => h_flex().relative().size(14).flex_none().items_center().justify_center()
+      .child(div().size(14).rounded_full().border(1.25).border_color(trackColor))
+      .child(svg(SPINNER).size(14).absolute().left(0).top(0).text_color(color).when(spin, s => s.spin(900)));
+    if (row.group === 'review' || (row.group === 'working' && (row.reviewing || row.status === 'review'))) {
+      if (row.reviewWorking) {
+        return h_flex().relative().size(14).flex_none().items_center().justify_center()
+          .child(div().size(14).rounded_full().border(1.25).border_color(withAlpha(t.accent, .28)))
+          .child(svg(SPINNER).size(14).absolute().left(0).top(0).text_color(t.accent).spin(900))
+          .child(div().size(4.5).rounded_full().bg(t.accent));
       }
-      if (row.working) {
-        const color = row.postGate ? (t.working ?? t.ansi3 ?? t.accent) : (t.ansi2 ?? t.working);
-        return svg(SPINNER).size(14).flex_none().text_color(color).spin(900);
-      }
-      return svg(SPINNER).size(14).flex_none().text_color(row.postGate ? (t.working ?? t.ansi3 ?? t.accent) : t.dim);
+      return ring(t.accent, 14, 1.4).child(div().size(4.5).rounded_full().bg(t.accent));
     }
-    return row.group === 'offline' ? this.icon('unplug', 14).text_color(t.dim)
-      : row.group === 'finished' ? div().size(9).flex_none().rounded_full().border(1.5).border_color(t.dim)
-      : row.group === 'parked' ? ring(t.dim)
-        : row.group === 'paused' ? ring(t.dim).child(div().size(6).rounded_full().bg(t.dim))
-          : ring(this.toneColor(row.tone, t)).child(div().size(6).rounded_full().bg(this.toneColor(row.tone, t)));
-  }
-
-  // Smooth cubic Bezier branch connectors (no right angles): each item carries a smooth curve from the
-  // vertical stem to its row, and every non-last item continues the stem down to the next sibling.
-  treeBranchList(items, opts = {}) {
-    return treeBranchList({ div, svg, v_flex }, items, { ...opts, treeBranchIcon: ICON('tree-branch') });
+    if (row.group === 'working') {
+      const workColor = t.working ?? t.ansi3 ?? t.accent;
+      return arcRing(row.working || row.postGate ? workColor : t.dim, Boolean(row.working));
+    }
+    if (row.group === 'offline') return this.icon('unplug', 13.5).text_color(t.dim);
+    if (row.group === 'finished') return this.icon('check', 13.5).flex_none().text_color(t.ansi2 ?? t.done ?? t.accent);
+    if (row.group === 'parked') {
+      return div().size(11).flex_none().rounded_full().border(1.25).border_color(withAlpha(t.muted, dark ? .48 : .58));
+    }
+    if (row.group === 'paused') {
+      return ring(t.dim, 13.5, 1.35).gap(2)
+        .child(div().w(1.5).h(5).rounded(1).bg(t.dim))
+        .child(div().w(1.5).h(5).rounded(1).bg(t.dim));
+    }
+    const c = this.toneColor(row.tone, t);
+    return ring(c).child(div().size(5.5).rounded_full().bg(c));
   }
 
   agentStatusMark(status, t, role = '', { compact = false } = {}) {
+    const workColor = t.working ?? t.ansi3 ?? t.accent;
     if (status === 'working') {
-      if (compact) return div().size(6).flex_none().rounded_full().bg(role === 'review' ? t.accent : (t.ansi2 ?? t.working));
-      return svg(SPINNER).size(10).flex_none().text_color(role === 'review' ? t.accent : (t.ansi2 ?? t.working)).spin(900);
+      if (compact) return div().size(6).flex_none().rounded_full().bg(role === 'review' ? t.accent : workColor);
+      return svg(SPINNER).size(10).flex_none().text_color(role === 'review' ? t.accent : workColor).spin(900);
     }
     const sz = compact ? 6 : 6.5;
     if (status === 'blocked') return div().size(sz).flex_none().rounded_full().bg(t.blocked);
-    if (status === 'done') return div().size(sz).flex_none().rounded_full().bg(t.accent);
+    if (status === 'done') return div().size(sz).flex_none().rounded_full().bg(t.ansi2 ?? t.done ?? t.accent);
     return div().size(sz).flex_none().rounded_full().border(1.4).border_color(t.dim);
   }
 
@@ -8038,8 +9556,11 @@ export default class PmProject extends View {
   }
 
   clearHoverNow(cx) {
+    this.hoverShowTimer?.cancel?.();
+    this.hoverShowTimer = null;
     this.hoverHideTimer?.cancel?.();
     this.hoverHideTimer = null;
+    this.hoverPendingKey = '';
     const had = Boolean(this.hoverKey) || Boolean(this.hoverCardOver);
     this.hoverKey = '';
     this.hoverCardOver = '';
@@ -8049,17 +9570,46 @@ export default class PmProject extends View {
   enterHover(key, cx) {
     this.hoverHideTimer?.cancel?.();
     this.hoverHideTimer = null;
-    if (this.hoverKey !== key) {
+    if (!key) return;
+    if (this.hoverKey === key) {
+      this.hoverShowTimer?.cancel?.();
+      this.hoverShowTimer = null;
+      this.hoverPendingKey = '';
+      return;
+    }
+    if (this.hoverPendingKey === key && this.hoverShowTimer) return;
+    this.hoverShowTimer?.cancel?.();
+    this.hoverShowTimer = null;
+    this.hoverPendingKey = key;
+    const delay = this.hoverKey ? HOVER_CARD_SWAP_MS : HOVER_CARD_OPEN_MS;
+    if (cx?.timer?.after) {
+      this.hoverShowTimer = cx.timer.after(delay, tCx => {
+        this.hoverShowTimer = null;
+        if (this.hoverPendingKey === key) {
+          this.hoverPendingKey = '';
+          this.hoverKey = key;
+          this.hoverCardOver = '';
+          tCx?.notify?.();
+        }
+      }) || null;
+    } else {
+      this.hoverPendingKey = '';
       this.hoverKey = key;
       this.hoverCardOver = '';
-      cx.notify();
+      cx?.notify?.();
     }
   }
 
   leaveHover(key, cx) {
-    if (!key || this.hoverKey !== key || this.hoverCardOver === key) return;
+    if (!key) return;
+    if (this.hoverPendingKey === key) {
+      this.hoverShowTimer?.cancel?.();
+      this.hoverShowTimer = null;
+      this.hoverPendingKey = '';
+    }
+    if (this.hoverKey !== key || this.hoverCardOver === key) return;
     this.hoverHideTimer?.cancel?.();
-    this.hoverHideTimer = cx.timer?.after?.(180, cx => {
+    this.hoverHideTimer = cx.timer?.after?.(HOVER_CARD_LEAVE_MS, cx => {
       this.hoverHideTimer = null;
       if (this.hoverKey === key && this.hoverCardOver !== key) {
         this.hoverKey = '';
@@ -8069,8 +9619,11 @@ export default class PmProject extends View {
   }
 
   enterHoverCard(key, cx) {
+    this.hoverShowTimer?.cancel?.();
+    this.hoverShowTimer = null;
     this.hoverHideTimer?.cancel?.();
     this.hoverHideTimer = null;
+    this.hoverPendingKey = '';
     this.hoverCardOver = key;
     if (this.hoverKey !== key) {
       this.hoverKey = key;
@@ -8107,45 +9660,67 @@ export default class PmProject extends View {
     const status = statusLabel(lang, row.status, Boolean(task?.cleanup), Boolean(row.offline), Boolean(row.answered), Boolean(row.closed));
     const numTag = formatTaskNumber(taskNumber(row) || taskNumber(task) || this.taskNumberFor(row.task));
     const showDeps = Boolean(deps?.showAsWaiting);
+    const isReview = !showDeps && (row.group === 'review' || row.reviewing || row.status === 'review');
     const hasSteps = !showDeps && Boolean(steps?.steps?.length);
+    const folderAlias = threadFolderBadge(row.folderAlias ? row : task, projectFolders(this.pm()));
     const metaParts = [
-      numTag,
-      row.closed ? word(lang, 'closedReattach') : (!(showDeps || hasSteps) ? status : ''),
+      row.closed ? word(lang, 'closedReattach') : (!(showDeps || hasSteps || isReview) ? status : ''),
+      folderAlias,
       row.branch,
+      task?.pane ? String(task.pane) : '',
       chip ? `${chip.label}${chip.up ? ' ↑' : ''}` : '',
       ctxLabel,
     ].filter(Boolean);
     const metaText = metaParts.join(' · ');
     const clean = cleanTaskLog(task?.latest);
     const rawLog = (row.latest || clean.text || '').replace(/\s+/g, ' ').trim();
-    const isWorking = !row.offline && row.group === 'working';
+    const isWorking = !row.offline && (row.group === 'working' || row.group === 'review');
+    const firstUnmet = showDeps ? (deps.items || []).find(it => !it.isMet) : null;
+    const firstUnmetRef = firstUnmet ? formatDepRef(firstUnmet, id => this.taskNumberFor(id)) : '';
     const depsCard = showDeps ? renderDepsCard({
       ui: { div, svg, h_flex, v_flex },
       deps, theme: t, lang, icons: STEP_ICONS,
       compact: true, framed: false,
       rowIdPrefix: `hover-dep-${row.task}`,
+      titleText: numTag ? `${word(lang, 'depsTitle')} ${numTag}` : word(lang, 'depsTitle'),
       headerMeta: metaText,
+      footerText: firstUnmetRef ? word(lang, 'depsAutoUnblock', firstUnmetRef) : '',
       onSelect: (dep, cx) => this.jumpToDependency(dep, cx),
     }) : null;
     const stepsCard = !depsCard && hasSteps ? renderStepsCard({
       ui: { div, svg, h_flex, v_flex },
       steps, theme: t, lang, icons: STEP_ICONS,
       compact: true, framed: false,
+      titleText: numTag ? `${word(lang, 'planTitle')} ${numTag}` : word(lang, 'planTitle'),
       headerMeta: metaText,
+      progressColor: isReview ? t.accent : (t.working ?? t.ansi3 ?? t.accent),
+      hidePolicy: true,
       spinning: isWorking, reviewSpinning: Boolean(row.reviewWorking), subSpinning: isWorking,
     }) : null;
-    const hasBody = Boolean(depsCard || stepsCard);
+    const reviewHeader = !depsCard && !stepsCard && isReview ? h_flex().w_full().min_w(0).gap(6).items_center()
+      .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground)
+        .child(numTag ? `${word(lang, 'reviewTitle')} ${numTag}` : word(lang, 'reviewTitle')))
+      .when(Boolean(row.branch), el => el.child(div().flex_1().min_w(0).truncate()
+        .font_family('monospace').text_size(10.5).text_color(t.dim).child(`· ${row.branch}`)))
+      .when(!row.branch, el => el.child(div().flex_1().min_w(0)))
+      .when(Boolean(row.reviewModel || chip?.label), el => el.child(div().flex_none()
+        .font_family('monospace').text_size(11).font_medium().text_color(t.accent)
+        .child(row.reviewModel || chip.label))) : null;
+    const hasBody = Boolean(depsCard || stepsCard || reviewHeader);
     if (!hasBody && !metaText && !rawLog) return null;
-    return v_flex().w(300).px(11).py(9).gap(6).rounded(10)
+    return v_flex().w(308).px(12).py(10).gap(6).rounded(10)
       .bg(fill).border_1().border_color(t.border).shadow_lg()
       .when(Boolean(depsCard), card => card.child(depsCard))
       .when(Boolean(stepsCard), card => card.child(stepsCard))
+      .when(Boolean(reviewHeader), card => card.child(reviewHeader))
       .when(!hasBody && Boolean(metaText), card => card.child(
-        div().truncate().font_family('monospace').text_size(10.5).text_color(t.dim).child(metaText),
+        div().truncate().font_family('monospace').text_size(10.5).text_color(t.dim)
+          .child(numTag ? `${numTag} · ${metaText}` : metaText),
       ))
       .when(Boolean(rawLog), card => card.child(
-        div().when(hasBody || Boolean(metaText), el => el.pt(5).border_t(1).border_color(withAlpha(t.border, .6)))
-          .child(div().truncate().text_size(11).line_height('15px').text_color(t.muted).child(rawLog)),
+        div().when(Boolean(depsCard || stepsCard) || (!reviewHeader && Boolean(metaText)), el => el.pt(5).border_t(1).border_color(withAlpha(t.border, .6)))
+          .child(div().whitespace_normal().text_size(11.5).line_height('16px')
+            .text_color(reviewHeader ? t.foreground : t.muted).child(rawLog)),
       ));
   }
 
@@ -8850,6 +10425,8 @@ export default class PmProject extends View {
     if (this.panelHideTimer) { this.panelHideTimer.cancel?.(); this.panelHideTimer = null; }
     if (this.panelTransitionTimer) { this.panelTransitionTimer.cancel?.(); this.panelTransitionTimer = null; }
     if (this._sideFadeTimer) { this._sideFadeTimer.cancel?.(); this._sideFadeTimer = null; }
+    if (this.hoverShowTimer) { this.hoverShowTimer.cancel?.(); this.hoverShowTimer = null; }
+    if (this.hoverHideTimer) { this.hoverHideTimer.cancel?.(); this.hoverHideTimer = null; }
     if (this._paneOwnerId) {
       PANE_OWNERS.delete(this._paneOwnerId);
       this._paneOwnerId = '';
@@ -8868,6 +10445,7 @@ export default class PmProject extends View {
   // collapse mark folds them again, so the log keeps its room.
   partsList(parts, t) {
     const lang = this.lang, open = this.partsOpen === this.thread;
+    const surf = tonalSurfaces(t);
     const { shown, more } = foldParts(parts, open);
     const rows = shown.map(row => {
       const gone = row.offline && row.group !== 'offline' ? (row.closed ? closedTip(lang, row.closed) : word(lang, 'disconnected'))
@@ -8876,38 +10454,43 @@ export default class PmProject extends View {
       const numText = formatTaskNumber(taskNumber(row) || this.taskNumberFor(row.task));
       const ctxText = contextLabel(lang, row.contextTokens), ctxCompact = contextShort(row.contextTokens);
       const tip = [label, gone, ctxText, numText ? `${numText} ${row.title}` : row.title].filter(Boolean).join(' · ');
-      return this.withTip(`part-${row.task}`, h_flex().id(`part-${row.task}`).h(30).px(8).gap(9).rounded(8).items_center().cursor_pointer()
+      return this.withTip(`part-${row.task}`, h_flex().id(`part-${row.task}`).h(28).px(6).gap(7).rounded(6).items_center().cursor_pointer()
         .hover(s => s.bg(t.hover)).accessibility_label(tip)
         .on_click((_e, cx) => this.openThread(row.task, cx, { insertAdjacent: true }))
         .child(h_flex().w(16).flex_none().items_center().justify_center().child(this.threadMark(row, t)))
         .when(Boolean(numText), el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
-        .child(div().flex_1().min_w(0).truncate().text_size(13)
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5)
           .text_color(['parked', 'paused', 'offline', 'finished'].includes(row.group) ? t.muted : t.foreground).child(row.title))
-        .when(Boolean(ctxCompact), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ctxCompact)))
+        .when(Boolean(ctxCompact), el => el.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(ctxCompact)))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(label)), tip, t, { panel: true, placement: 'above-left' });
     });
-    const toggle = (id, mark, tip, value) => this.withTip(id, h_flex().id(id).h(26).px(8).gap(9).rounded(8).items_center().cursor_pointer()
-      .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+    const toggle = (id, mark, tip, value) => this.withTip(id, h_flex().id(id).h(24).px(6).gap(7).rounded(6).items_center().cursor_pointer()
+      .text_size(11.5).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .accessibility_label(tip)
       .on_click((_e, cx) => { this.partsOpen = value; cx.notify(); })
-      .child(h_flex().w(16).flex_none().items_center().justify_center().child(this.icon(mark, 14)))
+      .child(h_flex().w(16).flex_none().items_center().justify_center().child(this.icon(mark, 13)))
       .when(Boolean(more), el => el.child(div().child(tip))), tip, t, { panel: true, placement: 'above-left' });
     const folding = open && parts.length > PARTS_LIMIT;
-    return v_flex().flex_none()
-      .child(h_flex().h(22).px(8).gap(6).items_center().text_size(11).font_medium().text_color(t.dim)
-        .child(word(lang, 'subThreads')).child(String(parts.length)))
-      .child(folding ? v_flex().id('thread-parts').max_h(30 * PARTS_LIMIT).overflow_y_scrollbar().children(rows)
-        : v_flex().children(rows))
+    const rowsBox = folding
+      ? v_flex().id('thread-parts').w_full().min_w(0).max_h(30 * PARTS_LIMIT).p(3).gap(1.5).rounded(6).bg(surf.podWell).overflow_y_scrollbar().children(rows)
+      : v_flex().id('thread-parts').w_full().min_w(0).p(3).gap(1.5).rounded(6).bg(surf.podWell).children(rows);
+    return v_flex().id('thread-parts-card').w_full().min_w(0).flex_none().rounded(10).p(8).gap(6).bg(surf.pod)
+      .child(h_flex().w_full().min_w(0).pl(4).pr(4).gap(6).items_center()
+        .child(div().text_size(11.5).font_semibold().text_color(t.muted).child(word(lang, 'subThreads')))
+        .child(div().font_family('monospace').text_size(11).text_color(t.dim).child(String(parts.length))))
+      .child(rowsBox)
       .when(more > 0, el => el.child(toggle('parts-more', 'expand', word(lang, 'moreParts', more), this.thread)))
       .when(folding, el => el.child(toggle('parts-fold', 'collapse', word(lang, 'fold'), '')));
   }
 
-  // The panel at rest: Threads task tree (container epics + single-line threads + agent sub-rows + unified fold + hover card).
+  // The panel at rest: Plan B Tonal Craft — merged frameless topbar, tonal concentric pods (no tree wires),
+  // crisp solid rings & spinners, inline single-worker + flex-wrap multi-agent identity chips, and calm hover cards.
   threadsPanel(pm, t, width) {
     this.agentWindows = this.agentWindows || [];
     this.epicOverrides = this.epicOverrides || new Map();
     this.expandedDone = this.expandedDone || new Set();
     const lang = this.lang;
+    const surf = tonalSurfaces(t);
     const alreadyFolded = Boolean(this.tasks);
     const allTasks = this.tasks || this.state.tasks;
     const termsNow = this.terms(), liveNow = this.live();
@@ -8932,10 +10515,17 @@ export default class PmProject extends View {
       return this.threadHoverCard(task, row, steps, deps, chip, ctxLabel, t, lang);
     };
     const now = Date.now();
-    const wireColor = t.input || t.border;
     const lead = el => h_flex().w(16).flex_none().items_center().justify_center().child(el);
+    const openBadge = () => h_flex().h(18).px(5.5).rounded(5).flex_none().items_center()
+      .bg(withAlpha(t.accent, surf.dark ? .14 : .12))
+      .text_size(10.5).font_medium().text_color(t.accent)
+      .child(word(lang, 'sideTabOpened'));
+    const reviewPill = () => h_flex().h(18).px(5.5).rounded(5).flex_none().items_center()
+      .bg(withAlpha(t.accent, surf.dark ? .10 : .09))
+      .text_size(10.5).text_color(t.accent)
+      .child(word(lang, 'reviewBadge'));
 
-    const agentSubRow = (ag, dimmed = false) => {
+    const agentChip = (ag, dimmed = false, { wrapHover = false } = {}) => {
       const open = agentWindowOpen(this.agentWindows, ag.key);
       const hoverKey = `agent:${ag.key}`;
       const hovered = this.hoverKey === hoverKey;
@@ -8943,11 +10533,12 @@ export default class PmProject extends View {
       const actionText = ag.actionLabel || '';
       const hasCustomHelperSlug = ag.role === 'helper' && Boolean(ag.nameSuffix) && !ag.purpose && ag.nameSuffix !== ag.roleLabel;
       const modelText = ag.modelBadge || ag.model || '';
-      const showSubModel = Boolean(modelText) && (!width || width >= 290);
       const accLabel = [primaryName, actionText, hasCustomHelperSlug ? ag.nameSuffix : '', modelText].filter(Boolean).join(' · ');
-      const row = h_flex().id(`agent-row-${ag.key}`).h(21).px(7).gap(5).rounded(5).items_center().cursor_pointer()
-        .when(open, el => el.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .42)))
-        .when(!open, el => el.hover(s => s.bg(t.hover)))
+      const chip = h_flex().id(`agent-row-${ag.key}`).h(22).px(7).gap(4.5).rounded(5.5).flex_none().max_w_full()
+        .items_center().cursor_pointer()
+        .when(open, el => el.bg(surf.chipOpen).border_1().border_color(surf.chipOpenBorder))
+        .when(!open, el => el.bg(surf.chip).hover(s => s.bg(surf.chipHover)))
+        .when(dimmed || ag.ended, el => el.opacity(.78))
         .accessibility_label(accLabel)
         .on_hover((over, cx) => {
           if (over) this.enterHover(hoverKey, cx);
@@ -8958,41 +10549,32 @@ export default class PmProject extends View {
           this.clearHoverNow(cx);
           this.toggleAgentSmallWindow(ag, cx);
         })
-        .child(h_flex().w(10).flex_none().items_center().justify_center().child(this.agentStatusMark(ag.status, t, ag.role, { compact: true })))
-        .child(this.agentProgramIcon(ag.program, 12, t, dimmed || ag.ended))
-        .child(div().flex_none().text_size(11.5)
+        .child(h_flex().w(8).flex_none().items_center().justify_center().child(this.agentStatusMark(ag.status, t, ag.role, { compact: true })))
+        .child(this.agentProgramIcon(ag.program, 11, t, dimmed || ag.ended))
+        .child(div().flex_none().text_size(11)
           .text_color(open ? t.foreground : dimmed || ag.ended ? t.muted : t.foreground)
           .when(!dimmed && !ag.ended, x => x.font_medium())
           .child(primaryName))
         .when(Boolean(actionText), el => el
-          .child(div().flex_none().text_size(11).text_color(t.dim).child('·'))
-          .child(div().flex_none().text_size(11.2)
+          .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
+          .child(div().flex_none().text_size(11)
             .text_color(open ? t.accent : dimmed || ag.ended ? t.dim : t.muted)
             .child(actionText)))
         .when(hasCustomHelperSlug, el => el
-          .child(div().flex_none().text_size(11).text_color(t.dim).child('·'))
-          .child(div().flex_1().min_w(0).truncate().text_size(11)
+          .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
+          .child(div().flex_none().max_w(96).truncate().text_size(10.5)
             .text_color(open ? t.foreground : t.dim)
-            .child(ag.nameSuffix))
-          .when(showSubModel, x => x
-            .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
-            .child(div().flex_none().max_w(84).truncate()
-              .font_family('monospace').text_size(10.5)
-              .text_color(open ? t.accent : t.dim)
-              .child(modelText))))
-        .when(!hasCustomHelperSlug, el => el
-          .when(Boolean(modelText), x => x
-            .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
-            .child(div().flex_1().min_w(0).truncate()
-              .font_family('monospace').text_size(10.5)
-              .text_color(open ? t.accent : t.dim)
-              .child(modelText)))
-          .when(!modelText, x => x.child(div().flex_1().min_w(0))))
-        .when(open || hovered, el => el.child(this.icon('window-pop', 11.5).flex_none().text_color(t.accent)));
-      return this.wrapHoverCard(hoverKey, row, () => this.agentHoverCard(ag, open, t, lang), t);
+            .child(ag.nameSuffix)))
+        .when(Boolean(modelText), el => el
+          .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
+          .child(div().flex_none().max_w(96).truncate().font_family('monospace').text_size(10.5)
+            .text_color(open ? t.accent : t.dim)
+            .child(modelText)))
+        .when(open || hovered, el => el.child(this.icon('window-pop', 10.5).flex_none().text_color(t.accent)));
+      return wrapHover ? this.wrapHoverCard(hoverKey, chip, () => this.agentHoverCard(ag, open, t, lang), t) : chip;
     };
 
-    const doneFoldRow = (foldId, count, expanded, onToggle) => h_flex().id(foldId).h(20).px(6).gap(4).rounded(5)
+    const doneFoldRow = (foldId, count, expanded, onToggle) => h_flex().id(foldId).h(22).px(6).gap(5).rounded(5)
       .items_center().cursor_pointer().text_size(11).text_color(t.dim).opacity(.88)
       .hover(s => s.bg(t.hover).text_color(t.muted).opacity(1))
       .on_click((_e, cx) => { cx.stop_propagation(); this.clearHoverNow(null); onToggle(cx); })
@@ -9002,66 +10584,73 @@ export default class PmProject extends View {
     const summaryPills = (s, epicId) => {
       if (!s) return null;
       const items = [];
-      if (s.waiting > 0) items.push({ key: 'waiting', color: t.blocked, solid: true, count: s.waiting, bg: withAlpha(t.blocked, .16) });
-      if (s.review > 0) items.push({ key: 'review', color: t.accent, solid: true, count: s.review, bg: withAlpha(t.accent, .14) });
-      if (s.working > 0) items.push({ key: 'working', color: t.ansi2 ?? t.working, solid: true, count: s.working, bg: withAlpha(t.ansi2 ?? t.working, .13) });
-      if (s.offline > 0) items.push({ key: 'offline', color: t.dim, solid: true, count: s.offline, bg: t.surface });
+      const workColor = t.working ?? t.ansi3 ?? t.accent;
+      const doneColor = t.ansi2 ?? t.done ?? t.dim;
+      if (s.waiting > 0) items.push({ key: 'waiting', color: t.blocked, solid: true, count: s.waiting, bg: withAlpha(t.blocked, .14), active: true });
+      if (s.review > 0) items.push({ key: 'review', color: t.accent, solid: true, count: s.review, bg: withAlpha(t.accent, .12), active: true });
+      if (s.working > 0) items.push({ key: 'working', color: workColor, solid: true, count: s.working, bg: withAlpha(workColor, .12), active: true });
+      if (s.offline > 0) items.push({ key: 'offline', color: t.dim, solid: true, count: s.offline, bg: surf.well, active: false });
       const queued = (s.paused || 0) + (s.parked || 0);
-      if (queued > 0) items.push({ key: 'queued', color: t.dim, solid: false, count: queued, bg: t.surface });
-      if (s.done > 0) items.push({ key: 'done', color: t.dim, solid: true, count: s.done, bg: t.surface });
+      if (queued > 0) items.push({ key: 'queued', color: t.muted, solid: false, count: queued, bg: surf.well, active: false });
+      if (s.done > 0) items.push({ key: 'done', color: doneColor, solid: true, count: s.done, bg: surf.well, active: false });
       if (!items.length) return null;
+      const allNeutral = items.every(it => !it.active);
+      if (allNeutral && items.length > 1) {
+        const segs = [];
+        items.forEach((it, idx) => {
+          if (idx > 0) segs.push(div().text_size(10).text_color(t.dim).child('·'));
+          segs.push(h_flex().gap(3.5).items_center()
+            .child(div().size(5.5).rounded_full()
+              .when(it.solid, d => d.bg(it.color).when(it.key === 'done', x => x.opacity(.8)))
+              .when(!it.solid, d => d.border(1.25).border_color(withAlpha(it.color, .65))))
+            .child(div().font_family('monospace').text_size(10.5).text_color(t.muted).child(String(it.count))));
+        });
+        return h_flex().id(`epic-summary-${epicId}`).flex_none().h(18).px(6).gap(5).rounded(5.5).items_center()
+          .bg(surf.well).children(segs);
+      }
       return h_flex().id(`epic-summary-${epicId}`).flex_none().gap(4).items_center()
-        .children(items.map(it => h_flex().h(18).px(5).gap(4).rounded(5).items_center().bg(it.bg)
-          .text_size(11).font_medium().text_color(it.solid && it.key !== 'done' && it.key !== 'offline' ? it.color : t.muted)
-          .child(div().size(6).rounded_full()
-            .when(it.solid, d => d.bg(it.color).when(it.key === 'done', x => x.opacity(.65)))
-            .when(!it.solid, d => d.border(1.3).border_color(it.color)))
+        .children(items.map(it => h_flex().h(18).px(5.5).gap(4).rounded(5.5).items_center().bg(it.bg)
+          .font_family('monospace').text_size(10.5).font_medium().text_color(it.active ? it.color : t.muted)
+          .child(div().size(5.5).rounded_full()
+            .when(it.solid, d => d.bg(it.color).when(it.key === 'done', x => x.opacity(.8)))
+            .when(!it.solid, d => d.border(1.25).border_color(withAlpha(it.color, .65))))
           .child(String(it.count))));
     };
 
     const openTabs = this.openTabKeys();
+    const projFolders = projectFolders(pm);
+    const folderPill = (id, alias) => h_flex().id(id).h(17).px(5).max_w(84).rounded(4.5).flex_none().items_center()
+      .bg(surf.pillMuted)
+      .child(div().min_w(0).truncate().font_family('monospace').text_size(10).text_color(t.muted).child(alias));
     const renderSingleThread = (node, { hideEndedFold = false, inEpic = false } = {}) => {
       const task = byId.get(node.task);
+      const folderAlias = threadFolderBadge(node.folderAlias ? node : task, projFolders);
       const at = eventTime(node.updated);
       const ageText = at > 0 ? age(Math.max(0, now - at), lang) : '';
       const mutedTitle = ['parked', 'paused', 'offline', 'finished'].includes(node.group);
+      const isReview = node.group === 'review' || (node.group === 'working' && (node.reviewing || node.status === 'review'));
       const pill = node.plan?.pill || '';
-      const pillBg = node.postGate ? withAlpha(t.working ?? t.ansi3 ?? t.accent, .14)
-        : node.reviewing ? withAlpha(t.accent, .14) : t.surface;
-      const pillFg = node.postGate ? (t.working ?? t.ansi3 ?? t.accent)
-        : node.reviewing ? t.accent : t.dim;
       const ctxLabel = node.contextTokens ? contextLabel(lang, node.contextTokens) : '';
       const numText = formatTaskNumber(taskNumber(node) || taskNumber(task) || this.taskNumberFor(node.task));
       const hoverKey = `task:${node.task}`;
-      const litRow = this.highlightThread === node.task;
+      const litRow = this.highlightThread === node.task || this.hoverKey === hoverKey;
       const isOpened = openTabs.has(sideTabKey({ kind: 'thread', taskId: node.task }));
 
       const { inlineWorker, subAgents, ended: rawEnded } = threadAgentLayout(node.agents);
       const endedAgents = hideEndedFold ? [] : rawEnded;
+      const hasSubChips = subAgents.length > 0;
       const inlineHoverKey = inlineWorker ? `agent:${inlineWorker.key}` : '';
       const inlineOpen = Boolean(inlineWorker && agentWindowOpen(this.agentWindows, inlineWorker.key));
       const inlineHovered = Boolean(inlineHoverKey && this.hoverKey === inlineHoverKey);
-      let inlineAgentEl = null;
+      let inlineChipEl = null;
       if (inlineWorker) {
-        const parts = inlineAgentBadgeParts(inlineWorker, width, { inEpic });
-        const hasText = Boolean(parts.name || parts.action || parts.model);
-        const effW = (Number(width) || 360) - (inEpic ? 28 : 0);
+        const badgeParts = inlineAgentBadgeParts(inlineWorker, width, { inEpic });
         const inlineTipLabel = [inlineWorker.displayName || inlineWorker.roleLabel, inlineWorker.actionLabel, inlineWorker.modelBadge || inlineWorker.model].filter(Boolean).join(' · ');
-        const needSepBeforeAction = Boolean(parts.name && parts.action);
-        const needSepBeforeModel = Boolean((parts.name || parts.action) && parts.model);
-        inlineAgentEl = h_flex()
+        inlineChipEl = h_flex()
           .id(`agent-inline-${inlineWorker.key}`)
-          .flex_none()
-          .h(20)
-          .px(hasText ? 6 : 5)
-          .gap(4)
-          .rounded(5)
-          .items_center()
-          .cursor_pointer()
-          .border_1()
-          .when(inlineOpen, el => el.bg(withAlpha(t.accent, .18)).border_color(withAlpha(t.accent, .52)))
-          .when(!inlineOpen, el => el.bg(withAlpha(t.surface, .85)).border_color(withAlpha(t.border, .7))
-            .hover(s => s.bg(t.hover).border_color(withAlpha(t.accent, .42))))
+          .h(20).px(6).gap(4).rounded(5.5).flex_none().items_center().cursor_pointer()
+          .when(inlineOpen, el => el.bg(surf.chipOpen).border_1().border_color(surf.chipOpenBorder))
+          .when(!inlineOpen, el => el.bg(surf.chip).hover(s => s.bg(surf.chipHover)))
           .accessibility_label(inlineTipLabel)
           .on_hover((over, cx) => {
             if (over) this.enterHover(inlineHoverKey, cx);
@@ -9072,37 +10661,83 @@ export default class PmProject extends View {
             this.clearHoverNow(cx);
             this.toggleAgentSmallWindow(inlineWorker, cx);
           })
-          .child(this.agentProgramIcon(inlineWorker.program, 12, t, false))
-          .when(Boolean(parts.name), el => el.child(
-            div().flex_none().text_size(11).line_height('14px')
-              .text_color(inlineOpen ? t.accent : t.foreground)
-              .font_medium()
-              .child(parts.name),
-          ))
-          .when(needSepBeforeAction, el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child('·')))
-          .when(Boolean(parts.action), el => el.child(
-            div().flex_none().text_size(10.5).line_height('14px')
-              .text_color(inlineOpen ? t.accent : inlineHovered ? t.foreground : t.muted)
-              .child(parts.action),
-          ))
-          .when(needSepBeforeModel, el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child('·')))
-          .when(Boolean(parts.model), el => el.child(
-            div().max_w(effW < 340 ? 58 : 88).truncate()
-              .font_family('monospace').text_size(10.5).line_height('14px')
-              .text_color(inlineOpen ? t.accent : inlineHovered ? t.foreground : t.dim)
-              .when(inlineOpen, x => x.font_medium())
-              .child(parts.model),
-          ))
-          .when(inlineOpen, el => el.child(this.icon('window-pop', 11).flex_none().text_color(t.accent)));
+          .child(this.agentProgramIcon(inlineWorker.program, 11, t, false))
+          .when(Boolean(badgeParts.name), el => el.child(div().flex_none().text_size(11).font_medium()
+            .text_color(inlineOpen ? t.foreground : t.muted).child(badgeParts.name)))
+          .when(Boolean(badgeParts.action), el => el
+            .child(div().flex_none().text_size(10.5).text_color(t.dim).child('·'))
+            .child(div().flex_none().text_size(11)
+              .text_color(inlineOpen ? t.accent : t.muted).child(badgeParts.action)))
+          .when(Boolean(badgeParts.model), el => el
+            .when(Boolean(badgeParts.name || badgeParts.action), x => x.child(div().flex_none().text_size(10.5).text_color(t.dim).child('·')))
+            .child(div().flex_none().font_family('monospace').text_size(10.5)
+              .text_color(inlineOpen ? t.accent : t.dim).child(badgeParts.model)))
+          .when(inlineOpen || inlineHovered, el => el.child(this.icon('window-pop', 10.5).flex_none().text_color(t.accent)));
       }
 
-      const titleRow = h_flex().id(`list-${node.task}`).min_h(28).px(8).py(3).gap(7).rounded(7).items_center().cursor_pointer()
-        .when(litRow, el => el.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .45)))
-        .when(!litRow, el => el.hover(s => s.bg(t.hover)))
+      // Clean trailing metadata per status:
+      // - review (inside Working): soft `In review` / `待审` badge (plus fallback reviewer model if no active chip)
+      // - working: plain monospace step fraction (fallback to age)
+      // - parked (not started): tonal `waits #N` / `等 #N` micro-pill if unmet dep, else quiet `queued` / `排队`
+      // - waiting/paused/offline: age
+      let rightMetaText = ageText;
+      let rightMetaId = '';
+      let rightMetaPill = false;
+      if (isReview) {
+        rightMetaText = !hasSubChips && node.reviewModel ? node.reviewModel : '';
+      } else if (node.group === 'working') {
+        if (pill) { rightMetaText = pill; rightMetaId = `list-steps-${node.task}`; }
+        else rightMetaText = ageText;
+      } else if (node.group === 'parked') {
+        const depInfo = task ? taskDependencies(task, allTasks, { terms: termsNow, live: liveNow }) : null;
+        const firstUnmet = depInfo?.items?.find(it => !it.isMet);
+        const unmetRef = firstUnmet ? formatDepRef(firstUnmet, id => this.taskNumberFor(id)) : '';
+        if (unmetRef) {
+          rightMetaText = word(lang, 'waitsDep', unmetRef);
+          rightMetaPill = true;
+        } else {
+          rightMetaText = word(lang, 'queuedLabel');
+        }
+      }
+
+      const titleRow = h_flex().w_full().min_h(22).gap(7).items_center()
+        .child(lead(this.threadMark(node, t)))
+        .when(Boolean(numText), el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
+        .when(Boolean(folderAlias), el => el.child(folderPill(`list-folder-${node.task}`, folderAlias)))
+        .child(div().flex_1().min_w(0).truncate().text_size(13)
+          .font_weight(mutedTitle ? 400 : 500)
+          .text_color(mutedTitle ? t.muted : t.foreground)
+          .child(node.title))
+        .when(Boolean(inlineChipEl), el => el.child(inlineChipEl))
+        .when(isOpened, el => el.child(openBadge()))
+        .when(isReview, el => el.child(reviewPill()))
+        .when(Boolean(rightMetaText) && rightMetaPill, el => el.child(h_flex()
+          .when(Boolean(rightMetaId), d => d.id(rightMetaId))
+          .h(18).px(6).rounded(5).flex_none().items_center().bg(surf.pillMuted)
+          .font_family('monospace').text_size(10.5).text_color(t.muted)
+          .child(rightMetaText)))
+        .when(Boolean(rightMetaText) && !rightMetaPill, el => el.child(div()
+          .when(Boolean(rightMetaId), d => d.id(rightMetaId))
+          .flex_none().font_family('monospace').text_size(11).text_color(t.dim)
+          .child(rightMetaText)));
+
+      const cardBg = litRow
+        ? t.hover
+        : hasSubChips
+          ? surf.card
+          : '';
+
+      const itemCard = v_flex().id(`list-${node.task}`).w_full()
+        .px(inEpic ? 6 : 8).py(hasSubChips ? 6 : 4.5).gap(hasSubChips ? 5 : 0)
+        .rounded(inEpic ? 6 : 8).cursor_pointer()
+        .when(Boolean(cardBg), el => el.bg(cardBg))
+        .hover(s => s.bg(t.hover))
         .accessibility_label(numText ? `${numText} ${node.title}` : node.title)
         .on_hover((over, cx) => {
           if (over) {
-            if (!inlineHoverKey || this.hoverKey !== inlineHoverKey) this.enterHover(hoverKey, cx);
+            const onChildAgent = (inlineHoverKey && (this.hoverKey === inlineHoverKey || this.hoverPendingKey === inlineHoverKey))
+              || subAgents.some(ag => this.hoverKey === `agent:${ag.key}` || this.hoverPendingKey === `agent:${ag.key}`);
+            if (!onChildAgent) this.enterHover(hoverKey, cx);
           } else {
             this.leaveHover(hoverKey, cx);
           }
@@ -9111,70 +10746,72 @@ export default class PmProject extends View {
           this.clearHoverNow(cx);
           this.openThread(node.task, cx);
         })
-        .child(lead(this.threadMark(node, t)))
-        .when(Boolean(numText), el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
-        .child(div().flex_1().min_w(0).truncate().text_size(13)
-          .font_weight(mutedTitle ? 400 : 500)
-          .text_color(mutedTitle ? t.muted : t.foreground)
-          .child(node.title))
-        .when(isOpened, el => el.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
-        .when(Boolean(pill), el => el.child(div().id(`list-steps-${node.task}`).flex_none().h(17).px(5).rounded(4)
-          .bg(pillBg).text_color(pillFg).font_family('monospace').text_size(10.5).line_height('17px')
-          .child(pill)))
-        .when(Boolean(inlineAgentEl), el => el.child(inlineAgentEl))
-        .when(Boolean(ageText), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ageText)));
+        .child(titleRow)
+        .when(hasSubChips, box => box.child(
+          h_flex().w_full().min_w(0).pl(23).flex_wrap().gap(6).items_center()
+            .children(subAgents.map(ag => agentChip(ag, false, { wrapHover: false }))),
+        ));
 
       const hasAgentFold = endedAgents.length > 0;
       const foldKey = `agents:${node.task}`;
       const foldOpen = hasAgentFold && this.expandedDone.has(foldKey);
 
-      const subItems = [];
-      for (const ag of subAgents) subItems.push(agentSubRow(ag, false));
+      const endedItems = [];
       if (hasAgentFold) {
-        subItems.push(doneFoldRow(`fold-done-agents-${node.task}`, endedAgents.length, foldOpen, cx => {
+        endedItems.push(doneFoldRow(`fold-done-agents-${node.task}`, endedAgents.length, foldOpen, cx => {
           if (this.expandedDone.has(foldKey)) this.expandedDone.delete(foldKey);
           else this.expandedDone.add(foldKey);
           cx.notify();
         }));
         if (foldOpen) {
-          for (const ag of endedAgents) subItems.push(agentSubRow(ag, true));
+          for (const ag of endedAgents) endedItems.push(agentChip(ag, true, { wrapHover: true }));
         }
       }
 
+      const hoveredSubAgent = subAgents.find(ag => this.hoverKey === `agent:${ag.key}`);
       const rowWrap = (inlineWorker && this.hoverKey === inlineHoverKey)
-        ? this.wrapHoverCard(inlineHoverKey, titleRow, () => this.agentHoverCard(inlineWorker, inlineOpen, t, lang), t)
-        : this.wrapHoverCard(hoverKey, titleRow, () => buildRowHoverCard(task, node, ctxLabel), t);
+        ? this.wrapHoverCard(inlineHoverKey, itemCard, () => this.agentHoverCard(inlineWorker, inlineOpen, t, lang), t)
+        : hoveredSubAgent
+          ? this.wrapHoverCard(`agent:${hoveredSubAgent.key}`, itemCard, () => this.agentHoverCard(hoveredSubAgent, agentWindowOpen(this.agentWindows, hoveredSubAgent.key), t, lang), t)
+          : this.wrapHoverCard(hoverKey, itemCard, () => buildRowHoverCard(task, node, ctxLabel), t);
 
       return v_flex().w_full().gap(1)
         .child(rowWrap)
-        .when(subItems.length > 0, box => box.child(div().pl(24).pb(2)
-          .child(v_flex().gap(1).children(subItems))));
+        .when(endedItems.length > 0, box => box.child(div().pl(23).pb(2)
+          .child(v_flex().gap(2).children(endedItems))));
     };
 
-    const renderFinishedSubRow = row => {
+    const renderFinishedSubRow = (row, { inEpic = false } = {}) => {
       const at = eventTime(row.updated);
       const ageText = at > 0 ? age(Math.max(0, now - at), lang) : '';
       const hoverKey = `task:${row.task}`;
       const task = byId.get(row.task);
+      const folderAlias = threadFolderBadge(row.folderAlias ? row : task, projFolders);
       const ctxLabel = row.contextTokens ? contextLabel(lang, row.contextTokens) : '';
       const numText = formatTaskNumber(taskNumber(row) || taskNumber(task) || this.taskNumberFor(row.task));
-      const litRow = this.highlightThread === row.task;
+      const litRow = this.highlightThread === row.task || this.hoverKey === hoverKey;
       const isOpened = openTabs.has(sideTabKey({ kind: 'thread', taskId: row.task }));
-      const el = h_flex().id(`list-${row.task}`).h(25).px(8).gap(7).rounded(7).items_center().cursor_pointer()
-        .text_size(12.2).text_color(litRow ? t.foreground : t.muted)
-        .when(litRow, x => x.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .45)))
-        .when(!litRow, x => x.hover(s => s.bg(t.hover).text_color(t.foreground)))
+      const doneColor = t.ansi2 ?? t.done ?? t.accent;
+      const commitHash = String(row.commit || '').trim();
+      const rowBg = litRow ? t.hover : '';
+      const el = h_flex().id(`list-${row.task}`).min_h(28).px(inEpic ? 6 : 8).py(4).gap(7).rounded(inEpic ? 6 : 8).items_center().cursor_pointer()
+        .text_size(13).text_color(litRow ? t.foreground : t.muted)
+        .when(Boolean(rowBg), x => x.bg(rowBg))
+        .hover(s => s.bg(t.hover).text_color(t.foreground))
         .accessibility_label(numText ? `${numText} ${row.title}` : row.title)
         .on_hover((over, cx) => {
           if (over) this.enterHover(hoverKey, cx);
           else this.leaveHover(hoverKey, cx);
         })
         .on_click((_e, cx) => { this.clearHoverNow(cx); this.openThread(row.task, cx); })
-        .child(lead(div().size(9).rounded_full().border(1.5).border_color(t.dim)))
-        .when(Boolean(numText), x => x.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(numText)))
+        .child(lead(this.icon('check', 13.5).flex_none().text_color(doneColor)))
+        .when(Boolean(numText), x => x.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
+        .when(Boolean(folderAlias), x => x.child(folderPill(`list-folder-${row.task}`, folderAlias)))
         .child(div().flex_1().min_w(0).truncate().child(row.title))
-        .when(isOpened, x => x.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
-        .when(Boolean(ageText), x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(ageText)));
+        .when(isOpened, x => x.child(openBadge()))
+        .when(Boolean(commitHash), x => x.child(div().flex_none().font_family('monospace').text_size(11)
+          .text_color(withAlpha(doneColor, surf.dark ? .82 : .92)).child(commitHash)))
+        .when(!commitHash && Boolean(ageText), x => x.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(ageText)));
       return this.wrapHoverCard(hoverKey, el, () => buildRowHoverCard(task, row, ctxLabel), t);
     };
 
@@ -9207,17 +10844,20 @@ export default class PmProject extends View {
             cx.notify();
           }));
           if (foldOpen) {
-            for (const fc of node.finishedChildren) childItems.push(renderFinishedSubRow(fc));
-            for (const ag of endedChildAgents) childItems.push(agentSubRow(ag, true));
+            for (const fc of node.finishedChildren) childItems.push(renderFinishedSubRow(fc, { inEpic: true }));
+            for (const ag of endedChildAgents) childItems.push(agentChip(ag, true, { wrapHover: true }));
           }
         }
       }
+
+      const hasExpandedChildren = open && childItems.length > 0;
 
       if (node.container) {
         const hoverKey = `epic:${node.task}`;
         const pills = summaryPills(node.summary, node.task);
         const epicNum = formatTaskNumber(taskNumber(node) || taskNumber(byId.get(node.task)) || this.taskNumberFor(node.task));
-        const hdr = h_flex().id(`epic-${node.task}`).min_h(30).px(8).py(4).gap(7).rounded(8).items_center().cursor_pointer()
+        const hdr = h_flex().id(`epic-${node.task}`).min_h(28).px(hasExpandedChildren ? 6 : 8).py(3.5).gap(7)
+          .rounded(hasExpandedChildren ? 6 : 8).items_center().cursor_pointer()
           .hover(s => s.bg(t.hover))
           .accessibility_label(epicNum ? `${epicNum} ${node.title}` : node.title)
           .on_hover((over, cx) => {
@@ -9226,39 +10866,55 @@ export default class PmProject extends View {
           })
           .on_click((_e, cx) => toggleEpic(cx))
           .child(h_flex().w(16).flex_none().items_center().justify_center().text_color(t.muted)
-            .child(this.icon(open ? 'expand' : 'chevron', 13)))
+            .child(this.icon(open ? 'expand' : 'chevron', 12.5)))
           .when(Boolean(epicNum), el => el.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(epicNum)))
           .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(node.title))
           .when(Boolean(pills), el => el.child(pills));
-        return v_flex().w_full().gap(2)
+
+        if (!hasExpandedChildren) {
+          return v_flex().w_full()
+            .child(this.wrapHoverCard(hoverKey, hdr, () => this.epicHoverCard(node, t, lang), t));
+        }
+        // Plan B Tonal Group Pod: concentric outer R=10 + p=4 -> inner recessed child well r=6 (zero tree wires!)
+        return v_flex().id(`epic-pod-${node.task}`).w_full().p(4).gap(4).rounded(10).bg(surf.pod)
           .child(this.wrapHoverCard(hoverKey, hdr, () => this.epicHoverCard(node, t, lang), t))
-          .when(open && childItems.length > 0, box => box.child(div().pl(8)
-            .child(this.treeBranchList(childItems, { indent: 20, stemX: 7, curveSize: 20, strokeW: 1.5, curveStart: 4, gap: 2, wireColor }))));
+          .child(v_flex().id(`epic-children-${node.task}`).w_full().p(3).gap(1).rounded(6).bg(surf.podWell)
+            .children(childItems));
       }
 
-      // Non-container parent thread (has own worker + sub-tasks): keep single-line thread row + fold toggle.
+      // Non-container parent thread (has own worker + sub-tasks): concentric tonal pod when expanded, zero tree wires.
       const ownSelf = { ...node, agents: { ...node.agents, ended: [] } };
-      return v_flex().w_full().gap(2)
-        .child(h_flex().w_full().items_center().gap(2)
-          .child(h_flex().id(`epic-${node.task}`).size(20).flex_none().rounded(5).items_center().justify_center()
-            .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => toggleEpic(cx))
-            .child(this.icon(open ? 'expand' : 'chevron', 12)))
-          .child(div().flex_1().min_w(0).child(renderSingleThread(ownSelf, { hideEndedFold: true, inEpic }))))
-        .when(open && childItems.length > 0, box => box.child(div().pl(14)
-          .child(this.treeBranchList(childItems, { indent: 20, stemX: 7, curveSize: 20, strokeW: 1.5, curveStart: 4, gap: 2, wireColor }))));
+      const parentHead = h_flex().w_full().items_center().gap(2)
+        .child(h_flex().id(`epic-${node.task}`).size(20).flex_none().rounded(5).items_center().justify_center()
+          .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => toggleEpic(cx))
+          .child(this.icon(open ? 'expand' : 'chevron', 12)))
+        .child(div().flex_1().min_w(0).child(renderSingleThread(ownSelf, { hideEndedFold: true, inEpic: hasExpandedChildren || inEpic })));
+      if (!hasExpandedChildren) return v_flex().w_full().child(parentHead);
+      return v_flex().id(`epic-pod-${node.task}`).w_full().p(4).gap(4).rounded(10).bg(surf.pod)
+        .child(parentHead)
+        .child(v_flex().id(`epic-children-${node.task}`).w_full().p(3).gap(1).rounded(6).bg(surf.podWell)
+          .children(childItems));
     };
 
-    const groupEl = (key, title, count, rows) => v_flex().gap(2)
-      .child(h_flex().h(22).px(8).gap(6).items_center().text_size(11).font_medium().text_color(t.dim)
-        .child(title).child(String(count)))
+    const groupCountColor = key => (
+      key === 'group_waiting' ? t.blocked
+        : key === 'group_review' ? t.accent
+          : key === 'group_working' ? (t.working ?? t.ansi3 ?? t.accent)
+            : key === 'groupFinished' ? (t.ansi2 ?? t.done ?? t.accent)
+              : t.muted
+    );
+    const groupEl = (key, title, count, rows) => v_flex().gap(3)
+      .child(h_flex().h(22).px(8).gap(6).items_center().text_size(11.5).font_medium().text_color(t.dim)
+        .child(title)
+        .child(div().font_semibold().text_color(groupCountColor(key)).child(String(count))))
       .children(rows);
 
     const openGroupEls = tree.groups.map(g => groupEl(g.key, g.title, g.count, g.nodes.map(n => renderNode(n, false))));
 
     const sessions = tree.sessions.map(row => {
-      const icon = !row.program?.icon ? this.icon('agent', 16).text_color(t.dim)
-        : row.program.tint ? svg(row.program.icon).size(16).flex_none().text_color(t.foreground) : image(row.program.icon).size(16).flex_none();
+      const icon = !row.program?.icon ? this.icon('agent', 15).text_color(t.dim)
+        : row.program.tint ? svg(row.program.icon).size(15).flex_none().text_color(t.foreground) : image(row.program.icon).size(15).flex_none();
       const state = `${word(lang, `session_${row.status}`)} · ${row.address}`;
       return this.withTip(`session-${row.address}`, h_flex().id(`session-${row.address}`).h(30).px(8).gap(8).rounded(8).items_center().cursor_pointer()
         .hover(s => s.bg(t.hover))
@@ -9312,13 +10968,14 @@ export default class PmProject extends View {
     }
 
     const q = String(this.threadsQuery || '').trim();
-    const toolbar = h_flex().flex_none().px(12).pt(8).pb(4).gap(4).items_center()
-      .child(div().flex_1().min_w(0).child(this.searchBox('threads-search', this.threadsInput, this.threadsQuery, word(lang, 'searchThreads'), cx => {
-        this.threadsQuery = '';
-        this.threadsInput?.set_value('');
-        this.scheduleThreadsSearch(cx);
-        this.threadsInput?.focus();
-      }, t)));
+    const filterEl = this.isInlineFilterVisible('threads')
+      ? this.inlineFilterBar('threads', 'threads-search', this.threadsInput, this.threadsQuery, word(lang, 'filterThreads'), cx => {
+          this.threadsQuery = '';
+          this.threadsInput?.set_value('');
+          this.scheduleThreadsSearch(cx);
+          this.threadsInput?.focus();
+        }, t, { focused: this.typing === 'threadsSearch' })
+      : null;
 
     const renderSearchRow = row => {
       const at = eventTime(row.updated);
@@ -9328,19 +10985,18 @@ export default class PmProject extends View {
       const muted = row.group === 'finished' || row.group === 'parked' || row.group === 'paused';
       const litRow = this.highlightThread === row.task;
       const isOpened = openTabs.has(sideTabKey({ kind: 'thread', taskId: row.task }));
-      return h_flex().id(`threads-hit-${row.task}`).min_h(27).px(8).py(3).gap(7).rounded(7).items_center().cursor_pointer()
+      const rowBg = litRow ? t.hover : '';
+      return h_flex().id(`threads-hit-${row.task}`).min_h(28).px(8).py(4).gap(7).rounded(8).items_center().cursor_pointer()
         .text_size(12.5).text_color(litRow ? t.foreground : muted ? t.muted : t.foreground)
-        .when(litRow, x => x.bg(withAlpha(t.accent, .16)).border_1().border_color(withAlpha(t.accent, .45)))
-        .when(!litRow, x => x.hover(s => s.bg(t.hover).text_color(t.foreground)))
+        .when(Boolean(rowBg), x => x.bg(rowBg))
+        .hover(s => s.bg(t.hover).text_color(t.foreground))
         .accessibility_label(numText ? `${numText} ${row.title}` : row.title)
         .on_click((_e, cx) => { this.clearHoverNow(cx); this.openThread(row.task, cx); })
-        .child(lead(row.group === 'finished'
-          ? div().size(9).rounded_full().border(1.5).border_color(t.dim)
-          : this.threadMark(row, t)))
+        .child(lead(this.threadMark(row, t)))
         .when(Boolean(numText), x => x.child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(numText)))
         .child(div().flex_1().min_w(0).truncate().font_weight(muted ? 400 : 500).child(row.title))
-        .when(isOpened, x => x.child(div().flex_none().text_size(10.5).text_color(t.accent).child(word(lang, 'sideTabOpened'))))
-        .when(Boolean(ageText), x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(ageText)));
+        .when(isOpened, x => x.child(openBadge()))
+        .when(Boolean(ageText), x => x.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(ageText)));
     };
 
     let listChildren;
@@ -9377,68 +11033,68 @@ export default class PmProject extends View {
     }
 
     return v_flex().w_full().h_full().min_w(0)
-      .on_hover((over, cx) => { if (!over && this.hoverKey) this.leaveHover(this.hoverKey, cx); })
-      .child(this.sideHeader(t, width, { inTabBar: this.hasSideTabs() }))
-      .child(toolbar)
-      .child(this.sideScrollBody(v_flex().id('thread-list').flex_1().min_h(0).px(10).pt(4).pb(16).gap(12).overflow_y_scrollbar()
+      .on_hover((over, cx) => { if (!over && (this.hoverKey || this.hoverPendingKey)) this.leaveHover(this.hoverKey || this.hoverPendingKey, cx); })
+      .when(Boolean(filterEl), el => el.child(filterEl))
+      .child(this.sideScrollBody(v_flex().id('thread-list').flex_1().min_h(0).px(10).pt(8).pb(16).gap(14).overflow_y_scrollbar()
         .when(Boolean(this.threadListScroll), el => el.track_scroll(this.threadListScroll))
-        .on_scroll_wheel((_e, cx) => { if (this.hoverKey) this.clearHoverNow(cx); })
+        .on_scroll_wheel((_e, cx) => { if (this.hoverKey || this.hoverPendingKey) this.clearHoverNow(cx); })
         .children(listChildren)));
   }
 
-  sideHeader(t, width = PANEL_WIDTH, { inTabBar = false } = {}) {
+  sideHeader(t, width = PANEL_WIDTH, { inTabBar = false, searchEl = null } = {}) {
     const lang = this.lang;
+    const surf = tonalSurfaces(t);
     const closeBtn = inTabBar ? null
       : this.splitIconBtn('panel-close', 'close', word(lang, 'closeSidePanel'), cx => this.closeSidePanel(cx), t, 14, false, { placement: 'below-right' });
-    const hVal = inTabBar ? 36 : 44;
-    const borderAlpha = inTabBar ? .5 : .7;
+    const hVal = inTabBar ? 38 : 44;
     if (!this.librarySupported()) {
-      return h_flex().id('side-header').h(hVal).w_full().flex_none().px(12).gap(6).items_center()
+      return h_flex().id('side-header').h(hVal).w_full().flex_none().px(12).gap(8).items_center()
         .bg(t.background)
-        .border_b(1).border_color(withAlpha(t.border, borderAlpha))
-        .child(div().flex_1().min_w(0).truncate().text_size(inTabBar ? 13 : 14).font_semibold().text_color(t.foreground).child(word(lang, 'threads')))
+        .border_b(1).border_color(surf.hairline)
+        .child(div().flex_none().text_size(inTabBar ? 13 : 14).font_semibold().text_color(t.foreground).child(word(lang, 'threads')))
+        .when(Boolean(searchEl), el => el.child(div().flex_1().min_w(0).child(searchEl)))
+        .when(!searchEl, el => el.child(div().flex_1()))
         .when(Boolean(closeBtn), el => el.child(closeBtn));
     }
     const compact = width < 300;
+    const tightTabs = Boolean(searchEl) && width < 420;
     const tabs = [
-      { key: 'threads', glyph: 'list', label: word(lang, 'threads') },
-      { key: 'library', glyph: 'library', label: word(lang, 'libraryTab') },
-      ...(this.memorySupported() ? [{ key: 'memory', glyph: 'memory', label: word(lang, 'memoryTab') }] : []),
+      { key: 'threads', label: word(lang, 'threads') },
+      { key: 'library', label: word(lang, 'libraryTab') },
+      ...(this.memorySupported() ? [{ key: 'memory', label: word(lang, 'memoryTab') }] : []),
     ];
     const active = this.sideTab === 'library' ? 'library'
       : (this.sideTab === 'memory' && this.memorySupported()) ? 'memory' : 'threads';
-    const activeIdx = Math.max(0, tabs.findIndex(x => x.key === active));
-    const slotW = compact ? 72 : 84;
-    const gap = 2;
-    const totalW = tabs.length * slotW + Math.max(0, tabs.length - 1) * gap;
-    const slider = div().id('panel-tab-slider').absolute().top(0).left(activeIdx * (slotW + gap)).w(slotW).h(28)
-      .rounded(7).bg(t.raised)
-      .when(this.measured, el => el.transition('left', { duration: 150, easing: 'ease-out' }));
-    const tab = item => this.withTip(`panel-tab-${item.key}`, h_flex().id(`panel-tab-${item.key}`).w(slotW).h(28).flex_none()
-      .gap(compact ? 3 : 5).rounded(7).items_center().justify_center().text_size(compact ? 12 : 12.5).accessibility_label(item.label)
-      .when(item.key === active, el => el.text_color(t.foreground).font_medium())
+    const tab = item => this.withTip(`panel-tab-${item.key}`, h_flex().id(`panel-tab-${item.key}`).flex_none().h(24)
+      .px(compact ? 7 : tightTabs ? 8 : 10)
+      .rounded(6).items_center().justify_center().text_size(compact || tightTabs ? 12 : 12.5).accessibility_label(item.label)
+      .when(item.key === active, el => el.bg(surf.segActive).when(!surf.dark, e => e.shadow_xs()).text_color(t.foreground).font_medium())
       .when(item.key !== active, el => el.cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
         .on_click((_e, cx) => this.selectSideTab(item.key, cx)))
-      .child(this.icon(item.glyph, compact ? 12.5 : 13.5))
       .child(item.label), item.label, t, { panel: true, placement: 'below-left' });
-    return h_flex().id('side-header').h(hVal).w_full().flex_none().px(12).gap(6).items_center()
+    return h_flex().id('side-header').h(hVal).w_full().flex_none().px(10).gap(8).items_center()
       .bg(t.background)
-      .border_b(1).border_color(withAlpha(t.border, borderAlpha))
-      .child(div().id('panel-tabs').relative().w(totalW).h(28).flex_none()
-        .child(slider)
-        .child(h_flex().relative().size_full().gap(gap).items_center().children(tabs.map(tab))))
-      .child(div().flex_1())
+      .border_b(1).border_color(surf.hairline)
+      .child(h_flex().id('panel-tabs').flex_none().h(30).p(3).gap(2).rounded(9)
+        .bg(surf.well).items_center()
+        .children(tabs.map(tab)))
+      .when(Boolean(searchEl), el => el.child(div().flex_1().min_w(0).child(searchEl)))
+      .when(!searchEl, el => el.child(div().flex_1()))
       .when(Boolean(closeBtn), el => el.child(closeBtn));
   }
 
-  searchBox(id, state, query, placeholder, onClear, t) {
+  searchBox(id, state, query, placeholder, onClear, t, { compact = false, focused = false } = {}) {
     const lang = this.lang;
-    const hint = div().absolute().left(0).top(6).right(0).truncate().text_size(12.5).text_color(t.dim).child(placeholder);
-    return keepPress(h_flex().id(id)).w_full().h(32).px(9).gap(7).rounded(9).items_center()
-      .bg(t.surface).border_1().border_color(t.input || t.border)
-      .child(this.icon('search', 14).text_color(t.dim))
-      .child(div().relative().flex_1().min_w(0).h(28).when(!query, el => el.child(hint))
-        .child(Input.new(state).w_full().h(28).items_center().text_size(12.5).text_color(t.foreground)))
+    const surf = tonalSurfaces(t);
+    const boxH = compact ? 30 : 32;
+    const inputH = compact ? 26 : 28;
+    const hint = div().absolute().left(0).top(compact ? 4 : 5).right(0).truncate().text_size(12).text_color(t.dim).child(placeholder);
+    return keepPress(h_flex().id(id)).w_full().h(boxH).px(9).gap(6).rounded(9).items_center()
+      .bg(surf.well)
+      .border_1().border_color(focused ? withAlpha(t.accent, .42) : withAlpha(t.border, 0))
+      .child(this.icon('search', 13.5).text_color(t.dim))
+      .child(div().relative().flex_1().min_w(0).h(inputH).when(!query, el => el.child(hint))
+        .child(Input.new(state).w_full().h(inputH).items_center().text_size(12).text_color(t.foreground)))
       .when(Boolean(query), el => el.child(this.withTip(`${id}-clear`, h_flex().id(`${id}-clear`).size(20).flex_none().rounded(6).items_center()
         .justify_center().cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .accessibility_label(word(lang, 'clearSearch'))
@@ -9490,7 +11146,6 @@ export default class PmProject extends View {
     const srcTip = row.task ? word(lang, 'openSourceThread', row.taskTitle || row.task) : '';
     return this.withTip(`lib-doc-${row.key}`, h_flex().id(`lib-doc-${row.key}`).pl(8 + row.depth * 14).pr(6).py(6).gap(9).rounded(8).items_start()
       .cursor_pointer().hover(s => s.bg(t.hover)).accessibility_label(tip)
-      .when(isOpened, el => el.border_l(2).border_color(t.accent))
       .when(Boolean(row.archive || row.supersededBy), el => el.opacity(.75))
       .on_click((_e, cx) => this.openDoc({ tab: 'library', root: row.root, path: row.path }, cx))
       .child(h_flex().h(19).w(16).flex_none().items_center().justify_center().child(this.icon(glyphName, 14).text_color(isOpened ? t.accent : t.dim)))
@@ -9520,7 +11175,6 @@ export default class PmProject extends View {
     const tip = [`${row.root}/${row.path}`, row.typeLabel, row.topicLabel, row.desc].filter(Boolean).join(' · ');
     return this.withTip(`mem-doc-${row.key}`, h_flex().id(`mem-doc-${row.key}`).pl(8 + row.depth * 14).pr(8).py(6).gap(9).rounded(8).items_start()
       .cursor_pointer().hover(s => s.bg(t.hover)).accessibility_label(tip)
-      .when(isOpened, el => el.border_l(2).border_color(t.accent))
       .when(row.dimmed, el => el.opacity(.78))
       .on_click((_e, cx) => this.openDoc({ tab: 'memory', root: row.root, path: row.path }, cx))
       .child(h_flex().h(19).w(16).flex_none().items_center().justify_center()
@@ -9561,9 +11215,29 @@ export default class PmProject extends View {
     const matchList = vm?.matchIndices || [];
     const safeMatchPos = matchList.length ? ((this.docMatchPos % matchList.length) + matchList.length) % matchList.length : 0;
 
+    const docImgTarget = mode === 'binary' && isPreviewableImage(docRef.path)
+      ? resolveImageTarget(docRef, this.docLinkContext())
+      : null;
+    const docImgState = docImgTarget ? this.imagePreviewState(docImgTarget, cx) : null;
+    const docImgReady = Boolean(docImgTarget && docImgState?.status === 'ready');
+    const docImgOpenPath = docImgReady
+      ? resolveSystemPreviewPath({
+          target: docImgTarget,
+          entry: docImgState.entry,
+          appHomeDir: typeof appHome === 'function' ? appHome() : '',
+          machine: this.machine || '',
+        })
+      : '';
+
     const fullPathLabel = isRepo || docRef.root === 'repo_docs' ? docRef.path : `${docRef.root} / ${docRef.path.split('/').join(' / ')}`;
     const titleTip = [headerTitle, fullPathLabel, vm?.modified || meta?.modified || ''].filter(Boolean).join('\n');
     const docActions = h_flex().flex_none().gap(2).items_center()
+      .when(docImgReady, el => el
+        .child(this.splitIconBtn('doc-img-zoom', 'zoom-in', word(lang, 'imageZoomLightbox'),
+          clickCx => this.openImageLightbox(docImgTarget, docImgState.entry, clickCx), t, 14))
+        .when(Boolean(docImgOpenPath), sub => sub.child(this.splitIconBtn('doc-img-open-external', 'external-open',
+          word(lang, 'imageOpenExternal'),
+          clickCx => this.openImageInSystem(docImgTarget, docImgState.entry, clickCx), t, 14))))
       .when(showCopyPath, el => el.child(this.splitIconBtn('doc-copy-path', copiedPath ? 'check' : 'clip',
         word(lang, copiedPath ? 'mentionPathCopied' : 'mentionCopyPath'), cx => {
           cx.write_to_clipboard?.(docRef.path);
@@ -9618,8 +11292,8 @@ export default class PmProject extends View {
       titleTip,
       actions: docActions,
       closeId: 'split-close',
-      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
-      compactBar: inTabBar,
+      onClose: null,
+      compactBar: true,
       titleMuted: inTabBar,
       t,
     });
@@ -9770,29 +11444,40 @@ export default class PmProject extends View {
     } else if (mode === 'large') {
       bodyChildren.push(div().pt(6).whitespace_normal().text_size(12.5).text_color(t.muted).child(word(lang, 'docTooLarge')));
     } else if (mode === 'binary') {
-      const imgTarget = isPreviewableImage(docRef.path) ? resolveImageTarget(docRef, this.docLinkContext()) : null;
-      if (imgTarget) {
-        const imgState = this.imagePreviewState(imgTarget, cx);
-        if (imgState.status === 'ready') {
-          const box = fitImageBox(imgState.entry.width, imgState.entry.height, {
+      if (docImgTarget) {
+        if (docImgState?.status === 'ready') {
+          const box = fitImageBox(docImgState.entry.width, docImgState.entry.height, {
             maxWidth: Math.max(240, Math.min(640, width - 56)),
             maxHeight: 640,
           });
+          const zoomTip = word(lang, 'imageZoomLightbox');
+          const imgFrame = div().id(`doc-img-preview-${key}`).w(box.width + 2).rounded(10).overflow_hidden()
+            .border_1().border_color(t.border).bg(t.surface).cursor_pointer()
+            .hover(s => s.border_color(withAlpha(t.accent, .55)))
+            .accessibility_label(zoomTip)
+            .on_click((_e, clickCx) => this.openImageLightbox(docImgTarget, docImgState.entry, clickCx))
+            .child(image(docImgState.entry.rel).w(box.width).h(box.height));
           bodyChildren.push(v_flex().id(`doc-img-wrap-${key}`).w_full().pt(4).gap(8).items_start()
-            .child(div().w(box.width + 2).rounded(10).overflow_hidden().border_1().border_color(t.border).bg(t.surface)
-              .child(image(imgState.entry.rel).w(box.width).h(box.height)))
-            .child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
-              .child(word(lang, 'imageDimensions', imgState.entry.width, imgState.entry.height))
-              .when(imgState.entry.size > 0, el => el.child(formatBytes(imgState.entry.size)))));
-        } else if (imgState.status === 'loading') {
+            .child(this.withTip(`doc-img-preview-${key}`, imgFrame, zoomTip, t, { panel: true, placement: 'above-left' }))
+            .child(h_flex().w(box.width + 2).max_w_full().gap(8).items_center().justify_between()
+              .child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
+                .child(word(lang, 'imageDimensions', docImgState.entry.width, docImgState.entry.height))
+                .when(docImgState.entry.size > 0, el => el.child(formatBytes(docImgState.entry.size))))
+              .child(h_flex().gap(2).items_center()
+                .child(this.splitIconBtn('doc-img-body-zoom', 'zoom-in', zoomTip,
+                  clickCx => this.openImageLightbox(docImgTarget, docImgState.entry, clickCx), t, 13.5, false, { placement: 'above-right' }))
+                .when(Boolean(docImgOpenPath), el => el.child(this.splitIconBtn('doc-img-body-open', 'external-open',
+                  word(lang, 'imageOpenExternal'),
+                  clickCx => this.openImageInSystem(docImgTarget, docImgState.entry, clickCx), t, 13.5, false, { placement: 'above-right' }))))));
+        } else if (docImgState?.status === 'loading') {
           bodyChildren.push(h_flex().pt(8).gap(8).items_center().text_size(12.5).text_color(t.dim)
             .child(svg(SPINNER).size(14).flex_none().spin(900)).child(word(lang, 'imageLoading')));
         } else {
-          const errMsg = imgState.error === 'too large' ? word(lang, 'imageTooLarge') : word(lang, 'imageLoadFailed');
+          const errMsg = docImgState?.error === 'too large' ? word(lang, 'imageTooLarge') : word(lang, 'imageLoadFailed');
           bodyChildren.push(h_flex().pt(6).gap(8).items_center()
             .child(div().flex_1().min_w(0).whitespace_normal().text_size(12.5).text_color(t.muted).child(errMsg))
             .child(this.iconButton('doc-img-retry', 'reattach', word(lang, 'docRetry'),
-              clickCx => this.loadImagePreview(imgTarget, clickCx, { force: true }), t, 14)));
+              clickCx => this.loadImagePreview(docImgTarget, clickCx, { force: true }), t, 14)));
         }
       } else {
         bodyChildren.push(div().pt(6).whitespace_normal().text_size(12.5).text_color(t.muted).child(word(lang, 'docNotText')));
@@ -9809,7 +11494,7 @@ export default class PmProject extends View {
       vm.chunks.forEach((chunk, idx) => {
         const hit = highlightActive && matchedSet.has(idx);
         bodyChildren.push(div().id(`doc-chunk-${key}-${idx}`).w_full().text_size(13.5).text_color(t.foreground)
-          .when(hit, el => el.pl(8).border_l(2).border_color(t.accent))
+          .when(hit, el => el.px(8).py(4).rounded(6).bg(withAlpha(t.accent, isDarkTheme(t) ? .14 : .10)))
           .child(TextView.markdown(`doc-md-${key}-${idx}`, chunk).selectable(true)
             .on_link_click((url, cx) => this.followDocLink(url, cx))));
       });
@@ -9865,8 +11550,8 @@ export default class PmProject extends View {
       title,
       actions: saveControl,
       closeId: 'split-close',
-      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
-      compactBar: inTabBar,
+      onClose: null,
+      compactBar: true,
       t,
     });
 
@@ -9968,8 +11653,8 @@ export default class PmProject extends View {
       titleId: 'history-title',
       title,
       closeId: 'split-close',
-      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
-      compactBar: inTabBar,
+      onClose: null,
+      compactBar: true,
       t,
     });
 
@@ -10058,22 +11743,18 @@ export default class PmProject extends View {
         : [div().px(8).whitespace_normal().text_size(13).text_color(t.dim).child(word(lang, 'libraryEmpty'))];
     }
 
-    const toolbar = h_flex().flex_none().px(12).pt(8).pb(4).gap(4).items_center()
-      .child(div().flex_1().min_w(0).child(this.searchBox('library-search', this.libraryInput, this.libraryQuery, word(lang, 'searchLibrary'), cx => {
-        this.libraryQuery = '';
-        this.libraryInput.set_value('');
-        this.libraryInput.focus();
-        cx.notify();
-      }, t)))
-      .child(this.iconButton('library-new-doc', 'plus', word(lang, 'newDoc'), cx => this.startNewDoc('library', cx), t, 15))
-      .child(this.iconButton('library-add-file', 'upload', word(lang, 'addFiles'), cx => this.pickLibraryFiles(cx), t, 15))
-      .child(this.iconButton('library-history', 'history', word(lang, 'docHistory'),
-        cx => this.openHistory('library', 'docs', '', 'all', cx), t, 15));
+    const filterEl = this.isInlineFilterVisible('library')
+      ? this.inlineFilterBar('library', 'library-search', this.libraryInput, this.libraryQuery, word(lang, 'filterLibrary'), cx => {
+          this.libraryQuery = '';
+          this.libraryInput.set_value('');
+          this.libraryInput.focus();
+          cx.notify();
+        }, t, { focused: this.typing === 'librarySearch' })
+      : null;
 
     return v_flex().id('library-panel').w_full().h_full().min_w(0)
       .on_drop((e, cx) => this.dropLibraryFiles(e?.paths || [], cx))
-      .child(this.sideHeader(t, width, { inTabBar: this.hasSideTabs() }))
-      .child(toolbar)
+      .when(Boolean(filterEl), el => el.child(filterEl))
       .when(Boolean(this.deletedBanner?.tab === 'library'), el => el.child(this.deletedBannerBar('library', t)))
       .when(Boolean(this.libraryDropBusy), el => el.child(h_flex().px(16).pb(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
         .child(svg(SPINNER).size(12).flex_none().spin(900)).child(word(lang, 'addingFiles', this.libraryDropBusy))))
@@ -10188,24 +11869,21 @@ export default class PmProject extends View {
       }
     }
 
-    const toolbar = h_flex().flex_none().px(12).pt(8).pb(4).gap(4).items_center()
-      .child(div().flex_1().min_w(0).child(this.searchBox('memory-search', this.memoryInput, this.memoryQuery, word(lang, 'searchMemory'), cx => {
-        this.memoryQuery = '';
-        this.memoryInput.set_value('');
-        this.memoryInput.focus();
-        cx.notify();
-      }, t)))
-      .child(this.iconButton('memory-new', 'plus', word(lang, 'newMemory'), cx => this.startNewDoc('memory', cx), t, 15))
-      .child(this.iconButton('memory-history', 'history', word(lang, 'docHistory'),
-        cx => this.openHistory('memory', 'memory', '', 'all', cx), t, 15));
+    const filterEl = this.isInlineFilterVisible('memory')
+      ? this.inlineFilterBar('memory', 'memory-search', this.memoryInput, this.memoryQuery, word(lang, 'filterMemory'), cx => {
+          this.memoryQuery = '';
+          this.memoryInput.set_value('');
+          this.memoryInput.focus();
+          cx.notify();
+        }, t, { focused: this.typing === 'memorySearch' })
+      : null;
 
     const dreamLine = formatDreamStatus(this.memoryData?.dream, lang, Date.now(), this.clockOffsetMs || 0);
 
     return v_flex().id('memory-panel').w_full().h_full().min_w(0)
       .on_drop((e, cx) => this.dropMemoryFiles(e?.paths || [], cx))
-      .child(this.sideHeader(t, width, { inTabBar: this.hasSideTabs() }))
-      .child(toolbar)
-      .when(Boolean(dreamLine), el => el.child(div().id('memory-dream-status').px(16).pb(4).truncate().text_size(11.5).text_color(t.dim).child(dreamLine)))
+      .when(Boolean(filterEl), el => el.child(filterEl))
+      .when(Boolean(dreamLine), el => el.child(div().id('memory-dream-status').px(16).pt(6).pb(4).truncate().text_size(11.5).text_color(t.dim).child(dreamLine)))
       .when(Boolean(this.deletedBanner?.tab === 'memory'), el => el.child(this.deletedBannerBar('memory', t)))
       .when(Boolean(this.memoryBusy), el => el.child(h_flex().px(16).pb(4).gap(6).items_center().text_size(11.5).text_color(t.dim)
         .child(svg(SPINNER).size(12).flex_none().spin(900)).child(word(lang, 'addingFiles', this.memoryBusy))))
@@ -10222,6 +11900,7 @@ export default class PmProject extends View {
 
   threadSessionView(t, today, cx) {
     const lang = this.lang;
+    const surf = tonalSurfaces(t);
     const held = this.threadSession?.taskId === this.thread ? this.threadSession : null;
     const turns = held ? sessionTurns(held.items, { lang, sent: this.sessionSent }) : [];
     const showEarlier = Boolean(held?.earlier || this.threadSessionEarlierLoading || this.threadSessionEarlierError);
@@ -10285,7 +11964,7 @@ export default class PmProject extends View {
         }
         const open = toolsOpen.has(part.key);
         const head = this.withTip(`session-tools-${part.key}`, h_flex().id(`session-tools-${part.key}`).min_h(26).px(8).py(4).gap(6).rounded(7).items_center()
-          .cursor_pointer().bg(t.surface).border_1().border_color(t.border).hover(s => s.bg(t.hover))
+          .cursor_pointer().bg(surf.pod).hover(s => s.bg(t.hover))
           .accessibility_label(part.label)
           .on_click((_e, cx) => {
             if (toolsOpen.has(part.key)) toolsOpen.delete(part.key);
@@ -10297,7 +11976,7 @@ export default class PmProject extends View {
           .when(part.errors > 0, el => el.child(div().flex_none().text_size(11).font_medium().text_color(t.blocked)
             .child(word(lang, 'toolErrors', part.errors)))), part.label, t, { panel: true, placement: 'above-left' });
         if (!open) return head;
-        const body = v_flex().id(`session-tools-body-${part.key}`).ml(6).pl(10).py(2).gap(5).border_l(1).border_color(t.border)
+        const body = v_flex().id(`session-tools-body-${part.key}`).px(10).py(6).gap(5).rounded(6).bg(surf.podWell)
           .children(part.calls.map((call, ci) => v_flex().id(`session-call-${part.key}-${ci}`).gap(1)
             .child(h_flex().gap(6).items_start()
               .child(div().flex_none().font_family('monospace').text_size(11.5).font_medium()
@@ -10325,7 +12004,7 @@ export default class PmProject extends View {
         .child(word(lang, 'sessionStale', this.threadSessionError)));
     }
     const turnStartIndex = children.length;
-    if (this.threadSessionLoading && !held) {
+    if (this.threadSessionLoading && !held && this.threadSessionState !== 'empty') {
       children.push(h_flex().pt(6).gap(8).items_center().text_size(12.5).text_color(t.dim)
         .child(svg(SPINNER).size(14).flex_none().spin(900)).child(word(lang, 'sessionLoading')));
     } else if (this.threadSessionError && !held) {
@@ -10334,7 +12013,7 @@ export default class PmProject extends View {
     } else if (held?.unknown?.length && !turns.length) {
       children.push(div().id('thread-session-unknown').pt(6).whitespace_normal().text_size(12.5).text_color(t.muted)
         .child(word(lang, 'sessionUnknown')));
-    } else if (held && !turns.length) {
+    } else if ((held && !turns.length) || this.threadSessionState === 'empty') {
       children.push(div().id('thread-session-empty').pt(6).text_size(12.5).text_color(t.dim)
         .child(word(lang, 'sessionEmpty')));
     } else {
@@ -10430,9 +12109,10 @@ export default class PmProject extends View {
     const detailGroup = offline ? 'offline'
       : ['done', 'released', 'merged', 'abandoned', 'cancelled'].includes(status) ? 'finished'
         : status === 'blocked' && !answered ? 'waiting'
-          : status === 'proposed' ? 'parked'
-            : status === 'paused' ? 'paused'
-              : 'working';
+          : status === 'review' ? 'review'
+            : status === 'proposed' ? 'parked'
+              : status === 'paused' ? 'paused'
+                : 'working';
     const markRow = {
       group: detailGroup,
       status,
@@ -10477,66 +12157,120 @@ export default class PmProject extends View {
           .when(Boolean(diffBtn), el => el.child(diffBtn))
       : null;
 
+    const surf = tonalSurfaces(t);
     const threadNum = formatTaskNumber(taskNumber(task) || taskNumber(stateTask) || this.taskNumberFor(this.thread));
-    const leadingEl = h_flex().flex_none().gap(5).items_center()
-      .child(this.withTip('thread-status', h_flex().id('thread-status').size(18).flex_none().items_center().justify_center()
-        .accessibility_label(statusTip)
-        .child(this.threadMark(markRow, t)), statusTip, t, { panel: true, placement: 'below-left' }))
-      .when(Boolean(threadNum), el => el.child(div().id('thread-number').flex_none().font_family('monospace').text_size(12.5).text_color(t.dim).child(threadNum)));
+    const fullTitle = task.title || this.thread;
+    const titleTip = [threadNum ? `${threadNum} ${fullTitle}` : fullTitle, statusTip].filter(Boolean).join(' · ');
     const inTabBar = this.hasSideTabs();
-    const headerBar = this.renderSplitTopBar({
-      id: 'thread-topbar',
-      backId: 'thread-back',
-      onBack: inTabBar ? null : (cx => {
-        this.panelClosing = false;
-        this.detail = false;
-        this.resetThreadChange();
-        this.listShown = true;
-        this.sideTab = 'threads';
-        this._panelOpenedFromClosed = false;
-        this.syncVisibleSideTab(cx);
-        this.notifyPanes(cx, { shell: true, conv: true, side: true });
-      }),
-      backTip: word(lang, 'backToThreads'),
-      leading: leadingEl,
-      titleId: 'thread-title',
-      title: task.title || this.thread,
-      titleTip: [threadNum ? `${threadNum} ${task.title || this.thread}` : (task.title || this.thread), statusTip].filter(Boolean).join(' · '),
-      actions,
-      closeId: 'thread-close',
-      onClose: inTabBar ? null : (cx => this.closeSidePanel(cx)),
-      closeTip: word(lang, 'closeSidePanel'),
-      compactBar: inTabBar,
-      t,
-    });
+    const statusDotEl = this.withTip('thread-status', h_flex().id('thread-status').size(18).flex_none().items_center().justify_center()
+      .accessibility_label(statusTip)
+      .child(this.threadMark(markRow, t)), statusTip, t, { panel: true, placement: 'below-left' });
 
-    const hasSubmeta = Boolean(task.branch || parent || (closedInfo && !quiet));
-    const parentNum = formatTaskNumber(parent);
-    const submetaBar = hasSubmeta ? h_flex().flex_wrap().gap(8).items_center().text_size(11.5).text_color(t.dim)
-      .when(Boolean(task.branch), el => el.child(this.withTip('thread-branch', div().id('thread-branch').font_family('monospace')
-        .child(task.branch), workerCtxText || task.branch, t, { panel: true, placement: 'below-left', wrap: true, flexNone: true })))
-      .when(Boolean(closedInfo && !quiet), el => el.child(this.withTip('thread-closed-pill', div().id('thread-closed-pill')
-        .child(word(lang, 'closedReattach')), closedTip(lang, closedInfo), t, { panel: true, placement: 'below-left', wrap: true, flexNone: true })))
-      .when(Boolean(parent), el => el.child(this.withTip('thread-parent', h_flex().id('thread-parent').gap(4).items_center().cursor_pointer()
-        .text_color(t.dim).hover(s => s.text_color(t.foreground))
-        .accessibility_label(word(lang, 'partOf', parent.title))
-        .on_click((_e, cx) => this.openThread(parent.task, cx, { insertAdjacent: true }))
-        .child(svg(ICON('hook-up')).size(11.5).flex_none())
-        .when(Boolean(parentNum), el => el.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(parentNum)))
-        .child(div().min_w(0).truncate().child(word(lang, 'partOf', parent.title))), word(lang, 'openThread'), t, { panel: true, placement: 'below-left' }))) : null;
     const hasSessionTab = this.sessionTabAvailable(stateTask, task);
     const activeTab = this.activeThreadTab(stateTask, task);
-    const tabItem = (key, glyph, label, dot = false) => h_flex().id(`thread-tab-${key}`).h(26).px(9).gap(5).rounded(7).items_center()
-      .text_size(12.2).accessibility_label(label)
-      .when(key === activeTab, el => el.bg(t.raised).text_color(t.foreground).font_medium())
-      .when(key !== activeTab, el => el.cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
+    const tabItem = (key, glyph, label, dot = false) => h_flex().id(`thread-tab-${key}`).h(22).px(8).gap(4.5).rounded(6).items_center()
+      .text_size(11.5).accessibility_label(label)
+      .when(key === activeTab, el => el.bg(surf.softChip).text_color(t.foreground).font_medium())
+      .when(key !== activeTab, el => el.cursor_pointer().text_color(t.muted).hover(s => s.bg(surf.softChipHover).text_color(t.foreground))
         .on_click((_e, cx) => this.selectThreadTab(key, cx)))
-      .child(this.icon(glyph, 13)).child(label)
+      .child(this.icon(glyph, 12)).child(label)
       .when(Boolean(dot), el => el.child(div().size(5).rounded_full().bg(t.blocked)));
-    const tabBar = hasSessionTab ? h_flex().id('thread-tabs').flex_none().gap(2).items_center()
+    const tabBar = hasSessionTab ? h_flex().id('thread-tabs').flex_none().h(24).gap(2).items_center()
       .child(tabItem('log', 'list', word(lang, 'threadLogTab'), activeTab === 'session' && Boolean(asks)))
       .child(tabItem('session', 'chat', word(lang, 'threadSessionTab'))) : null;
-    const mergeSubBar = width >= 440 && Boolean(tabBar) && Boolean(submetaBar);
+
+    const parentNum = formatTaskNumber(parent);
+    const statusBadge = reviewOpen
+      ? h_flex().h(19).px(6).rounded(5).flex_none().items_center().bg(withAlpha(t.accent, surf.dark ? .13 : .10))
+          .text_size(10.5).font_medium().text_color(t.accent).child(word(lang, 'reviewBadge'))
+      : detailGroup === 'waiting'
+        ? h_flex().h(19).px(6).rounded(5).flex_none().items_center().bg(withAlpha(t.blocked, surf.dark ? .14 : .11))
+            .text_size(10.5).font_medium().text_color(t.blocked).child(statusText)
+        : null;
+    const projFolders = projectFolders(this.pm());
+    const folderAlias = threadFolderBadge(task, projFolders);
+    const folderPath = folderAlias ? (projFolders.find(f => f.alias === folderAlias)?.path || '') : '';
+    const hasMetaChips = Boolean((inTabBar && threadNum) || statusBadge || folderAlias || task.branch || engine || (closedInfo && !quiet) || parent);
+    const metaStrip = hasMetaChips ? h_flex().flex_1().min_w(0).flex_wrap().gap(5).items_center()
+      .when(inTabBar && Boolean(threadNum), el => el.child(h_flex().id('thread-number').h(19).px(5.5).rounded(5).flex_none()
+        .items_center().bg(surf.pillMuted).font_family('monospace').text_size(11).text_color(t.muted).child(threadNum)))
+      .when(Boolean(statusBadge), el => el.child(statusBadge))
+      .when(Boolean(folderAlias), el => el.child(this.withTip('thread-folder', h_flex().id('thread-folder').h(19).px(6).gap(4).rounded(5)
+        .flex_none().max_w(140).items_center().bg(surf.pillMuted)
+        .child(this.icon('folder', 11).text_color(t.dim))
+        .child(div().min_w(0).truncate().font_family('monospace').text_size(11).text_color(t.muted).child(folderAlias)),
+        word(lang, 'folderAliasTip', folderAlias, folderPath), t, { panel: true, placement: 'below-left', wrap: true, flexNone: true })))
+      .when(Boolean(task.branch), el => el.child(this.withTip('thread-branch', h_flex().id('thread-branch').h(19).px(6).rounded(5)
+        .flex_none().max_w(240).items_center().bg(surf.well)
+        .child(div().min_w(0).truncate().font_family('monospace').text_size(11).text_color(t.muted).child(task.branch)),
+        workerCtxText ? `${task.branch} · ${workerCtxText}` : task.branch, t, { panel: true, placement: 'below-left', wrap: true, flexNone: true })))
+      .when(Boolean(engine), el => el.child(h_flex().h(19).px(5.5).rounded(5).flex_none().items_center().bg(surf.pillMuted)
+        .font_family('monospace').text_size(10.5).text_color(t.dim)
+        .child(`${engine}${wasEscalated(task) ? ' ↑' : ''}`)))
+      .when(Boolean(closedInfo && !quiet), el => el.child(this.withTip('thread-closed-pill', h_flex().id('thread-closed-pill').h(19).px(6).rounded(5)
+        .flex_none().items_center().bg(withAlpha(t.blocked, surf.dark ? .13 : .10))
+        .text_size(10.5).text_color(t.blocked).child(word(lang, 'closedReattach')),
+        closedTip(lang, closedInfo), t, { panel: true, placement: 'below-left', wrap: true, flexNone: true })))
+      .when(Boolean(parent), el => el.child(this.withTip('thread-parent', h_flex().id('thread-parent').h(19).px(6).gap(4).rounded(5)
+        .max_w(240).items_center().cursor_pointer().bg(surf.pillMuted).text_color(t.muted)
+        .hover(s => s.bg(t.hover).text_color(t.foreground))
+        .accessibility_label(word(lang, 'partOf', parent.title))
+        .on_click((_e, cx) => this.openThread(parent.task, cx, { insertAdjacent: true }))
+        .child(svg(ICON('hook-up')).size(11).flex_none())
+        .when(Boolean(parentNum), el => el.child(div().flex_none().font_family('monospace').text_size(10.5).text_color(t.dim).child(parentNum)))
+        .child(div().min_w(0).truncate().text_size(11).child(word(lang, 'partOf', parent.title))),
+        word(lang, 'openThread'), t, { panel: true, placement: 'below-left' }))) : null;
+
+    const inlineTabInMeta = width >= 440 && Boolean(tabBar) && Boolean(metaStrip);
+    let headerBar;
+    if (inTabBar) {
+      // Plan B unified frameless info header: title appears ONCE cleanly (tab bar carries only `#NNN`),
+      // actions sit flush at top-right, and branch / parent / view-switcher nest tightly below with zero border_b.
+      const titleEl = div().id('thread-title').w_full().whitespace_normal()
+        .text_size(14.5).line_height('20px').font_semibold().text_color(t.foreground)
+        .child(fullTitle);
+      const titleNode = this.withTip('thread-title', titleEl, titleTip, t, { panel: true, placement: 'below-left', wrap: true, flex1: true });
+      headerBar = v_flex().id('thread-topbar').w_full().min_w(0).flex_none().px(16).pt(12).pb(4).gap(7)
+        .child(h_flex().w_full().min_w(0).gap(8).items_start()
+          .child(h_flex().h(20).flex_none().items_center().child(statusDotEl))
+          .child(titleNode)
+          .when(Boolean(actions), el => el.child(h_flex().h(20).flex_none().items_center().child(actions))))
+        .when(Boolean(metaStrip || tabBar), el => el.child(v_flex().id('thread-subbar').w_full().min_w(0).pl(26).gap(6)
+          .when(inlineTabInMeta, row => row.child(h_flex().w_full().min_w(0).gap(8).items_center().justify_between()
+            .child(metaStrip)
+            .child(tabBar)))
+          .when(!inlineTabInMeta && Boolean(metaStrip), row => row.child(metaStrip))
+          .when(!inlineTabInMeta && Boolean(tabBar), row => row.child(h_flex().w_full().items_center().child(tabBar)))));
+    } else {
+      const leadingEl = h_flex().flex_none().gap(5).items_center()
+        .child(statusDotEl)
+        .when(Boolean(threadNum), el => el.child(div().id('thread-number').flex_none().font_family('monospace').text_size(12.5).text_color(t.dim).child(threadNum)));
+      headerBar = this.renderSplitTopBar({
+        id: 'thread-topbar',
+        backId: 'thread-back',
+        onBack: cx => {
+          this.panelClosing = false;
+          this.detail = false;
+          this.resetThreadChange();
+          this.listShown = true;
+          this.sideTab = 'threads';
+          this._panelOpenedFromClosed = false;
+          this.syncVisibleSideTab(cx);
+          this.notifyPanes(cx, { shell: true, conv: true, side: true });
+        },
+        backTip: word(lang, 'backToThreads'),
+        leading: leadingEl,
+        titleId: 'thread-title',
+        title: fullTitle,
+        titleTip,
+        actions,
+        closeId: 'thread-close',
+        onClose: null,
+        closeTip: word(lang, 'closeSidePanel'),
+        compactBar: true,
+        t,
+      });
+    }
 
     // Prerequisite dependencies card ("Waiting" / "等待"), clickable to jump to prerequisite threads.
     const deps = taskDependencies(planTask, allTasks, { terms: this.terms(), live: this.live() });
@@ -10557,7 +12291,7 @@ export default class PmProject extends View {
       onSelect: (dep, cx) => this.jumpToDependency(dep, cx),
     }) : null;
 
-    // Two-layer Steps card: outer plan + folded/auto-expanded sub-steps with smooth Bezier connectors.
+    // Two-layer Steps card: Plan B tonal pod with clean recessed sub-step wells (zero tree wires).
     const planCard = (!deps?.showAsWaiting || steps.hasPlan) ? renderStepsCard({
       ui: detailUi,
       steps,
@@ -10596,39 +12330,37 @@ export default class PmProject extends View {
         const busy = this.threadEarlierLoading, err = this.threadEarlierError;
         const tip = busy ? word(lang, 'loadingEarlierLog')
           : err ? word(lang, 'earlierLogFailed', err) : word(lang, 'earlierLog', earlierLogCount);
-        return h_flex().relative().w_full().min_w(0).flex_none().pb(8).items_center()
-          .when(visibleLog.length > 0, el => el.child(div().absolute().left(3).top(12).bottom(0).w(1).bg(t.border)))
-          .child(div().absolute().left(1).top(9.5).size(5).rounded_full().border_1().border_color(t.border).bg(t.background))
-          .child(this.withTip('thread-log-earlier', h_flex().id('thread-log-earlier').ml(13).size(24).rounded(7).items_center().justify_center()
-            .text_color(err ? t.blocked : t.dim).accessibility_label(tip)
+        return h_flex().w_full().min_w(0).flex_none().pb(2).items_center()
+          .child(this.withTip('thread-log-earlier', h_flex().id('thread-log-earlier').h(22).px(7).gap(5).rounded(6).items_center()
+            .bg(surf.well).text_size(11).text_color(err ? t.blocked : t.dim).accessibility_label(tip)
             .when(!busy, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(err ? t.blocked : t.foreground))
               .on_click((_e, cx) => this.loadEarlierThreadLog(cx)))
-            .child(busy ? svg(SPINNER).size(13).flex_none().text_color(t.muted).spin(900) : this.icon('earlier', 14)), tip, t, { panel: true, placement: 'below-left' }));
+            .child(busy ? svg(SPINNER).size(12).flex_none().text_color(t.muted).spin(900) : this.icon('earlier', 12.5))
+            .child(tip), tip, t, { panel: true, placement: 'below-left' }));
       })() : null;
+      const dotMuted = withAlpha(t.muted || t.dim, surf.dark ? .42 : .52);
       const entries = visibleLog.length ? visibleLog.map((entry, i) => {
-        const first = i === 0, latest = i === visibleLog.length - 1;
-        const lineAbove = !first || Boolean(earlierLogRow), lineBelow = !latest;
+        const latest = i === visibleLog.length - 1;
         const entryText = logText(lang, entry.text, true);
         if (!this.threadLogExpanded) {
           const compactText = compactLogLine(entryText);
-          return this.withTip(`thread-entry-${entry.n ?? i}`, h_flex().id(`thread-entry-${entry.n ?? i}`).relative().w_full().min_w(0).flex_none().h(22).pl(16).gap(8).items_center().overflow_hidden()
-            .when(lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(0).bottom(0).w(1).bg(t.border)))
-            .when(!lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(11).bottom(0).w(1).bg(t.border)))
-            .when(lineAbove && !lineBelow, el => el.child(div().absolute().left(3).top(0).h(11).w(1).bg(t.border)))
-            .child(div().absolute().left(.5).top(8).size(6).rounded_full().bg(latest ? t.accent : t.border))
+          return this.withTip(`thread-entry-${entry.n ?? i}`, h_flex().id(`thread-entry-${entry.n ?? i}`).w_full().min_w(0).flex_none()
+            .min_h(26).px(7).py(3).gap(8).rounded(6).items_center().overflow_hidden()
+            .when(latest, el => el.bg(surf.podWell))
+            .when(!latest, el => el.hover(s => s.bg(t.hover)))
+            .child(div().size(5.5).flex_none().rounded_full().bg(latest ? t.accent : dotMuted))
             .child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(clock(entry.at, today)))
             .child(div().flex_1().min_w(0).overflow_hidden().truncate().text_size(12.2)
               .text_color(latest ? t.foreground : t.muted).child(compactText)), entryText, t, { panel: true, placement: 'above-left', wrap: true, full: true, flexNone: true });
         }
-        return v_flex().id(`thread-entry-${entry.n ?? i}`).relative().w_full().min_w(0).flex_none().pl(16).pb(latest ? 2 : 12).gap(2)
-          .when(lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(0).bottom(0).w(1).bg(t.border)))
-          .when(!lineAbove && lineBelow, el => el.child(div().absolute().left(3).top(10).bottom(0).w(1).bg(t.border)))
-          .when(lineAbove && !lineBelow, el => el.child(div().absolute().left(3).top(0).h(10).w(1).bg(t.border)))
-          .child(div().absolute().left(0).top(7).size(7).rounded_full().bg(latest ? t.accent : t.border))
-          .child(div().flex_none().font_family('monospace').text_size(11.5).text_color(t.dim).child(clock(entry.at, today)))
+        return v_flex().id(`thread-entry-${entry.n ?? i}`).w_full().min_w(0).flex_none().px(8).py(6).gap(3).rounded(6)
+          .when(latest, el => el.bg(surf.podWell))
+          .child(h_flex().gap(6).items_center()
+            .child(div().size(5.5).flex_none().rounded_full().bg(latest ? t.accent : dotMuted))
+            .child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(clock(entry.at, today))))
           .child(this.selectableText(`thread-log-txt-${this.thread}-${entry.n ?? i}`, entryText).w_full().min_w(0)
             .text_size(12.5).text_color(latest ? t.foreground : t.muted));
-      }) : [div().pl(16).text_size(12.5).text_color(t.dim).child(word(lang, 'noLog'))];
+      }) : [div().px(6).py(4).text_size(12).text_color(t.dim).child(word(lang, 'noLog'))];
       const logScrollHandle = this.tabScrollHandle('log');
       if (this.threadAnchor && visibleLog.length) {
         const idx = visibleLog.findIndex(e => e.n === this.threadAnchor.n);
@@ -10640,33 +12372,39 @@ export default class PmProject extends View {
           cx.timer.after(16, cx => { this.threadTicking = false; cx.notify(); });
         }
       }
-      const logHeader = canExpandRecent ? h_flex().w_full().min_w(0).flex_none().pb(4).items_center().justify_end()
-        .child(h_flex().id('thread-log-toggle').h(20).px(6).rounded(5).items_center().cursor_pointer()
-          .text_size(11).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+      const logPodHeader = h_flex().w_full().min_w(0).flex_none().pl(4).pr(4).gap(6).items_center()
+        .child(div().flex_none().text_size(11.5).font_semibold().text_color(t.muted).child(word(lang, 'threadLogTab')))
+        .when(log.length > 0, el => el.child(div().flex_none().font_family('monospace').text_size(11).text_color(t.dim).child(String(log.length))))
+        .child(div().flex_1().min_w(0))
+        .when(canExpandRecent, el => el.child(h_flex().id('thread-log-toggle').h(19).px(6).rounded(5).flex_none()
+          .items_center().cursor_pointer().bg(surf.well).text_size(10.5).text_color(t.muted)
+          .hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => { this.threadLogExpanded = !this.threadLogExpanded; cx.notify(); })
-          .child(this.threadLogExpanded ? word(lang, 'collapseLog') : word(lang, 'showAllLog', log.length))) : null;
-      bodyEl = v_flex().id('thread-log').w_full().min_w(0).flex_1().min_h(0).py(2).overflow_y_scrollbar()
+          .child(this.threadLogExpanded ? word(lang, 'collapseLog') : word(lang, 'showAllLog', log.length))));
+      const logList = v_flex().id('thread-log').w_full().min_w(0).flex_1().min_h(0).gap(2).overflow_y_scrollbar()
         .when(Boolean(logScrollHandle), el => el.track_scroll(logScrollHandle))
         .on_scroll_wheel((e, cx) => {
           if (e.delta.y) this.threadAnchor = null;
           if (this.hoverKey) { this.hoverKey = ''; cx.notify(); }
         })
-        .when(Boolean(logHeader), el => el.child(logHeader))
         .when(Boolean(earlierLogRow), el => el.child(earlierLogRow))
         .children(entries);
+      bodyEl = v_flex().id('thread-log-card').w_full().min_w(0).flex_1().min_h(0).rounded(10).p(8).gap(6).bg(surf.pod)
+        .child(logPodHeader)
+        .child(logList);
     }
 
     return v_flex().w_full().h_full().min_w(0)
       .child(headerBar)
-      .child(this.sideScrollBody(v_flex().w_full().min_w(0).flex_1().min_h(0).px(16).pt(10).pb(14).gap(10)
-        .when(mergeSubBar, el => el.child(h_flex().id('thread-subbar').min_h(32).flex_none().gap(10).items_center().justify_between()
+      .child(this.sideScrollBody(v_flex().w_full().min_w(0).flex_1().min_h(0).px(16).pt(inTabBar ? 6 : 10).pb(14).gap(10)
+        .when(!inTabBar && inlineTabInMeta, el => el.child(h_flex().id('thread-subbar').min_h(28).flex_none().gap(10).items_center().justify_between()
           .child(tabBar)
-          .child(div().flex_1().min_w(0).child(h_flex().w_full().justify_end().child(submetaBar)))))
-        .when(!mergeSubBar && Boolean(submetaBar), el => el.child(submetaBar))
-        .when(!mergeSubBar && Boolean(tabBar), el => el.child(tabBar))
-        .when(activeTab === 'log' && Boolean(asks), el => el.child(v_flex().id('thread-question').flex_none().max_h(320).overflow_y_scrollbar()
-          .mx(-10).gap(2)
-          .when(Boolean(asks.text), el => el.child(this.selectableText(`thread-ask-${this.thread}`, logText(lang, asks.text, true)).px(10).pb(6).w_full()
+          .child(div().flex_1().min_w(0).child(h_flex().w_full().justify_end().child(metaStrip)))))
+        .when(!inTabBar && !inlineTabInMeta && Boolean(metaStrip), el => el.child(metaStrip))
+        .when(!inTabBar && !inlineTabInMeta && Boolean(tabBar), el => el.child(tabBar))
+        .when(activeTab === 'log' && Boolean(asks), el => el.child(v_flex().id('thread-question').w_full().min_w(0).flex_none().max_h(320).overflow_y_scrollbar()
+          .rounded(10).p(10).gap(4).bg(withAlpha(t.blocked, surf.dark ? .085 : .06))
+          .when(Boolean(asks.text), el => el.child(this.selectableText(`thread-ask-${this.thread}`, logText(lang, asks.text, true)).px(4).pb(4).w_full()
             .text_size(13.5).text_color(t.foreground)))
           .children(this.answerRows(asks, t, 'thread-'))))
         .when(activeTab === 'log' && Boolean(depsCard), el => el.child(depsCard))
@@ -10940,7 +12678,7 @@ export default class PmProject extends View {
         .when(Boolean(pmUndeliveredText), el => el.child(this.pmUndeliveredBar(pmUndeliveredText, t)))
         .when(Boolean(pmBlockedText), el => el.child(this.pmBlockedBar(pmBlockedText, t)))
         .when(Boolean(pmBusyView), el => el.child(this.pmBusyBar(pmBusyView, t, cx)))
-        .child(this.composer('say', this.input, this.draft, Boolean(pmTerm || this.isPmStarting()), word(lang, 'say', pm.project || pm.name),
+        .child(this.composer('say', this.input, this.draft, Boolean(pmTerm || this.isPmStarting()), word(lang, 'say', projectName(pm) || pm.name),
           offlineTip, sendCx => this.sendMain(sendCx), t, 16, true, cx));
       this.ringAction = ring;
       if (this.bodyOnly) this.publishHeaderState(this.buildHeaderData(pm, waiting, Boolean(ring)));
@@ -11039,7 +12777,7 @@ export default class PmProject extends View {
         .when(!isDarkTheme(t), el => el.shadow_xs())
         .when(isSlideOpenClose, el => el.w(width).flex_none())
         .when(!isSlideOpenClose, el => el.w_full().min_w(0))
-        .when(hasTabs, el => el.child(this.sideTabBar(t, width, cx)))
+        .child(this.sideHeaderBar(t, width, cx))
         .when(banners.length > 0, el => el.children(banners))
         .child(styledBody);
 
@@ -11060,6 +12798,7 @@ export default class PmProject extends View {
   }
 
   render(cx) {
+    if (this.lightboxOverlayMode) return this.renderImageLightbox(cx);
     if (this.agentWindow === 'titlebar' || this.agentWindow === 'chat') return this.renderAgentWindow(cx);
     if (this.headerOnly) return this.renderHeaderOnly(cx);
     const t = theme();
@@ -11090,14 +12829,22 @@ export default class PmProject extends View {
       this.memoryBusy = ''; this.memoryNoticeError = ''; this.deletedBanner = null;
       this.mention = null; this.mentionDismissed = null;
       this.searchOpen = false; this.searchQuery = ''; this.searchScope = 'all'; this.searchIndex = 0; this.searchKey = '';
+      this.inlineFilterOpen = false;
+      this.imageLightbox = null;
+      if (this.lightboxOverlayId) { this.closeOverlayIds([this.lightboxOverlayId], cx, { defer: true }); this.lightboxOverlayId = ''; }
       this.jumpTarget = null; this.flash = ''; this.flashPara = ''; this.flashTone = 'blocked';
       this.quotes = []; this.hoveredMsg = ''; this.hoverClipboard = null; this.selectionBar = null; this.lastBlocks = [];
       this.clearParaHoverNow(null);
-      this.repoFilesSlug = ''; this.repoFilesRepo = ''; this.repoFiles = []; this.repoFilesRead = false; this.repoFilesLoading = false; this.repoFilesAgain = false; this.repoFilesError = ''; this.repoFilesTruncated = false; this.repoFilesAt = 0;
+      this.repoFilesSlug = ''; this.repoFilesRepo = ''; this.repoFilesSig = ''; this.repoFiles = []; this.repoFilesRead = false; this.repoFilesLoading = false; this.repoFilesAgain = false; this.repoFilesError = ''; this.repoFilesTruncated = false; this.repoFilesAt = 0;
+      this.resetFoldersPopoverState();
       this.resetLibraryDocState();
       this.resetRenderCaches();
       if (!this.bringingBack) { this.bringBackOpen = false; this.bringBackProgress = null; }
-      cx.timer.after(0, cx => { this.searchInput?.set_value(''); this.refresh(cx); });
+      cx.timer.after(0, cx => {
+        this.searchInput?.set_value('');
+        if (findStage(layout())?.active === 'pm-project') this.keyFocus?.focus?.();
+        this.refresh(cx);
+      });
     }
     if (wanted !== this.pmName) {
       // Another project: its own log, no bubbles or panel from the last one.
@@ -11127,10 +12874,14 @@ export default class PmProject extends View {
       this.docFindOpen = false; this.docFindQuery = ''; this.docJumpQuery = ''; this.docMatchPos = 0;
       this.mention = null; this.mentionDismissed = null;
       this.searchOpen = false; this.searchQuery = ''; this.searchScope = 'all'; this.searchIndex = 0; this.searchKey = '';
+      this.inlineFilterOpen = false;
+      this.imageLightbox = null;
+      if (this.lightboxOverlayId) { this.closeOverlayIds([this.lightboxOverlayId], cx, { defer: true }); this.lightboxOverlayId = ''; }
       this.jumpTarget = null;
       this.quotes = []; this.hoveredMsg = ''; this.hoverClipboard = null; this.selectionBar = null; this.lastBlocks = [];
       this.clearParaHoverNow(null);
-      this.repoFilesSlug = ''; this.repoFilesRepo = ''; this.repoFiles = []; this.repoFilesRead = false; this.repoFilesLoading = false; this.repoFilesAgain = false; this.repoFilesError = ''; this.repoFilesTruncated = false; this.repoFilesAt = 0;
+      this.repoFilesSlug = ''; this.repoFilesRepo = ''; this.repoFilesSig = ''; this.repoFiles = []; this.repoFilesRead = false; this.repoFilesLoading = false; this.repoFilesAgain = false; this.repoFilesError = ''; this.repoFilesTruncated = false; this.repoFilesAt = 0;
+      this.resetFoldersPopoverState();
       this.resetLibraryDocState();
       this.resetRenderCaches();
       this.seen = null; this.count = 0; this.settle = 0; this.away = false; this.rise = 0; this.heights = new Map();
@@ -11147,17 +12898,26 @@ export default class PmProject extends View {
         this.docNameInput?.set_value('');
         this.memDescInput?.set_value('');
         this.docEditorInput?.set_value('');
+        this.folderAliasInput?.set_value('');
+        this.folderRemoteInput?.set_value('');
         this.showMainDraft();
         this.hydrateSideTabs(wanted, cx);
         this.readLog(cx);
         if (this.machine || this.sideTab === 'library') this.readLibrary(cx);
         if (this.sideTab === 'memory') this.readMemory(cx);
+        if (findStage(layout())?.active === 'pm-project') this.keyFocus?.focus?.();
         this.notifyPanes(cx, { shell: true, conv: true, side: true });
       });
     }
     const onStage = findStage(layout())?.active === 'pm-project';
     if (onStage && !this.onStage) cx.timer.after(0, () => this.keyFocus.focus());
-    if (!onStage && this.onStage) { this.clearHoverNow(null); this.clearParaHoverNow(null); this.searchOpen = false; this.closeAllAgentWindows(cx, { defer: true }); }
+    if (!onStage && this.onStage) {
+      this.clearHoverNow(null); this.clearParaHoverNow(null); this.searchOpen = false;
+      this.resetFoldersPopoverState();
+      this.imageLightbox = null;
+      if (this.lightboxOverlayId) { this.closeOverlayIds([this.lightboxOverlayId], cx, { defer: true }); this.lightboxOverlayId = ''; }
+      this.closeAllAgentWindows(cx, { defer: true });
+    }
     this.onStage = onStage;
     if (rawRef?.thread && rawRef?.jumpSeq && rawRef.jumpSeq !== this.lastJumpSeq) {
       this.lastJumpSeq = rawRef.jumpSeq;
@@ -11259,7 +13019,7 @@ export default class PmProject extends View {
 
     // Fast path for shell-only updates (drag move, grip hover, transition timers) when retained child Entities are active:
     // zero JS rebuild of the conversation timeline or side split content tree.
-    if (shellOnly && this._convEntity && this._sideEntity && !this.searchOpen) {
+    if (shellOnly && this._convEntity && this._sideEntity && !this.searchOpen && !this.imageLightbox && !this.foldersOpen) {
       const mainSlot = v_flex().id('pm-main-slot').flex_1().min_w(0).h_full().child(this._convEntity);
       const panelEl = this.buildPanelShell(pm, t, today, cx, { open, layout: splitLayout, dragging });
       return root.child(mainSlot).child(panelEl);
@@ -11354,7 +13114,9 @@ export default class PmProject extends View {
           cx.timer?.after?.(0, liveCx => this.jumpToThread(jumpId, liveCx));
         }
         return root.child(mainSlot).child(panelEl)
-          .when(Boolean(this.searchOpen), el => el.child(this.projectSearchOverlay(pm, this.items || [], t, today, cx)));
+          .when(Boolean(this.foldersOpen), el => el.child(this.renderFoldersPopover(pm, t, cx)))
+          .when(Boolean(this.searchOpen), el => el.child(this.projectSearchOverlay(pm, this.items || [], t, today, cx)))
+          .when(Boolean(this.imageLightbox), el => el.child(this.renderImageLightbox(cx, { inProject: true })));
       }
 
       const mainEl = this.renderConversationPane(cx);
@@ -11366,7 +13128,9 @@ export default class PmProject extends View {
         cx.timer?.after?.(0, liveCx => this.jumpToThread(jumpId, liveCx));
       }
       return root.child(mainEl).child(panelEl)
-        .when(Boolean(this.searchOpen), el => el.child(this.projectSearchOverlay(pm, this.items || [], t, today, cx)));
+        .when(Boolean(this.foldersOpen), el => el.child(this.renderFoldersPopover(pm, t, cx)))
+        .when(Boolean(this.searchOpen), el => el.child(this.projectSearchOverlay(pm, this.items || [], t, today, cx)))
+        .when(Boolean(this.imageLightbox), el => el.child(this.renderImageLightbox(cx, { inProject: true })));
     } finally {
       this._inRender = false;
       this._renderTerms = null;

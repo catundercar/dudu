@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
 """The full check before a merge, run in parallel: the mods' `herdr-app check`, their node model tests, every
-pm unittest file and the scripts/tests safety net, and `pm.py state`.
+pm unittest file and the scripts/tests safety net, `pm.py state`, and optionally `tests/render_check.py`.
 
-    python3 tests/run_checks.py [--jobs N] [--only TEXT] [--keep] [--list]
+    python3 tests/run_checks.py [--jobs N] [--only TEXT] [--render-check never|auto|always] [--keep] [--list]
 
 Run from the repository root (land runs the verify file there). Prints one line per check as it ends, with its
 wall time; then, for each failed check, the traceback of every failed test (or the last lines a failed command
 printed); then a summary line. Exit 0 when everything passed, 1 when anything failed, 2 on bad usage.
 
+With `--render-check auto`, staged changes (`git diff --cached --name-only HEAD`) are inspected in pure Python:
+if any changed file is under `mods/<mod>/` (excluding `mods/pm-dash/skill/`) or `tests/render_check*`,
+`tests/render_check.py` is scheduled at the highest priority so it runs in parallel with all other checks from
+t=0. Exit 2 (BLOCKED / NOT JUDGED) from `render_check.py` still fails the run (exit 1) with an explicit message
+so an unjudged UI merge is never silently passed.
+
 How the unittest files run: each file (and the scripts/tests folder as one group) is first listed in a child
-process, then split into shards, one per TestCase class (a class of more than CHUNK tests in chunks; one per test
-method for the modules in SPLIT_METHODS, whose methods each replay a whole scenario), and every shard runs in its own
-`python3` process. Shards and the other
-checks share one pool of --jobs processes (default: the number of CPUs), the longest ones first. A file's tests are
-imported under the same module names as `python3 -m unittest <file>` and `unittest discover` give them, so a test
-sees the same `__name__`, `__file__` and `sys.path` as in the serial run. After the run, the tests run per group
-must equal the tests listed, so a shard that loads fewer tests is a failure, not a silent pass.
+process, then split into shards: one per test method for modules/classes in SPLIT_METHODS, smaller chunks for
+subprocess-heavy classes in SHARD_CHUNKS, CHUNK-sized chunks for large classes, and small normal TestCase
+classes within the same module packed into CHUNK-sized shards to avoid redundant interpreter startups. Every
+shard runs in its own `python3` process. Shards and the other checks share one pool of --jobs processes
+(default: the number of CPUs), longest ones first (LPT). A file's tests are imported under the same module
+names as `python3 -m unittest <file>` and `unittest discover` give them, so a test sees the same `__name__`,
+`__file__` and `sys.path` as in the serial run. After the run, the tests run per group must equal the tests
+listed, so a shard that loads fewer tests is a failure, not a silent pass.
 
 Isolation: each test shard gets its own empty HOME (with a .gitconfig naming a test author and `main` as the
 default branch, as this machine's has), PM_HOME and TMPDIR, and an environment without the terminal and agent
 session variables (HC_*, HERDR_*, CLAUDE*, CODEX_*, PI_*, DISCORD_*, PM_*, GIT_DIR and friends): no shard reaches
 the real ledger, lock files, hc terminals or another shard's temporary files. The command checks (herdr-app check,
-node, pm.py state) run with the caller's environment, as the verify file ran them: `pm.py state` is meant to read
-the real ledger.
+node, pm.py state, render-check) run with the caller's environment, as the verify file ran them: `pm.py state` is
+meant to read the real ledger, and `render_check.py` isolates its own private Herdr home and hc session.
 
 Tests that cannot share the machine with others go in SERIAL (module or module.Class): they run one at a time,
 after the parallel ones. None are needed today; see the comment there.
@@ -36,6 +43,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -49,9 +57,35 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = "mods/pm-dash/skill/scripts"
 SAFETY_NET = f"{SCRIPTS}/tests"
 
-# Modules whose test methods each get a shard of their own: every method of test_replay replays the full pm.py
-# scenario on two sides (~30 s); as one class shard they would add up to ~75 s.
+# Modules whose test methods each get a shard of their own: every method of test_replay replays a pm.py
+# scenario on two sides; as one class shard they would add up linearly.
 SPLIT_METHODS = {"test_replay"}
+
+# Classes or modules whose tests spawn real subprocesses (pm.py, git, setup.py) and dominate the tail when left
+# in CHUNK-sized (10) shards. Mapping to a smaller chunk size splits them finer and boosts their pool priority
+# so they start right after listing and never hold up the end of the run.
+SHARD_CHUNKS = {
+    "test_replay": 1,
+    "test_install.InstallTest": 5,
+    "test_views.LibraryAndMemoryTests": 2,
+    "test_transition_reactions.TransitionReactions": 2,
+    "test_review_land.DelegatedMergeTests": 3,
+    "test_review_land.LandAndReview": 3,
+    "test_review_land.ResearchCollectionTests": 2,
+    "test_ledger_transitions.TwoLayerPlanAndAutoReview": 3,
+    "test_ledger_transitions.TaskNumbersTests": 2,
+    "test_deliverer.Events": 5,
+    "test_deliverer.TaskDependencies": 3,
+    "test_homemove.HomeMoveTest": 3,
+    "test_views.StoreAndProjectTests": 3,
+    "test_views.ContextStoreAndProjectTests": 3,
+    "test_views.LightOutput": 4,
+    "test_store_locks.StoreLocksTest": 4,
+    "test_workers_dispatch.Profiles": 5,
+    "test_agents_profiles.PmStateAndCliTests": 4,
+    "test_manager_seat.PMSeatAndAdopt": 4,
+    "test_mod_error_contract.ModErrorContractTest": 1,
+}
 
 # Modules or module.Class names that must not run beside other tests (shared machine-wide state: a fixed port, a
 # fixed path, a global lock, timing that breaks under load). They run one at a time after everything else.
@@ -66,8 +100,61 @@ STRIP_NAMES = {"CLAUDECODE", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_
                "GIT_COMMON_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG", "PYTHONPATH", "PYTHONSTARTUP"}
 GITCONFIG = "[user]\n\tname = run-checks\n\temail = run-checks@example.invalid\n[init]\n\tdefaultBranch = main\n"
 
-CHUNK = 10  # a TestCase class with more tests than this is split into chunks of about this many
+CHUNK = 10  # default max tests per shard (and bin capacity when packing small TestCase classes of one module)
 TAIL = 30  # lines of a failed command's output to show, as the verify file's `| tail -30` did
+RENDER_TAIL = 60  # render-check prints a compact multi-line report; keep all of it on failure
+RENDER_CHECK_MATCH = re.compile(r"^(?:mods/[^/]+/|tests/render_check)")
+RENDER_CHECK_EXCLUDE = "mods/pm-dash/skill/"
+RENDER_CHECK_SUN_LEN = 104  # macOS sun_path limit for <dir>/app/herdr-app.sock
+RENDER_NOT_JUDGED_MSG = "render-check 没有评判（见上面的 BLOCKED/NOT JUDGED），醒着屏幕再跑一次"
+
+
+def shard_chunk_limit(short, cls):
+    """Max tests per shard for module `short` and TestCase class `cls`."""
+    key = f"{short}.{cls}" if cls else short
+    if short in SPLIT_METHODS or key in SPLIT_METHODS:
+        return 1
+    if cls and key in SHARD_CHUNKS:
+        return SHARD_CHUNKS[key]
+    if short in SHARD_CHUNKS:
+        return SHARD_CHUNKS[short]
+    return CHUNK
+
+
+def shard_priority(short, cls, count, serial):
+    """Pool priority (higher runs sooner): LPT ordering so slow subprocess shards start immediately."""
+    if serial:
+        return -1
+    key = f"{short}.{cls}" if cls else short
+    if short in SPLIT_METHODS or key in SPLIT_METHODS:
+        return 2000
+    limit = shard_chunk_limit(short, cls)
+    if limit <= 2:
+        return 200 * count
+    if limit <= 3:
+        return 120 * count
+    if limit <= 5:
+        return 60 * count
+    return count
+
+
+def needs_render_check(paths):
+    """Whether any changed path touches a UI mod (mods/* excluding mods/pm-dash/skill/) or render_check itself."""
+    return any(RENDER_CHECK_MATCH.match(p) and not p.startswith(RENDER_CHECK_EXCLUDE) for p in paths)
+
+
+def staged_files(root):
+    """Staged file paths (`git diff --cached --name-only HEAD`) in pure Python, avoiding shell grep/ugrep traps."""
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "HEAD"],
+            cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return None, str(exc)
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}"
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()], ""
 
 
 # --- child side: list a group's tests, or run one shard, and write the result as JSON ---------------------------
@@ -89,8 +176,9 @@ def module_names(spec):
 
 
 def child_list(spec):
-    """{"shards": [[names, count, serial], ...], "total": n, "errors": [...]}: one shard per TestCase class, a class
-    of more than CHUNK tests in chunks of about CHUNK, one per method for SPLIT_METHODS; a whole module when it has
+    """{"shards": [[names, count, serial, priority], ...], "total": n, "errors": [...]}: splits modules into
+    shards using SHARD_CHUNKS / SPLIT_METHODS / CHUNK, and packs small normal TestCase classes within the same
+    module into CHUNK-sized bins to save interpreter startups; falls back to the whole module when it has
     load_tests or when the split does not add up to what unittest loads from it."""
     loader = unittest.TestLoader()
     shards, errors = [], []
@@ -102,31 +190,55 @@ def child_list(spec):
             continue
         short = modname.rsplit(".", 1)[-1]
         whole = loader.loadTestsFromModule(module).countTestCases()
-        mine = []  # (names to load, class or None, number of tests)
+        mine = []  # (names to load, class or None, number of tests, serial, priority)
         if not hasattr(module, "load_tests"):
+            packable = []  # (full class name, count) for small normal classes in this module
             for attr in dir(module):
                 obj = getattr(module, attr)
                 if not (isinstance(obj, type) and issubclass(obj, unittest.TestCase)):
                     continue
                 methods = [f"{modname}.{attr}.{m}" for m in loader.getTestCaseNames(obj)]
-                if short in SPLIT_METHODS:
-                    mine += [([m], attr, 1) for m in methods]
-                elif len(methods) > CHUNK:
-                    parts = -(-len(methods) // CHUNK)
-                    mine += [(methods[i::parts], attr, len(methods[i::parts])) for i in range(parts)]
-                elif methods:
-                    mine.append(([f"{modname}.{attr}"], attr, len(methods)))
-        if sum(n for _, _, n in mine) != whole:
-            mine = [([modname], None, whole)] if whole else []
-        for names, cls, n in mine:
-            serial = short in SERIAL or (cls is not None and f"{short}.{cls}" in SERIAL)
-            shards.append([names, n, serial])
+                if not methods:
+                    continue
+                serial = short in SERIAL or f"{short}.{attr}" in SERIAL
+                limit = shard_chunk_limit(short, attr)
+                if limit == 1:
+                    prio = shard_priority(short, attr, 1, serial)
+                    mine += [([m], attr, 1, serial, prio) for m in methods]
+                elif len(methods) > limit:
+                    parts = -(-len(methods) // limit)
+                    for i in range(parts):
+                        chunk = methods[i::parts]
+                        mine.append((chunk, attr, len(chunk), serial, shard_priority(short, attr, len(chunk), serial)))
+                elif serial or limit < CHUNK:
+                    mine.append(([f"{modname}.{attr}"], attr, len(methods), serial,
+                                 shard_priority(short, attr, len(methods), serial)))
+                else:
+                    packable.append((f"{modname}.{attr}", len(methods)))
+            if packable:
+                # First-fit decreasing packing within the same module (same isolation as `unittest <module>`).
+                bins = []  # ([class_names], total_tests)
+                for full_name, n in sorted(packable, key=lambda x: (-x[1], x[0])):
+                    for b in bins:
+                        if b[1] + n <= CHUNK:
+                            b[0].append(full_name)
+                            b[1] += n
+                            break
+                    else:
+                        bins.append([[full_name], n])
+                for names, n in bins:
+                    mine.append((names, None, n, False, n))
+        if sum(n for _, _, n, _, _ in mine) != whole:
+            serial = short in SERIAL
+            mine = [([modname], None, whole, serial, shard_priority(short, None, whole, serial))] if whole else []
+        for names, _cls, n, serial, prio in mine:
+            shards.append([names, n, serial, prio])
     if spec["kind"] == "discover":  # anything discover would find that the module walk above did not
         found = unittest.TestLoader().discover(spec["start"], pattern=spec["pattern"]).countTestCases()
-        listed = sum(n for _, n, _ in shards)
+        listed = sum(n for _, n, *_ in shards)
         if found != listed and not errors:
-            shards = [[["<discover>"], found, False]]
-    return {"shards": shards, "total": sum(n for _, n, _ in shards), "errors": errors}
+            shards = [[["<discover>"], found, False, found]]
+    return {"shards": shards, "total": sum(n for _, n, *_ in shards), "errors": errors}
 
 
 def child_run(spec, names):
@@ -200,6 +312,7 @@ class Run:
         self.keep = keep
         self.n = 0
         self.lock = threading.Lock()
+        self.extra_cleanup = []
         self.pool = Pool(jobs)
         self.serial_lock = threading.Lock()  # SERIAL shards hold it; they are queued last
 
@@ -282,6 +395,77 @@ class CommandCheck(Check):
         run.pool.add(self.cost, job)
 
 
+class FailedCheck(Check):
+    """A check that already failed before starting (e.g. git diff failed while checking render-check trigger)."""
+
+    def __init__(self, label, summary, detail=None):
+        super().__init__(label)
+        self._summary = summary
+        self._detail = detail or []
+
+    def schedule(self, run, report):
+        now = time.time()
+        self.started = self.ended = now
+        self.ok = False
+        self.summary = self._summary
+        self.detail = list(self._detail)
+        report(self)
+
+
+class RenderCheck(CommandCheck):
+    """Runs tests/render_check.py in parallel with the rest of the suite at top priority.
+
+    Exit 2 means BLOCKED / NOT JUDGED: explicitly reported and fails the run (exit 1) so a UI merge cannot
+    slip through without a real render judgement.
+    """
+
+    def __init__(self, root):
+        super().__init__("render-check", [sys.executable, str(root / "tests/render_check.py")], cost=20000)
+        self.root = root
+
+    def _argv_for(self, run):
+        argv = list(self.argv)
+        if os.name != "nt":
+            default_sock = self.root / "evidence/render-check/run/app/herdr-app.sock"
+            if len(str(default_sock).encode()) >= RENDER_CHECK_SUN_LEN:
+                cand = run.base / "rc"
+                if len(str(cand / "app/herdr-app.sock").encode()) >= RENDER_CHECK_SUN_LEN:
+                    cand = Path(tempfile.mkdtemp(prefix="dudu-rc-", dir="/tmp"))
+                    with run.lock:
+                        run.extra_cleanup.append(cand)
+                argv += ["--dir", str(cand)]
+        return argv
+
+    def schedule(self, run, report):
+        def job():
+            self.started = time.time()
+            folder = run.scratch()
+            log = folder / "out.log"
+            argv = self._argv_for(run)
+            try:
+                with open(log, "wb") as f:
+                    proc = subprocess.run(argv, cwd=self.root, stdout=f, stderr=subprocess.STDOUT,
+                                          stdin=subprocess.DEVNULL)
+            except OSError as exc:
+                self.ended = time.time()
+                self.ok = False
+                self.summary = f"cannot start {argv[0]}: {exc}"
+                self.detail = [str(exc)]
+                report(self)
+                return
+            text = log.read_text(encoding="utf-8", errors="replace")
+            self.ended = time.time()
+            self.ok = proc.returncode == 0
+            if not self.ok:
+                if proc.returncode == 2:
+                    self.summary = f"exit 2: {RENDER_NOT_JUDGED_MSG}"
+                else:
+                    self.summary = f"exit {proc.returncode}"
+                self.detail = text.splitlines()[-RENDER_TAIL:]
+            report(self)
+        run.pool.add(self.cost, job)
+
+
 def json_output(stdout):
     try:
         json.loads(stdout)
@@ -333,8 +517,9 @@ class TestGroup(Check):
             self.left = self.shards
             if not self.left:
                 return self.finish(report)
-            for names, count, serial in data["shards"]:
-                cost = 1000 if SPLIT_METHODS & set(names[0].split(".")) else count
+            for shard in data["shards"]:
+                names, count, serial = shard[:3]
+                cost = shard[3] if len(shard) > 3 else (2000 if SPLIT_METHODS & set(names[0].split(".")) else count)
                 run.pool.add(-1 if serial else cost, self.shard_job(run, report, names, serial))
         run.pool.add(10000, list_job)
 
@@ -385,43 +570,85 @@ class TestGroup(Check):
         report(self)
 
 
-def checks(root):
+def checks(root, render_check="never"):
     found = []
+    render_skipped = False
+    if render_check == "always":
+        found.append(RenderCheck(root))
+    elif render_check == "auto":
+        paths, err = staged_files(root)
+        if err:
+            found.append(FailedCheck("render-check", f"git diff --cached failed: {err}"))
+        elif needs_render_check(paths):
+            found.append(RenderCheck(root))
+        else:
+            render_skipped = True
     for mod in sorted(root.glob("mods/pm-*")):
         if mod.is_dir():
             found.append(CommandCheck(f"herdr-app check {mod.relative_to(root)}", ["herdr-app", "check", str(mod)]))
     for test in sorted(root.glob("mods/*/model.test.mjs")):
         rel = test.relative_to(root)
-        found.append(CommandCheck(f"node --test {rel}", ["node", "--test", str(rel)], cost=60))
+        cost = 1500 if rel.parts[1] == "pm-project" else 60
+        found.append(CommandCheck(f"node --test {rel}", ["node", "--test", str(rel)], cost=cost))
 
     def files(label, *paths):
         return TestGroup(f"unittest {label}", {"kind": "files", "files": list(paths)})
     found.append(files("tests/test_install.py", "tests/test_install.py"))
     found.append(files("tests/test_render_check_win.py", "tests/test_render_check_win.py"))
+    if (root / "tests/test_run_checks.py").is_file():
+        found.append(files("tests/test_run_checks.py", "tests/test_run_checks.py"))
     if (root / SAFETY_NET).is_dir():
         found.append(TestGroup("unittest scripts/tests (discover)",
                                {"kind": "discover", "start": SAFETY_NET, "pattern": "test_*.py"}))
     found.append(CommandCheck("pm.py state (JSON)", [sys.executable, f"{SCRIPTS}/pm.py", "state"],
                               validate=json_output, cost=40))
-    return found
+    return found, render_skipped
+
+
+def default_jobs():
+    """Default worker count: on macOS, cap to Performance cores (<= 14) to avoid E-core throttling and
+    XNU fork/APFS/pgrep contention observed above ~14-16 concurrent subprocess-heavy shards."""
+    cpus = os.cpu_count() or 4
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL, timeout=2)
+            if r.returncode == 0 and r.stdout.strip().isdigit():
+                p_cores = int(r.stdout.strip())
+                if p_cores > 0:
+                    return max(1, min(p_cores, 14))
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return max(1, min(cpus, 14))
+    return max(1, cpus)
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--jobs", "-j", type=int, default=os.cpu_count() or 4, help="processes at once (default: CPUs)")
+    p.add_argument("--jobs", "-j", type=int, default=default_jobs(),
+                   help="processes at once (default: P-cores capped at 14 on macOS, CPUs elsewhere)")
     p.add_argument("--only", action="append", default=[], help="run only the checks whose label contains this")
+    p.add_argument("--render-check", choices=("never", "auto", "always"), default="never",
+                   help="also run tests/render_check.py in parallel (auto: only when staged diff touches UI mods or render_check*)")
     p.add_argument("--keep", action="store_true", help="keep the logs and temporary homes, and say where")
     p.add_argument("--list", action="store_true", help="print the checks and exit")
     a = p.parse_args(argv)
     if Path.cwd().resolve() != ROOT:
         os.chdir(ROOT)
-    todo = [c for c in checks(ROOT) if not a.only or any(o in c.label for o in a.only)]
-    if a.list or not todo:
-        print("\n".join(c.label for c in todo) or "run_checks: no check matches")
-        return 0 if todo else 2
+    all_checks, render_skipped = checks(ROOT, render_check=a.render_check)
+    todo = [c for c in all_checks if not a.only or any(o in c.label for o in a.only)]
+    render_selected = not a.only or any(o in "render-check" for o in a.only)
+    if a.list or (not todo and not (render_skipped and render_selected)):
+        lines = [c.label for c in todo]
+        if a.list and render_skipped and render_selected:
+            lines.append("render-check (skipped: no UI files in staged diff)")
+        print("\n".join(lines) or "run_checks: no check matches")
+        return 0 if lines else 2
     run = Run(max(1, a.jobs), a.keep)
     out = threading.Lock()
     began = time.time()
+    if render_skipped and render_selected:
+        print("skip   0.0s  render-check  (no UI files in staged diff)", flush=True)
 
     def report(check):
         with out:
@@ -448,6 +675,8 @@ def main(argv=None):
         print(f"run_checks: logs in {run.base}")
     else:
         shutil.rmtree(run.base, ignore_errors=True)
+        for extra in run.extra_cleanup:
+            shutil.rmtree(extra, ignore_errors=True)
     return 1 if failed else 0
 
 

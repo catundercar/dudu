@@ -27,6 +27,7 @@ def _request_from_args(a: Any) -> DispatchRequest:
     return DispatchRequest(
         title=getattr(a, "title", None),
         repo=getattr(a, "repo", ".") or ".",
+        folder=getattr(a, "folder", None),
         branch=getattr(a, "branch", None),
         label=getattr(a, "label", None),
         path=getattr(a, "path", None),
@@ -56,6 +57,8 @@ def _request_from_args(a: Any) -> DispatchRequest:
         subplan=getattr(a, "subplan", None),
         no_review=bool(getattr(a, "no_review", False)),
         async_=bool(getattr(a, "async_", False)),
+        on=getattr(a, "on", None),
+        remote_repo=getattr(a, "remote_repo", None),
     )
 
 
@@ -152,6 +155,7 @@ def register_dispatch_command(sub):
     d = sub.add_parser("dispatch")
     d.add_argument("title", nargs="?", help="the task's title (default with --task: that task's)")
     d.add_argument("--repo", default=".")
+    d.add_argument("--folder", help="target folder alias or path when a project links multiple workspace folders")
     d.add_argument("--branch", help="the worktree's new branch (not with --here)")
     d.add_argument("--label", help="the worktree's label (default: from the task id or title)")
     d.add_argument("--path", help="worktree path (default: herdr's choice; in the desktop app ~/.herdr/worktrees/…); "
@@ -189,5 +193,10 @@ def register_dispatch_command(sub):
     d.add_argument("--step", action="append", metavar="TEXT", help="one outer plan step (repeat for more)")
     d.add_argument("--outer-plan", action="append", metavar="STEPS", help="explicitly set outer task plan steps")
     d.add_argument("--no-review", action="store_true", help="skip plan-driven automatic review when worker reports --commit")
+    d.add_argument("--on", metavar="MACHINE",
+                   help="run the worker on a machine added to hc (`hc machine ls`): worktree and terminal there "
+                        "(`<machine>/t7`), PM and ledger here; reports come back through its outbox")
+    d.add_argument("--remote-repo", metavar="PATH",
+                   help="with --on: the project's clone on that machine (default: config.json machines.<m>.repos.<slug>)")
     d.add_argument("--async", dest="async_", action="store_true",
                    help="return immediately after starting the worker terminal and deliver its brief in the background")

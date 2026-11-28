@@ -22,7 +22,7 @@ from ..messaging.router import UNDELIVERED_P1_P3_ALERT_MS, UNDELIVERED_P4_ALERT_
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
-from ..store import file_lock, lock_file, replace_task_file, unlock_file, valid_task_id, valid_task_number, write_atomic
+from ..store import file_lock, lock_file, replace_task_file, unlock_file, valid_slug, valid_task_id, valid_task_number, write_atomic
 from ..messaging.router import pending_items
 
 REPORT_WIDTH = 2500  # the report `wait` prints; reports are asked to stay under 600, this only stops a runaway
@@ -244,22 +244,34 @@ class Delivery:
     def __init__(
         self,
         ctx: Context,
-        repo: str | Path,
+        repo: str | Path = "",
         *,
+        slug: str | None = None,
         watchers: Iterable[Any] | None = None,
         holds: Iterable[Any] | None = None,
         settle: float | None = None,
     ) -> None:
         self.ctx = ctx
         self.repo = str(repo) if repo else ""
+        if slug and valid_slug(slug):
+            self.slug = slug
+        elif self.repo:
+            self.slug = ctx.store.folder_project_slug(self.repo) or project_slug(self.repo)
+        else:
+            self.slug = ""
         self._watchers: tuple[Any, ...] = tuple(ctx.deliver_watchers if watchers is None else watchers)
         self._holds: tuple[Any, ...] = tuple(ctx.deliver_holds if holds is None else holds)
         self._settle = SETTLE if settle is None else settle
         self._projects = ProjectRegistry(ctx)
         self._ledger = Ledger(ctx)
 
+    def _project_files(self) -> Any:
+        if self.slug:
+            return self.ctx.home.project(self.slug)
+        return self.ctx.home.project_for(self.repo)
+
     def _project_dir(self) -> Path:
-        return self.ctx.home.project_for(self.repo).ensure()
+        return self._project_files().ensure()
 
     def _read_delivered_state(self) -> tuple[int, list[list[int]]]:
         """(offset, received_ranges) from delivered.json: `offset` is how far the deliverer has sent or skipped,
@@ -284,6 +296,80 @@ class Delivery:
     def received_ranges(self) -> list[list[int]]:
         """Normalized `[start, end]` byte ranges the PM has acknowledged receiving (inbound receipt)."""
         return self._read_delivered_state()[1]
+
+    def is_received(self, start: int, end: int) -> bool:
+        """Whether `[start, end)` is completely covered by acknowledged `received` ranges in `delivered.json`."""
+        return _is_covered(self.received_ranges(), start, end)
+
+    def batch_already_answered(self, start: int, end: int) -> bool:
+        """True when `conversation.jsonl` already contains a non-notice PM reply covering deliver batch `[start, end)`."""
+        if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end):
+            return False
+        _, events = Conversation(self.ctx, self.repo, slug=self.slug or None).events_after(start)
+        for _, e in events:
+            if e.get("type") != "pm" or e.get("notice") or e.get("after") != "deliver":
+                continue
+            b = e.get("batch")
+            if (isinstance(b, list) and len(b) == 2
+                    and isinstance(b[0], int) and not isinstance(b[0], bool)
+                    and isinstance(b[1], int) and not isinstance(b[1], bool)
+                    and b[0] <= start and b[1] >= end):
+                return True
+        return False
+
+    def _load_event_tasks(self, events: list[tuple[int, dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+        tasks: dict[str, dict[str, Any]] = {}
+
+        def _load_one(tid: Any) -> dict[str, Any]:
+            try:
+                if not tid or tid in tasks:
+                    return tasks.get(tid, {}) if isinstance(tid, str) else {}
+            except TypeError:
+                return {}
+            try:
+                loaded = json.loads(self.ctx.home.task(tid).read_text())
+            except (OSError, ValueError):
+                loaded = {}
+            if not isinstance(loaded, dict):
+                loaded = {}
+            tasks[tid] = loaded
+            return loaded
+
+        for _, e in events:
+            t = _load_one(e.get("task"))
+            rev_parent = e.get("review_of") or t.get("review_of")
+            if rev_parent:
+                _load_one(rev_parent)
+        return tasks
+
+    def batch_has_live_news(self, start: int, end: int) -> bool:
+        """Re-evaluate byte stretch `[start, end)` against current `conversation.jsonl` (up to EOF) and current
+        disk tasks. Returns False only when real events existed in `[start, end)` and every single one has since
+        been superseded by a PM action or moved on; fails open (True) on missing/synthetic logs."""
+        if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end):
+            return True
+        log = self._project_dir() / "conversation.jsonl"
+        try:
+            if not log.exists() or log.stat().st_size < end:
+                return True
+        except OSError:
+            return True
+        eof, events = Conversation(self.ctx, self.repo, slug=self.slug or None).events_after(start)
+        if eof < end:
+            return True
+        orig_ids = {id(e) for at, e in events if at < end}
+        if not orig_ids:
+            return True
+        tasks = self._load_event_tasks(events)
+        _, live_items = pending_items(
+            events,
+            self._projects.pm_panes(self.slug or self.repo),
+            tasks,
+            eof,
+            self.ctx.clock.datetime_now(),
+            0,
+        )
+        return any(id(it["event"]) in orig_ids for it in live_items)
 
     def advance_delivered(self, offset: int) -> None:
         """Move the outbound delivered cursor forward to `offset`, never back (except past a replaced log).
@@ -325,7 +411,7 @@ class Delivery:
 
     def is_running(self) -> bool:
         """Whether a deliverer holds the project's lock now (read-only: creates no files if absent)."""
-        lock_path = self.ctx.home.project_for(self.repo).deliver_lock
+        lock_path = self._project_files().deliver_lock
         if not lock_path.exists():
             return False
         try:
@@ -345,9 +431,15 @@ class Delivery:
         }
 
     def _ensure_running_impl(self) -> None:
-        if not self._projects.app_pm(self.repo) or self.is_running():
+        pm_target = self.slug or self.repo
+        if not pm_target or not self._projects.app_pm(pm_target) or self.is_running():
             return
-        self.ctx.procs.spawn_pm(["deliver", self.repo], env=self.deliverer_env(), cwd=self.ctx.home.root)
+        spawn_target = (
+            self.repo
+            if (self.repo and (not self.slug or project_slug(self.repo) == self.slug))
+            else self.slug
+        )
+        self.ctx.procs.spawn_pm(["deliver", spawn_target], env=self.deliverer_env(), cwd=self.ctx.home.root)
 
     def ensure_running(self) -> None:
         """Make sure the project's deliverer runs: start `pm.py deliver` in a process of its own unless one holds
@@ -363,7 +455,7 @@ class Delivery:
         event since it was claimed. What came before is the handover's, not news."""
         claimed = str((rec or {}).get("claimed") or "")[:16]
         if claimed and not (self._project_dir() / "delivered.json").exists():
-            end, events = Conversation(self.ctx, self.repo).events_after(0)
+            end, events = Conversation(self.ctx, self.repo, slug=self.slug or None).events_after(0)
             self.advance_delivered(next((at for at, e in events if str(e.get("at") or "")[:16] >= claimed), end))
 
     def watched_terminals(self) -> set[str]:
@@ -407,26 +499,13 @@ class Delivery:
     def pending_batch(self, offset: int | None = None, settle: bool = False) -> tuple[int, int, list[dict[str, Any]]]:
         """(start, end, items): what the log holds for the PM after `offset` (default: the delivered mark)."""
         start = self.delivered_offset() if offset is None else offset
-        end, events = Conversation(self.ctx, self.repo).events_after(start)
+        end, events = Conversation(self.ctx, self.repo, slug=self.slug or None).events_after(start)
         if end < start:  # log was replaced by a shorter file: events_after read from 0
             start = 0
-        tasks: dict[str, dict[str, Any]] = {}
-        for _, e in events:  # the file of every task an entry names, read once (pending_items judges them)
-            task = e.get("task")
-            try:
-                if not task or task in tasks:
-                    continue
-            except TypeError:  # not a name a file can have; pending_items treats it as before
-                continue
-            try:
-                tasks[task] = json.loads(self.ctx.home.task(task).read_text())
-            except (OSError, ValueError):
-                tasks[task] = {}
-            if not isinstance(tasks[task], dict):
-                tasks[task] = {}
+        tasks = self._load_event_tasks(events)
         end, items = pending_items(
             events,
-            self._projects.pm_panes(self.repo),
+            self._projects.pm_panes(self.slug or self.repo),
             tasks,
             end,
             self.ctx.clock.datetime_now(),
@@ -462,7 +541,7 @@ class Delivery:
 
     def _overdue_messages(self) -> dict[str, Any] | None:
         """Mailbox messages (not batches: their events are the batch above) still not typed past their SLA."""
-        root = self.ctx.home.project_for(self.repo).pm_mailbox
+        root = self._project_files().pm_mailbox
         if not root.is_dir():
             return None
         now_ms = int(self.ctx.clock.time() * 1000)
@@ -494,10 +573,10 @@ class Delivery:
         Surfaces once the oldest pending event has waited at least `deliver_warn_seconds` (default 900 s), or
         sooner (at most 60 s) when the deliverer is not running or the PM is offline/blocked/error. Creates no
         files or folders."""
-        rec = self._projects.app_pm(self.repo)
+        rec = self._projects.app_pm(self.slug or self.repo)
         if not rec:
             return None
-        proj = self.ctx.home.project_for(self.repo)
+        proj = self._project_files()
         log = proj.conversation
         try:
             log_size = log.stat().st_size
@@ -510,7 +589,7 @@ class Delivery:
         else:
             claimed = str(rec.get("claimed") or "")[:16]
             if claimed:
-                end_all, all_ev = Conversation(self.ctx, self.repo).events_after(0)
+                end_all, all_ev = Conversation(self.ctx, self.repo, slug=self.slug or None).events_after(0)
                 start = next((at for at, e in all_ev if str(e.get("at") or "")[:16] >= claimed), end_all)
             else:
                 start = 0
@@ -747,7 +826,7 @@ class Delivery:
         """Format waiting events for a synchronous turn hook without running slow `git` subprocesses or
         committing `ack_delivery` until the caller has flushed stdout. Returns `(start, end, text)` or `None`."""
         (self._project_dir() / "turn-cause.json").unlink(missing_ok=True)
-        if not self._projects.app_pm(self.repo):
+        if not self._projects.app_pm(self.slug or self.repo):
             return None
         start, end, items = self.pending_batch(settle=True)
         if items:
@@ -806,8 +885,8 @@ def deliverer_env() -> dict[str, str]:
     return Delivery(Context.from_env(), "").deliverer_env()
 
 
-def deliver_later(repo: str | Path) -> None:
-    Delivery(Context.from_env(), repo)._ensure_running_impl()
+def deliver_later(repo: str | Path, *, slug: str = "") -> None:
+    Delivery(Context.from_env(), repo, slug=slug or None)._ensure_running_impl()
 
 
 _DEFAULT_DELIVER_LATER = deliver_later

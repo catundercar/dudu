@@ -1,11 +1,13 @@
 import { View, div, svg, PathBuilder } from 'gpui-kit';
 import { v_flex, h_flex, Scrollbar, Popup } from 'gpui-base';
 import { theme, home, appHome, exec, readTextFile, window as appWindow, watchFolder, terminals, agents, panes, run, props, closeOverlay, openOverlay, layout as desktopLayout } from 'herdr';
-import { setupState, shouldRecheckSetup, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts, wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, taskSteps, taskDependencies, taskNumber, formatTaskNumber, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime, tooltipLayout } from './model.js';
-import { page, pageView, pageHeader, projectHeader, windowControlsBar, keepPress, dialogView, initDialog, restoreProject, readLines, archivePopup, NEW_DIALOG, openProject, showPage } from './projects.js';
+import { setupState, shouldRecheckSetup, setupCoversPage, fitBoard, withAlpha, solidText, isDarkTheme, cleanTaskLog, hoverCardPosition, newEvents, pmId, taskId, eventText, terminalFor, terminalTargetFor, focusPlan, pmColor, counts, projectCounts, projectName, wireFlows, reviewWorking, word, label, taskStatusText, isClosedTask, taskSteps, taskDependencies, taskNumber, formatTaskNumber, mergeStates, cachedRemoteStates, LEDGER_HOME_SH, remoteStateCommand, pmStatusText, scopeState, archiveThreads, disconnected, escapeTarget, DROPPED, endedTime, tooltipLayout, readTokensExpanded, writeTokensExpanded, parseTokenAnalytics } from './model.js';
+import { page, pageView, pageHeader, projectHeader, windowControlsBar, keepPress, dialogView, initDialog, restoreProject, readLines, archivePopup, renameDialogSpec, NEW_DIALOG, openProject, showPage } from './projects.js';
+import { renderTokenPulsePill, renderTokenShelf } from './tokens.js';
 
 import { FlowLayer, boardVisible } from './flow.js';
 import { execPython, NO_PYTHON } from './python.js';
+import { createErrorLogger } from './error_log.js';
 import { renderStepsCard, renderDepsCard } from './steps.js';
 
 // Keep the full mods/<name>/ prefix: Herdr rewrites it when cloning this mod.
@@ -48,6 +50,9 @@ export default class PmDash extends View {
     this.flowLayer = cx.new(FlowLayer);
     this.flowKey = ''; this.hoverTask = null;
     this.hoverTaskCard = null; this.hoverTaskTimer = null; this.hoverTaskInteractive = false; this.hoverTaskRect = null;
+    this.tokenData = null; this.tokensLoading = false; this.tokensFetchedAt = 0; this.tokensRetryAfter = 0; this.tokensFailedCount = 0; this.tokensScheduled = false; this.tokensExpanded = readTokensExpanded(globalThis.localStorage);
+    this.tokensRange = 'today'; this.tokensMetric = 'tokens'; this.tokensDim = 'task'; this.tokensAgent = 'all';
+    this.hoverTokenBar = null;
     this.shownStatus = {}; this.shownLive = {}; this.hoverPm = null;
     this.shown = {}; this.statuses = {}; this.tags = {}; this.nudges = {};
     this.serial = 0; this.trip = null; this.lastEvent = Date.now();
@@ -74,6 +79,14 @@ export default class PmDash extends View {
     this.refresh(cx);
     cx.spawn(async cx => {
       try {
+        const cached = parseTokenAnalytics(await readTextFile(await this.homeKnown + '/cache/token-analytics.json'));
+        if (cached && !this.tokenData) { this.tokenData = cached; cx.notify(); }
+      } catch (_) { /* Absent or invalid token cache does not block Board render. */ }
+      this.refreshTokens(cx);
+      cx.timer.every(30000, cx => this.refreshTokens(cx));
+    });
+    cx.spawn(async cx => {
+      try {
         const cached = cachedRemoteStates(await readTextFile(await this.homeKnown + '/cache/remote-states.json'));
         if (cached) { this.remoteStates = cached; this.publish(cx); }
       } catch (_) { /* An absent, unreadable or invalid cache does not block live reads. */ }
@@ -85,19 +98,21 @@ export default class PmDash extends View {
     cx.timer.every(10000, cx => this.refresh(cx));
     this.armIdle(cx);
   }
-  // Watch <ledger home>/tasks. A different home (the first state correcting the
-  // fallback, or PM_HOME changing) arms a new watcher; the old one stops at its next wake.
+  // Watch <ledger home>/tasks and <ledger home>/pms. A different home (the first state correcting
+  // the fallback, or PM_HOME changing) arms new watchers; the old ones stop at their next wake.
   setLedgerHome(path, cx) {
     if (typeof path !== 'string' || !path || path === this.ledgerHome) return;
     this.ledgerHome = path; this.resolveHome(path);
-    cx.spawn(async cx => {
-      try {
-        while (this.ledgerHome === path) {
-          await watchFolder(path + '/tasks');
-          if (this.ledgerHome === path) this.refresh(cx);
-        }
-      } catch (_) { /* Missing folder/watch failure: the 10s fallback remains active. */ }
-    });
+    for (const sub of ['tasks', 'pms']) {
+      cx.spawn(async cx => {
+        try {
+          while (this.ledgerHome === path) {
+            await watchFolder(path + '/' + sub);
+            if (this.ledgerHome === path) this.refresh(cx);
+          }
+        } catch (_) { /* Missing folder/watch failure: the 10s fallback remains active. */ }
+      });
+    }
   }
   text(key, ...args) { return word(this.state.lang, key, ...args); }
   today() {
@@ -105,7 +120,8 @@ export default class PmDash extends View {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
   openNew() { openOverlay(NEW_DIALOG); }
-  openArchive(pm) { openOverlay(archivePopup(pm, archiveThreads(this.localState, pm).length)); }
+  openRename(pm) { openOverlay(renameDialogSpec(pm)); }
+  openArchive(pm, machine = '') { openOverlay(archivePopup(pm, archiveThreads(this.allState, pm).length, machine)); }
   restore(card, cx) { restoreProject(this, card, cx); }
   // Another board (all projects, or one): its rows start over, with no packets for what was already there.
   rescope(scope, cx) {
@@ -113,6 +129,17 @@ export default class PmDash extends View {
     this.shown = {}; this.shownStatus = {}; this.shownLive = {}; this.statuses = {}; this.hoverTask = null; this.hoverPm = null;
     this.endedOpen.clear(); this.hoverEnded = null;
     this.publish(cx);
+  }
+  logModError(source, error) {
+    if (typeof createErrorLogger !== 'function') return;
+    if (!this.errorLogger) {
+      this.errorLogger = createErrorLogger({
+        mod: 'pm-dash',
+        exec,
+        getLedgerHome: () => this.ledgerHome || (home() + '/.dudu'),
+      });
+    }
+    this.errorLogger.record(source, error);
   }
   async checkSetup() {
     if (this.setupChecking) return;
@@ -123,10 +150,12 @@ export default class PmDash extends View {
       if (result.code !== 0) throw new Error(result.stderr || result.stdout || `setup.py: ${result.code}`);
       const status = JSON.parse(result.stdout);
       this.setupStatus = setupState(status); this.setupError = status.error || '';
+      if (this.setupError) this.logModError('checkSetup', this.setupError);
     } catch (error) {
       this.setupStatus = 'missing';
       // No Python to run setup.py: the card says how to get one instead of an error.
       this.noPython = error?.message === NO_PYTHON; this.setupError = this.noPython ? '' : String(error);
+      if (!this.noPython) this.logModError('checkSetup', error);
     } finally {
       this.setupChecking = false;
     }
@@ -157,6 +186,7 @@ export default class PmDash extends View {
         if (this.setupDone) this.refresh(cx);
       } catch (error) {
         this.noPython = error?.message === NO_PYTHON; this.setupError = this.noPython ? '' : String(error);
+        if (!this.noPython) this.logModError('setUp', error);
       }
       finally { this.setupBusy = false; run('pm-nav.setup-changed'); cx.notify(); }
     });
@@ -209,19 +239,67 @@ export default class PmDash extends View {
         this.setLedgerHome(next.home, cx);
         this.publish(cx);
         if (!page().project && page().view !== 'board') { this.lines = await readLines(next.pms); cx.notify(); }
-      } catch (e) { this.error = String(e); cx.notify(); }
+      } catch (e) { this.error = String(e); this.logModError('refresh', e); cx.notify(); }
       finally {
         this.loading = false;
         if (this.again) { this.again = false; this.refresh(cx); }
       }
     });
   }
+  toggleTokens(cx) {
+    this.tokensExpanded = !this.tokensExpanded;
+    this.hoverTokenBar = null;
+    writeTokensExpanded(globalThis.localStorage, this.tokensExpanded);
+    cx.notify();
+  }
+  refreshTokens(cx, { force = false } = {}) {
+    if (this.tokensLoading) return;
+    if (!force) {
+      if (this.tokensRetryAfter > Date.now()) return;
+      if (!props()?.overlay && !boardVisible(desktopLayout())) return;
+      const v = page();
+      if (!v.project && v.view !== 'board') return;
+    }
+    this.tokensLoading = true;
+    if (force) cx.notify();
+    cx.spawn(async cx => {
+      let ok = false;
+      try {
+        const result = await execPython(exec, [appHome() + '/' + MOD_FOLDER + 'skill/scripts/pm.py', 'tokens', '--json']);
+        if (result.code === 0) {
+          const next = parseTokenAnalytics(result.stdout);
+          if (next) {
+            this.tokenData = next;
+            ok = true;
+            this.tokensFailedCount = 0;
+            this.tokensRetryAfter = 0;
+          } else {
+            this.logModError('refreshTokens', 'invalid token analytics payload');
+          }
+        } else {
+          this.logModError('refreshTokens', result.stderr || result.stdout || `pm.py tokens: ${result.code}`);
+        }
+      } catch (e) { this.logModError('refreshTokens', e); /* Token analytics failures never block the Board. */ }
+      finally {
+        this.tokensFetchedAt = Date.now();
+        if (!ok) {
+          this.tokensFailedCount = (this.tokensFailedCount || 0) + 1;
+          this.tokensRetryAfter = this.tokensFetchedAt + Math.min(300000, 30000 * Math.pow(2, this.tokensFailedCount - 1));
+        }
+        this.tokensLoading = false;
+        cx.notify();
+      }
+    });
+  }
   refreshRemote(cx) {
-    if (this.remoteLoading || (!props()?.overlay && !boardVisible(desktopLayout()))) return;
+    const startedNow = Date.now();
+    if ((this.remoteLoading && startedNow - (this.remoteLoadingAt || 0) < 18000) ||
+        (!props()?.overlay && !boardVisible(desktopLayout()))) return;
     this.remoteLoading = true;
+    this.remoteLoadingAt = startedNow;
     cx.spawn(async cx => {
       try {
-        const result = await exec('hc', ['machine', 'ls', '--json'], { timeout: 4000 });
+        const result = await exec('hc', ['machine', 'ls', '--json'], { timeout: 6000 });
         if (result.code !== 0) return;
         const listing = JSON.parse(result.stdout);
         const machines = Array.isArray(listing) ? listing : listing?.machines;
@@ -231,7 +309,7 @@ export default class PmDash extends View {
         for (const name of Object.keys(this.remoteStates)) if (!names.includes(name)) delete this.remoteStates[name];
         await Promise.all(names.map(async name => {
           try {
-            const r = await exec('hc', ['exec', '--on', name, remoteStateCommand()], { timeout: 4000 });
+            const r = await exec('hc', ['exec', '--on', name, remoteStateCommand()], { timeout: 10000 });
             if (r.code !== 0) return;
             const state = JSON.parse(r.stdout);
             if (['pms', 'tasks', 'events'].every(k => Array.isArray(state[k]))) this.remoteStates[name] = state;
@@ -239,7 +317,7 @@ export default class PmDash extends View {
         }));
         this.publish(cx);
       } catch (_) { /* Discovery failures leave the last good board intact. */ }
-      finally { this.remoteLoading = false; }
+      finally { if (this.remoteLoadingAt === startedNow) this.remoteLoading = false; }
     });
   }
   publish(cx) {
@@ -410,19 +488,21 @@ export default class PmDash extends View {
     const canNotify = cx?.notify && cx?.phase?.() !== 'render';
     if (!force && this.hoverTaskInteractive && this.hoverTask) {
       if (this.hoverTaskCard !== this.hoverTask) this.leaveTaskHover(this.hoverTask, cx);
-      const hadOther = this.hoverEnded !== null || Boolean(this.hoverTip) || (includePm && this.hoverPm !== null);
+      const hadOther = this.hoverEnded !== null || Boolean(this.hoverTip) || Boolean(this.hoverTokenBar) || (includePm && this.hoverPm !== null);
       this.hoverEnded = null;
       this.hoverTip = '';
+      this.hoverTokenBar = null;
       if (includePm) this.hoverPm = null;
       if (hadOther && canNotify) cx.notify();
       return;
     }
     this.hoverTaskTimer?.cancel?.();
     this.hoverTaskTimer = null;
-    const had = Boolean(this.hoverTask) || Boolean(this.hoverTaskCard) || this.hoverEnded !== null || Boolean(this.hoverTip) || (includePm && this.hoverPm !== null);
+    const had = Boolean(this.hoverTask) || Boolean(this.hoverTaskCard) || this.hoverEnded !== null || Boolean(this.hoverTip) || Boolean(this.hoverTokenBar) || (includePm && this.hoverPm !== null);
     this.hoverTask = null; this.hoverTaskCard = null; this.hoverTaskInteractive = false; this.hoverTaskRect = null;
     this.hoverEnded = null;
     this.hoverTip = '';
+    this.hoverTokenBar = null;
     if (includePm) this.hoverPm = null;
     if (had && canNotify) cx.notify();
   }
@@ -501,7 +581,7 @@ export default class PmDash extends View {
     const steps = showDeps ? null : taskSteps(row, { lang });
     const hasSteps = !showDeps && Boolean(steps?.steps?.length);
     const pm = this.state.pms.find(p => p.name === row.pm);
-    const project = !this.state.project ? (pm?.project || row.project || (pm?.sourceName ?? pm?.name) || '') : '';
+    const project = !this.state.project ? (projectName(pm) || row.project || '') : '';
     const rowNum = formatTaskNumber(row);
     const closedMeta = isClosedTask(row) ? this.text('closedReattach') : '';
     const metaText = [rowNum, project, closedMeta, row.branch].filter(Boolean).join(' · ');
@@ -813,10 +893,32 @@ export default class PmDash extends View {
     const said = e.review ? `${label(this.state.lang, e.review)}${text ? `: ${text}` : ''}` : text;
     return task ? this.text('line', title, said || taskStatusText(this.state.lang, task)) : said;
   }
+  warmRemoteCache(cx) {
+    if (Object.keys(this.remoteStates || {}).length > 0) return;
+    cx.spawn(async cx => {
+      try {
+        const base = String(this.ledgerHome || (await this.homeKnown) || '').trim().replace(/[\\/]+$/, '');
+        if (!base) return;
+        const cached = cachedRemoteStates(await readTextFile(base + '/cache/remote-states.json'));
+        if (cached && Object.keys(this.remoteStates || {}).length === 0) {
+          this.remoteStates = cached;
+          this.publish(cx);
+        }
+      } catch (_) { /* Best-effort warm before live refresh finishes. */ }
+    });
+  }
   render(cx) {
     if (this.dialog) return dialogView(this, theme());
     const onStage = !props()?.overlay && boardVisible(desktopLayout());
-    if (onStage && !this.onStage) cx.timer.after(0, () => this.keys.focus());
+    if (onStage && !this.onStage) {
+      cx.timer.after(0, tcx => {
+        this.keys.focus();
+        if (tcx) {
+          this.warmRemoteCache(tcx);
+          this.refreshRemote(tcx);
+        }
+      });
+    }
     if (!onStage && this.onStage) this.clearHover(null, true, true);
     this.onStage = onStage;
     // Esc, one layer a press (escapeTarget). A dialog over the page has the keyboard: its Esc closes only it.
@@ -824,11 +926,12 @@ export default class PmDash extends View {
       .on_mouse_down('left', () => this.keys.focus())
       .on_key_down((e, cx) => {
         const to = e.keystroke === 'escape' ? escapeTarget(this.onStage, page(),
-          { hoverCard: Boolean(this.hoverTask) || this.peeking(), ended: this.endedOpen.size > 0 }) : null;
+          { hoverCard: Boolean(this.hoverTask) || this.peeking(), ended: this.endedOpen.size > 0, tokens: Boolean(this.tokensExpanded) }) : null;
         if (!to) return;
         cx.stop_propagation();
         if (to.hoverCard) { this.clearHover(cx, false, true); }
         else if (to.ended) { this.endedOpen.clear(); cx.notify(); }
+        else if (to.tokens) { this.toggleTokens(cx); }
         else if (to.project) openProject(to.project, this.allState.pms.find(p => p.name === to.project)?.machine);
         else if (to.view) showPage(to.view);
         // The same way back as a second Projects click; without pm-nav there is none, so the workspace.
@@ -838,7 +941,20 @@ export default class PmDash extends View {
       .child(this.content(cx));
   }
   content(cx) {
-    if (this.setupStatus === null || this.setupStatus === 'missing') return this.setupView(theme());
+    if (setupCoversPage(this.setupStatus, this.allState)) return this.setupView(theme());
+    const missing = this.setupStatus === 'missing', body = this.pageContent(cx);
+    if (!missing) return body;
+    // Set up is missing here but other machines' projects show: a slim notice above them.
+    const t = theme();
+    return v_flex().id('pm-setup-local').size_full().min_w(0).min_h(0).bg(t.canvas)
+      .child(h_flex().flex_none().mx(16).mt(10).px(12).py(8).gap(10).rounded(10).bg(t.surface).items_center()
+        .text_size(12.5).text_color(t.muted)
+        .child(div().flex_1().min_w(0).whitespace_normal()
+          .child(this.setupError || (this.noPython ? this.text(appWindow()?.platform === 'windows' ? 'noPythonWindows' : 'noPython') : this.text('setupLocal'))))
+        .child(this.setupButton(t, 'setup', true)))
+      .child(div().flex_1().min_h(0).min_w(0).child(body));
+  }
+  pageContent(cx) {
     const t = theme(), view = page(), scope = view.project || '';
     if (scope !== this.scope) cx.timer.after(0, cx => this.rescope(scope, cx));
     if (!scope && view.view !== 'board') {
@@ -856,6 +972,10 @@ export default class PmDash extends View {
       .child(this.board(cx));
   }
   board(cx) {
+    if (this.tokensFetchedAt === 0 && !this.tokensLoading && !this.tokensScheduled) {
+      this.tokensScheduled = true;
+      cx.timer.after(0, cx => { this.tokensScheduled = false; this.refreshTokens(cx); });
+    }
     const g = this.geometry(), terms = terminals(), live = agents(), t = theme();
     const px = n => n * g.scale, font = n => Math.max(10, px(n));
     const rows = g.rows.map(r => ['label', 'junction', 'ended', 'day'].includes(r.type) ? r : this.presentation(r, terms, live));
@@ -985,7 +1105,7 @@ export default class PmDash extends View {
         .when(current, el => el.bg(t.raised)).text_color(current ? t.foreground : t.muted)
         .child(this.dot(color, true, t, 6))
         .child(div().max_w(g.frame.wide ? 95 : 160).truncate().flex_shrink_0().text_size(12).font_semibold().text_color(t.foreground)
-          .child(pm?.project || (pm?.sourceName ?? pm?.name) || this.text('noPm')))
+          .child(projectName(pm) || this.text('noPm')))
         .child(div().flex_1().min_w(0).truncate().text_size(12)
           .child(`${current && tr.replay ? this.text('replay') : ''}${this.eventLine(e)}`)));
     }
@@ -1023,14 +1143,17 @@ export default class PmDash extends View {
         .child(this.setupButton(t, 'update', true))))
       .when(Boolean(this.setupError || this.setupDone), el => el.child(div().mt(8).whitespace_normal().text_size(12.5)
         .text_color(this.setupError ? t.blocked : t.muted).child(this.setupError || this.text('setupDone'))))
-      .child(h_flex().flex_none().mt(14).gap(small ? 12 : 24).items_start().justify_between()
-        .child(v_flex().flex_1().min_w(0).gap(6)
+      .child((g.frame.width < 880 ? v_flex().flex_none().mt(14).gap(12) : h_flex().flex_none().mt(14).gap(small ? 12 : 24).items_start().justify_between())
+        .child(v_flex().when(g.frame.width >= 880, el => el.flex_1().min_w(0)).gap(6)
           .child(h_flex().flex_wrap().gap(5).text_size(small ? 16 : 22).font_semibold()
             .child(div().child(this.text('summaryLead', this.state.pms.length, total.running)))
             .child(div().text_color(total.waiting ? t.blocked : t.foreground).child(this.text('summaryWaiting', total.waiting))))
-          .child(div().h(36).overflow_hidden().whitespace_normal().text_size(13.5).line_height('18px').text_color(t.muted).child(total.conclusion)))
-        .child(stats))
+          .child(div().max_h(36).overflow_hidden().whitespace_normal().text_size(13.5).line_height('18px').text_color(t.muted).child(total.conclusion)))
+        .child(h_flex().flex_none().flex_wrap().gap(10).items_center().child(renderTokenPulsePill(this, t, small)).child(stats)))
       .child(main);
+    const body = v_flex().id('board-scroll-body').w(g.frame.width).flex_none().bg(t.canvas)
+      .child(card)
+      .child(renderTokenShelf(this, g, t));
     return keepPress(this, v_flex().id('root')).w_full().flex_1().min_h(0).bg(t.canvas).text_color(t.foreground).text_size(13)
       .on_hover((over, cx) => { if (!over) this.clearHover(cx, true); })
       .on_mouse_move((event, cx) => {
@@ -1044,7 +1167,7 @@ export default class PmDash extends View {
       .on_size_change((size,cx) => { if (size.width !== this.size.width || size.height !== this.size.height) { this.size=size; this.clearHover(cx, false, true); cx.notify(); } })
       .child(div().relative().flex_1().min_h(0).min_w(0).w_full()
         .child(div().id('scroll').size_full().overflow_scroll()
-          .on_scroll_wheel((_event, cx) => { if (this.hoverTask || this.hoverEnded !== null) this.clearHover(cx, false, true); }).child(card))
+          .on_scroll_wheel((_event, cx) => { if (this.hoverTask || this.hoverEnded !== null || this.hoverTokenBar) this.clearHover(cx, false, true); }).child(body))
         .child(Scrollbar.new('scroll').absolute().inset_0().mode('always')));
   }
 }

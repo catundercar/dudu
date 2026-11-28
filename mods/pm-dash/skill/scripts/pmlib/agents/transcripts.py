@@ -1,8 +1,9 @@
 """Agent session transcript reading and context-token measurement. Standard library only.
 
 Implements the Sessions interface (transcript, context_tokens, turns) for Claude Code
-transcripts (~/.claude/projects/<folder>/<id>.jsonl). Other agent kinds (Codex, agy, pi)
-are not guessed: unknown kinds return None / 0 / UnsupportedSessionError.
+transcripts (~/.claude/projects/<folder>/<id>.jsonl) and Antigravity CLI (agy) transcripts
+(~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript[_full].jsonl).
+Other agent kinds (Codex, pi) are not guessed: unknown kinds return None / 0 / UnsupportedSessionError.
 
 All transcript reads are bounded:
 - context_tokens scans backwards from EOF in 64 KiB blocks (capped at CONTEXT_SCAN_MAX),
@@ -65,6 +66,15 @@ INPUT_FIELDS = {
     "Glob": ("pattern",),
     "Agent": ("description", "prompt"),
     "Task": ("description", "prompt"),
+    # Antigravity (agy) native tool names
+    "run_command": ("CommandLine", "command"),
+    "read_file": ("Path", "path"),
+    "write_file": ("Path", "path"),
+    "edit_file": ("Path", "path"),
+    "search_web": ("query",),
+    "invoke_subagent": ("Role", "Prompt"),
+    "grep_search": ("Query", "query"),
+    "find_by_name": ("Pattern", "pattern"),
 }
 
 
@@ -140,6 +150,10 @@ def valid_session_id(sid: Any) -> bool:
 def default_claude_projects() -> Path:
     base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
     return base / "projects"
+
+
+def default_agy_dir() -> Path:
+    return Path(os.environ.get("AGY_DATA_DIR") or (Path.home() / ".gemini" / "antigravity-cli"))
 
 
 # ---- text tidying (home path shortening and length bounds) ------------------
@@ -442,12 +456,24 @@ def _extract_transcript_questions(inp: Any, tidy: Tidier) -> list[dict[str, Any]
     return out
 
 
+def _unquote_arg_value(val: str) -> str:
+    s = val.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        try:
+            decoded = json.loads(s)
+            if isinstance(decoded, str):
+                return decoded
+        except ValueError:
+            pass
+    return val
+
+
 def _input_summary(name: str, inp: Any) -> str:
     if isinstance(inp, dict):
         for key in INPUT_FIELDS.get(name, ()):
             val = inp.get(key)
             if isinstance(val, str) and val.strip():
-                return val
+                return _unquote_arg_value(val)
     if inp is None:
         return ""
     try:
@@ -1110,13 +1136,440 @@ class ClaudeSessions:
         )
 
 
-# ---- Multi-agent registry (Claude Code implemented; others unsupported) -----
+# ---- Antigravity (agy) transcript parsing & Sessions implementation ---------
+
+_AGY_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
+_AGY_USER_REQUEST_OPEN_RE = re.compile(r"^\s*<USER_REQUEST>\s*", re.S)
+_AGY_TRAILING_META_RE = re.compile(r"\n<(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)\b.*$", re.S)
+_AGY_QUIET_ROWS = frozenset({"SYSTEM_MESSAGE", "CHECKPOINT", "ERROR_MESSAGE", "GENERIC"})
+_AGY_TRANSCRIPT_NAMES = ("transcript_full.jsonl", "transcript.jsonl")
+
+
+def _extract_agy_user_text(content: str) -> str:
+    raw = str(content or "")
+    m = _AGY_USER_REQUEST_RE.search(raw)
+    if m:
+        return m.group(1).strip()
+    if _AGY_USER_REQUEST_OPEN_RE.match(raw):
+        cleaned = _AGY_USER_REQUEST_OPEN_RE.sub("", raw, count=1)
+        cleaned = _AGY_TRAILING_META_RE.sub("", cleaned)
+        return cleaned.strip()
+    return raw.strip()
+
+
+def _agy_row_context_tokens(row: dict[str, Any]) -> int:
+    return _int_token(row.get("input_tokens")) + _int_token(row.get("cache_read_tokens"))
+
+
+def agy_context_tokens_file(path: str | Path, max_scan: int = CONTEXT_SCAN_MAX) -> int:
+    """Context tokens held by an agy transcript: input + cache_read of its latest DONE PLANNER_RESPONSE or CHECKPOINT."""
+    if not path:
+        return 0
+    try:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            if size <= 0:
+                return 0
+            for raw, at, _ in each_line_back(f, size, include_partial=True):
+                if raw is not None and (b'"PLANNER_RESPONSE"' in raw or b'"CHECKPOINT"' in raw):
+                    try:
+                        row = json.loads(raw.decode("utf-8", "replace"))
+                    except ValueError:
+                        row = None
+                    if isinstance(row, dict) and row.get("type") in ("PLANNER_RESPONSE", "CHECKPOINT"):
+                        status = row.get("status")
+                        if status in ("DONE", None, ""):
+                            tokens = _agy_row_context_tokens(row)
+                            if tokens > 0:
+                                return tokens
+                if max_scan >= 0 and size - at >= max_scan:
+                    break
+    except (OSError, TypeError, ValueError):
+        return 0
+    return 0
+
+
+def _parse_agy_tool_args(raw_args: Any) -> Any:
+    if isinstance(raw_args, str):
+        try:
+            return json.loads(raw_args)
+        except ValueError:
+            return raw_args
+    return raw_args
+
+
+def _parse_agy_transcript_line(raw: bytes | None, end: int, tidy: Tidier) -> _ParsedLine:
+    out = _ParsedLine()
+    if raw is None or not raw.strip():
+        return out
+    try:
+        row = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        out.kind = "?"
+        return out
+    if not isinstance(row, dict):
+        out.kind = "?"
+        return out
+    rtype = row.get("type")
+    if not isinstance(rtype, str) or not rtype:
+        out.kind = "?"
+        return out
+    out.kind = rtype
+    at = row.get("created_at") if isinstance(row.get("created_at"), str) else ""
+    status = row.get("status")
+
+    if rtype == "SYSTEM_MESSAGE":
+        out.understood = True
+        return out
+
+    if rtype == "CHECKPOINT":
+        out.understood = True
+        out.compact_boundary = True
+        if status in ("DONE", None, ""):
+            out.context = _agy_row_context_tokens(row)
+        return out
+
+    if rtype == "ERROR_MESSAGE":
+        out.understood = True
+        return out
+
+    if rtype == "USER_INPUT":
+        out.understood = True
+        source = row.get("source")
+        if source not in ("USER_EXPLICIT", None, "") or status not in ("DONE", None, ""):
+            return out
+        content = row.get("content")
+        if isinstance(content, str):
+            text = _extract_agy_user_text(content)
+            if text:
+                out.talk = True
+                out.at = at
+                out.items.append({"type": "user", "at": at, "text": tidy.body(text), "offset": end})
+        return out
+
+    if rtype == "PLANNER_RESPONSE":
+        out.understood = True
+        source = row.get("source")
+        if source not in ("MODEL", None, "") or status not in ("DONE", None, ""):
+            return out
+        out.talk = True
+        out.at = at
+        out.context = _agy_row_context_tokens(row)
+        content = row.get("content")
+        if isinstance(content, str) and content.strip():
+            out.items.append({"type": "text", "at": at, "text": tidy.body(content.strip()), "offset": end})
+        tcalls = row.get("tool_calls")
+        step_idx = row.get("step_index")
+        if isinstance(tcalls, list):
+            for idx, tc in enumerate(tcalls):
+                if not isinstance(tc, dict):
+                    continue
+                name = str(tc.get("name") or tc.get("tool_name") or "").strip()
+                if not name:
+                    continue
+                call_id = tc.get("id") if isinstance(tc.get("id"), str) and tc.get("id") else f"agy:{step_idx if step_idx is not None else end}:{idx}"
+                raw_inp = _parse_agy_tool_args(tc.get("args") if "args" in tc else tc.get("arguments"))
+                qs = _extract_transcript_questions(raw_inp, tidy) if name in QUESTION_TOOLS else []
+                summary_text = (qs[0]["question"] or qs[0]["header"]) if qs else _input_summary(name, raw_inp)
+                item: dict[str, Any] = {
+                    "type": "tool",
+                    "at": at,
+                    "name": name,
+                    "input": tidy.line(summary_text),
+                    "output": "",
+                    "error": False,
+                    "offset": end,
+                    "id": call_id,
+                }
+                if qs:
+                    item["questions"] = qs
+                out.items.append(item)
+        return out
+
+    if rtype == "GENERIC":
+        out.understood = True
+        if status not in ("DONE", None, ""):
+            return out
+        content = row.get("content")
+        result_text = content if isinstance(content, str) else ""
+        call_id = str(row.get("tool_call_id") or row.get("call_id") or "")
+        is_error = bool(row.get("is_error") or row.get("error"))
+        out.results.append({
+            "type": "result",
+            "at": at,
+            "id": call_id,
+            "output": tidy.line(result_text),
+            "error": is_error,
+            "offset": end,
+        })
+        return out
+
+    return out
+
+
+def _join_agy_lines(lines: list[_ParsedLine], orphans: bool) -> tuple[list[dict[str, Any]], str]:
+    items: list[dict[str, Any]] = []
+    calls_by_id: dict[str, dict[str, Any]] = {}
+    pending_calls: list[dict[str, Any]] = []
+    ended = ""
+    for line in lines:
+        for res in line.results:
+            call = calls_by_id.pop(res["id"], None) if res.get("id") else None
+            if call is not None:
+                if call in pending_calls:
+                    pending_calls.remove(call)
+                call["output"] = res["output"]
+                call["error"] = res["error"]
+            elif pending_calls:
+                call = pending_calls.pop(0)
+                if call.get("id"):
+                    calls_by_id.pop(call["id"], None)
+                call["output"] = res["output"]
+                call["error"] = res["error"]
+            elif orphans and res.get("id"):
+                items.append(res)
+        for item in line.items:
+            items.append(item)
+            if item.get("type") == "tool":
+                if item.get("id"):
+                    calls_by_id[item["id"]] = item
+                pending_calls.append(item)
+        if line.talk and line.at:
+            ended = line.at
+    return items, ended
+
+
+def _agy_session_started(f: Any, size: int) -> str:
+    lines, _, _ = read_lines_forward(f, 0, size, SESSION_HEAD)
+    for raw, _ in lines:
+        if raw is None or not raw.strip():
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("type") in ("USER_INPUT", "PLANNER_RESPONSE"):
+            ts = row.get("created_at")
+            if isinstance(ts, str) and ts:
+                return ts
+    return ""
+
+
+class AgySessions:
+    """Sessions implementation for Antigravity CLI (`agy`) JSONL transcripts."""
+
+    kind = "agy"
+
+    def __init__(
+        self,
+        agy_dir: Path | Callable[[], Path] | None = None,
+        home: str | Path | Callable[[], str] | None = None,
+        cache_path: Path | Callable[[], Path | None] | None = None,
+        is_windows: bool | None = None,
+    ):
+        self._agy_source = agy_dir
+        self._home_source = home
+        self._is_windows = is_windows
+        self._cache = _ContextCache(cache_path)
+
+    def _agy_dir(self) -> Path:
+        if self._agy_source is None:
+            return default_agy_dir()
+        return Path(self._agy_source() if callable(self._agy_source) else self._agy_source)
+
+    def _tidier(self) -> Tidier:
+        if self._home_source is None:
+            return Tidier(is_windows=self._is_windows)
+        home = self._home_source() if callable(self._home_source) else str(self._home_source)
+        return Tidier(home=str(home), is_windows=self._is_windows)
+
+    def _extract_id(self, session: dict[str, Any] | Path | str | None) -> str:
+        if isinstance(session, dict):
+            sid = session.get("id")
+            if isinstance(sid, str) and sid:
+                return sid
+            raw_path = session.get("path")
+            if isinstance(raw_path, (Path, str)) and str(raw_path):
+                p = Path(raw_path)
+                # <agy_dir>/brain/<cid>/.system_generated/logs/transcript[_full].jsonl
+                if len(p.parts) >= 4 and p.parent.name == "logs" and p.parent.parent.name == ".system_generated":
+                    return p.parent.parent.parent.name
+                return p.stem
+            return ""
+        if isinstance(session, (Path, str)) and str(session):
+            p = Path(session)
+            if len(p.parts) >= 4 and p.parent.name == "logs" and p.parent.parent.name == ".system_generated":
+                return p.parent.parent.parent.name
+            return p.stem
+        return ""
+
+    def _validated_path(self, candidate: Path, resolved_root: Path) -> Path | None:
+        if candidate.name not in _AGY_TRANSCRIPT_NAMES:
+            return None
+        try:
+            rp = candidate.resolve()
+            if not rp.is_relative_to(resolved_root) or not rp.is_file():
+                return None
+            return rp
+        except OSError:
+            return None
+
+    def transcript(self, session: dict[str, Any] | Path | str | None) -> Path | None:
+        if isinstance(session, dict) and session.get("kind") and session.get("kind") != self.kind:
+            return None
+        adir = self._agy_dir()
+        try:
+            resolved_root = adir.resolve()
+        except OSError:
+            return None
+        if isinstance(session, (Path, str)):
+            raw_path = str(session)
+            return self._validated_path(Path(raw_path), resolved_root) if raw_path else None
+        if not isinstance(session, dict):
+            return None
+        raw_path = session.get("path")
+        if isinstance(raw_path, (Path, str)) and str(raw_path):
+            ok = self._validated_path(Path(raw_path), resolved_root)
+            if ok is not None:
+                return ok
+        sid = session.get("id")
+        if not valid_session_id(sid):
+            return None
+        logs = adir / "brain" / sid / ".system_generated" / "logs"
+        for name in _AGY_TRANSCRIPT_NAMES:
+            ok = self._validated_path(logs / name, resolved_root)
+            if ok is not None:
+                return ok
+        return None
+
+    def context_tokens(self, session: dict[str, Any] | Path | str | None) -> int:
+        path = self.transcript(session)
+        if path is None:
+            return 0
+        return agy_context_tokens_file(path)
+
+    def flush(self) -> None:
+        self._cache.flush()
+
+    def turns(
+        self,
+        session: dict[str, Any] | Path | str | None,
+        before: int | None = None,
+        limit: int = DEFAULT_LIMIT,
+        after: int | None = None,
+    ) -> Turns:
+        if isinstance(session, dict) and session.get("kind") and session.get("kind") != self.kind:
+            raise UnsupportedSessionError(f"session kind {session.get('kind')!r} is not supported")
+        if before is not None and after is not None:
+            raise InvalidOffsetError("cannot specify both before and after")
+        if limit is None:
+            limit = DEFAULT_LIMIT
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > MAX_LIMIT:
+            raise InvalidOffsetError(f"limit must be between 1 and {MAX_LIMIT}")
+        if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 0):
+            raise InvalidOffsetError("before must be a non-negative byte offset")
+        if after is not None and (isinstance(after, bool) or not isinstance(after, int) or after < 0):
+            raise InvalidOffsetError("after must be a non-negative byte offset")
+
+        path = self.transcript(session)
+        if path is None:
+            raise SessionNotFoundError("session transcript not found")
+        sid = self._extract_id(session)
+        tidy = self._tidier()
+
+        try:
+            with open(path, "rb") as f:
+                size = os.fstat(f.fileno()).st_size
+                if before is not None:
+                    if before > size:
+                        raise SessionChangedError("the transcript is shorter than that: it was replaced")
+                    if not line_start(f, before):
+                        raise InvalidOffsetError(f"no line of the transcript starts at byte {before}")
+                    return self._window(f, sid, before, limit, tidy, fresh=False, reset=False)
+                if after is not None and after <= size and line_start(f, after):
+                    return self._since(f, sid, size, after, tidy)
+                end = last_line_end(f, size)
+                out = self._window(f, sid, end, limit, tidy, fresh=True, reset=(after is not None))
+                out.started = _agy_session_started(f, size)
+                if out.context == 0 and out.from_ > 0:
+                    out.context = agy_context_tokens_file(path)
+                return out
+        except SessionError:
+            raise
+        except OSError as exc:
+            raise SessionNotFoundError(f"the transcript could not be read: {exc}") from exc
+
+    def _window(
+        self,
+        f: Any,
+        sid: str,
+        end: int,
+        limit: int,
+        tidy: Tidier,
+        *,
+        fresh: bool,
+        reset: bool,
+    ) -> Turns:
+        lines: list[_ParsedLine] = []
+        count = 0
+        from_off = end
+        for raw, at, nxt in each_line_back(f, end, include_partial=False):
+            parsed = _parse_agy_transcript_line(raw, nxt, tidy)
+            lines.append(parsed)
+            count += len(parsed.items)
+            from_off = at
+            if count >= limit or end - at >= SESSION_BACK:
+                break
+        lines.reverse()
+        items, ended = _join_agy_lines(lines, orphans=(from_off > 0))
+        ctx = _context_of(lines)
+        unknown = _unknown_kinds(lines) if (fresh and not items) else None
+        return Turns(
+            kind=self.kind,
+            id=sid,
+            started="",
+            ended=ended,
+            items=items,
+            from_=from_off,
+            offset=end,
+            earlier=(from_off > 0),
+            more=False,
+            reset=reset,
+            context=ctx,
+            unknown=unknown,
+        )
+
+    def _since(self, f: Any, sid: str, size: int, after: int, tidy: Tidier) -> Turns:
+        raw_lines, at, more = read_lines_forward(f, after, size, SINCE_MAX)
+        lines = [_parse_agy_transcript_line(raw, end, tidy) for raw, end in raw_lines]
+        items, ended = _join_agy_lines(lines, orphans=(after > 0))
+        return Turns(
+            kind=self.kind,
+            id=sid,
+            started="",
+            ended=ended,
+            items=items,
+            from_=after,
+            offset=at,
+            earlier=(after > 0),
+            more=more,
+            reset=False,
+            context=_context_of(lines),
+            unknown=None,
+        )
+
+
+# ---- Multi-agent registry (Claude Code + agy implemented; others unsupported) -----
 
 class SessionRegistry:
     """Dispatch Sessions calls by session['kind']; unknown kinds degrade safely."""
 
     def __init__(self, backends: dict[str, Any]):
         self.backends = dict(backends)
+
+    @property
+    def supported_kinds(self) -> frozenset[str]:
+        return frozenset(self.backends.keys())
 
     def _backend(self, session: dict[str, Any] | Path | str | None) -> tuple[str, Any | None]:
         if isinstance(session, dict):
@@ -1172,8 +1625,10 @@ def default_sessions(
     projects_dir: Path | Callable[[], Path] | None = None,
     home: str | Path | Callable[[], str] | None = None,
     cache_path: Path | Callable[[], Path | None] | None = None,
+    agy_dir: Path | Callable[[], Path] | None = None,
 ) -> SessionRegistry:
-    """Default Sessions registry: Claude Code enabled; Codex/agy/pi unsupported."""
+    """Default Sessions registry: Claude Code and agy enabled; Codex/pi unsupported."""
     return SessionRegistry({
         "claude": ClaudeSessions(projects_dir=projects_dir, home=home, cache_path=cache_path),
+        "agy": AgySessions(agy_dir=agy_dir, home=home, cache_path=cache_path),
     })

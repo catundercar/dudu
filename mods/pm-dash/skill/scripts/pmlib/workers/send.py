@@ -39,6 +39,7 @@ from ..messaging.typist import (
     unblock_endpoint,
 )
 from ..terminals.screen import classify_stuck_screen, known_prompt_action
+from .self_hosted import is_self_hosted_task, send_to_self_hosted, self_hosted_endpoint
 from .sessions import _worker_caller
 
 
@@ -141,18 +142,20 @@ def took_in(ctx: Context, ep: Endpoint, item: MailboxItem, out: DeliverOutcome) 
     return int(info.get("turn") or 0) > pre_turn or status.get("state") == "working"
 
 
-def _deliver_later_for(ctx: Context, repo: str) -> None:
+def _deliver_later_for(ctx: Context, repo: str, *, slug: str = "") -> None:
     """Start the project's deliverer when its PM is a desktop-app one (as `Workers._deliver_later`)."""
-    if not repo:
+    eff_slug = slug or (ctx.store.folder_project_slug(repo) if repo else "")
+    pm_target = eff_slug or repo
+    if not pm_target:
         return
     if getattr(ctx, "_legacy", False):
-        deliver_later(str(repo))
-    elif ProjectRegistry(ctx).app_pm(repo):
-        Delivery(ctx, repo).ensure_running()
+        deliver_later(str(repo or eff_slug), slug=eff_slug)
+    elif ProjectRegistry(ctx).app_pm(pm_target):
+        Delivery(ctx, repo, slug=eff_slug or None).ensure_running()
 
 
 def send_failed_for(ctx: Context, term: str, why: str, *, task_id: str = "", repo: str = "",
-                    quiet: bool = False) -> None:
+                    slug: str = "", quiet: bool = False) -> None:
     """A queued send into `term` did not go in: tell whoever has to know, as the lockless background send did. A
     worker-executed merge approval falls back to an exec helper; else the task (or the project) records why and wakes
     a desktop-app PM. `quiet` (the user's own words from the app): only a note on the task, where they look."""
@@ -166,13 +169,15 @@ def send_failed_for(ctx: Context, term: str, why: str, *, task_id: str = "", rep
         return
     if isinstance(task, dict) and task:
         resolved_repo = resolved_repo or task.get("repo") or ""
+        pslug = slug or ctx.store.task_project_slug(task)
         la = task.get("land_approved")
         if (isinstance(la, dict) and la.get("executor") == "worker"
                 and not task.get("landed") and task.get("status") not in REPORTED_STATUSES):
             if StallWatcher(ctx).fallback_land_to_helper(task, reason=f"approve send to hc:{term} failed ({why})",
                                                          term=term):
                 return
-        wake = bool(resolved_repo and ProjectRegistry(ctx).app_pm(resolved_repo))
+        pm_target = pslug or resolved_repo
+        wake = bool(pm_target and ProjectRegistry(ctx).app_pm(pm_target))
         msg = ctx.config.tr(
             f"async send to hc:{term} failed ({why}); check or triage with `pm.py triage {task_id}`",
             f"异步发送到 hc:{term} 失败（{why}）；可用 `pm.py triage {task_id}` 交给 helper 排查",
@@ -185,15 +190,17 @@ def send_failed_for(ctx: Context, term: str, why: str, *, task_id: str = "", rep
             )[1],
         )
         if wake:
-            _deliver_later_for(ctx, resolved_repo)
-    elif resolved_repo:
-        wake = bool(ProjectRegistry(ctx).app_pm(resolved_repo))
+            _deliver_later_for(ctx, resolved_repo, slug=pslug)
+    elif resolved_repo or slug:
+        pslug = slug or (ctx.store.folder_project_slug(resolved_repo) if resolved_repo else "")
+        pm_target = pslug or resolved_repo
+        wake = bool(pm_target and ProjectRegistry(ctx).app_pm(pm_target))
         msg = ctx.config.tr(f"async send to hc:{term} failed ({why})", f"异步发送到 hc:{term} 失败（{why}）")
-        Conversation(ctx, resolved_repo).record(
+        Conversation(ctx, resolved_repo, slug=pslug or None).record(
             "event", by=f"hc:{term}", source="harness", text=msg, **({"wake": True} if wake else {}),
         )
         if wake:
-            _deliver_later_for(ctx, resolved_repo)
+            _deliver_later_for(ctx, resolved_repo, slug=pslug)
 
 
 def send_reactions_for(
@@ -222,6 +229,7 @@ def send_reactions_for(
             return
         send_failed_for(ctx, term, deliver_failure_reason(ctx, out, term),
                         task_id=str(why.get("task_id") or ""), repo=str(why.get("repo") or ""),
+                        slug=str(why.get("project_slug") or ""),
                         quiet=bool(why.get("quiet")))
 
     return on_typed, on_failed
@@ -526,8 +534,25 @@ def send_back_for(ctx: Context, task: Any, text: str, *, wait: bool = False) -> 
     written. From a PM terminal this runs asynchronously by default; pass `wait=True` to wait synchronously.
     Raises `Refused(..., code=1, stream="stdout")` when the worker is gone or send fails."""
     raw = task.raw if isinstance(task, Task) else task
-    term = hc_terminal_of(raw)
     message = f"[from {ctx.pane or 'pm.py'}] {text}"
+    if is_self_hosted_task(raw):
+        ep = self_hosted_endpoint(raw)
+        out = send_to_self_hosted(ctx, raw, message, kind="cmd.send")
+        if out.status == "rejected":
+            raise Refused(
+                ctx.config.tr(
+                    f"{raw['id']}: the note was recorded but not sent ({out.detail})",
+                    f"{raw['id']}：已记入台账，但没发出去（{out.detail}）",
+                ),
+                code=1,
+                stream="stdout",
+            )
+        where = ep.legacy_pane if ep is not None else "self_hosted"
+        return SendBackResult(
+            queued=out.status != "typed",
+            message=ctx.config.tr(f"{raw['id']}: queued for {where}", f"{raw['id']}：已入队给 {where}"),
+        )
+    term = hc_terminal_of(raw)
     info = (ctx.hc.get_raw(term) or {}) if term and "/" not in term else {}
     if info.get("state") == "live" and not wait and _worker_caller(ctx).is_pm_caller(raw):
         send_async_later_for(

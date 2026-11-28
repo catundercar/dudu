@@ -24,6 +24,7 @@ from .home import project_slug
 from .ledger.ledger import Ledger
 from .ledger.task import ACTIVE, pm_started
 from .project.project import ProjectRegistry, in_scope, pm_name
+from .store import project_folders, registration_slug
 from .terminals.hc import TerminalInfo
 
 
@@ -384,7 +385,7 @@ class Caller:
             return None
         if len(matches) > 1 and target == self.pane and self.terminal:
             for rec in matches:
-                if self._hc_pm_matches(rec.get("repo")):
+                if self._hc_pm_matches(rec.get("repo"), rec=rec):
                     return rec
         return matches[0]
 
@@ -491,7 +492,7 @@ class Caller:
         if len(matches) > 1 and target == self.pane:
             if self.terminal:
                 for rec in matches:
-                    if self._hc_pm_matches(rec.get("repo")):
+                    if self._hc_pm_matches(rec.get("repo"), rec=rec):
                         return rec
             elif self.in_tui():
                 for rec in matches:
@@ -499,17 +500,27 @@ class Caller:
                         return rec
         return matches[0]
 
-    def _hc_pm_matches(self, repo: str | Path | None) -> bool:
+    def _hc_pm_matches(self, repo: str | Path | None, *, rec: dict[str, Any] | None = None) -> bool:
         """True unless live herdr-core labels on this terminal explicitly name a different project's PM or a worker/helper."""
-        if not self.terminal or not repo:
+        if not self.terminal or (not repo and rec is None):
             return True
         live_pm = str(self.labels.get("pm") or "")
         if not live_pm:
             if self.labels.get("task") or self.labels.get("helper") or self.labels.get("helper.of"):
                 return False
             return True
-        root = self.ctx.git.project_root(repo) or str(repo)
-        return live_pm in (project_slug(root), Path(root).name)
+        candidates: set[str] = set()
+        if rec:
+            rslug = registration_slug(rec)
+            if rslug:
+                candidates.add(rslug)
+            if rec.get("project"):
+                candidates.add(str(rec["project"]))
+        if repo:
+            root = self.ctx.git.project_root(repo) or str(repo)
+            candidates.add(project_slug(root))
+            candidates.add(Path(root).name)
+        return live_pm in candidates
 
     def _tui_pm_matches(self, repo: str | Path | None, cwd: str | Path | None = None, *, check_cwd: bool = True) -> bool:
         """True unless live herdr TUI facts (agent name or cwd) show this pane belongs to a different project."""
@@ -545,8 +556,19 @@ class Caller:
         if r and self.manages(r):
             return True
         rec = self.own_pm_record()
-        if rec and (not r or not rec.get("repo") or in_scope(r, rec["repo"]) or in_scope(rec["repo"], r)):
-            return True
+        if rec:
+            tslug = str((task or {}).get("project_slug") or "")
+            rslug = registration_slug(rec)
+            if tslug and rslug and tslug == rslug:
+                return True
+            if not r:
+                return True
+            for f in project_folders(rec):
+                fp = f.get("path") or ""
+                if fp and (in_scope(r, fp) or in_scope(fp, r)):
+                    return True
+            if not project_folders(rec) and not rec.get("repo"):
+                return True
         return False
 
     def own_pm_record(self, cwd: str | Path | None = None) -> dict[str, Any] | None:
@@ -554,15 +576,16 @@ class Caller:
         rec = self.pm_record_for_pane(self.pane) if self.pane else None
         if not rec:
             return None
-        if self.terminal and not self._hc_pm_matches(rec.get("repo")):
+        if self.terminal and not self._hc_pm_matches(rec.get("repo"), rec=rec):
             return None
         if self.in_tui():
             try:
                 here = self.ctx.git.project_root(cwd or os.getcwd())
             except OSError:  # the session's folder was removed
                 here = None
-            repo = rec.get("repo")
-            if not here or not repo or not (in_scope(here, repo) or in_scope(repo, here)):
+            folders = [f.get("path") for f in project_folders(rec) if f.get("path")]
+            repo = rec.get("repo") or (folders[0] if folders else "")
+            if not here or not folders or not any(in_scope(here, fp) or in_scope(fp, here) for fp in folders):
                 return None
             # The same pane id in another herdr session (see identity_inventory): not this session's registration.
             if rec.get("session") and rec["session"] != (self.herdr_session() or rec["session"]):
@@ -574,8 +597,10 @@ class Caller:
     def caller_projects(self, reg_idx: Any) -> Iterator[str]:
         """The projects this terminal works in, most certain first, lazily evaluated."""
         rec = self.own_pm_record()
-        if rec and rec.get("repo"):
-            yield project_slug(rec["repo"])
+        if rec:
+            rslug = registration_slug(rec)
+            if rslug:
+                yield rslug
         own = self.own_task
         if own:
             yield self.ctx.store._task_slug(own, reg_idx)
@@ -631,7 +656,7 @@ class Caller:
             else:
                 recs = self.identity_inventory()["records"]
             for rec in recs:
-                if project in (project_slug(rec.get("repo") or "."), rec.get("project"), rec.get("name")):
+                if project in (project_slug(rec.get("repo") or "."), rec.get("project"), rec.get("display_name"), rec.get("space_name"), rec.get("name")):
                     return rec
             return None
         return (self.own_registration() if self.pane else None) or self._projects.pm_record(repo)
@@ -643,12 +668,18 @@ class Caller:
         rec = self._projects.pm_record(repo)
         if rec and rec.get("pane") == self.pane and not rec.get("archived") and self.manages(repo):
             return "pm", "pm"
+        proj_slug = registration_slug(rec) if isinstance(rec, dict) else project_slug(repo)
+        proj_paths = [f.get("path") for f in project_folders(rec) if f.get("path")] if isinstance(rec, dict) else []
+        if str(repo) not in proj_paths:
+            proj_paths.append(str(repo))
 
         def _matches_worker(t: dict[str, Any] | None) -> bool:
             if not t or t.get("status") not in ACTIVE or not pm_started(t):
                 return False
+            if proj_slug and t.get("project_slug") == proj_slug:
+                return True
             t_repo = t.get("repo")
-            return bool(t_repo and (in_scope(t_repo, repo) or in_scope(repo, t_repo)))
+            return bool(t_repo and any(in_scope(t_repo, p) or in_scope(p, t_repo) for p in proj_paths if p))
 
         task = self.own_task
         if not _matches_worker(task):
@@ -697,7 +728,8 @@ class Caller:
         if not self.pane or self.pane not in self._projects.pm_panes(repo):
             return False
         if self.terminal:
-            return self._hc_pm_matches(repo)
+            rec = self._projects.pm_record(repo)
+            return self._hc_pm_matches(repo, rec=rec)
         if self.in_tui():
             rec = self._projects.pm_record(repo) or {}
             if rec.get("session") and rec["session"] != (self.herdr_session() or rec["session"]):

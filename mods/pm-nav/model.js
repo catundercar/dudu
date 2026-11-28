@@ -1,3 +1,42 @@
+export const NAV_HEIGHT = 40;
+export const NAV_COMPACT_UNFOLD_HEIGHT = 72;
+
+// True when the layout has no visible `agents` block (e.g. wrapped inside hidden `herdr-lists`).
+// On macOS collapsed 76px rail, workspace-chrome hides its top sidebar-toggle because traffic lights
+// fill row 1 and relies on `agents` rendering `»`. When `agents` is hidden, pm-nav renders `»` instead.
+export function isAgentsHidden(tree, ancestorHidden = false) {
+  if (!tree || typeof tree !== 'object') return true;
+  const hidden = ancestorHidden || Boolean(tree.hidden);
+  if (tree.content?.mod === 'agents') return hidden;
+  const kids = Array.isArray(tree.children) ? tree.children : [];
+  for (const child of kids) {
+    if (!isAgentsHidden(child, hidden)) return false;
+  }
+  return true;
+}
+
+// Whether pm-nav writes <ledger home>/cache/remote-states.json (pm-list's only source of other machines'
+// projects). Another machine's ledger is read over hc and needs no Set up here, so remote projects are
+// cached even when this computer has no skill installed (or cannot read it). With nothing remote and no
+// Set up here, it writes only to empty a cache that exists, so a disconnected machine does not linger.
+export function shouldWriteRemoteCache(setupAvailable, states, cacheExists = false) {
+  return Boolean(setupAvailable) || Object.keys(states || {}).length > 0 || Boolean(cacheExists);
+}
+
+// The Projects entry shows the summary whenever there is a project to count (on this computer or
+// another machine); "Set up" only when Set up is missing here and there is nothing to show at all.
+export function showsSummary(setupAvailable, counts) {
+  return Boolean(setupAvailable) || Number(counts?.projects) > 0;
+}
+
+export function needsRailUnfold(tree, win) {
+  return Boolean(tree && win?.platform === 'macos' && isAgentsHidden(tree));
+}
+
+export function navHeight(compact, showUnfold) {
+  return compact && showUnfold ? NAV_COMPACT_UNFOLD_HEIGHT : NAV_HEIGHT;
+}
+
 // Compare navigation identities, not cwd: a shell changing directory is not
 // sidebar navigation. Keep remote machine prefixes intact.
 export function focusKey(focus) {
@@ -16,6 +55,36 @@ export function isOverlayTerminalFocus(focus, overlayTerminals) {
 export function shouldReturnToWork(shown, wasShown, focus, previousFocus, { overlayFocus = false } = {}) {
   if (overlayFocus) return false;
   return shown && wasShown && focus !== previousFocus;
+}
+
+// Decide which pm-stage child should be active when a dudu layout mounts (e.g. after switching
+// layouts or reloading mods). Returns the child id to select via layout.select, or null if
+// stage.active already matches the desired child.
+// Priority:
+//   1. Persisted shared('pm-stage').child when present in stage.children (for 'pm-project',
+//      requires a non-empty shared('pm-project').pm, else falls back to 'pm-board').
+//   2. When no saved stage exists yet (e.g. switching from an older layout), restore 'pm-project'
+//      if shared('pm-project').pm is set, otherwise default to 'pm-board' (Projects page).
+export function initialStageChild(stage, savedStage, projectPage) {
+  const children = (stage?.children ?? []).map(c => c?.id).filter(Boolean);
+  if (!stage || !children.length) return null;
+  const hasProject = typeof projectPage?.pm === 'string' && Boolean(projectPage.pm.trim());
+  const saved = typeof savedStage?.child === 'string' ? savedStage.child : '';
+  let target = '';
+  if (saved && children.includes(saved)) {
+    if (saved === 'pm-project' && !hasProject) {
+      target = children.includes('pm-board') ? 'pm-board' : stage.active;
+    } else {
+      target = saved;
+    }
+  } else if (hasProject && children.includes('pm-project')) {
+    target = 'pm-project';
+  } else if (children.includes('pm-board')) {
+    target = 'pm-board';
+  } else {
+    target = stage.active;
+  }
+  return target && target !== stage.active ? target : null;
 }
 
 // The stage page the Projects page covers, for the next Projects click to come back to: the stage's
@@ -113,14 +182,42 @@ export function remoteStateCommand(scripts = PM_SCRIPTS) {
     'if [ -f "$f" ]; then exec python3 "$f" state; fi; done; echo "pm.py not found" >&2; exit 127';
 }
 
+export const ENSURE_DIR_PY = "import sys; from pathlib import Path; Path(sys.argv[1]).mkdir(parents=True, exist_ok=True)";
+
+// Stable signature of remote machines and their PMs, used to wake pm-list via
+// shared('pm-remote-cache') only when the remote project set actually changes.
+export function remoteCacheSig(states) {
+  return Object.entries(states || {})
+    .filter(([machine, state]) => machine && Array.isArray(state?.pms))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([machine, state]) => `${machine}:${state.pms.map(pm => `${pm?.name || ''}:${pm?.archived ? 1 : 0}`).sort().join(',')}`)
+    .join('|');
+}
+
 // writeTextFile documents atomic replacement of existing files, but not parent
-// creation or atomic first creation. Rename a sibling temp file in both cases.
+// creation or atomic first creation. Stage large JSON to a sibling file with
+// writeTextFile (avoiding OS argv limits such as Windows' 32 KiB CreateProcess
+// limit and Linux's 128 KiB MAX_ARG_STRLEN) and pass `--from-file <tmp>` so
+// Python validates, deduplicates unchanged states, cleans up the staging file,
+// and atomically replaces the target. Inline JSON in argv[2] remains supported
+// for direct callers.
 export const WRITE_REMOTE_CACHE = `
 import json, os, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
-states = json.loads(sys.argv[2])
-at = int(sys.argv[3])
+if sys.argv[2] == '--from-file':
+    source = Path(sys.argv[3])
+    at = int(sys.argv[4])
+    try:
+        states = json.loads(source.read_text(encoding='utf-8'))
+    finally:
+        try:
+            source.unlink()
+        except OSError:
+            pass
+else:
+    states = json.loads(sys.argv[2])
+    at = int(sys.argv[3])
 try:
     old = json.loads(path.read_text(encoding='utf-8'))
 except (OSError, ValueError):

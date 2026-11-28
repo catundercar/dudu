@@ -28,7 +28,7 @@ LAYERS = {
     "ledger": 2, "project": 2, "project/turn_reducer": 2, "caller": 2, "memory": 2,
     "messaging": 2,
     "events": 3, "workers": 3, "review": 3, "reactions": 3, "landing": 3, "manager": 3, "helpers": 3, "library": 3,
-    "homemove": 3, "discord": 3, "reports": 3,
+    "homemove": 3, "discord": 3, "reports": 3, "nodes": 3,
     "cli": 4, "commands": 4, "hooks": 4, "views": 4,
     "compat": 4,  # the forwarding module behind `import pm`; it finds the package's modules at run time
 }
@@ -44,12 +44,16 @@ ARROWS = {
     "manager": {"workers", "events", "discord"},
     "helpers": {"workers", "events"},
     "reports": {"reactions", "review", "workers", "helpers", "events"},
+    "nodes": {"reports", "reactions", "review", "workers", "helpers", "events"},
 }
 # (module, outermost function, imported module): the few stdlib late imports, all for commands that are not
-# long-running processes' code paths at import time (Discord, the browser board).
+# long-running processes' code paths at import time (Discord, the browser board, the self-hosted HTTP carrier).
 LATE_IMPORTS = {
     ("discord", "discord_api", "urllib.error"),
     ("discord", "discord_api", "urllib.request"),
+    ("nodes/wire", "serve_http", "http.server"),
+    ("nodes/wire", "_http_post", "urllib.error"),
+    ("nodes/wire", "_http_post", "urllib.request"),
     ("views/dash", "cmd_dash", "http.server"),
     ("views/dash", "cmd_dash", "threading"),
     ("views/dash", "cmd_dash", "time"),

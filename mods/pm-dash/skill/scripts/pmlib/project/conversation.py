@@ -11,7 +11,7 @@ from typing import Any
 from ..context import Context
 from ..home import project_slug
 from ..osutil import clip
-from ..store import _stamp_to_ms, file_lock, local_tz_offset, lock_file, replace_task_file, unlock_file, write_atomic
+from ..store import _stamp_to_ms, file_lock, local_tz_offset, lock_file, replace_task_file, unlock_file, valid_slug, write_atomic
 
 
 RECEIPT_LIMIT = 50
@@ -50,10 +50,15 @@ def conversation_events(path: str | Path) -> list[dict[str, Any]]:
 class Conversation:
     """One project's conversation log (`projects/<slug>/conversation.jsonl`) over an explicit `Context`."""
 
-    def __init__(self, ctx: Context, repo: str | Path) -> None:
+    def __init__(self, ctx: Context, repo: str | Path = "", *, slug: str | None = None) -> None:
         self.ctx = ctx
-        self.repo = str(repo)
-        self.slug = project_slug(repo)
+        self.repo = str(repo) if repo else ""
+        if slug and valid_slug(slug):
+            self.slug = slug
+        elif repo:
+            self.slug = ctx.store.folder_project_slug(repo) or project_slug(repo)
+        else:
+            self.slug = "project"
         self.files = ctx.home.project(self.slug)
 
     @property

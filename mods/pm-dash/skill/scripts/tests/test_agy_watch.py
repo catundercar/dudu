@@ -722,6 +722,90 @@ class AgyTranscriptWatcherTests(unittest.TestCase):
         names = [getattr(w, "name", "") for w in ctx.deliver_watchers]
         self.assertIn("agy-transcript", names)
         self.assertEqual(ctx.agy_dir, self.agy_dir)
+        self.assertTrue(callable(ctx.compact_sync))
+
+    def test_checkpoint_triggers_one_shot_compact_sync_on_next_deliver_batch(self):
+        from pmlib.events.agy_watch import agy_compact_sync_pending
+
+        clock = _clock_at(30)
+        hc = FakeHc(
+            terminals={
+                "t182": {
+                    "address": "t182",
+                    "state": "live",
+                    "status": {"state": "idle"},
+                    "turn": 1,
+                    "labels": {"pm": "demo", "pm.seat": "1"},
+                },
+            },
+            clock=clock,
+        )
+        ctx = make_ctx(self.tmp.name, hc=hc, clock=clock, agy_dir=self.agy_dir)
+        _register_pm(ctx, self.repo, agent="agy", terminal="t182")
+        conv_id = "conv-compact-sync"
+        tp = self._transcript_path(conv_id)
+        _write_summary_db(self.agy_dir, [(conv_id, [f"file://{self.repo}"], "2026-11-23 16:15:00+00:00")])
+
+        # Initial PM turn + running CHECKPOINT (ignored) + completed CHECKPOINT (sets pending_compact_sync).
+        _append_rows(tp, [
+            _user_row(0, "[from pm.py start] You are the PM of the demo project.", at=_utc_iso(5)),
+            _pm_row(1, "已接手。", at=_utc_iso(8)),
+            {"step_index": 2, "source": "SYSTEM", "type": "CHECKPOINT", "status": "RUNNING", "created_at": _utc_iso(12)},
+        ])
+        w = AgyTranscriptWatcher(ctx)
+        w.sync(self.repo)
+        self.assertFalse(agy_compact_sync_pending(ctx, self.repo))
+
+        _append_rows(tp, [
+            {
+                "step_index": 3,
+                "source": "SYSTEM",
+                "type": "CHECKPOINT",
+                "status": "DONE",
+                "created_at": _utc_iso(15),
+                "input_tokens": 2000,
+                "cache_read_tokens": 198000,
+                "output_tokens": 4000,
+                "content": "# Resuming from a compaction\nSummary",
+            },
+        ])
+        # Syncing CHECKPOINT records no spurious PM/user event and wakes nothing by itself.
+        self.assertEqual(w.sync(self.repo), 0)
+        self.assertTrue(agy_compact_sync_pending(ctx, self.repo))
+        self.assertEqual(hc.sent, [])
+
+        # Add an active task and record a worker event: next Deliverer batch must attach live ledger sync once.
+        ctx.home.tasks.mkdir(parents=True, exist_ok=True)
+        ctx.home.task("demo-t1").write_text(json.dumps({
+            "id": "demo-t1",
+            "number": 7,
+            "title": "Fix widget",
+            "project": "demo",
+            "repo": self.repo,
+            "status": "review",
+            "log": [{"at": "2026-11-23 11:15", "by": "hc:tw", "text": "status=review; ready"}],
+        }), encoding="utf-8")
+        Conversation(ctx, self.repo).record(
+            "thread", task="demo-t1", title="Fix widget", status="review",
+            by="hc:tw", text="status=review; ready", number=7, source="worker", wake=True,
+        )
+        dlv = Deliverer(ctx, self.repo, watchers=(), holds=(), settle=0)
+        dlv.look(FakeChangeWaiter(), {}, {})
+        self.assertEqual(len(hc.sent), 1)
+        first_payload = hc.sent[0][1]
+        self.assertTrue(first_payload.splitlines()[0].startswith("[from pm.py deliver]"))
+        self.assertIn("[pm post-compact live disk sync]", first_payload)
+        self.assertIn("#7 demo-t1: Fix widget", first_payload)
+        self.assertFalse(agy_compact_sync_pending(ctx, self.repo))
+
+        # Subsequent event batch must NOT repeat the compact sync block.
+        Conversation(ctx, self.repo).record(
+            "thread", task="demo-t1", title="Fix widget", status="done",
+            by="hc:tw", text="status=done; merged", number=7, source="worker", wake=True,
+        )
+        dlv.look(FakeChangeWaiter(), {}, {})
+        self.assertEqual(len(hc.sent), 2)
+        self.assertNotIn("[pm post-compact live disk sync]", hc.sent[1][1])
 
 
 if __name__ == "__main__":

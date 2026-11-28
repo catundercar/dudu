@@ -1220,7 +1220,7 @@ class PmQuestionCardsAndStaleBlockedTest(unittest.TestCase):
         tid = "repo-i18n-311"
         Ledger(self.ctx).save({
             "id": tid,
-            "title": "08-i18n",
+            "title": "web-i18n",
             "project": "repo",
             "repo": self.repo,
             "status": "in_progress",
@@ -1299,7 +1299,7 @@ class PmQuestionCardsAndStaleBlockedTest(unittest.TestCase):
         for st in ("blocked", "review", "done"):
             Ledger(self.ctx).save({
                 "id": tid,
-                "title": "08-i18n",
+                "title": "web-i18n",
                 "project": "repo",
                 "repo": self.repo,
                 "status": st,

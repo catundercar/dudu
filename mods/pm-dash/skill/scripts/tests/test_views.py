@@ -1700,7 +1700,11 @@ class ContextStoreAndProjectTests(LedgerCase):
 
     def test_research_root_lists_reads_headings_and_blocks_escapes_and_symlinks(self):
         repo = Path(self.tmp.name) / "repo-dudu"
-        ev = repo / "evidence"
+        # Repo evidence/ is included in legacy `context()`/`research-migrate` only, NOT `Store.library()`.
+        (repo / "evidence/repo-only").mkdir(parents=True, exist_ok=True)
+        (repo / "evidence/repo-only/README.md").write_text("# 仓内调研不应扫入 Library\n", encoding="utf-8")
+
+        ev = self.projects / "dudu" / "research"
         (ev / "agents-helpers").mkdir(parents=True)
         (ev / "agents-helpers/README.md").write_text(
             "# 子 agent：线程 worker 和临时 helper（调研与设计）\n\n详细内容。\n", encoding="utf-8"
@@ -1733,9 +1737,6 @@ class ContextStoreAndProjectTests(LedgerCase):
         (ev / "bad-utf8/README.md").write_bytes(b"\xff\xfe\xfd")
         (ev / "logo.svg").write_text("<svg/>", encoding="utf-8")
 
-        # Ledger-stored research (used when a repo does not gitignore evidence/) merges cleanly and stays out of `project`.
-        self.write_file("projects/dudu/research/ledger-topic/README.md", "# 台账侧调研报告\n\n来自未忽略仓。\n")
-
         outside = Path(self.tmp.name) / "outside-secret.md"
         outside.write_text("# 外部机密\n", encoding="utf-8")
         outside_dir = Path(self.tmp.name) / "outside-research"
@@ -1758,14 +1759,17 @@ class ContextStoreAndProjectTests(LedgerCase):
         self.assertEqual(
             set(research),
             {
+                "repo-only/README.md",
                 "agents-helpers/README.md",
                 "dev-pm-skill/README.md",
                 "render-check-locked/README.md",
                 "huge-topic/README.md",
                 "bad-utf8/README.md",
-                "ledger-topic/README.md",
             },
         )
+        # Store.library("dudu") stays strictly decoupled from `<repo>/evidence`.
+        lib_research_paths = {f["path"] for f in self.store.library("dudu")["files"] if f["root"] == "research"}
+        self.assertNotIn("evidence/repo-only/README.md", lib_research_paths)
         # Ledger research folder never leaks into `project` root.
         self.assertFalse(any(p == "research" or p.startswith("research/") for p in project_paths))
 
@@ -1776,13 +1780,11 @@ class ContextStoreAndProjectTests(LedgerCase):
             "子 agent：线程 worker 和临时 helper（调研与设计）",
         )
         self.assertEqual(research["dev-pm-skill/README.md"]["description"], "Skill 调研")
-        self.assertEqual(research["ledger-topic/README.md"]["description"], "台账侧调研报告")
         self.assertNotIn("show", research["huge-topic/README.md"])
 
-        # Reading valid topic READMEs works (both repo and ledger); non-READMEs, excluded dirs, escapes, symlinks blocked.
+        # Reading valid topic READMEs works; non-READMEs, excluded dirs, escapes, symlinks blocked.
         self.assertIn("详细内容", projects.document("dudu", "research", "agents-helpers/README.md"))
         self.assertIn("正式报告应保留", projects.document("dudu", "research", "render-check-locked/README.md"))
-        self.assertIn("来自未忽略仓", projects.document("dudu", "research", "ledger-topic/README.md"))
         for bad_call in (
             lambda: projects.document("dudu", "research", "../secret.txt"),
             lambda: projects.document("dudu", "research", "agents-helpers/../../outside-secret.md"),
@@ -1805,7 +1807,7 @@ class ContextStoreAndProjectTests(LedgerCase):
             lambda: projects.document("dudu", "research", "inside-link/README.md"),
             lambda: projects.document("dudu", "research", ".hidden/README.md"),
             lambda: projects.document("dudu", "research", "agents-helpers"),
-            lambda: projects.document("dudu", "project", "research/ledger-topic/README.md"),
+            lambda: projects.document("dudu", "project", "research/agents-helpers/README.md"),
         ):
             with self.assertRaises(readmodel.NotFoundError):
                 missing_call()
@@ -1820,7 +1822,6 @@ class ContextStoreAndProjectTests(LedgerCase):
         for args in (
             ["project", "file", "dudu", "research/agents-helpers/README.md"],
             ["project", "file", "--root", "research", "--", "dudu", "agents-helpers/README.md"],
-            ["project", "file", "dudu", "research/ledger-topic/README.md"],
         ):
             res = subprocess.run([sys.executable, str(SCRIPT), *args],
                                  env=env, capture_output=True, text=True, timeout=30)
@@ -1828,32 +1829,21 @@ class ContextStoreAndProjectTests(LedgerCase):
             doc = json.loads(res.stdout)
             self.assertEqual(doc["root"], "research")
 
-        # Replacing `<repo>/evidence` itself with a symlink leaks nothing.
+        # Replacing `projects/<slug>/research` itself with a symlink leaks nothing.
         repo_sym = Path(self.tmp.name) / "repo-sym"
         repo_sym.mkdir()
-        (repo_sym / "evidence").symlink_to(outside_dir, target_is_directory=True)
+        (self.projects / "symproj").mkdir(parents=True)
+        (self.projects / "symproj/research").symlink_to(outside_dir, target_is_directory=True)
         self.write_reg("symproj", project="symproj", repo=str(repo_sym))
         self.assertEqual([d for d in projects.context("symproj") if d["root"] == "research"], [])
         with self.assertRaises(readmodel.NotFoundError):
             projects.document("symproj", "research", "README.md")
 
-        # Missing evidence/ or unregistered project with only task repo degrades cleanly.
+        # Missing research/ or project with only repo degrades cleanly.
         repo_no_ev = Path(self.tmp.name) / "repo-empty"
         repo_no_ev.mkdir()
         self.write_reg("emptyproj", project="emptyproj", repo=str(repo_no_ev))
         self.assertEqual([d for d in projects.context("emptyproj") if d["root"] == "research"], [])
-
-        repo_task_only = Path(self.tmp.name) / "repo-task-only"
-        (repo_task_only / "evidence/only-topic").mkdir(parents=True)
-        (repo_task_only / "evidence/only-topic/README.md").write_text("# 无登记项目\n", encoding="utf-8")
-        (self.tasks / "t1.json").write_text(json.dumps({
-            "id": "t1", "title": "research", "project": "repo-task-only", "repo": str(repo_task_only),
-            "status": "done", "updated": "2026-11-21 20:00",
-        }), encoding="utf-8")
-        self.assertEqual(
-            [d["path"] for d in projects.context("repo-task-only") if d["root"] == "research"],
-            ["only-topic/README.md"],
-        )
 
     def test_documents_excludes_project_helpers_folder(self):
         self.write_reg("dudu", project="dudu")
@@ -1906,7 +1896,7 @@ class LibraryAndMemoryTests(unittest.TestCase):
             return json.loads(r.stdout)
         return r
 
-    def test_library_lists_docs_research_and_instructions_and_nothing_of_the_process(self):
+    def test_library_lists_docs_and_ledger_research_decoupled_from_repos(self):
         ledger = self.root / "projects/proj"
         self.put(ledger, "decisions.md", "- 2026-11-10 一\n- 2026-11-11 二\n")
         for junk in ("handover.md", "verify", "verify.before-ui-only", "conversation.jsonl"):
@@ -1915,43 +1905,38 @@ class LibraryAndMemoryTests(unittest.TestCase):
         self.put(ledger, "docs/spec.md", "# 告警规格\n\n正文。\n")
         self.put(ledger, "docs/.history/old.md.20261101-000000.deleted", "old\n")
         self.put(ledger, "docs/research/ledger-report.md", "# 台账里的报告\n\n私有结论。\n")
-        ev = self.repo / "evidence"
-        self.put(ev, "alpha/README.md", "# Alpha 调研\n\n- **任务**：`proj-alpha-study`\n- **日期**：今天\n\n"
-                                        "第一段结论，说明为什么。\n\n## 细节\n")
-        self.put(ev, "alpha/shot.png", b"\x89PNG")
-        self.put(ev, "alpha/probe.sh", "#!/bin/sh\n")
-        self.put(ev, "beta/README.md", "# Beta 旧位置\n")
-        self.put(ev, "gamma/README.md", "# Gamma\n\n结论。\n")
-        self.put(ev, "published/README.md", "# 名叫 published 的本地原件\n")
-        self.put(ev, "render-check/README.md", "# 截图\n")
         self.put(ledger, "docs/research/beta.md", "# Beta 新家\n\n搬过来的报告。\n")
-        self.put(self.repo, "docs/research/alpha.md", "# Alpha（公开脱敏版）\n\n删掉了私有细节。\n")
-        self.put(self.repo, "docs/research/only-public.md", "# 只有公开版\n\n正文。\n")
-        self.task("proj-only-public", title="不该被猜成它")
-        self.put(self.repo, "docs/guide.md", "# 网站文档\n")
-        self.put(self.repo, "CLAUDE.md", "# 仓库规矩\n")
-        self.put(self.repo, "AGENTS.md", "# Agents\n")
+        # Unmigrated ledger-side research: `projects/proj/research/<topic>/README.md`
+        self.put(ledger, "research/alpha/README.md", "# Alpha 调研\n\n- **任务**：`proj-alpha-study`\n\n第一段结论，说明为什么。\n")
+        self.put(ledger, "research/beta/README.md", "# Beta 旧位置\n")
+        self.put(ledger, "research/gamma/README.md", "# Gamma\n\n结论。\n")
+        self.put(ledger, "research/published/README.md", "# 名叫 published 的本地原件\n")
+        self.put(ledger, "research/render-check/README.md", "# 截图\n")
+
+        # Repo-side docs, instructions, evidence, and docs/research must be completely ignored by Library.
+        ev = self.repo / "evidence"
+        self.put(ev, "repo-ev/README.md", "# 仓内 evidence 不应出现\n")
+        self.put(self.repo, "docs/research/only-public.md", "# 公开版不应出现\n")
+        self.put(self.repo, "docs/guide.md", "# 网站文档不应出现\n")
+        self.put(self.repo, "CLAUDE.md", "# 仓库规矩不应出现\n")
+        self.put(self.repo, "AGENTS.md", "# Agents 不应出现\n")
         self.put(self.repo, ".claude/coordination.md", "# 协调\n")
         self.put(self.repo, ".claude/rules/tests.md", "# 测试规矩\n")
-        self.put(self.repo, ".claude/rules/notes.txt", "not a rule\n")
+
         self.task("proj-alpha-study", title="Alpha 调研任务")
         self.task("proj-beta-x", title="Beta", worktree="/wt/dev-beta")
         self.task("proj-gamma-1", title="Gamma 任务")
         FileStore(self.root).note_research_source("proj", "evidence/gamma/README.md", "proj-gamma-1")
 
         lib = self.pm("library", "proj")
-        self.assertEqual([r["id"] for r in lib["roots"]], ["docs", "repo_docs", "research", "instructions"])
-        self.assertEqual([r["writable"] for r in lib["roots"]], [True, False, False, False])
+        self.assertEqual([r["id"] for r in lib["roots"]], ["docs", "research"])
+        self.assertEqual([r["writable"] for r in lib["roots"]], [True, False])
         by = {f"{f['root']}/{f['path']}": f for f in lib["files"]}
         self.assertEqual(set(by), {
             "docs/spec.md", "docs/decisions.md",
-            "repo_docs/docs/guide.md",
             "research/docs/research/beta.md", "research/docs/research/ledger-report.md",
             "research/evidence/alpha/README.md", "research/evidence/gamma/README.md",
             "research/evidence/published/README.md",
-            "research/published/only-public.md",
-            "instructions/CLAUDE.md", "instructions/AGENTS.md", "instructions/.claude/coordination.md",
-            "instructions/.claude/rules/tests.md",
         })
         self.assertIn("名叫 published 的本地原件",
                       self.pm("file", "proj", "research/evidence/published/README.md")["text"])
@@ -1960,16 +1945,11 @@ class LibraryAndMemoryTests(unittest.TestCase):
         self.assertEqual((dec["archive"], dec["hidden"], dec["writable"], dec["entries"]), (True, False, False, 2))
         alpha = by["research/evidence/alpha/README.md"]
         self.assertEqual((alpha["title"], alpha["summary"], alpha["task"], alpha["task_title"], alpha["source"]),
-                         ("Alpha 调研", "第一段结论，说明为什么。", "proj-alpha-study", "Alpha 调研任务", "repo"))
+                         ("Alpha 调研", "第一段结论，说明为什么。", "proj-alpha-study", "Alpha 调研任务", "ledger"))
+        self.assertNotIn("published", alpha)
         self.assertEqual(by["research/evidence/gamma/README.md"]["task"], "proj-gamma-1")
-        # The local original stays the report; its redacted public copy only marks it. A public copy with no
-        # original is listed, marked, and linked to a task only by what it says itself.
-        self.assertEqual(alpha["published"], "published/alpha.md")
-        public = by["research/published/only-public.md"]
-        self.assertEqual((public["published"], public["source"], "task" in public), (True, "published", False))
-        self.assertIn("删掉了私有细节", self.pm("file", "proj", "research/published/alpha.md")["text"])
         self.assertEqual((by["research/docs/research/beta.md"]["task"], by["research/docs/research/beta.md"]["title"]),
-                         ("proj-beta-x", "Beta 新家"))  # the project's docs/research copy replaces evidence/beta
+                         ("proj-beta-x", "Beta 新家"))  # docs/research copy replaces research/beta
         self.assertEqual((by["research/docs/research/beta.md"]["source"],
                           by["research/docs/research/ledger-report.md"]["source"]), ("ledger", "ledger"))
         self.assertFalse(any(f["writable"] for f in lib["files"] if f["root"] != "docs" or f.get("archive")))
@@ -1978,9 +1958,9 @@ class LibraryAndMemoryTests(unittest.TestCase):
         self.assertIn("第一段结论", doc["text"])
         self.assertTrue(doc["version"])
         self.assertIn("搬过来", self.pm("file", "proj", "research/docs/research/beta.md")["text"])
-        self.assertIn("测试规矩", self.pm("file", "--root", "instructions", "--", "proj", ".claude/rules/tests.md")["text"])
-        for bad in ("research/evidence/alpha/probe.sh", "instructions/.claude/rules/notes.txt",
-                    "instructions/docs/guide.md", "docs/research/ledger-report.md", "docs/.history/old.md"):
+        for bad in ("research/published/only-public.md",
+                    "instructions/CLAUDE.md", "instructions/.claude/rules/tests.md",
+                    "repo_docs/docs/guide.md", "docs/research/ledger-report.md", "docs/.history/old.md"):
             self.assertNotEqual(self.pm("file", "proj", bad, ok=False).returncode, 0, bad)
 
         self.assertEqual(self.pm("archive-decisions", "proj")["decisions"]["hidden"], True)
@@ -2095,7 +2075,7 @@ class LibraryAndMemoryTests(unittest.TestCase):
                          (mem / "candidates/empty").stat().st_mtime < time.time() - CANDIDATE_GRACE)
 
     def test_research_migrate_is_a_dry_run_until_applied_and_never_overwrites(self):
-        ev = self.repo / "evidence"
+        ev = self.root / "projects/proj/research"
         ledger_research = self.root / "projects/proj/docs/research"
         self.put(ev, "alpha/README.md", "# Alpha\n\n![shot](shot.png) [web](https://example.com)\n")
         self.put(ev, "alpha/shot.png", b"\x89PNG")
@@ -2112,10 +2092,10 @@ class LibraryAndMemoryTests(unittest.TestCase):
         self.assertEqual({r["topic"]: r["status"] for r in done["reports"]}, {"alpha": "moved", "beta": "exists"})
         self.assertEqual((ledger_research / "beta.md").read_text(), "# 已有的不同版本\n")
         self.assertEqual((self.repo / "docs/research/alpha.md").read_text(), "# 公开版\n")
-        self.assertTrue((ev / "alpha/README.md").exists())  # the evidence copy stays; the Library shows the new one
+        self.assertTrue((ev / "alpha/README.md").exists())
         research = {f["path"]: f for f in self.pm("library", "proj")["files"] if f["root"] == "research"}
         self.assertEqual(set(research), {"docs/research/alpha.md", "docs/research/beta.md"})
-        self.assertEqual(research["docs/research/alpha.md"]["published"], "published/alpha.md")
+        self.assertNotIn("published", research["docs/research/alpha.md"])
 
     def test_repo_files_and_preview_allow_only_git_tracked_files(self):
         self.put(self.repo, "README.md", "# Demo Repo\n")
@@ -2181,15 +2161,23 @@ class LibraryAndMemoryTests(unittest.TestCase):
 
         self.assertNotEqual(self.pm("files", "missing-proj", ok=False).returncode, 0)
 
-        # Non-git directories expose no repo files and allow no repo file preview.
+        # Non-git directories walk safely: skip dotfiles/node_modules/symlinks and preview safe text files.
         def _rm_readonly(func, p, _exc):
             os.chmod(p, 0o600)
             func(p)
         shutil.rmtree(self.repo / ".git", onerror=_rm_readonly)
         self.put(self.repo, "keep/hello.js", "export default 1;\n")
+        self.put(self.repo, "node_modules/pkg/index.js", "ignored\n")
         nongit = self.pm("files", "proj")
-        self.assertEqual(nongit, {"project": "proj", "files": [], "truncated": False})
-        self.assertNotEqual(self.pm("file", "proj", "--root", "repo", "--", "README.md", ok=False).returncode, 0)
+        self.assertFalse(nongit["truncated"])
+        self.assertIn("keep/hello.js", nongit["files"])
+        self.assertIn("README.md", nongit["files"])
+        self.assertNotIn(".env", nongit["files"])
+        self.assertNotIn("node_modules/pkg/index.js", nongit["files"])
+        self.assertNotIn("escape.txt", nongit["files"])
+        self.assertIn("export default 1", self.pm("file", "proj", "--root", "repo", "--", "keep/hello.js")["text"])
+        self.assertNotEqual(self.pm("file", "proj", "--root", "repo", "--", ".env", ok=False).returncode, 0)
+        self.assertNotEqual(self.pm("file", "proj", "--root", "repo", "--", "node_modules/pkg/index.js", ok=False).returncode, 0)
 
     def _init_git(self, repo: Path) -> None:
         for cmd in (["git", "-C", str(repo), "init"],
@@ -2198,131 +2186,119 @@ class LibraryAndMemoryTests(unittest.TestCase):
                     ["git", "-C", str(repo), "add", "-A"]):
             subprocess.run(cmd, capture_output=True, text=True, check=True)
 
-    def test_repo_docs_discovery_filtering_superseded_and_readonly(self):
-        # Mix static site noise, media, framework dirs, i18n, boilerplate, cross-root files, and real docs.
-        self.put(self.repo, "docs/index.html", "<html></html>\n")
-        self.put(self.repo, "docs/.nojekyll", "")
-        self.put(self.repo, "docs/demo.gif", b"GIF89a")
-        self.put(self.repo, "docs/library.mp4", b"\x00\x00\x00\x18ftypmp42")
-        self.put(self.repo, "docs/.vitepress/config.js", "export default {}\n")
-        self.put(self.repo, "docs/_site/built.md", "# Built\n")
-        self.put(self.repo, "docs/i18n/zh/a.md", "# 翻译\n")
-        self.put(self.repo, "docs/CHANGELOG.md", "# Changelog\n")
-        self.put(self.repo, "docs/research/r1.md", "# Research 1\n")
+    def test_library_decouples_repo_docs_instructions_and_repo_docs_cli_deprecated(self):
         self.put(self.repo, "CLAUDE.md", "# Claude rules\n")
-        self.put(self.repo, "docs/design/auto-dream.md",
-                 "# 后台记忆整理（autoDream）\n\n- **任务**：`proj-auto-dream`\n\n核心设计定稿摘要。\n")
-        self.put(self.repo, "docs/guide.md", "# 使用指南\n\n快速上手。\n")
-        outside = Path(self.tmp.name) / "secret.md"
-        outside.write_text("# Secret\n", encoding="utf-8")
-        (self.repo / "docs" / "escape.md").symlink_to(outside)
+        self.put(self.repo, "AGENTS.md", "# Agents\n")
+        self.put(self.repo, "docs/design/auto-dream.md", "# Design\n")
+        self.put(self.repo, "ARCHITECTURE.md", "# Architecture\n")
         self._init_git(self.repo)
-        # Untracked file in git repo must not be listed or readable.
-        self.put(self.repo, "docs/untracked-draft.md", "# Untracked\n")
-        self.task("proj-auto-dream", title="autoDream 设计定稿")
-
-        # Ledger drafts: auto-dream-draft.md matches normalized stem; explicit frontmatter overrides; generic names do not.
-        ledger = self.root / "projects/proj"
-        self.put(ledger, "docs/auto-dream-draft.md", "# autoDream 草稿\n\n旧版本。\n")
-        self.put(ledger, "docs/custom-alias.md", "---\nsuperseded_by: docs/guide.md\n---\n# 别名草稿\n")
-        self.put(ledger, "docs/notes.md", "# 随手笔记\n")
-        self.put(ledger, "docs/README.md", "# 台账说明\n")
+        self.put(self.root / "projects/proj", "docs/note.md", "# Note\n")
 
         lib = self.pm("library", "proj")
-        roots = {r["id"]: r for r in lib["roots"]}
-        self.assertEqual(roots["repo_docs"], {"id": "repo_docs", "writable": False, "truncated": False, "total": 2})
-
-        repo_docs = {f["path"]: f for f in lib["files"] if f["root"] == "repo_docs"}
-        self.assertEqual(set(repo_docs), {"docs/design", "docs/design/auto-dream.md", "docs/guide.md"})
-        self.assertEqual(repo_docs["docs/design"]["kind"], "folder")
-        self.assertFalse(repo_docs["docs/design"]["writable"])
-        ad = repo_docs["docs/design/auto-dream.md"]
-        self.assertEqual((ad["title"], ad["summary"], ad["task"], ad["task_title"], ad["writable"]),
-                         ("后台记忆整理（autoDream）", "核心设计定稿摘要。", "proj-auto-dream", "autoDream 设计定稿", False))
-        # No cross-root duplication: research/r1.md stays in research, CLAUDE.md stays in instructions.
-        self.assertIn("published/r1.md", {f["path"] for f in lib["files"] if f["root"] == "research"})
-        self.assertIn("CLAUDE.md", {f["path"] for f in lib["files"] if f["root"] == "instructions"})
-
-        # Superseded_by annotations on ledger docs.
-        ledger_docs = {f["path"]: f for f in lib["files"] if f["root"] == "docs"}
-        self.assertEqual(ledger_docs["auto-dream-draft.md"].get("superseded_by"), "docs/design/auto-dream.md")
-        self.assertEqual(ledger_docs["custom-alias.md"].get("superseded_by"), "docs/guide.md")
-        self.assertNotIn("superseded_by", ledger_docs["notes.md"])
-        self.assertNotIn("superseded_by", ledger_docs["README.md"])
-
-        # Reading allowed repo_docs works; disallowed paths and writes are rejected.
-        got = self.pm("file", "proj", "--root", "repo_docs", "--", "docs/design/auto-dream.md")
-        self.assertIn("核心设计定稿摘要", got["text"])
-        self.assertTrue(got["version"])
-        self.assertIn("使用指南", self.pm("file", "proj", "repo_docs/docs/guide.md")["text"])
-
-        for bad in (
-            ["file", "proj", "--root", "repo_docs", "--", "docs/index.html"],
-            ["file", "proj", "--root", "repo_docs", "--", "docs/CHANGELOG.md"],
-            ["file", "proj", "--root", "repo_docs", "--", "docs/research/r1.md"],
-            ["file", "proj", "--root", "repo_docs", "--", "docs/escape.md"],
-            ["file", "proj", "--root", "repo_docs", "--", "docs/untracked-draft.md"],
-            ["file", "proj", "--root", "repo_docs", "--", ".git/config"],
-            ["file", "proj", "--root", "repo_docs", "--", "CLAUDE.md"],
-            ["save", "proj", "repo_docs/docs/guide.md", "--text", "hack"],
-            ["delete", "proj", "repo_docs/docs/guide.md"],
-            ["restore", "proj", "repo_docs/docs/guide.md"],
+        self.assertEqual([r["id"] for r in lib["roots"]], ["docs", "research"])
+        self.assertEqual({f"{f['root']}/{f['path']}" for f in lib["files"]}, {"docs/note.md"})
+        for blocked in (
+            ["file", "proj", "--root", "repo_docs", "--", "docs/design/auto-dream.md"],
+            ["file", "proj", "repo_docs/ARCHITECTURE.md"],
+            ["file", "proj", "--root", "instructions", "--", "CLAUDE.md"],
         ):
-            self.assertNotEqual(self.pm(*bad, ok=False).returncode, 0, bad)
+            self.assertNotEqual(self.pm(*blocked, ok=False).returncode, 0, blocked)
 
-    def test_repo_docs_singular_doc_rfcs_architecture_and_nongit_fallback(self):
-        # Non-git repo with singular `doc/`, root `rfcs/`, and `ARCHITECTURE.md`.
-        self.put(self.repo, "doc/manual.md", "# Manual\n")
-        self.put(self.repo, "rfcs/0001-protocol.md", "# RFC 0001\n")
-        self.put(self.repo, "ARCHITECTURE.md", "# System Architecture\n")
-        self.put(self.repo, "README.md", "# Root README not included by default\n")
+        cfg = self.pm("repo-docs", "proj")
+        self.assertEqual((cfg["enabled"], cfg["deprecated"], cfg["entries"]), (False, True, []))
+        cfg_on = self.pm("repo-docs", "proj", "--on")
+        self.assertEqual((cfg_on["enabled"], cfg_on["deprecated"]), (False, True))
 
-        lib = self.pm("library", "proj")
-        paths = {f["path"] for f in lib["files"] if f["root"] == "repo_docs" and f["kind"] != "folder"}
-        self.assertEqual(paths, {"doc/manual.md", "rfcs/0001-protocol.md", "ARCHITECTURE.md"})
-        self.assertIn("System Architecture", self.pm("file", "proj", "repo_docs/ARCHITECTURE.md")["text"])
-
-    def test_repo_docs_tier_cap_and_cli_config(self):
-        # 5 Tier-1 design docs + 205 Tier-3 guides -> total 210, truncated to 200 with all 5 Tier-1 preserved.
-        for i in range(5):
-            self.put(self.repo, f"docs/design/spec-{i}.md", f"# Design {i}\n")
-        for i in range(205):
-            self.put(self.repo, f"docs/guides/g-{i:03d}.md", f"# Guide {i}\n")
-        self.put(self.repo, "packages/core/docs/core.md", "# Core\n")
-        self.put(self.repo, "README.md", "# Root README\n")
-        self._init_git(self.repo)
+    def test_library_reads_ledger_research_without_repo_evidence_fallback(self):
+        ledger = self.root / "projects/proj"
+        ledger_copy = self.put(ledger, "research/dup/README.md", "# 台账原件\n\n仅此一份。\n")
+        repo_copy = self.put(self.repo, "evidence/dup/README.md", "# 仓内新副本\n\n不应覆盖。\n")
+        self.put(self.repo, "evidence/repo-only/README.md", "# 仅仓库存在\n")
+        now = time.time()
+        os.utime(ledger_copy, (now - 30, now - 30))
+        os.utime(repo_copy, (now + 30, now + 30))
 
         lib = self.pm("library", "proj")
-        rd_root = next(r for r in lib["roots"] if r["id"] == "repo_docs")
-        self.assertTrue(rd_root["truncated"])
-        self.assertEqual(rd_root["total"], 210)
-        rd_files = [f["path"] for f in lib["files"] if f["root"] == "repo_docs" and f["kind"] != "folder"]
-        self.assertEqual(len(rd_files), 200)
-        for i in range(5):
-            self.assertIn(f"docs/design/spec-{i}.md", rd_files)
+        self.assertEqual({f"{f['root']}/{f['path']}" for f in lib["files"]}, {"research/evidence/dup/README.md"})
+        read_dup = self.pm("file", "proj", "research/evidence/dup/README.md")
+        self.assertIn("台账原件", read_dup["text"])
+        self.assertNotIn("仓内新副本", read_dup["text"])
+        self.assertNotEqual(self.pm("file", "proj", "research/evidence/repo-only/README.md", ok=False).returncode, 0)
 
-        # CLI `project repo-docs`: inspect, include/exclude, off/on, reset.
-        cfg0 = self.pm("repo-docs", "proj")
-        self.assertTrue(cfg0["enabled"])
-        self.assertFalse(cfg0["custom"])
-        self.assertEqual(cfg0["entries"], ["docs"])
+    def test_project_folders_cli_multifolder_files_and_state(self):
+        from pmlib.views.state import dash_state
 
-        cfg1 = self.pm("repo-docs", "proj", "--include", "packages/core/docs", "--include", "README.md",
-                       "--exclude", "docs/guides")
-        self.assertTrue(cfg1["custom"])
-        self.assertEqual(cfg1["include"], ["packages/core/docs", "README.md"])
-        lib1 = self.pm("library", "proj")
-        paths1 = {f["path"] for f in lib1["files"] if f["root"] == "repo_docs" and f["kind"] != "folder"}
-        self.assertEqual(paths1, {"packages/core/docs/core.md", "README.md"})
+        api_v1 = Path(self.tmp.name) / "v1/api"
+        api_v2 = Path(self.tmp.name) / "v2/api"
+        notes_dir = Path(self.tmp.name) / "design-notes"
+        self.put(api_v1, "app.py", "print('v1')\n")
+        self.put(api_v2, "main.py", "print('v2')\n")
+        self.put(notes_dir, "arch.md", "# Architecture Notes\n")
+        self.put(notes_dir, "node_modules/skip.js", "skip\n")
+        self._init_git(api_v1)
+        self._init_git(api_v2)
 
-        cfg_off = self.pm("repo-docs", "proj", "--off")
-        self.assertFalse(cfg_off["enabled"])
-        self.assertEqual([f for f in self.pm("library", "proj")["files"] if f["root"] == "repo_docs"], [])
+        # Create 0-folder project explicitly via registration JSON (`folders: []`, `space_id`, `slug`).
+        (self.root / "pms/app-multi.json").write_text(json.dumps({
+            "name": "pm-app-multi",
+            "slug": "app-multi",
+            "project": "App Multi",
+            "space_id": "space-app-1",
+            "folders": [],
+            "repo": "",
+        }), encoding="utf-8")
 
-        cfg_reset = self.pm("repo-docs", "proj", "--reset")
-        self.assertTrue(cfg_reset["enabled"])
-        self.assertFalse(cfg_reset["custom"])
-        self.assertEqual(cfg_reset["include"], [])
+        ls0 = self.pm("folders", "ls", "app-multi")
+        self.assertEqual(ls0, {"project": "app-multi", "folders": []})
+        self.assertEqual(self.pm("files", "app-multi"), {"project": "app-multi", "files": [], "truncated": False})
+
+        # Add first Git folder -> mirror repo updates, single-folder files remain unprefixed.
+        add1 = self.pm("folders", "add", "app-multi", str(api_v1))
+        self.assertEqual(len(add1["folders"]), 1)
+        self.assertEqual(add1["folders"][0]["alias"], "api")
+        self.assertTrue(add1["folders"][0]["git"])
+        reg1 = json.loads((self.root / "pms/app-multi.json").read_text())
+        self.assertEqual(reg1["repo"], str(api_v1.resolve()))
+        self.assertNotIn("primary", reg1["folders"][0])
+        self.assertNotIn("role", reg1["folders"][0])
+        self.assertEqual(self.pm("files", "app-multi")["files"], ["app.py"])
+
+        # Add duplicate-basename Git repo + non-Git notes folder -> disambiguated aliases + <alias>/ files.
+        add2 = self.pm("folders", "add", "app-multi", str(api_v2))
+        self.assertEqual([f["alias"] for f in add2["folders"]], ["api", "v2-api"])
+        add3 = self.pm("folders", "add", "app-multi", str(notes_dir))
+        self.assertEqual([f["alias"] for f in add3["folders"]], ["api", "v2-api", "design-notes"])
+        self.assertFalse(add3["folders"][2]["git"])
+
+        multi_files = self.pm("files", "app-multi")["files"]
+        self.assertEqual(set(multi_files), {"api/app.py", "v2-api/main.py", "design-notes/arch.md"})
+        self.assertIn("print('v2')", self.pm("file", "app-multi", "--root", "repo", "--", "v2-api/main.py")["text"])
+        self.assertIn("Architecture Notes", self.pm("file", "app-multi", "--root", "repo", "--", "design-notes/arch.md")["text"])
+
+        # Rename alias and verify updated namespace.
+        renamed = self.pm("folders", "rename-alias", "app-multi", "api", "core-api")
+        self.assertEqual([f["alias"] for f in renamed["folders"]], ["core-api", "v2-api", "design-notes"])
+        self.assertIn("core-api/app.py", self.pm("files", "app-multi")["files"])
+
+        # Removing first folder has no "primary" lock: updates `repo` mirror to remaining folders[0] & leaves files intact.
+        removed = self.pm("folders", "remove", "app-multi", "core-api")
+        self.assertEqual([f["alias"] for f in removed["folders"]], ["v2-api", "design-notes"])
+        reg_after = json.loads((self.root / "pms/app-multi.json").read_text())
+        self.assertEqual(reg_after["repo"], str(api_v2.resolve()))
+        self.assertTrue((api_v1 / "app.py").exists())
+
+        # dash_state surfaces slug, space_id, equal folders, and task project_slug/folder_alias.
+        (self.root / "tasks/app-t1.json").write_text(json.dumps({
+            "id": "app-t1", "title": "Cross-repo", "project": "App Multi", "project_slug": "app-multi",
+            "folder_alias": "v2-api", "repo": str(api_v2.resolve()), "status": "in_progress",
+            "updated": "2026-11-28 06:00",
+        }), encoding="utf-8")
+        state = dash_state(ctx=self.ctx)
+        pm_row = next(p for p in state["pms"] if p["name"] == "pm-app-multi")
+        self.assertEqual((pm_row["slug"], pm_row["space_id"], pm_row["repo_ok"]), ("app-multi", "space-app-1", True))
+        self.assertEqual([f["alias"] for f in pm_row["folders"]], ["v2-api", "design-notes"])
+        t_row = next(t for t in state["tasks"] if t["id"] == "app-t1")
+        self.assertEqual((t_row["project_slug"], t_row["folder_alias"]), ("app-multi", "v2-api"))
 
 
 class DashTurnWireEventsTests(unittest.TestCase):

@@ -8,9 +8,10 @@ from pathlib import Path
 
 from ..agents.reads import HERDR_DOCS, docs_line, outside_reads, read_settings, wide_folder
 from ..context import Context
+from ..home import project_slug
 from ..ledger.ledger import Ledger
 from ..memory.layer import MemoryLayer
-from ..store import valid_task_id
+from ..store import project_folders, valid_slug, valid_task_id
 
 __all__ = [
     "HERDR_DOCS",
@@ -65,9 +66,30 @@ def keep_sent_for(ctx: Context, task_id: str, brief: str) -> Path:
     """The brief as the worker gets it, report section included, kept as sent/<id>.md for a resend."""
     path = ctx.home.sent_dir / f"{task_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    repo = sent_repo_for(ctx, task_id)
-    mem = MemoryLayer(ctx, repo).memory_part() if repo else ""
-    path.write_text(brief + report_section_for(ctx, task_id) + mem + ctx.agents.docs_line())
+    task = ctx.store.task(task_id) if valid_task_id(task_id) else None
+    repo = str((task or {}).get("repo") or "") or (sent_repo_for(ctx, task_id) or "")
+    pslug = str((task or {}).get("project_slug") or "").strip()
+    mem_ref = (
+        repo
+        if (repo and (not pslug or project_slug(repo) == pslug))
+        else (str(ctx.home.project(pslug).root) if valid_slug(pslug) else repo)
+    )
+    mem = MemoryLayer(ctx, mem_ref).memory_part() if mem_ref else ""
+    siblings_block = ""
+    if pslug and valid_slug(pslug):
+        reg = ctx.store.registration(pslug)
+        if isinstance(reg, dict):
+            repo_res = str(Path(repo).resolve()) if repo else ""
+            siblings = [
+                f for f in project_folders(reg)
+                if f.get("path") and (not repo_res or str(Path(f["path"]).resolve()) != repo_res)
+            ]
+            if siblings:
+                header = ctx.config.tr("Linked workspace folders (read-only):", "同项目其他关联文件夹（只读）：")
+                siblings_block = "\n" + header + "\n" + "\n".join(
+                    f"- {f['alias']}: {f['path']}" for f in siblings
+                ) + "\n"
+    path.write_text(brief + siblings_block + report_section_for(ctx, task_id) + mem + ctx.agents.docs_line())
     return path
 
 

@@ -100,13 +100,16 @@ class CliSurfaceTest(unittest.TestCase):
                       "is meant):\n" + diff)
 
     def test_golden_lists_every_command(self):
-        # The contract names 60 commands; a golden file written from a broken parser would not.
+        # The contract names 68 commands; a golden file written from a broken parser would not.
         tree = json.loads(GOLDEN.read_text(encoding="utf-8"))
-        self.assertEqual(len(tree["subcommands"]), 62)
-        self.assertEqual(len(tree["subcommands"]["project"]["subcommands"]), 21)
+        self.assertEqual(len(tree["subcommands"]), 68)  # +tokens, +remote-sync (P6a), +worker/mailbox-sync/worker-hub/worker-agent (P6b)
+        self.assertEqual(len(tree["subcommands"]["project"]["subcommands"]), 24)
+        self.assertEqual(sorted(tree["subcommands"]["project"]["subcommands"]["folders"]["subcommands"]),
+                         ["add", "ls", "remove", "rename-alias"])
         self.assertEqual(sorted(tree["subcommands"]["turn-journal"]["subcommands"]), ["export"])
         self.assertEqual(sorted(tree["subcommands"]["helper"]["subcommands"]), ["done", "ls", "start", "stop", "wait"])
         self.assertEqual(sorted(tree["subcommands"]["dream"]["subcommands"]), ["apply", "run", "status", "undo"])
+        self.assertEqual(sorted(tree["subcommands"]["worker"]["subcommands"]), ["enroll", "join", "list", "revoke"])
 
 
 if __name__ == "__main__":

@@ -57,33 +57,43 @@
               "id": "pm-list",
               "type": "block",
               "size": {
-                "px": 30
+                "weight": 1
               },
               "content": {
                 "mod": "pm-list"
               }
             },
             {
-              "id": "spaces",
-              "type": "block",
+              "id": "herdr-lists",
+              "type": "column",
+              "hidden": true,
               "size": {
                 "weight": 1
               },
-              "min": 90,
-              "content": {
-                "mod": "spaces"
-              }
-            },
-            {
-              "id": "agents",
-              "type": "block",
-              "size": {
-                "weight": 1
-              },
-              "min": 90,
-              "content": {
-                "mod": "agents"
-              }
+              "children": [
+                {
+                  "id": "spaces",
+                  "type": "block",
+                  "size": {
+                    "weight": 1
+                  },
+                  "min": 90,
+                  "content": {
+                    "mod": "spaces"
+                  }
+                },
+                {
+                  "id": "agents",
+                  "type": "block",
+                  "size": {
+                    "weight": 1
+                  },
+                  "min": 90,
+                  "content": {
+                    "mod": "agents"
+                  }
+                }
+              ]
             }
           ]
         },
@@ -105,7 +115,7 @@
     {
       "id": "pm-stage",
       "type": "stack",
-      "active": "work",
+      "active": "pm-board",
       "children": [
         {
           "id": "work",

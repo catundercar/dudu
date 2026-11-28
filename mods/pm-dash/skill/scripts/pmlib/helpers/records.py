@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from ..context import Clock, Context, seconds_since
 from ..events.deliver import Delivery
@@ -320,7 +320,7 @@ def finalize_helper_for(
     if kill_term and hterm and transitioned[0]:
         kill_helper_terminal_for(ctx, hterm, remove=remove_term)
     if notify and transitioned[0]:
-        _notify_helper_owner_for(ctx, owner_kind, owner_id, repo, entry)
+        _notify_helper_owner_for(ctx, owner_kind, owner_id, repo, entry, slug=slug)
     return entry, transitioned[0]
 
 
@@ -347,12 +347,31 @@ def _send_to_worker_if_active_for(ctx: Context, owner_id: str, entry: dict[str, 
     return True
 
 
+def helper_should_wake_pm(ctx: Context, entry: Mapping[str, Any], status: str) -> bool:
+    """Whether a PM-owned helper notification should wake the PM.
+
+    Quiet helpers (`quiet=True`) suppress wake-ups on normal completion (e.g. `land` helpers whose task
+    status transition already woke the PM, or background `auto-dream` helpers). For a quiet task-scoped
+    exec helper (`for_task` set), abnormal failure (`timeout`/`exited`/`blocked`/`error`) still wakes the PM
+    if the target task remains `in_progress`, so a failed delegated merge is never silently lost.
+    """
+    if not entry.get("quiet"):
+        return True
+    for_task = str(entry.get("for_task") or "").strip()
+    if not for_task or status not in ("timeout", "exited", "blocked", "error"):
+        return False
+    task = ctx.store.task(for_task)
+    return bool(isinstance(task, Mapping) and task.get("status") == "in_progress")
+
+
 def _notify_helper_owner_for(
     ctx: Context,
     owner_kind: str,
     owner_id: str,
     repo: str,
     entry: dict[str, Any],
+    *,
+    slug: str = "",
 ) -> None:
     """Deliver a helper's conclusion/status to its owner: PM via project conversation log + deliver, worker via
     hc send (only while its task is still `in_progress` on the same terminal and not in `pm.py helper wait`)."""
@@ -378,14 +397,15 @@ def _notify_helper_owner_for(
             f"helper {name} {status}" + (f"（{result}）" if result else "") + (f"：{summary}" if summary else ""),
         )
     if owner_kind == "pm":
-        if repo:
-            quiet = bool(entry.get("quiet"))
-            Conversation(ctx, repo).record(
+        eff_slug = slug or (ctx.store.folder_project_slug(repo) if repo else "")
+        if repo or eff_slug:
+            wake = helper_should_wake_pm(ctx, entry, status)
+            Conversation(ctx, repo, slug=eff_slug or None).record(
                 "helper", by=f"hc:{term}" if term else "helper", source="helper", helper=name,
-                status=status, result=result, text=text, wake=not quiet,
+                status=status, result=result, text=text, wake=wake,
             )
-            if not quiet:
-                Delivery(ctx, repo).ensure_running()
+            if wake:
+                Delivery(ctx, repo, slug=eff_slug or None).ensure_running()
         return
     _send_to_worker_if_active_for(ctx, owner_id, entry, f"[from helper {name}] {text}")
 

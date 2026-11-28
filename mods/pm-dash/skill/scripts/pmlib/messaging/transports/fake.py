@@ -278,6 +278,8 @@ class FakeTransport:
 
     def unblock_prompt(self, endpoint: Endpoint, keys: Sequence[str]) -> bool:
         st = self._ep(endpoint)
+        if st.get("link_state", "connected") != "connected":
+            return False
         if not st.get("can_unblock_keys", True) or not st.get("live", True) or not keys:
             return False
         self.unblocks.append((endpoint.uid, tuple(keys)))

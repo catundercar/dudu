@@ -16,7 +16,8 @@ from typing import Mapping
 from ..errors import NotFound
 from ..home import project_slug
 from ..messaging.mailbox import MailboxStore, merge_receipts_compat
-from ..store import REPO_FILES_MAX, Store, valid_slug, valid_task_id, valid_task_number
+from ..store import REPO_FILES_MAX, Store, project_folders, registration_slug, valid_slug, valid_task_id, valid_task_number
+from .project import project_display_name
 
 LOG_LIMIT_DEFAULT = 50
 LOG_LIMIT_MAX = 2000
@@ -79,25 +80,39 @@ def _extract_live(live) -> tuple[frozenset[str] | set[str] | None, frozenset[str
 
 
 def owner_of(task: dict, pms: list[dict]) -> dict | None:
-    """The PM a task belongs to, as the board counts it: the PM of its repository, else of a repository
-    that holds it (a project inside another, such as issues/site-a), else of a project of that name.
-    None: no PM (unclaimed)."""
-    raw_repo = task.get("repo") or "/"
-    repo = str(Path(raw_repo).resolve())
+    """The PM a task belongs to, as the board counts it: `project_slug` first, else the PM of any of its
+    folders, else a folder that holds it (a project inside another, such as issues/site-a), else of a project
+    of that name. None: no PM (unclaimed)."""
+    pslug = str(task.get("project_slug") or "").strip()
+    if pslug and valid_slug(pslug):
+        for p in pms:
+            if _pm_slug(p) == pslug:
+                return p
+    raw_repo = task.get("repo") or ""
+    repo = str(Path(raw_repo).resolve()) if raw_repo else ""
     tproj = str(task.get("project") or "").lower()
     exact, nested, named = [], [], []
     for p in pms:
-        prepo_raw = p.get("repo") or ""
-        if prepo_raw:
+        matched_exact = False
+        matched_nested = False
+        for f in project_folders(p):
+            prepo_raw = f.get("path") or ""
+            if not prepo_raw:
+                continue
             prepo = str(Path(prepo_raw).resolve())
-            if prepo == repo:
-                exact.append(p)
-                continue
-            if repo.startswith(prepo + "/") or repo.startswith(prepo + os.sep):
-                nested.append(p)
-                continue
+            if repo and prepo == repo:
+                matched_exact = True
+                break
+            if repo and (repo.startswith(prepo + "/") or repo.startswith(prepo + os.sep)):
+                matched_nested = True
+        if matched_exact:
+            exact.append(p)
+            continue
+        if matched_nested:
+            nested.append(p)
+            continue
         pproj = str(p.get("project") or "").lower()
-        if pproj and pproj == tproj:
+        if pproj and tproj and pproj == tproj:
             named.append(p)
     hit = exact or nested or named
     return hit[0] if hit else None
@@ -185,7 +200,12 @@ def project_lost(
         return None
     pm_name = reg.get("name") or ""
     repo = reg.get("repo") or ""
-    has_repo = bool(repo and Path(repo).is_dir()) if repo_exists is None else bool(repo_exists)
+    if repo_exists is not None:
+        has_repo = bool(repo_exists)
+    elif "folders" in reg and isinstance(reg.get("folders"), list) and not project_folders(reg):
+        has_repo = True
+    else:
+        has_repo = bool(repo and Path(repo).is_dir())
     pm_pane = reg.get("pane") or ""
     prev = reg.get("previous")
     prev_pm_pane = (prev.get("pane") or "") if isinstance(prev, dict) else ""
@@ -526,12 +546,7 @@ def _task_summary(task: Mapping) -> dict:
 
 
 def _pm_slug(pm: dict) -> str:
-    repo = pm.get("repo") or ""
-    if repo:
-        return project_slug(repo)
-    name = str(pm.get("name") or "")
-    stripped = name[3:] if name.startswith("pm-") else name
-    return stripped if valid_slug(stripped) else ""
+    return registration_slug(pm)
 
 
 class Projects:
@@ -612,11 +627,13 @@ class Projects:
             runtime = rec.get("runtime") or ""
             live_row = (hc_pms.get(repo) or hc_pms.get(name) or {}) if runtime == "hc" else (by_pane.get(pane) or {})
             alive = bool(name) and live_row.get("name") == name
-            out.append({
+            item = {
                 "slug": _pm_slug(rec),
                 "name": name,
                 "project": rec.get("project") or "",
+                "display_name": project_display_name(rec, repo),
                 "repo": repo,
+                "folders": project_folders(rec),
                 "archived": rec.get("archived"),
                 "coordinator": {
                     "pane": pane,
@@ -627,7 +644,10 @@ class Projects:
                     "rotations": int(rec.get("rotations") or 0),
                 },
                 "counts": counted["by_pm"].get(name, _empty_pm_counts()),
-            })
+            }
+            if rec.get("space_id"):
+                item["space_id"] = str(rec["space_id"])
+            out.append(item)
         return out
 
     def events(self, slug: str, before: int | None = None, limit: int = 200, *, after: int | None = None) -> dict:

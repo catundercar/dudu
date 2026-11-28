@@ -17,8 +17,9 @@ def doc_tabs(value: Any):
     return hc_mod._doc_tabs(value)
 
 
-def pm_tab_name(repo: str | Path) -> str:
-    return f"PM-{Path(repo).name}"
+def pm_tab_name(repo: str | Path, display_name: str | None = None) -> str:
+    label = str(display_name or "").strip() or Path(repo).name
+    return f"PM-{label}"
 
 
 def _legacy_hc_host(*, with_rename_hook: bool = False) -> hc_mod.HcHost:

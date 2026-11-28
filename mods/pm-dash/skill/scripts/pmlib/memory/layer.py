@@ -154,22 +154,27 @@ class MemoryLayer:
         ctx: Context,
         repo: str | Path | None = None,
         *,
+        slug: str | None = None,
         candidate_pruner: Callable[[str | Path], Any] | None = None,
         index_lines_cap: int | None = None,
         index_bytes_cap: int | None = None,
     ) -> None:
         self.ctx = ctx
         self.repo: str | None = str(repo) if repo else None
+        resolved_slug = slug if slug else (ctx.store.folder_project_slug(repo) if repo else "")
+        self._slug: str = str(resolved_slug or "")
         self._candidate_pruner = candidate_pruner
         self._index_lines_cap = index_lines_cap
         self._index_bytes_cap = index_bytes_cap
 
     @property
     def is_personal(self) -> bool:
-        return self.repo is None
+        return self.repo is None and not self._slug
 
     @property
     def dir(self) -> Path:
+        if self._slug:
+            return self.ctx.home.project(self._slug).memory
         return self.ctx.home.memory_dir(self.repo)
 
     @property
@@ -267,13 +272,13 @@ class MemoryLayer:
                 f"（另有 {pitfalls} 条工程踩坑只进 worker 任务书：`pm.py recall --type pitfall`）",
             ))
         pruner = self._candidate_pruner if self._candidate_pruner is not None else self.ctx.candidate_pruner
-        if self.repo:
+        if self.repo or self._slug:
             if pruner is not None:
-                pruner(self.repo)
+                pruner(self.repo or self._slug)
             else:
                 cand_mod = sys.modules.get("pmlib.memory.candidates")
                 if cand_mod is not None:
-                    cand_mod.MemoryCandidates(self.ctx, self.repo).prune()
+                    cand_mod.MemoryCandidates(self.ctx, self.repo or "", slug=self._slug or None).prune()
         text = "".join(line + "\n" for line in lines)
         index = d / "MEMORY.md"
         if not index.exists() or index.read_text(errors="replace") != text:
@@ -315,9 +320,10 @@ class MemoryLayer:
     def quote_said(self, quote: str, *, project_repo: str | Path | None = None) -> bool:
         """Whether the project's conversation log has the user saying this."""
         conv_repo = project_repo if project_repo is not None else self.repo
-        if not conv_repo:
+        conv_slug = self._slug if (project_repo is None or conv_repo == self.repo) else ""
+        if not (conv_repo or conv_slug):
             return False
-        events = Conversation(self.ctx, conv_repo).events()
+        events = Conversation(self.ctx, conv_repo or "", slug=conv_slug or None).events()
         said = squash(" ".join(e.get("text") or "" for e in events if e.get("type") == "user"))
         pieces = [p for p in (squash(p) for p in re.split(r"…|\.\.\.| / ", quote or "")) if p]
         return bool(pieces) and all(p in said for p in pieces)
@@ -435,8 +441,9 @@ class MemoryLayer:
                     "you saw>\"",
                     "踩坑要写清怎么知道的：--verified \"<命令、任务、看到了什么>\"",
                 ))
-            if (role == "pm" and (personal or kind in QUOTED_TYPES) and conv_repo
-                    and Conversation(self.ctx, conv_repo).turn_cause().get("after") == "deliver"):
+            conv_slug = self._slug if (project_repo is None or conv_repo == self.repo) else ""
+            if (role == "pm" and (personal or kind in QUOTED_TYPES) and (conv_repo or conv_slug)
+                    and Conversation(self.ctx, conv_repo or "", slug=conv_slug or None).turn_cause().get("after") == "deliver"):
                 raise MemoryRefused("this turn was started by delivered events, not by the user: a rule of the user's "
                                     "and the personal layer are written only in a turn the user started")
         kept = (old or {}).get("body", "")
@@ -461,8 +468,9 @@ class MemoryLayer:
                 self.keep_history(old, "replaced")
             (self.dir / f"{slug}.md").write_text(memory_text(m))
             left = self.write_index()
-        if not quiet and conv_repo:
-            Conversation(self.ctx, conv_repo).record(
+        conv_slug = self._slug if (project_repo is None or conv_repo == self.repo) else ""
+        if not quiet and (conv_repo or conv_slug):
+            Conversation(self.ctx, conv_repo or "", slug=conv_slug or None).record(
                 "memory",
                 layer="personal" if personal else "project",
                 action="update" if old else "remember",
@@ -527,16 +535,17 @@ class MemoryLayer:
         conv_repo = project_repo if project_repo is not None else self.repo
         if role in ("worker", "helper", "other") and (self.is_personal or m.get("by") != caller):
             raise MemoryRefused(f"{m['name']} was not written by this session: say what is wrong with it in your report")
-        if (role == "pm" and self.is_personal and conv_repo
-                and Conversation(self.ctx, conv_repo).turn_cause().get("after") == "deliver"):
+        conv_slug = self._slug if (project_repo is None or conv_repo == self.repo) else ""
+        if (role == "pm" and self.is_personal and (conv_repo or conv_slug)
+                and Conversation(self.ctx, conv_repo or "", slug=conv_slug or None).turn_cause().get("after") == "deliver"):
             raise MemoryRefused("this turn was started by delivered events, not by the user: the personal layer is left "
                                 "alone")
         with self.lock():
             self.keep_history(m, "forgotten")
             Path(m["path"]).unlink(missing_ok=True)
             self.write_index()
-        if conv_repo:
-            Conversation(self.ctx, conv_repo).record(
+        if conv_repo or conv_slug:
+            Conversation(self.ctx, conv_repo or "", slug=conv_slug or None).record(
                 "memory",
                 layer="personal" if self.is_personal else "project",
                 action="forget",
@@ -597,8 +606,9 @@ class MemoryLayer:
             (self.dir / f"{slug}.md").write_text(memory_text({**m, "name": slug}))
             kept[0]["file"].unlink(missing_ok=True)
             self.write_index()
-        if conv_repo:
-            Conversation(self.ctx, conv_repo).record(
+        conv_slug = self._slug if (project_repo is None or conv_repo == self.repo) else ""
+        if conv_repo or conv_slug:
+            Conversation(self.ctx, conv_repo or "", slug=conv_slug or None).record(
                 "memory",
                 layer="personal" if self.is_personal else "project",
                 action="restore",

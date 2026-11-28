@@ -16,12 +16,12 @@ from ..agents.turn_adapters import adapter_for
 from ..context import Context
 from ..home import project_slug
 from ..ledger.ledger import Ledger
-from ..ledger.task import hc_terminal_of, pm_started
+from ..ledger.task import hc_terminal_of, pm_started, task_endpoint
 from ..messaging.address import Endpoint, parse_legacy_endpoint
 from ..messaging.principal import Principal
 from ..messaging.transport import Transport
 from ..messaging.transports.local_hc import LocalHcTransport
-from ..messaging.typist import unblock_endpoint
+from ..messaging.typist import transport_for, unblock_endpoint
 from ..osutil import clip
 from ..project.conversation import Conversation
 from ..project.project import ProjectRegistry
@@ -98,6 +98,7 @@ class StallWatcher:
         self.ctx = ctx
         self._stall_grace = STALL_GRACE if stall_grace is None else stall_grace
         self._land_approve_timeout_override = land_approve_timeout
+        self._injected_transport = transport is not None
         self._transport: Transport = transport if transport is not None else LocalHcTransport(ctx)
         self._ledger = Ledger(ctx)
         self._projects = ProjectRegistry(ctx)
@@ -157,6 +158,13 @@ class StallWatcher:
             if self.ctx.clock.seconds_since(r.get("at")) < ROUND_START:
                 return None
         return bases.setdefault((task["id"], term), (info or {}).get("turn") or 0)
+
+    def _transport_of(self, ep: Any) -> Any:
+        """The injected transport (tests), else the endpoint's own: a remote `<machine>/t7` worker goes through
+        `RemoteHcTransport`, whose partition answers are `unknown`, never a stall (I4)."""
+        if self._injected_transport or not getattr(ep, "machine", None):
+            return self._transport
+        return transport_for(self.ctx, ep)
 
     def _land_approved(self, task: dict[str, Any] | None) -> dict[str, Any] | None:
         la = (task or {}).get("land_approved")
@@ -284,16 +292,17 @@ class StallWatcher:
                 f"{tid} 的合并批准未由 {who} 执行（{reason}）；"
                 f"当前没有桌面版 PM 终端可自动转交 helper，请手动运行 `pm.py land {tid}` 或 `pm.py approve {tid} --via helper`。",
             )
-        if repo:
+        pslug = self.ctx.store.task_project_slug(fresh)
+        if repo or pslug:
             key = f"land-approve-stall:{claimed_la.get('at') or ''}"
-            conv = Conversation(self.ctx, repo)
+            conv = Conversation(self.ctx, repo or "", slug=pslug or None)
             last = next((e for e in reversed(conv.events()) if e.get("task") == tid and e.get("type") == "stall"), {})
             if last.get("key") != key:
                 conv.record(
                     "stall", task=tid, title=fresh.get("title"), status=fresh.get("status"),
                     by=who, text=msg, source="harness", wake=True, key=key,
                 )
-            Delivery(self.ctx, repo).ensure_running()
+            Delivery(self.ctx, repo or "", slug=pslug or None).ensure_running()
         return True
 
     def watched_worker(self, task: dict[str, Any]) -> bool:
@@ -725,13 +734,13 @@ class StallWatcher:
                     res_obs["detail"] = "no_tool_pid"
 
             elif action == "nudge_enter":
-                ok = bool(self._transport.unblock_prompt(ep, ["enter"]))
+                ok = bool(self._transport_of(ep).unblock_prompt(ep, ["enter"]))
                 res_obs["outcome"] = "sent" if ok else "failed"
                 res_obs["detail"] = "enter"
 
             elif action == "interrupt_turn":
                 if cfg.recovery_auto == "full":
-                    int_res = self._transport.interrupt(ep, timeout_s=2.0)
+                    int_res = self._transport_of(ep).interrupt(ep, timeout_s=2.0)
                     res_obs["outcome"] = str(int_res.status or "unknown")
                     res_obs["detail"] = str(int_res.detail or int_res.key_sent or "")
                 else:
@@ -869,10 +878,12 @@ class StallWatcher:
         if la and self._land_lock_active(task.get("repo")):
             return due
         term = hc_terminal_of(task)
-        ep = parse_legacy_endpoint(f"hc:{term}", runtime_hint="hc")
+        ep = parse_legacy_endpoint(f"hc:{term}", runtime_hint="hc") if term else task_endpoint(task)
         if ep is None:
             return due
-        batch = self._transport.observe(ep, {})
+        if not term:
+            term = ep.legacy_pane
+        batch = self._transport_of(ep).observe(ep, {})
         store = EndpointTurnStore(self.ctx, ep, repo=task.get("repo") or None)
         cfg = self._worker_cfg(store, task)
         if batch.link_state != "connected":
@@ -889,6 +900,12 @@ class StallWatcher:
                 cfg=cfg,
             )
         self._worker_link_sigs[ep.uid] = "connected"
+
+        if ep.runtime == "self_hosted":
+            for item in batch.observations:
+                store.append_observation(item, reduce_now=False, cfg=cfg)
+            store.sync_journal(tick_now=True, now_ms=now_ms, cfg=cfg)
+            return due
 
         info = batch.terminal_info
         base = self.round_base(task, term, info, bases)
@@ -1066,7 +1083,7 @@ class StallWatcher:
             return None
         task = next((t for t in self._ledger.raw_tasks() if t.get("pane") == self.ctx.pane and pm_started(t)
                      and t.get("status") == "in_progress"), None)
-        if not task or not self._projects.app_pm(task.get("repo")):
+        if not task or not self._projects.app_pm(self.ctx.store.task_project_slug(task) or task.get("repo")):
             return None
         if self._land_approved(task):
             return None
@@ -1091,14 +1108,17 @@ class StallWatcher:
         cur = self.ctx.store.task(task["id"]) if task.get("id") else None
         if isinstance(cur, dict) and (cur.get("status") in REPORTED_STATUSES or self._land_delegated_away(cur)):
             return
-        conv = Conversation(self.ctx, task["repo"])
+        src_task = cur if isinstance(cur, dict) else task
+        pslug = self.ctx.store.task_project_slug(src_task)
+        repo_val = str(src_task.get("repo") or "")
+        conv = Conversation(self.ctx, repo_val, slug=pslug or None)
         last = next((e for e in reversed(conv.events()) if e.get("task") == task["id"]), {})
         if last.get("type") == "stall" and last.get("key") == key:
             return
-        conv.record("stall", task=task["id"], title=task.get("title"), status=task.get("status"),
-                    by=task.get("pane") or "", text=text, source="harness", wake=True,
+        conv.record("stall", task=task["id"], title=src_task.get("title"), status=src_task.get("status"),
+                    by=src_task.get("pane") or "", text=text, source="harness", wake=True,
                     **({"key": key} if key else {}))
-        Delivery(self.ctx, task["repo"]).ensure_running()
+        Delivery(self.ctx, repo_val, slug=pslug or None).ensure_running()
 
     def sweep_exited(self, repo: str | Path) -> None:
         """At the end of a PM's turn: a dispatched worker whose terminal is gone while its task is still

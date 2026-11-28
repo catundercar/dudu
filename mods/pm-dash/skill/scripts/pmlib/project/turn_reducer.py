@@ -1181,7 +1181,8 @@ def _resolve_incident(
 
 
 def incident_holds_batch(state: Mapping[str, Any] | None) -> bool:
-    """True when an active/notified incident owns recovery so `event.batch` must wait for `continue_turn` or resolution."""
+    """True when an active/notified incident owns recovery so `event.batch` must wait for `continue_turn`,
+    `retype_submitted`, or resolution."""
     if not isinstance(state, Mapping):
         return False
     inc = state.get("incident")
@@ -1190,7 +1191,11 @@ def incident_holds_batch(state: Mapping[str, Any] | None) -> bool:
     st = str(inc.get("status") or "")
     if st not in ("open", "recovering", "notified"):
         return False
-    if st in ("open", "recovering") and inc.get("cause_kind") == "deliver" and inc.get("awaiting_verify") == "continue_turn":
+    if (
+        st in ("open", "recovering")
+        and inc.get("cause_kind") == "deliver"
+        and inc.get("awaiting_verify") in ("continue_turn", "retype_submitted")
+    ):
         return False
     return True
 
@@ -2686,7 +2691,11 @@ def reduce(state: Mapping[str, Any], obs: Mapping[str, Any], cfg: TurnConfig | N
                     else:
                         _advance_incident(nxt, obs_ms, c)
             elif action_r in ("continue_turn", "nudge_enter", "retype_submitted", "restart_seat", "switch_profile"):
-                if outcome_r in ("queued", "sent", "requeued", "started"):
+                if outcome_r == "superseded" and action_r in ("retype_submitted", "continue_turn"):
+                    _resolve_incident(nxt, obs_ms, c, resolution="superseded")
+                    if str(turn.get("phase") or "") in ("submitted", "recovering"):
+                        _close_turn(nxt, outcome="superseded", now_ms=obs_ms, cfg=c, aborted=False)
+                elif outcome_r in ("queued", "sent", "requeued", "started"):
                     verify_field = str(step_meta.get("verify_field") or "verify_continue_ms")
                     verify_ms = _opt_int(getattr(c, verify_field, 15_000)) or 15_000
                     inc["awaiting_verify"] = action_r
@@ -2712,19 +2721,27 @@ def reduce(state: Mapping[str, Any], obs: Mapping[str, Any], cfg: TurnConfig | N
         new_ls = str(obs.get("link_state") or "connected").strip().lower() or "connected"
         nxt["link_state"] = new_ls
         nxt["link_since_ms"] = obs_ms
-        if prev_ls != "connected" and new_ls == "connected" and prev_ls_since > 0:
-            shift_ms = max(0, obs_ms - prev_ls_since)
-            if shift_ms > 0 and str(turn.get("phase") or "idle") in ACTIVE_TURN_PHASES:
-                for tk in ("started_ms", "phase_since_ms", "last_progress_ms", "suspect_since_ms"):
-                    if _opt_int(turn.get(tk)):
-                        turn[tk] = int(turn[tk]) + shift_ms
-                if _opt_int(ev["step"].get("last_ms")):
-                    ev["step"]["last_ms"] = int(ev["step"]["last_ms"]) + shift_ms
-                if _opt_int(ev["pty"].get("frozen_since_ms")):
-                    ev["pty"]["frozen_since_ms"] = int(ev["pty"]["frozen_since_ms"]) + shift_ms
-                for pk in ("since_ms", "cpu_changed_ms"):
-                    if _opt_int(ev["proc"].get(pk)):
-                        ev["proc"][pk] = int(ev["proc"][pk]) + shift_ms
+        if new_ls != "connected":
+            # I4 (§5.2): partitioned or unauthorized endpoint strictly reduces to health="unknown", never stalled.
+            turn["health"] = "unknown"
+            turn["health_reason"] = str(obs.get("unknown_reason") or "machine_disconnected")
+        elif prev_ls != "connected" and new_ls == "connected":
+            if str(turn.get("health") or "") == "unknown":
+                turn["health"] = "ok"
+                turn["health_reason"] = ""
+            if prev_ls_since > 0:
+                shift_ms = max(0, obs_ms - prev_ls_since)
+                if shift_ms > 0 and str(turn.get("phase") or "idle") in ACTIVE_TURN_PHASES:
+                    for tk in ("started_ms", "phase_since_ms", "last_progress_ms", "suspect_since_ms"):
+                        if _opt_int(turn.get(tk)):
+                            turn[tk] = int(turn[tk]) + shift_ms
+                    if _opt_int(ev["step"].get("last_ms")):
+                        ev["step"]["last_ms"] = int(ev["step"]["last_ms"]) + shift_ms
+                    if _opt_int(ev["pty"].get("frozen_since_ms")):
+                        ev["pty"]["frozen_since_ms"] = int(ev["pty"]["frozen_since_ms"]) + shift_ms
+                    for pk in ("since_ms", "cpu_changed_ms"):
+                        if _opt_int(ev["proc"].get(pk)):
+                            ev["proc"][pk] = int(ev["proc"][pk]) + shift_ms
 
     nxt["updated_ms"] = max(_opt_int(nxt.get("updated_ms")) or 0, obs_ms)
     return sync_compat_fields(nxt)

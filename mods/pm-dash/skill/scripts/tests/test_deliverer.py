@@ -1886,5 +1886,92 @@ class Watchers(unittest.TestCase):
         self.assertEqual(list(self.ctx.home.inbox.glob("*.log")), [])
 
 
+class NonHomonymousProjectSlugRoutingTests(unittest.TestCase):
+    """Tasks belonging to non-homonymous folders (project_slug != folder basename) must anchor Conversation,
+    Delivery, StallWatcher, DependencyWatcher, parent rollups, and async send failures to projects/<project_slug>/."""
+
+    def test_stall_deps_rollup_send_failed_and_delivery_anchor_to_project_slug(self):
+        from pmlib.commands.ledger import UpdateRequest
+        from pmlib.reactions import Updates
+        from pmlib.workers.send import send_failed_for
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = make_ctx(root / "ledger")
+            dudu_repo = root / "work/dudu"
+            web_repo = root / "other/web"
+            dudu_repo.mkdir(parents=True)
+            web_repo.mkdir(parents=True)
+            ctx.git.roots[str(dudu_repo.resolve())] = str(dudu_repo.resolve())
+            ctx.git.roots[str(web_repo.resolve())] = str(web_repo.resolve())
+
+            ctx.home.registrations.mkdir(parents=True, exist_ok=True)
+            ctx.home.project("dudu").root.mkdir(parents=True, exist_ok=True)
+            ctx.home.registration("dudu").write_text(json.dumps({
+                "name": "pm-dudu",
+                "slug": "dudu",
+                "project": "Dudu",
+                "runtime": "hc",
+                "terminal": "pm1",
+                "pane": "hc:pm1",
+                "folders": [
+                    {"path": str(dudu_repo.resolve()), "alias": "dudu", "git": True},
+                    {"path": str(web_repo.resolve()), "alias": "web", "git": True},
+                ],
+                "repo": str(dudu_repo.resolve()),
+            }), encoding="utf-8")
+            ctx.hc.terminals["pm1"] = {"id": "pm1", "state": "live"}
+            ctx.hc.terminals["w2"] = {"id": "w2", "state": "live"}
+            ctx.hc.terminals["w4"] = {"id": "w4", "state": "live"}
+            ctx.home.tasks.mkdir(parents=True, exist_ok=True)
+
+            for tid, fields in (
+                ("dudu-1", {"title": "Parent", "status": "in_progress"}),
+                ("dudu-2", {"title": "Web Child", "status": "in_progress", "parent": "dudu-1", "pane": "hc:w2"}),
+                ("dudu-3", {"title": "Web Followup", "status": "proposed", "depends_on": ["dudu-2"],
+                            "brief": "/tmp/web-followup.md"}),
+                ("dudu-4", {"title": "Web Staller", "status": "in_progress", "pane": "hc:w4"}),
+            ):
+                ctx.home.task(tid).write_text(json.dumps({
+                    "id": tid,
+                    "project": "Dudu",
+                    "project_slug": "dudu",
+                    "folder_alias": "web",
+                    "repo": str(web_repo.resolve()),
+                    "updated": "2026-11-28 06:00",
+                    **fields,
+                }), encoding="utf-8")
+
+            # 1) Stall notification -> projects/dudu/conversation.jsonl & spawn deliver "dudu"
+            stall_task = ctx.store.task("dudu-4")
+            assert stall_task is not None
+            StallWatcher(ctx).stalled(stall_task, "worker stopped without reporting", key="w4:stop:1")
+            # 2) Failed async send (task-bound AND repo-only fallback) -> projects/dudu/conversation.jsonl
+            send_failed_for(ctx, "w2", "timeout", task_id="dudu-2", repo=str(web_repo))
+            send_failed_for(ctx, "w9", "timeout", repo=str(web_repo))
+
+            # 3) Child done -> parent rollup close & ready-dependency notification -> projects/dudu/conversation.jsonl
+            ctx.pane = "hc:w2"
+            Updates(ctx).update(UpdateRequest(id="dudu-2", status="done", note="web child done"))
+            ctx.pane = ""
+            DependencyWatcher(ctx).reconcile(str(web_repo))
+
+            # Assert everything landed in projects/dudu/conversation.jsonl and projects/web/ never existed.
+            self.assertFalse((ctx.home.projects / "web").exists())
+            dudu_conv = Conversation(ctx, str(web_repo), slug="dudu")
+            events = dudu_conv.events()
+            self.assertTrue(any(e.get("type") == "stall" and e.get("task") == "dudu-4" for e in events))
+            self.assertTrue(any(e.get("source") == "harness" and e.get("by") == "hc:w9" for e in events))
+            self.assertTrue(any(e.get("source") == "deps" and e.get("task") == "dudu-3" for e in events))
+            self.assertTrue(any(e.get("task") == "dudu-1" and e.get("status") == "done" for e in events))
+            self.assertEqual(ctx.store.task("dudu-1")["status"], "done")
+            self.assertTrue(any(e.get("task") == "dudu-2" and e.get("source") == "harness" and e.get("by") == "harness" for e in events))
+            self.assertTrue(any(s["args"][:2] == ["deliver", "dudu"] for s in ctx.procs.spawned))
+
+            d = Delivery(ctx, str(web_repo), slug="dudu", settle=0)
+            _, _, items = d.pending_batch(offset=0)
+            self.assertTrue(any(i["event"].get("task") == "dudu-4" for i in items))
+
+
 if __name__ == "__main__":
     unittest.main()

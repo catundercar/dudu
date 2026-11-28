@@ -81,6 +81,15 @@ class AgentRegistry:
         return sessions_mod.CODEX_SESSIONS
 
     @property
+    def agy_dir(self) -> Path:
+        if self._ctx is not None and getattr(self._ctx, "agy_dir", None) is not None:
+            return Path(self._ctx.agy_dir)
+        env_dir = self._env_map().get("AGY_DATA_DIR")
+        if env_dir:
+            return Path(env_dir)
+        return Path.home() / ".gemini" / "antigravity-cli"
+
+    @property
     def herdr_docs(self) -> Path:
         if self._ctx is not None and getattr(self._ctx, "herdr_docs", None) is not None:
             return Path(self._ctx.herdr_docs)
@@ -178,8 +187,15 @@ class AgentRegistry:
             given, role=role, cfg=cfg, kinds=base_mod.agent_kinds(cfg), tr_fn=self._tr
         )
 
-    def outside_reads(self, repo: str | Path | None, *briefs: str | Path | None) -> list[str]:
-        return reads_mod._outside_reads_impl(repo, *briefs, herdr_docs=self.herdr_docs)
+    def outside_reads(
+        self,
+        repo: str | Path | None,
+        *briefs: str | Path | None,
+        extra_folders: Iterable[str | Path] = (),
+    ) -> list[str]:
+        return reads_mod._outside_reads_impl(
+            repo, *briefs, herdr_docs=self.herdr_docs, extra_folders=extra_folders
+        )
 
     def docs_line(self) -> str:
         return reads_mod.docs_line(herdr_docs=self.herdr_docs, tr_fn=self._tr)
@@ -235,6 +251,7 @@ class AgentRegistry:
             cache=cache,
             home=self._ledger_home(),
             claude_projects=lambda: self.claude_projects,
+            agy_dir=lambda: self.agy_dir,
         )
 
     def own_transcript(self) -> str:

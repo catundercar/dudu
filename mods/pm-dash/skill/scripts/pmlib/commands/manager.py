@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import sys
 import types
@@ -96,19 +97,56 @@ def cmd_start(a: Any, prompt: str | None = None, *, ctx: Context | None = None) 
     --space new (the default) gives the PM a space of its own, called --name (default: the folder's name);
     --space current puts it in a tab of the space this command runs in, as before."""
     ctx = Context.from_env() if ctx is None else ctx
+    raw_folders = list(getattr(a, "folder", None) or [])
+    raw_repo = getattr(a, "repo", None)
+    use_json = bool(getattr(a, "json", False))
+    no_app_space = bool(getattr(a, "no_app_space", False))
+    name_val = getattr(a, "name", None)
+    slug_val = getattr(a, "slug", None)
+    if raw_folders:
+        folders_arg: list[str] | None = raw_folders
+        repo_arg: str | None = raw_repo
+    elif raw_repo is not None:
+        folders_arg = None
+        repo_arg = raw_repo
+    elif (slug_val or "").strip():
+        folders_arg = None
+        repo_arg = None
+    elif (name_val or "").strip():
+        folders_arg = []
+        repo_arg = None
+    else:
+        folders_arg = None
+        repo_arg = "."
     try:
         res = ManagerSessions(ctx).start(
-            a.repo,
+            repo_arg,
+            folders=folders_arg,
             kind=getattr(a, "kind", None),
             model=getattr(a, "model", None),
-            name=getattr(a, "name", None),
+            name=name_val,
             space=getattr(a, "space", None) or "new",
             prompt=prompt,
+            no_app_space=no_app_space,
+            slug=slug_val,
         )
     except PmError as err:
         _exit_on_error(err)
     for line in res.stderr_lines:
         ctx.out.err_line(line)
+    if use_json:
+        ctx.out.line(json.dumps({
+            "ok": True,
+            "slug": res.slug,
+            "name": res.name,
+            "display_name": res.display_name,
+            "terminal": res.terminal,
+            "cwd": res.cwd,
+            "space_id": res.space_id,
+            "space_name": res.space_name,
+            "folders": res.folders,
+        }, ensure_ascii=False))
+        return res.terminal
     for line in res.lines:
         ctx.out.line(line)
     return res.terminal
@@ -118,10 +156,24 @@ def cmd_archive(a: Any, ctx: Context | None = None) -> None:
     """Put a project away: its PM's session ends and its open tasks are paused. The ledger, the conversation
     log, the decisions and the handover notes stay; `pm.py restore` brings it back."""
     ctx = Context.from_env() if ctx is None else ctx
+    use_json = bool(getattr(a, "json", False))
     try:
         res = ManagerSessions(ctx).archive(a.project)
     except PmError as err:
         _exit_on_error(err)
+    if use_json:
+        ctx.out.line(json.dumps({
+            "ok": True,
+            "slug": res.slug,
+            "project": res.project,
+            "paused": res.paused,
+            "already_archived": res.already_archived,
+            "space_id": res.space_id,
+            "terminal": res.terminal,
+            "space_closed": res.space_closed,
+            "space_kept": res.space_kept,
+        }, ensure_ascii=False))
+        return
     for line in res.lines:
         ctx.out.line(line)
 
@@ -130,16 +182,35 @@ def cmd_restore(a: Any, ctx: Context | None = None) -> None:
     """Bring an archived project back: its paused tasks return to where they were and a fresh PM starts from
     the handover. Either all of that happens or nothing does."""
     ctx = Context.from_env() if ctx is None else ctx
+    use_json = bool(getattr(a, "json", False))
+    no_app_space = bool(getattr(a, "no_app_space", False))
     try:
         res = ManagerSessions(ctx).restore(
             a.project,
             kind=getattr(a, "kind", None),
             model=getattr(a, "model", None),
+            no_app_space=no_app_space,
         )
     except PmError as err:
         _exit_on_error(err)
     for line in res.stderr_lines:
         ctx.out.err_line(line)
+    if use_json:
+        ctx.out.line(json.dumps({
+            "ok": True,
+            "slug": res.slug,
+            "name": res.name,
+            "display_name": res.display_name,
+            "project": res.project,
+            "restored": res.restored,
+            "not_archived": res.not_archived,
+            "terminal": res.terminal,
+            "cwd": res.cwd,
+            "space_id": res.space_id,
+            "space_name": res.space_name,
+            "space_reused": res.space_reused,
+        }, ensure_ascii=False))
+        return
     for line in res.lines:
         ctx.out.line(line)
 
@@ -220,13 +291,18 @@ def register_manager_lifecycle_commands(sub):
     la.add_argument("--repo", default=".")
     la.add_argument("--resume")
     st = sub.add_parser("start", help="start a PM session for a project, with any coding agent")
-    st.add_argument("--repo", default=".")
+    st.add_argument("--repo", default=None)
+    st.add_argument("--folder", action="append", default=[], help="workspace folder path (repeat for multiple; omit for 0 folders)")
     st.add_argument("--kind", help="agent program (default: config.json pm.kind, else claude)")
     st.add_argument("--model", help="default: config.json pm.model, else opus for Claude Code, else the program's own")
-    st.add_argument("--name", help="the project's name, given to its new space (default: the folder's name)")
+    st.add_argument("--name", help="the project's display name (also given to its new space; default: the folder's name)")
+    st.add_argument("--slug", help="existing project slug (e.g. restarting an offline 0-folder project)")
     st.add_argument("--space", choices=["new", "current"], default="new",
                     help="new (default): a space of its own, called --name. current: a tab in this command's "
                          "space, or a bare terminal outside one; that was what start did before --space existed")
+    st.add_argument("--no-app-space", action="store_true",
+                    help="start only the guarded PM seat terminal without creating or attaching a local herdr-app space")
+    st.add_argument("--json", action="store_true", help="print result as JSON")
     for verb, about in (("archive", "end a project's PM and pause its open tasks; the record stays"),
                         ("restore", "bring an archived project back and start its PM from the handover")):
         ar = sub.add_parser(verb, help=about)
@@ -235,6 +311,9 @@ def register_manager_lifecycle_commands(sub):
             ar.add_argument("--kind", help="agent program (default: the one the PM was)")
             ar.add_argument("--model", help="default: config.json pm.model, else opus for Claude Code, else the "
                                             "program's own")
+            ar.add_argument("--no-app-space", action="store_true",
+                            help="start only the guarded PM seat terminal without creating or attaching a local herdr-app space")
+        ar.add_argument("--json", action="store_true", help="print result as JSON")
 
 
 def register_handover_command(sub):

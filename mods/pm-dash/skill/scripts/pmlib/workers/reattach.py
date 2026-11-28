@@ -13,6 +13,7 @@ from ..agents.profiles import WorkerSpec
 from ..context import Context
 from ..errors import Refused
 from ..events.deliver import deliver_later
+from ..home import project_slug
 from ..ledger.ledger import Change, Ledger
 from ..ledger.question import QUESTION_FIELDS
 from ..ledger.task import Task
@@ -43,13 +44,16 @@ class AdoptWorkerResult:
     how: str = ""
 
 
-def _deliver_later_for(ctx: Context, repo: str) -> None:
-    if not repo:
+def _deliver_later_for(ctx: Context, repo: str, *, slug: str = "") -> None:
+    eff_slug = slug or (ctx.store.folder_project_slug(repo) if repo else "")
+    pm_target = eff_slug or repo
+    if not pm_target:
         return
     if getattr(ctx, "_legacy", False):
-        deliver_later(repo)
-    elif ProjectRegistry(ctx).app_pm(repo):
-        ctx.procs.spawn_pm(["deliver", str(repo)], env=ctx.procs.clean_session_env(), cwd=ctx.home.root)
+        deliver_later(repo, slug=eff_slug)
+    elif ProjectRegistry(ctx).app_pm(pm_target):
+        spawn_target = repo if repo and (not eff_slug or project_slug(repo) == eff_slug) else pm_target
+        ctx.procs.spawn_pm(["deliver", str(spawn_target)], env=ctx.procs.clean_session_env(), cwd=ctx.home.root)
 
 
 def _round_sent_for(ctx: Context, task_id: str, term: str, sent: bool, seen: dict[str, Any]) -> bool:
@@ -286,8 +290,10 @@ def adopt_task_for(ctx: Context, candidate: str, *, confirmed: bool = False) -> 
         ))
     if "/" in old_pane:
         raise Refused(ctx.config.tr(
-            f"{tid}: remote worker {old_pane} cannot be adopted onto this machine's PM seat",
-            f"{tid}：远程终端 {old_pane} 不能收归本机 PM 座位下",
+            f"{tid}: remote worker {old_pane} cannot be adopted onto this machine's PM seat (its terminal stays on "
+            f"that machine; start a new one there with `pm.py dispatch --task {tid} --on <machine>`)",
+            f"{tid}：远程终端 {old_pane} 不能收归本机 PM 座位下（终端留在那台机器上；要换人就在那边重派："
+            f"`pm.py dispatch --task {tid} --on <机器>`）",
         ))
     old = old_pane[3:]
     if old == pm_term:
@@ -440,7 +446,7 @@ def adopt_task_for(ctx: Context, candidate: str, *, confirmed: bool = False) -> 
             f"{plan['how']} {plan['kind']} pane={pane} parent={pm_pane}"
             + (f" session={plan['session']}" if plan["session"] else "")
         )
-        _deliver_later_for(ctx, updated.raw["repo"])
+        _deliver_later_for(ctx, updated.raw.get("repo") or "", slug=ctx.store.task_project_slug(updated.raw))
         return AdoptWorkerResult(task_id=tid, lines=(line,), pane=pane, how=plan["how"])
     finally:
         with contextlib.suppress(OSError):

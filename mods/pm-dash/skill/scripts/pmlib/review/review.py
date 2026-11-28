@@ -21,11 +21,12 @@ from ..ledger.task import Task
 from ..memory.layer import MemoryLayer
 from ..osutil import Options, clip, file_text, slugify
 from ..project.project import ProjectRegistry
-from ..store import StoreError, valid_task_id
+from ..store import StoreError, project_folders, valid_task_id
 from ..terminals.tabs import bug_of, hc_name, new_tabs, not_renamed, tab_short, tab_title, tabs_cfg, task_bug
 from ..workers.dispatch import review_placement_for
 from ..workers.escalate import review_reports, task_workspace_for, tui_prompt_for, tui_tab_agent_for
 from ..workers.lifecycle import end_worker_for, live_worker_for
+from ..workers.self_hosted import is_offsite_task, offsite_workspace_for
 from ..workers.send import send_when_ready_for
 from ..workers.service import Workers
 from ..workers.sessions import clear_task_session_for
@@ -257,7 +258,12 @@ class Reviews:
 
     def _brief_impl(self, task: dict[str, Any], rid: str, worktree: str | Path, *, since: str | None = None) -> str:
         branch, base = task["branch"], task["base"]
-        checks = verify_commands_for(self.ctx, task["repo"])
+        checks = verify_commands_for(
+            self.ctx,
+            task["repo"],
+            project_slug_val=task.get("project_slug") or None,
+            folder_alias=task.get("folder_alias") or None,
+        )
         cmd = f"{self.ctx.procs.pm_command()} update {rid} --status done --note"  # done: a review is not work waiting to be merged
         run = "\n".join(f"  - `{c}`" for c in checks or [])
         docs = self.ctx.agents.docs_line()
@@ -368,7 +374,16 @@ class Reviews:
         tid = task["id"]
         if task.get("review_of") or not task.get("branch"):
             raise fail(tr(f"{tid} has no branch to review", f"{tid} 没有可审查的分支"))
-        worktree = task.get("worktree") or self.ctx.git.checkout_of(task["repo"], task["branch"])
+        if is_offsite_task(task) and not req.dry_run:
+            # The commits are on the worker's machine: fetch them here, review a detached local checkout of them.
+            try:
+                rws = offsite_workspace_for(self.ctx, task)
+                worktree = rws.review_checkout(task, rws.fetch_branch(task))
+            except Refused as err:
+                raise fail(tr(f"{tid}: could not fetch the remote worker's branch for review: {err}",
+                              f"{tid}：取不回远端 worker 的分支，无法审查：{err}")) from err
+        else:
+            worktree = task.get("worktree") or self.ctx.git.checkout_of(task["repo"], task["branch"])
         if not worktree or not Path(worktree).is_dir():
             raise fail(tr(f"no checkout has {task['branch']}", f"没有检出 {task['branch']} 的工作树"))
         given = WorkerSpec(kind=req.kind or "", model=req.model or "", effort=req.effort or "",
@@ -405,7 +420,21 @@ class Reviews:
                                                                        task_bug(task, cfg=cfg))[:16], bug)
             tab = tab_title(short, bug, dry=True, cfg=cfg) if new_tabs(cfg=cfg, pane=self.ctx.pane) else ""
             extra = self.ctx.agents.reviewer_extra_argv(spec.kind)
-            reads = self.ctx.agents.outside_reads(task["repo"], task.get("brief") or "")
+            rev_reg = (
+                self.ctx.store.registration(task["project_slug"])
+                if task.get("project_slug")
+                else ProjectRegistry(self.ctx).pm_record(task.get("repo"))
+            )
+            sibling_paths = [
+                f["path"]
+                for f in project_folders(rev_reg)
+                if f.get("path") and str(f["path"]) != str(task.get("repo") or "")
+            ]
+            reads = self.ctx.agents.outside_reads(
+                task["repo"],
+                task.get("brief") or "",
+                extra_folders=sibling_paths,
+            )
             if dry:
                 out.plan = workers.build_dry_run_plan(
                     spec, task["repo"], "review", rid, worktree, tab,
@@ -418,8 +447,12 @@ class Reviews:
             since, _ = self.review_scope(task, worktree, full=req.full)
             sent = self.ctx.home.sent(rid)
             sent.parent.mkdir(parents=True, exist_ok=True)
-            sent.write_text(self.brief(task, rid, worktree, since=since) + MemoryLayer(self.ctx, task.get("repo")).memory_part(),
-                            encoding="utf-8")
+            pslug = self.ctx.store.task_project_slug(task)
+            sent.write_text(
+                self.brief(task, rid, worktree, since=since)
+                + MemoryLayer(self.ctx, task.get("repo"), slug=pslug or None).memory_part(),
+                encoding="utf-8",
+            )
             workspace, agent, fast = "", name, ""
             argv = workers.worker_argv(spec, reads, task["repo"], extra, wrap=not tui)
             if tui:
@@ -508,8 +541,9 @@ class Reviews:
                                    f"任务书没送达；审查 worker 屏幕上是：{seen_text}"))
                 raise fail(f"the review brief was not sent to {pane}. Its screen: {seen_text}\nOnce it is ready, "
                            f"send it by hand: hc send {pane[3:]} {file_text(sent)}")
-        workers._deliver_later(task["repo"])  # it watches the reviewer from now on
-        if self._projects.app_pm(task["repo"]):
+        pslug = self.ctx.store.task_project_slug(task)
+        workers._deliver_later(task.get("repo"), slug=pslug)  # it watches the reviewer from now on
+        if self._projects.app_pm(pslug or task.get("repo")):
             say(tr(f"{rid}: reviewer in {pane}. Its findings are delivered to you when it reports.",
                    f"{rid}：审查 worker 在 {pane}。它汇报后结论会送到你这里。"))
         else:
@@ -548,7 +582,11 @@ class Reviews:
                     for s in raw_task["plan"]:
                         if isinstance(s, dict) and step_anchor(s) == "review" and s.get("state") == "doing":
                             s["state"] = "todo"
-                told = {"source": "worker", **({"wake": True} if self._projects.app_pm(raw_task.get("repo")) else {})}
+                p_slug = self.ctx.store.task_project_slug(raw_task)
+                told = {
+                    "source": "worker",
+                    **({"wake": True} if self._projects.app_pm(p_slug or raw_task.get("repo")) else {}),
+                }
                 msg = tr(
                     f"auto-review failed ({reason}); handed to PM (commit {commit})"
                     + (f": {worker_note}" if worker_note else ""),
@@ -559,8 +597,10 @@ class Reviews:
                 return raw_task
 
             parent = self._ledger.change(task_id, _fail)
-            if parent is not None and parent.raw.get("repo"):
-                Workers(self.ctx)._deliver_later(parent.raw["repo"])
+            if parent is not None and (parent.raw.get("repo") or parent.raw.get("project_slug")):
+                Workers(self.ctx)._deliver_later(
+                    parent.raw.get("repo"), slug=self.ctx.store.task_project_slug(parent.raw)
+                )
             return tr(f"{task_id}: auto-review failed ({reason}); handed to PM",
                       f"{task_id}：自动审查启动失败（{reason}），已转交 PM")
 

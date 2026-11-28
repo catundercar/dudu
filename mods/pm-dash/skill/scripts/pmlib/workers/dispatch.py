@@ -8,12 +8,14 @@ from typing import Any, Iterable, Sequence
 from ..agents.profiles import fallback_said, worker_summary
 from ..context import Context
 from ..errors import Refused
+from ..home import project_slug
 from ..ledger.ledger import Change, Ledger
 from ..ledger.task import Task, hc_terminal_of
 from ..memory.layer import native_memory
 from ..osutil import clip
 from ..project.conversation import Conversation, conversation_events
 from ..project.project import ProjectRegistry
+from ..store import registration_slug
 from .codex_pool import codex_pool_for
 
 
@@ -104,10 +106,11 @@ def recent_conversation_pointers_for(
     ctx: Context,
     repo: str | Path,
     *,
+    slug: str = "",
     limit: int = THIN_BRIEF_CONV_LIMIT,
 ) -> tuple[str, list[str]]:
     """Return `(conversation_path, pointer_lines)` for the most recent user/PM exchanges in this project."""
-    conv = Conversation(ctx, repo)
+    conv = Conversation(ctx, repo, slug=slug or None)
     conv_path = conv.path
     events = conversation_events(conv_path) if conv_path.is_file() else []
     turns = [
@@ -137,6 +140,7 @@ def assemble_thin_brief_for(
     branch: str | None = None,
     base: str | None = None,
     here: bool = False,
+    project_slug_val: str = "",
 ) -> str:
     """Assemble a thin-dispatch worker brief from the bundled template, verbatim `--ask`, attachments,
     recent conversation pointers, and optional PM `--note` (`pm-stuck-root-fix.md` §3.8 O-b, D4)."""
@@ -163,7 +167,7 @@ def assemble_thin_brief_for(
     else:
         att_block = tr("- (none)", "- （无）")
 
-    conv_path, pointer_lines = recent_conversation_pointers_for(ctx, repo)
+    conv_path, pointer_lines = recent_conversation_pointers_for(ctx, repo, slug=project_slug_val)
     pointers_block = "\n".join(pointer_lines) if pointer_lines else tr("- (no prior conversation)", "- （暂无历史对话）")
     note_clean = str(note or "").strip()
     note_block = note_clean if note_clean else tr("(none)", "（无）")
@@ -298,7 +302,14 @@ def hold_exited_for(
     )
 
 
-def held_task_for(ctx: Context, repo: str, branch: str | None, title: str | None = None) -> dict[str, Any] | None:
+def held_task_for(
+    ctx: Context,
+    repo: str,
+    branch: str | None,
+    title: str | None = None,
+    *,
+    project_slug_val: str | None = None,
+) -> dict[str, Any] | None:
     """The task dispatch registered for this branch without a worker at work in it."""
     def same(t: dict[str, Any]) -> bool:
         if branch:
@@ -310,10 +321,15 @@ def held_task_for(ctx: Context, repo: str, branch: str | None, title: str | None
             and t.get("title") == title
         )
 
+    def same_project(t: dict[str, Any]) -> bool:
+        if repo and t.get("repo") == repo:
+            return True
+        return bool(project_slug_val and t.get("project_slug") == project_slug_val and not t.get("repo"))
+
     return next(
         (
             t for t in Ledger(ctx).raw_tasks()
-            if t.get("held") and t.get("status") == "blocked" and t.get("repo") == repo and same(t)
+            if t.get("held") and t.get("status") == "blocked" and same_project(t) and same(t)
         ),
         None,
     )
@@ -352,10 +368,14 @@ def worker_argv_for(
     wrap: bool = False,
     memory: bool = True,
     writes: Iterable[str | Path] = (),
+    *,
+    slug: str | None = None,
 ) -> list[str]:
     """Assemble a worker's command line from `spec`, `reads`, `repo`, `extra`, `wrap`, `memory`, and `writes`."""
-    codex_rec = ProjectRegistry(ctx).pm_record(repo) if (spec.kind == "codex" and repo) else None
-    pool_active = bool(codex_pool_for(ctx, repo)) if spec.kind == "codex" else False
+    reg_target = slug or repo
+    codex_rec = ProjectRegistry(ctx).pm_record(reg_target) if (spec.kind == "codex" and reg_target) else None
+    pool_target = repo or (ctx.home.project(slug).root if slug else None)
+    pool_active = bool(codex_pool_for(ctx, pool_target)) if (spec.kind == "codex" and pool_target) else False
     mine: dict[str, Any] = {}
     if memory:
         worker_name = getattr(spec, "name", None) or getattr(spec, "branch", None) or ""
@@ -363,7 +383,11 @@ def worker_argv_for(
         if getattr(ctx, "_legacy", False):
             mine = native_memory(spec.kind, repo, "worker", worker_name, create=create_mem)
         else:
-            mem_root = ctx.home.memory_dir(repo) if repo else None
+            rec_slug = slug or (registration_slug(ProjectRegistry(ctx).pm_record(repo)) if repo else "")
+            if rec_slug and (not repo or project_slug(repo) != rec_slug):
+                mem_root: Path | None = ctx.home.project(rec_slug).memory
+            else:
+                mem_root = ctx.home.memory_dir(repo) if repo else None
             mine = ctx.agents.native_memory_settings(spec.kind, mem_root, "worker", worker_name, create=create_mem)
     return ctx.agents.worker_argv(
         spec,
@@ -385,8 +409,10 @@ def worker_argv(
     wrap: bool = False,
     memory: bool = True,
     writes: Iterable[str | Path] = (),
+    *,
+    slug: str | None = None,
 ) -> list[str]:
-    return worker_argv_for(Context.from_env(), a, reads=reads, repo=repo, extra=extra, wrap=wrap, memory=memory, writes=writes)
+    return worker_argv_for(Context.from_env(), a, reads=reads, repo=repo, extra=extra, wrap=wrap, memory=memory, writes=writes, slug=slug)
 
 
 def worker_placement_for(ctx: Context) -> list[str]:

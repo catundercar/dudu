@@ -17,7 +17,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from typing import Callable, Iterator, Protocol
+from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
 
 LINE_MAX = 16 << 20        # 16 MiB bound on one JSONL line; longer lines are skipped
 BLOCK_SIZE = 64 << 10      # 64 KiB read chunk for forward and reverse line scans
@@ -43,12 +43,17 @@ DOCUMENT_MAX = 1_000_000   # 1 MB bound on one context document read whole as te
 MEMORY_HEAD_MAX = 64 << 10 # 64 KiB cap when inspecting a memory file's frontmatter
 DOCUMENTS_MAX = 5000       # maximum entries listed per context root
 REPO_FILES_MAX = 20_000    # maximum repository files listed for @ mentions
+NON_GIT_FILES_MAX = 2_000  # hard cap on files walked in a single non-Git workspace folder
+NON_GIT_SKIP_DIRS = frozenset({
+    "node_modules", "dist", "build", "target", "__pycache__", ".venv", "venv",
+    ".tox", ".mypy_cache", ".pytest_cache", ".next", ".nuxt", "coverage", "vendor",
+})
 # Roots a document is named under (`<root>/<path>`). `project`, `user` and `research` are the old Context
-# panel's (`project context`, kept for the UI until it moves); `docs`, `research` and `instructions` are the
-# Library's; `memory` (the project's) and `personal` (the user's) are the Memory page's; `repo` is read-only
-# preview of the project's repository files.
+# panel's (`project context`, kept for the UI until it moves); `docs` and `research` are the Library's;
+# `memory` (the project's) and `personal` (the user's) are the Memory page's; `repo` is read-only preview of
+# the project's linked folders.
 DOCUMENT_ROOTS = ("project", "user", "research", "docs", "repo_docs", "instructions", "memory", "personal", "repo")
-LIBRARY_ROOTS = ("docs", "repo_docs", "research", "instructions")
+LIBRARY_ROOTS = ("docs", "research")
 RESEARCH_FOLDER = "evidence"
 LEDGER_RESEARCH_FOLDER = "research"
 RESEARCH_FILENAME = "README.md"
@@ -285,6 +290,132 @@ def valid_task_number(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         return None
     return value
+
+
+FOLDER_ALIAS_MAX_LEN = 64
+
+
+def normalize_folder_alias(raw: object) -> str:
+    """Validate and normalize a workspace folder alias."""
+    if not isinstance(raw, str):
+        raise ValueError("folder alias must be a string")
+    alias = raw.strip()
+    if not alias:
+        raise ValueError("folder alias cannot be empty")
+    if len(alias) > FOLDER_ALIAS_MAX_LEN:
+        raise ValueError(f"folder alias is too long (max {FOLDER_ALIAS_MAX_LEN} characters)")
+    if alias in (".", "..") or alias.startswith("."):
+        raise ValueError(f"folder alias cannot start with '.': {alias!r}")
+    if "/" in alias or "\\" in alias or "\x00" in alias or any(ord(ch) < 32 or ord(ch) == 127 for ch in alias):
+        raise ValueError(f"invalid folder alias: {alias!r}")
+    return alias
+
+
+def registration_slug(rec: Mapping[str, Any] | None, stem: str = "") -> str:
+    """Canonical project slug for a registration record (`slug` -> `project_slug(repo)` -> `pm-<slug>` -> `stem`)."""
+    if isinstance(rec, Mapping):
+        raw_slug = rec.get("slug")
+        if valid_slug(raw_slug):
+            return str(raw_slug)
+        raw_repo = rec.get("repo")
+        if isinstance(raw_repo, str) and raw_repo:
+            return project_slug(raw_repo)
+        name = str(rec.get("name") or "")
+        if name.startswith("pm-") and valid_slug(name[3:]):
+            return name[3:]
+    return stem if valid_slug(stem) else ""
+
+
+def project_folders(rec: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Equal-status reader for a project's linked workspace folders (`0..N`), compatible with legacy `repo`."""
+    if not isinstance(rec, Mapping):
+        return []
+    raw_folders = rec.get("folders")
+    if "folders" in rec and isinstance(raw_folders, list):
+        out: list[dict[str, Any]] = []
+        for item in raw_folders:
+            if not isinstance(item, Mapping):
+                continue
+            path_str = str(item.get("path") or "").strip()
+            if not path_str:
+                continue
+            alias = str(item.get("alias") or "").strip() or Path(path_str).name or "folder"
+            entry: dict[str, Any] = {"path": path_str, "alias": alias}
+            if "git" in item and item["git"] is not None:
+                entry["git"] = bool(item["git"])
+            if item.get("default_branch"):
+                entry["default_branch"] = str(item["default_branch"])
+            out.append(entry)
+        return out
+    raw_repo = str(rec.get("repo") or "").strip()
+    if raw_repo:
+        return [{"path": raw_repo, "alias": Path(raw_repo).name or "repo"}]
+    return []
+
+
+def sync_registration_folders(
+    rec: dict[str, Any],
+    folders: list[dict[str, Any]],
+    *,
+    slug: str = "",
+) -> dict[str, Any]:
+    """Persist equal-status `folders[]` on a registration dict and mirror `repo` (`folders[0].path` or '')."""
+    cleaned: list[dict[str, Any]] = []
+    for item in folders:
+        if not isinstance(item, Mapping):
+            continue
+        path_str = str(item.get("path") or "").strip()
+        if not path_str:
+            continue
+        alias = str(item.get("alias") or "").strip() or Path(path_str).name or "folder"
+        entry: dict[str, Any] = {"path": path_str, "alias": alias}
+        if "git" in item and item["git"] is not None:
+            entry["git"] = bool(item["git"])
+        if item.get("default_branch"):
+            entry["default_branch"] = str(item["default_branch"])
+        cleaned.append(entry)
+    rec["folders"] = cleaned
+    rec["repo"] = cleaned[0]["path"] if cleaned else ""
+    if slug and valid_slug(slug):
+        rec["slug"] = slug
+    return rec
+
+
+def disambiguate_folder_alias(
+    path: Path,
+    existing_aliases: Iterable[str],
+    explicit_alias: str | None = None,
+) -> str:
+    """Choose a unique, valid folder alias within a project."""
+    taken = {str(a).casefold() for a in existing_aliases if a}
+    if explicit_alias is not None:
+        alias = normalize_folder_alias(explicit_alias)
+        if alias.casefold() in taken:
+            raise ValueError(f"folder alias {alias!r} already exists in this project")
+        return alias
+    raw_base = (path.name or "").strip().replace("/", "-").replace("\\", "-").lstrip(".")
+    raw_base = "".join(ch for ch in raw_base if ord(ch) >= 32 and ord(ch) != 127)
+    base = (raw_base or "folder")[:FOLDER_ALIAS_MAX_LEN]
+    base = normalize_folder_alias(base)
+    if base.casefold() not in taken:
+        return base
+    parent_raw = (path.parent.name if path.parent != path else "").strip().replace("/", "-").replace("\\", "-").lstrip(".")
+    parent_raw = "".join(ch for ch in parent_raw if ord(ch) >= 32 and ord(ch) != 127)
+    if parent_raw:
+        cand = f"{parent_raw}-{base}"[:FOLDER_ALIAS_MAX_LEN]
+        try:
+            cand = normalize_folder_alias(cand)
+        except ValueError:
+            cand = ""
+        if cand and cand.casefold() not in taken:
+            return cand
+    n = 2
+    while True:
+        suffix = f"-{n}"
+        cand = base[:FOLDER_ALIAS_MAX_LEN - len(suffix)] + suffix
+        if cand.casefold() not in taken:
+            return cand
+        n += 1
 
 
 def local_tz_offset(dt: datetime.datetime | None = None) -> str:
@@ -917,7 +1048,8 @@ class FileStore:
             return slug, direct
         for stem, rec in self._registrations_with_stem():
             repo = rec.get("repo")
-            if stem == slug or rec.get("name") == f"pm-{slug}" or (isinstance(repo, str) and repo and project_slug(repo) == slug):
+            if (stem == slug or rec.get("slug") == slug or rec.get("name") == f"pm-{slug}"
+                    or (isinstance(repo, str) and repo and project_slug(repo) == slug)):
                 return stem, pms_dir / f"{stem}.json"
         return slug, direct
 
@@ -1130,18 +1262,24 @@ class FileStore:
         if slug is None:
             return every
 
-        # Follow pm.py's owner_of rule (exact repo, nested repo, then project name),
+        # Follow pm.py's owner_of rule (project_slug, exact folder, nested folder, then project name),
         # falling back to project_slug(repo) when no registration matches.
-        regs = self._reg_index()
+        f_regs = self._reg_folder_index()
 
         def belongs(task: dict) -> bool:
+            pslug = task.get("project_slug")
+            if valid_slug(pslug):
+                return pslug == slug
             raw_repo = str(task.get("repo") or "")
             trepo = str(Path(raw_repo).resolve()) if raw_repo else ""
             tproj = str(task.get("project") or "").lower()
-            if regs:
-                exact = [r for r in regs if r[2] and trepo == r[2]]
-                nested = [r for r in regs if r[2] and (trepo.startswith(r[2] + "/") or trepo.startswith(r[2] + os.sep))]
-                named = [r for r in regs if r[3] and r[3] == tproj]
+            if f_regs:
+                exact = [r for r in f_regs if trepo and any(trepo == fp for fp in r[2])]
+                nested = [
+                    r for r in f_regs
+                    if trepo and any(trepo.startswith(fp + "/") or trepo.startswith(fp + os.sep) for fp in r[2])
+                ]
+                named = [r for r in f_regs if r[3] and r[3] == tproj]
                 hit = (exact or nested or named or [None])[0]
                 if hit is not None:
                     return slug in (hit[0], hit[1])
@@ -1154,20 +1292,43 @@ class FileStore:
         for stem, rec in self._registrations_with_stem():
             raw_repo = str(rec.get("repo") or "")
             resolved = str(Path(raw_repo).resolve()) if raw_repo else ""
-            rslug = project_slug(raw_repo) if raw_repo else stem
+            rslug = registration_slug(rec, stem)
             proj = str(rec.get("project") or "").lower()
             regs.append((stem, rslug, resolved, proj))
         return regs
 
-    def _task_slug(self, task: dict, regs: list[tuple[str, str, str, str]] | None = None) -> str:
-        """Canonical project slug for a task, matching owner_of -> project_slug(repo) -> sanitized project."""
-        reg_list = self._reg_index() if regs is None else regs
+    def _reg_folder_index(self) -> list[tuple[str, str, tuple[str, ...], str]]:
+        regs: list[tuple[str, str, tuple[str, ...], str]] = []
+        for stem, rec in self._registrations_with_stem():
+            rslug = registration_slug(rec, stem)
+            resolved_list: list[str] = []
+            for f in project_folders(rec):
+                with contextlib.suppress(OSError):
+                    resolved_list.append(str(Path(f["path"]).resolve()))
+            proj = str(rec.get("project") or "").lower()
+            regs.append((stem, rslug, tuple(dict.fromkeys(resolved_list)), proj))
+        return regs
+
+    def _task_slug(self, task: dict, regs: list[tuple[str, str, Any, str]] | None = None) -> str:
+        """Canonical project slug for a task: `project_slug` -> folder/repo ownership -> project_slug(repo)."""
+        pslug = task.get("project_slug")
+        if valid_slug(pslug):
+            return str(pslug)
+        reg_list: list[tuple[str, str, Any, str]] = self._reg_folder_index() if regs is None else regs
         raw_repo = str(task.get("repo") or "")
         trepo = str(Path(raw_repo).resolve()) if raw_repo else ""
         tproj = str(task.get("project") or "").lower()
         if reg_list:
-            exact = [r for r in reg_list if r[2] and trepo == r[2]]
-            nested = [r for r in reg_list if r[2] and (trepo.startswith(r[2] + "/") or trepo.startswith(r[2] + os.sep))]
+            def _paths_of(val: Any) -> tuple[str, ...]:
+                if isinstance(val, (tuple, list)):
+                    return tuple(str(x) for x in val if x)
+                return (str(val),) if val else ()
+
+            exact = [r for r in reg_list if trepo and any(trepo == fp for fp in _paths_of(r[2]))]
+            nested = [
+                r for r in reg_list
+                if trepo and any(trepo.startswith(fp + "/") or trepo.startswith(fp + os.sep) for fp in _paths_of(r[2]))
+            ]
             named = [r for r in reg_list if r[3] and r[3] == tproj]
             hit = (exact or nested or named or [None])[0]
             if hit is not None:
@@ -1179,6 +1340,45 @@ class FileStore:
             if valid_slug(cleaned):
                 return cleaned
         return "default"
+
+    def task_project_slug(self, task: Mapping[str, Any] | None) -> str:
+        """Resolve canonical project slug for `task`: `task['project_slug']` -> folder ownership -> `project_slug(repo)`."""
+        if not isinstance(task, Mapping):
+            return ""
+        return self._task_slug(dict(task))
+
+    def folder_project_slug(self, repo_or_slug: str | Path | None) -> str:
+        """Resolve canonical project slug for a workspace folder path or project slug (`''` if empty)."""
+        raw = str(repo_or_slug or "").strip()
+        if not raw:
+            return ""
+        if valid_slug(raw) and self._registration_path(raw) is not None:
+            return registration_slug(self.registration(raw), raw)
+        try:
+            resolved = str(Path(raw).resolve())
+        except OSError:
+            resolved = raw
+        try:
+            proj_root_resolved = self._dirs()[3].resolve()
+            p_res = Path(resolved)
+            if p_res.parent == proj_root_resolved and valid_slug(p_res.name) and self._registration_path(p_res.name) is not None:
+                return registration_slug(self.registration(p_res.name), p_res.name)
+        except OSError:
+            pass
+        reg_list = self._reg_folder_index()
+        if reg_list:
+            def _paths_of(val: Any) -> tuple[str, ...]:
+                if isinstance(val, (tuple, list)):
+                    return tuple(str(x) for x in val if x)
+                return (str(val),) if val else ()
+
+            for _stem, rslug, fp_val, _pname in reg_list:
+                if any(resolved == fp for fp in _paths_of(fp_val)):
+                    return rslug
+            for _stem, rslug, fp_val, _pname in reg_list:
+                if any(resolved.startswith(fp + "/") or resolved.startswith(fp + os.sep) for fp in _paths_of(fp_val)):
+                    return rslug
+        return project_slug(raw)
 
     @staticmethod
     def _read_seq_last(seq_doc: dict | None, seq_path: Path) -> int:
@@ -1550,25 +1750,48 @@ class FileStore:
             return proj
         return self._safe_subdir(proj, DOCS_FOLDER if root == "docs" else "memory")
 
+    def _resolve_dir(self, path_val: str | Path) -> Path | None:
+        p = Path(path_val)
+        try:
+            st = os.stat(p)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as err:
+            raise UnreadableFileError(err.errno, f"cannot stat {p}: {err.strerror or err}", str(p)) from err
+        if not stat.S_ISDIR(st.st_mode):
+            return None
+        try:
+            return p.resolve(strict=True)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as err:
+            raise UnreadableFileError(err.errno, f"cannot resolve {p}: {err.strerror or err}", str(p)) from err
+
     def _repo_dir(self, slug: str) -> Path | None:
         """The project's main checkout, resolved, when it is a directory."""
         repo = self._project_repo(slug)
         if repo is None:
             return None
-        try:
-            repo_st = os.stat(repo)
-        except (FileNotFoundError, NotADirectoryError):
-            return None
-        except OSError as err:
-            raise UnreadableFileError(err.errno, f"cannot stat {repo}: {err.strerror or err}", str(repo)) from err
-        if not stat.S_ISDIR(repo_st.st_mode):
-            return None
-        try:
-            return repo.resolve(strict=True)
-        except (FileNotFoundError, NotADirectoryError):
-            return None
-        except OSError as err:
-            raise UnreadableFileError(err.errno, f"cannot resolve {repo}: {err.strerror or err}", str(repo)) from err
+        return self._resolve_dir(repo)
+
+    def _project_folders(self, slug: str) -> list[tuple[dict[str, Any], Path]]:
+        """Equal-status resolved directories linked to `slug`, preserving `folders[]` order."""
+        reg = self.registration(slug)
+        if isinstance(reg, dict):
+            has_explicit = "folders" in reg and isinstance(reg.get("folders"), list)
+            out: list[tuple[dict[str, Any], Path]] = []
+            seen: set[Path] = set()
+            for entry in project_folders(reg):
+                resolved = self._resolve_dir(entry["path"])
+                if resolved is not None and resolved not in seen:
+                    seen.add(resolved)
+                    out.append((entry, resolved))
+            if has_explicit or out:
+                return out
+        repo = self._repo_dir(slug)
+        if repo is not None:
+            return [({"path": str(repo), "alias": repo.name or "repo"}, repo)]
+        return []
 
     def _subdirs(self, base: Path | None, *names: str) -> Path | None:
         """base/names[0]/names[1]/…, each a plain (non-symlink) folder inside the last; None otherwise."""
@@ -1579,12 +1802,13 @@ class FileStore:
             cur = self._safe_subdir(cur, name)
         return cur
 
-    def _research_root_dirs(self, slug: str) -> list[Path]:
-        """Safe research roots in priority order: `<repo>/evidence` and ledger `projects/<slug>/research`."""
+    def _research_root_dirs(self, slug: str, *, include_repo: bool = True) -> list[Path]:
+        """Research roots: ledger `projects/<slug>/research` (always) and optionally legacy `<repo>/evidence`."""
         roots: list[Path] = []
-        ev = self._subdirs(self._repo_dir(slug), RESEARCH_FOLDER)
-        if ev is not None:
-            roots.append(ev)
+        if include_repo:
+            ev = self._subdirs(self._repo_dir(slug), RESEARCH_FOLDER)
+            if ev is not None:
+                roots.append(ev)
         proj_dir = self._context_root_dir(slug, "project")
         if proj_dir is not None:
             ledger_res = self._safe_subdir(proj_dir, LEDGER_RESEARCH_FOLDER)
@@ -1601,14 +1825,12 @@ class FileStore:
         local originals: the Library marks an original that has one, and lists one that has no original."""
         return self._subdirs(self._repo_dir(slug), DOCS_FOLDER, DOCS_RESEARCH)
 
-    def _evidence_reports(self, slug: str) -> dict[str, tuple[os.stat_result, Path, str]]:
-        """`<topic>/README.md` → (stat, path, source) across `<repo>/evidence` and the ledger's research folder.
-
-        Skips loose top-level files, sibling non-README files, screenshots/probes, and test-output folders
-        (`render-check` or folders carrying `.render-check`). When the same topic exists in both roots, the
-        newer mtime wins (repo wins ties)."""
+    def _evidence_reports(
+        self, slug: str, *, include_repo: bool = True
+    ) -> dict[str, tuple[os.stat_result, Path, str]]:
+        """`<topic>/README.md` → (stat, path, source) across ledger research (and legacy `<repo>/evidence` when `include_repo`)."""
         by_path: dict[str, tuple[os.stat_result, Path, str]] = {}
-        for real_base in self._research_root_dirs(slug):
+        for real_base in self._research_root_dirs(slug, include_repo=include_repo):
             source = "repo" if real_base.name == RESEARCH_FOLDER else "ledger"
             try:
                 with os.scandir(real_base) as it:
@@ -1925,24 +2147,12 @@ class FileStore:
                                      topic_of(parts), slug, sources, tasks, by_id)
             by_topic.setdefault(topic_of(parts), row)
             rows.append(row)
-        for rel, (st, readme, source) in sorted(self._evidence_reports(slug).items()):
+        for rel, (st, readme, source) in sorted(self._evidence_reports(slug, include_repo=False).items()):
             topic = rel.split("/", 1)[0]
             if topic in by_topic:  # moved to the project's docs/research: that copy is the one shown
                 continue
             row = self._research_row(f"{RESEARCH_FOLDER}/{rel}", source, st, readme, topic, slug, sources, tasks, by_id)
             by_topic[topic] = row
-            rows.append(row)
-        public = self._published_research_dir(slug)
-        for parts, st, file in (self._scan_tree(public, max_depth=RESEARCH_DEPTH, files_only=True, extensions=md)
-                                if public is not None else ()):
-            rel = "/".join(parts)
-            original = by_topic.get(topic_of(parts))
-            if original is not None:  # the local original stays the report; it says where its public copy is
-                original.setdefault("published", f"{PUBLISHED_PREFIX}/{rel}")
-                continue
-            row = self._research_row(f"{PUBLISHED_PREFIX}/{rel}", PUBLISHED_PREFIX, st, file, topic_of(parts), slug,
-                                     sources, tasks, by_id)
-            row["published"] = True
             rows.append(row)
         return rows
 
@@ -2181,19 +2391,17 @@ class FileStore:
         return found
 
     def repo_docs_settings(self, slug: str) -> dict:
-        """Current effective repo_docs settings and resolved scan entries for a project."""
+        """Repository doc scanning has been removed from Library (`deprecated: True`, always disabled)."""
         if not valid_slug(slug):
             raise ValueError(f"invalid project slug: {slug!r}")
-        cfg = self._repo_docs_config(slug)
-        repo = self._repo_dir(slug)
-        entries = [rel for rel, _ in self._repo_docs_entries(repo, cfg)[0]] if repo is not None else []
         return {
             "project": slug,
-            "enabled": cfg["enabled"],
-            "include": cfg["include"],
-            "exclude": cfg["exclude"],
-            "custom": cfg["custom"],
-            "entries": entries,
+            "enabled": False,
+            "deprecated": True,
+            "include": [],
+            "exclude": [],
+            "custom": False,
+            "entries": [],
         }
 
     def _repo_docs_items(self, slug: str) -> tuple[list[dict], dict]:
@@ -2269,30 +2477,8 @@ class FileStore:
         rows = [folder_rows[k] for k in sorted(folder_rows)] + file_rows
         return rows, meta_out
 
-    def _docs_items(self, slug: str, repo_docs: list[dict] | None = None) -> list[dict]:
+    def _docs_items(self, slug: str) -> list[dict]:
         rows: list[dict] = []
-        repo_paths: set[str] = set()
-        repo_by_stem: dict[str, tuple[int, str]] = {}
-        for r in (repo_docs or ()):
-            if r.get("kind") == "folder":
-                continue
-            rpath = str(r.get("path") or "")
-            if not rpath:
-                continue
-            repo_paths.add(rpath)
-            rparts = tuple(rpath.split("/"))
-            stem = Path(rparts[-1]).stem.lower()
-            if len(stem) < 3 or stem in GENERIC_DOC_STEMS:
-                continue
-            is_design = (
-                any(seg.lower() in REPO_DOCS_DESIGN_SEGMENTS for seg in rparts[:-1])
-                or (len(rparts) == 1 and rparts[0].lower() in REPO_DOCS_DEFAULT_ROOT_FILES)
-            )
-            prio = 0 if is_design else 1
-            cur_best = repo_by_stem.get(stem)
-            if cur_best is None or (prio, rpath.lower()) < (cur_best[0], cur_best[1].lower()):
-                repo_by_stem[stem] = (prio, rpath)
-
         docs = self._context_root_dir(slug, "docs")
         if docs is not None:
             for parts, st, file in self._scan_tree(docs, skip_top=frozenset({DOCS_RESEARCH})):
@@ -2300,18 +2486,10 @@ class FileStore:
                 row["writable"] = True
                 if not stat.S_ISDIR(st.st_mode):
                     row["version"] = _version_of(st)
-                    explicit_superseded = ""
                     if row["kind"] in ("md", "markdown") and st.st_size <= DOCUMENT_MAX:
                         meta = _read_doc_meta(file)
                         if meta.get("title"):
                             row["title"] = meta["title"]
-                        explicit_superseded = meta.get("superseded_by") or ""
-                    if explicit_superseded and explicit_superseded in repo_paths:
-                        row["superseded_by"] = explicit_superseded
-                    elif repo_by_stem:
-                        norm = _normalize_doc_stem(parts[-1])
-                        if len(norm) >= 3 and norm not in GENERIC_DOC_STEMS and norm in repo_by_stem:
-                            row["superseded_by"] = repo_by_stem[norm][1]
                 rows.append(row)
         proj = self._context_root_dir(slug, "project")
         if proj is not None:
@@ -2333,35 +2511,22 @@ class FileStore:
         return rows
 
     def library(self, slug: str) -> dict:
-        """The Library of a project, as the UI shows it: what each root is and every document in it.
+        """The Library of a project, decoupled from workspace folders:
 
         docs: projects/<slug>/docs/** (editable, files can be dropped in) and decisions.md as a read-only archive
-        row (`archive: true`, `hidden` once its decisions are all in memory); repo_docs: curated read-only design
-        docs and guides from the repository; research: reports, read-only: the local originals,
-        `docs/research/**.md` of the project's ledger folder and `evidence/<topic>/README.md` (a topic moved to
-        docs/research is shown there only); a redacted public copy in `<repo>/docs/research` never stands in for
-        an original: the original gets `published: "published/<rel>"`, and one with no original is listed as
-        `published/<rel>` with `published: true`; instructions: the repository's CLAUDE.md, AGENTS.md,
-        .claude/*.md and .claude/rules/*.md that exist, read-only."""
+        row (`archive: true`, `hidden` once its decisions are all in memory); research: project-owned ledger
+        reports in `projects/<slug>/docs/research/**.md` and unmigrated `projects/<slug>/research/<topic>/README.md`.
+        """
         if not valid_slug(slug):
             raise ValueError(f"invalid project slug: {slug!r}")
-        repo_docs_rows, repo_meta = self._repo_docs_items(slug)
         return {
             "project": slug,
             "roots": [
                 {"id": "docs", "writable": True, "accepts": {
                     "extensions": sorted(ADD_EXTENSIONS), "max_bytes": ADD_MAX, "edit_max_bytes": DOCUMENT_MAX}},
-                {"id": "repo_docs", "writable": False,
-                 "truncated": repo_meta["truncated"], "total": repo_meta["total"]},
                 {"id": "research", "writable": False},
-                {"id": "instructions", "writable": False},
             ],
-            "files": (
-                self._docs_items(slug, repo_docs=repo_docs_rows)
-                + repo_docs_rows
-                + self._research_items(slug)
-                + self._instruction_items(slug)
-            ),
+            "files": self._docs_items(slug) + self._research_items(slug),
         }
 
     def _is_tracked_repo_file(self, repo: Path, rel: str) -> bool:
@@ -2379,19 +2544,53 @@ class FileStore:
             return False
         return rel.encode("utf-8") in proc.stdout.split(b"\x00")
 
-    def repo_files(self, slug: str, *, limit: int = REPO_FILES_MAX) -> dict:
-        """List git-tracked repository files in the project's main checkout via `git ls-files -z`."""
-        if not valid_slug(slug):
-            raise ValueError(f"invalid project slug: {slug!r}")
-        cap = max(1, min(int(limit), 50_000))
-        repo = self._repo_dir(slug)
-        if repo is None:
-            return {"project": slug, "files": [], "truncated": False}
+    @staticmethod
+    def _scan_non_git_files(folder: Path, cap: int) -> tuple[list[str], bool]:
+        """Safe directory walk for a non-Git folder: skips symlinks, dotfiles, and heavy build directories."""
+        hard_cap = max(1, min(int(cap), NON_GIT_FILES_MAX))
+        files: list[str] = []
+        truncated = False
+        stack: list[tuple[Path, tuple[str, ...]]] = [(folder, ())]
+        while stack and not truncated:
+            cur_dir, prefix = stack.pop()
+            try:
+                with os.scandir(cur_dir) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError:
+                continue
+            subdirs: list[tuple[Path, tuple[str, ...]]] = []
+            for entry in entries:
+                name = entry.name
+                if not name or name.startswith("."):
+                    continue
+                try:
+                    if entry.is_symlink():
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    if name.lower() in NON_GIT_SKIP_DIRS:
+                        continue
+                    subdirs.append((Path(entry.path), (*prefix, name)))
+                elif stat.S_ISREG(st.st_mode):
+                    if len(files) >= hard_cap:
+                        truncated = True
+                        break
+                    files.append("/".join((*prefix, name)))
+            for sub in reversed(subdirs):
+                stack.append(sub)
+        return files, truncated
+
+    def _list_folder_files(self, folder: Path, cap: int) -> tuple[list[str], bool]:
+        """List files inside one workspace folder (`git ls-files -z` for Git repos, else `_scan_non_git_files`)."""
+        if not self._is_git_repo(folder):
+            return self._scan_non_git_files(folder, cap)
         files: list[str] = []
         truncated = False
         try:
             proc = subprocess.run(
-                ["git", "-C", str(repo), "ls-files", "-z"],
+                ["git", "-C", str(folder), "ls-files", "-z"],
                 capture_output=True,
                 stdin=subprocess.DEVNULL,
                 timeout=15,
@@ -2419,8 +2618,58 @@ class FileStore:
                     files.append(rel)
         except (OSError, subprocess.SubprocessError):
             pass
+        return files, truncated
 
-        return {"project": slug, "files": files, "truncated": truncated}
+    def repo_files(self, slug: str, *, limit: int = REPO_FILES_MAX) -> dict:
+        """Aggregate files across all linked folders of `slug` (`<alias>/` prefixed when >= 2 folders)."""
+        if not valid_slug(slug):
+            raise ValueError(f"invalid project slug: {slug!r}")
+        cap = max(1, min(int(limit), 50_000))
+        folders = self._project_folders(slug)
+        if not folders:
+            return {"project": slug, "files": [], "truncated": False}
+        if len(folders) == 1:
+            _entry, fdir = folders[0]
+            files, truncated = self._list_folder_files(fdir, cap)
+            return {"project": slug, "files": files, "truncated": truncated}
+
+        base_quota = max(1, cap // len(folders))
+        raw_per_folder: list[tuple[str, list[str], bool]] = []
+        any_truncated = False
+        # First pass up to cap so folders with fewer files leave room for larger ones.
+        for entry, fdir in folders:
+            alias = str(entry.get("alias") or fdir.name or "folder")
+            items, trunc = self._list_folder_files(fdir, cap)
+            raw_per_folder.append((alias, items, trunc))
+            if trunc:
+                any_truncated = True
+
+        selected: list[list[str]] = [[] for _ in folders]
+        used = 0
+        # Fair round 1: guarantee each folder up to `base_quota` slots.
+        for idx, (_alias, items, _trunc) in enumerate(raw_per_folder):
+            take = min(len(items), base_quota, cap - used)
+            selected[idx] = items[:take]
+            used += take
+            if len(items) > take:
+                any_truncated = True
+        # Round 2: redistribute unused headroom in folder order up to `cap`.
+        if used < cap:
+            for idx, (_alias, items, _trunc) in enumerate(raw_per_folder):
+                if used >= cap:
+                    break
+                cur = len(selected[idx])
+                if len(items) > cur:
+                    extra = min(len(items) - cur, cap - used)
+                    selected[idx].extend(items[cur:cur + extra])
+                    used += extra
+                    if len(items) > len(selected[idx]):
+                        any_truncated = True
+        files_out: list[str] = []
+        for idx, (alias, _items, _trunc) in enumerate(raw_per_folder):
+            for rel in selected[idx]:
+                files_out.append(f"{alias}/{rel}")
+        return {"project": slug, "files": files_out, "truncated": any_truncated}
 
     # ---- reading one document ------------------------------------------------------------------------------
 
@@ -2479,7 +2728,7 @@ class FileStore:
             if parts[0] == RESEARCH_FOLDER:
                 if len(parts) != 3 or parts[2] != RESEARCH_FILENAME or is_excluded_research_topic(parts[1]):
                     raise missing
-                return self._newest_of(self._research_root_dirs(slug), parts[1:], label, skip_marked=True)
+                return self._newest_of(self._research_root_dirs(slug, include_repo=False), parts[1:], label, skip_marked=True)
             if parts[:2] == (DOCS_FOLDER, DOCS_RESEARCH) and len(parts) >= 3:
                 if Path(parts[-1]).suffix.lower() not in (".md", ".markdown"):
                     raise missing
@@ -2487,48 +2736,39 @@ class FileStore:
                 if base is None:
                     raise missing
                 return self._walk_file(base, parts[2:], label)
-            if parts[0] == PUBLISHED_PREFIX and len(parts) >= 2:
-                if Path(parts[-1]).suffix.lower() not in (".md", ".markdown"):
-                    raise missing
-                base = self._published_research_dir(slug)
-                if base is not None:
-                    try:
-                        return self._walk_file(base, parts[1:], label)
-                    except FileNotFoundError:
-                        if parts != (PUBLISHED_PREFIX, RESEARCH_FILENAME):
-                            raise
-                elif parts != (PUBLISHED_PREFIX, RESEARCH_FILENAME):
-                    raise missing
             if len(parts) != 2 or parts[1] != RESEARCH_FILENAME or is_excluded_research_topic(parts[0]):
                 raise missing
             return self._newest_of(self._research_root_dirs(slug), parts, label, skip_marked=True)
-        if root == "instructions":
-            repo = self._repo_dir(slug)
-            if repo is None or parts not in self._instruction_paths(repo):
-                raise missing
-            return self._walk_file(repo, parts, label)
-        if root == "repo_docs":
-            repo = self._repo_dir(slug)
-            if repo is None:
-                raise missing
-            cfg = self._repo_docs_config(slug)
-            entries, explicit_files = self._repo_docs_entries(repo, cfg)
-            if self._repo_docs_match_entry(parts, entries, explicit_files, cfg["exclude"]) is None:
-                raise missing
-            rel = "/".join(parts)
-            if self._is_git_repo(repo) and not self._is_tracked_repo_file(repo, rel):
-                raise missing
-            return self._walk_file(repo, parts, label)
+        if root in ("instructions", "repo_docs"):
+            raise missing
         if root == "repo":
             if any(p == ".git" for p in parts):
                 raise missing
-            repo = self._repo_dir(slug)
-            if repo is None:
+            folders = self._project_folders(slug)
+            if not folders:
                 raise missing
-            rel = "/".join(parts)
-            if not self._is_tracked_repo_file(repo, rel):
-                raise missing
-            return self._walk_file(repo, parts, label)
+            if len(folders) == 1:
+                fdir = folders[0][1]
+                sub_parts = parts
+            else:
+                if len(parts) < 2:
+                    raise missing
+                alias = parts[0]
+                matched = next((fdir for entry, fdir in folders if entry.get("alias") == alias), None)
+                if matched is None:
+                    raise missing
+                fdir = matched
+                sub_parts = parts[1:]
+            rel = "/".join(sub_parts)
+            if self._is_git_repo(fdir):
+                if not self._is_tracked_repo_file(fdir, rel):
+                    raise missing
+            else:
+                if any(p.startswith(".") for p in sub_parts):
+                    raise missing
+                if any(p.lower() in NON_GIT_SKIP_DIRS for p in sub_parts[:-1]):
+                    raise missing
+            return self._walk_file(fdir, sub_parts, label)
         if root in ("user", "personal", "memory"):
             if len(parts) != 1 or not parts[0].endswith(".md") or parts[0] == "MEMORY.md":
                 raise missing

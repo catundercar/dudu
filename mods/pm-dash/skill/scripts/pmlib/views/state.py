@@ -1,5 +1,7 @@
 """JSON read model for `pm.py state` (`dash_state`), read directly by the mods (pm-dash, pm-project, pm-nav, pm-list).
 Layer 4."""
+from __future__ import annotations
+
 import datetime
 import json
 from pathlib import Path
@@ -17,7 +19,7 @@ from ..ledger.task import ACTIVE, CLOSED, needs_cleanup, task_number
 from ..manager.launch import pm_compact_tokens
 from ..osutil import stale_lock
 from ..project.conversation import conversation_events
-from ..project.project import ProjectRegistry
+from ..project.project import ProjectRegistry, backfill_space_id, project_display_name
 from ..project.turn_state import TurnTracker
 from ..project.readmodel import (
     LiveSnapshot,
@@ -29,7 +31,7 @@ from ..project.readmodel import (
     task_closed,
     task_offline,
 )
-from ..store import local_tz_offset
+from ..store import local_tz_offset, project_folders, registration_slug
 from ..workers.lifecycle import term_status
 from ..workers.sessions import ATTACHED, pm_session_info_for, task_session_info_for
 
@@ -211,25 +213,46 @@ def dash_state(ctx=None):
         rec = json.loads(path.read_text())
         pane_val = rec.get("pane", "")
         is_hc_pm = rec.get("runtime") == "hc" or str(pane_val).startswith("hc:")
+        slug = registration_slug(rec)
+        folders = project_folders(rec)
+        has_explicit_project = ("folders" in rec) or bool(rec.get("slug"))
+        repo = rec.get("repo", "") or (folders[0]["path"] if folders else "")
         live = by_pane.get(pane_val or "", {})
         if is_hc_pm:
-            live = projects_reg.hc_pm(rec.get("repo") or "") or {}
+            live = projects_reg.hc_pm(repo or slug) or {}
         alive = live.get("name") == rec.get("name")
         ctx_tokens = sessions.context_tokens(pm_session_info_for(ctx, rec)) if sessions else 0
-        repo = rec.get("repo", "")
         runtime = rec.get("runtime") or ("tui" if pane_val and not pane_val.startswith("hc:") else "")
-        repo_ok = bool(repo and Path(repo).is_dir())
+        if has_explicit_project and not folders:
+            repo_ok = True
+        elif folders:
+            repo_ok = any(Path(f["path"]).is_dir() for f in folders)
+        else:
+            repo_ok = bool(repo and Path(repo).is_dir())
         pm_agent = rec.get("agent", "")
-        receipts = TurnTracker(ctx, repo).receipts_projection(limit=20) if repo else []
-        pm_entry = {"name": rec["name"], "project": rec.get("project", ""), "repo": repo,
+        receipts_target = repo or (str(home.project(slug).root) if (has_explicit_project and slug and home.project(slug).root.is_dir()) else "")
+        receipts = TurnTracker(ctx, receipts_target).receipts_projection(limit=20) if receipts_target else []
+        display_name = project_display_name(rec, repo)
+        space_name = str(rec.get("space_name") or "").strip()
+        space_id = str(rec.get("space_id") or "").strip()
+        conv_path = (
+            str(home.project(slug).conversation)
+            if (slug and (repo or has_explicit_project))
+            else (str(home.project_for(repo).conversation) if repo else "")
+        )
+        pm_entry = {"name": rec["name"], "project": rec.get("project", ""), "display_name": display_name,
+                    **({"slug": slug} if slug else {}),
+                    **({"space_id": space_id} if space_id else {}),
+                    **({"space_name": space_name} if space_name else {}),
+                    "repo": repo,
+                    "folders": folders,
                     "pane": pane_val, "runtime": runtime, "repo_ok": repo_ok,
                     "status": live.get("agent_status") if alive else "offline",
                     "title": live.get("terminal_title_stripped", "") if alive else "",
                     "agent": pm_agent, "archived": rec.get("archived"),
                     "compact_tokens": pm_compact_tokens(pm_agent, ctx=ctx),
                     # The project's conversation log; read-only here, so its folder is not created.
-                    "conversation": str(home.project_for(repo).conversation)
-                    if repo else "",
+                    "conversation": conv_path,
                     # Sessions under either folder work in this project (the project view lists them).
                     "worktrees": str(ctx.git.worktree_home(repo)) if repo else ""} | (
                         {"context_tokens": ctx_tokens} if ctx_tokens > 0 else {}) | (
@@ -277,7 +300,8 @@ def dash_state(ctx=None):
         if pm_helpers:
             p["helpers"] = pm_helpers
         repo = rec.get("repo") or ""
-        if repo:
+        slug = p.get("slug") or ""
+        if repo or slug:
             is_hc = rec.get("runtime") == "hc" or str(p.get("pane") or "").startswith("hc:")
             term_addr = str(rec.get("terminal") or (p["pane"][3:] if str(p.get("pane") or "").startswith("hc:") else ""))
             term_row = (live_rows or {}).get(term_addr) if term_addr and isinstance(live_rows, dict) else None
@@ -285,9 +309,14 @@ def dash_state(ctx=None):
                 raw_info = ctx.hc.get_raw(term_addr, errors=True)
                 if isinstance(raw_info, dict) and not raw_info.get("error") and raw_info.get("state") == "live":
                     term_row = raw_info
+                    if slug and not p.get("space_id") and not rec.get("archived"):
+                        sp_id = backfill_space_id(ctx, slug, rec, raw_info)
+                        if sp_id:
+                            p["space_id"] = sp_id
+            turn_target = repo or str(home.project(slug).root)
             turn_view = read_pm_turn_view(
                 ctx,
-                repo,
+                turn_target,
                 rec,
                 term_info=term_row,
                 live_pm={"agent_status": p.get("status") if alive else "offline", "name": p.get("name")},
@@ -297,7 +326,7 @@ def dash_state(ctx=None):
             p["turn2"] = turn_view["turn2"]
             p["supervised"] = turn_view["supervised"]
             if is_hc and not rec.get("archived"):
-                undel = Delivery(ctx, repo).undelivered_status(
+                undel = Delivery(ctx, repo, slug=slug or None).undelivered_status(
                     live_state=str((p.get("status") if alive else "offline") or ""),
                 )
                 if undel:
@@ -331,6 +360,8 @@ def dash_state(ctx=None):
         tasks.append({k: t.get(k) or "" for k in ("id", "title", "project", "status", "owner", "pane", "agent",
                                                    "branch", "updated", "parent")}
                      | ({"number": task_number(t)} if task_number(t) else {})
+                     | ({"project_slug": t["project_slug"]} if t.get("project_slug") else {})
+                     | ({"folder_alias": t["folder_alias"]} if t.get("folder_alias") else {})
                      | ({"brief": t["brief"]} if t.get("brief") else {})
                      | ({"paused_from": t["paused_from"]} if t.get("paused_from") else {})
                      | ({"answered": True} if t["id"] in answered else {})

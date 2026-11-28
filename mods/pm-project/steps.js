@@ -1,28 +1,8 @@
-// Shared Steps Card UI component (detail Steps card + Threads & Board compact hover cards).
+// Shared Steps & Waiting Card UI components (detail pods + Threads & Board compact hover cards).
 // Pure UI builder with zero direct imports from gpui-kit/gpui-base/herdr so Node tests can import it directly.
 // Keep mods/pm-project/steps.js and mods/pm-dash/steps.js byte-for-byte identical.
 
-import { word, withAlpha } from './model.js';
-
-export function treeBranchList(ui, items, {
-  indent = 20,
-  stemX = 7,
-  curveSize = 20,
-  strokeW = 1.5,
-  curveStart = 4,
-  gap = 2,
-  wireColor,
-  treeBranchIcon,
-} = {}) {
-  const { div, svg, v_flex } = ui;
-  return v_flex().w_full().min_w(0).gap(gap).children(items.map((el, i) => {
-    const hasNext = i < items.length - 1;
-    return div().relative().w_full().min_w(0).pl(indent)
-      .when(hasNext, box => box.child(div().absolute().left(stemX - strokeW / 2).top(curveStart).bottom(-gap).w(strokeW).bg(wireColor)))
-      .child(svg(treeBranchIcon).size(curveSize).absolute().left(0).top(0).text_color(wireColor))
-      .child(el);
-  }));
-}
+import { word, withAlpha, tonalSurfaces } from './model.js';
 
 export function renderStepsCard({
   ui,
@@ -35,7 +15,10 @@ export function renderStepsCard({
   scale = 1,
   cardId = '',
   stepIdPrefix = '',
+  titleText = '',
   headerMeta = '',
+  progressColor = '',
+  hidePolicy = false,
   spinning = false,
   reviewSpinning = spinning,
   subSpinning = spinning,
@@ -53,8 +36,14 @@ export function renderStepsCard({
   const sc = compact ? (scale || 1) : 1;
   const px = n => n * sc;
   const font = n => Math.max(10, px(n));
-  const wireColor = t.input || t.border;
-  const doneColor = t.ansi2 ?? t.working;
+  const surf = tonalSurfaces(t);
+  const doneColor = t.ansi2 ?? t.done ?? t.working;
+  const workColor = t.working ?? t.ansi3 ?? t.accent;
+  const todoBorder = withAlpha(t.muted || t.border, surf.dark ? .44 : .54);
+  const subTodoBorder = withAlpha(t.muted || t.border, surf.dark ? .38 : .48);
+  const activeStepBg = withAlpha(t.foreground, surf.dark ? .055 : .045);
+  const activeSubBg = withAlpha(t.foreground, surf.dark ? .05 : .04);
+  const compactSubWellBg = withAlpha(t.foreground, surf.dark ? .038 : .032);
   const markSize = compact ? Math.max(10, px(11)) : 12;
   const todoSize = compact ? Math.max(7, px(8)) : 8.5;
   const subMarkSize = compact ? Math.max(9, px(10)) : 10.5;
@@ -66,42 +55,45 @@ export function renderStepsCard({
     if (s.state === 'done') return svg(icons.checkMark).size(markSize).flex_none().text_color(doneColor);
     if (s.state === 'doing') {
       const isReview = s.anchor === 'review';
-      const c = isReview ? t.accent
-        : (steps.postGate && s.anchor === 'custom' ? (t.working ?? t.ansi3 ?? t.accent) : doneColor);
+      const c = isReview ? t.accent : workColor;
       const spin = isReview ? reviewSpinning : spinning;
       return svg(icons.spinner).size(markSize).flex_none().text_color(c).when(spin, sp => sp.spin(900));
     }
-    return div().size(todoSize).flex_none().rounded_full().border(Math.max(1, px(1.3))).border_color(t.border);
+    return div().size(todoSize).flex_none().rounded_full().border(Math.max(1, px(1.25))).border_color(todoBorder);
   };
 
   const renderSubstepMark = sub => {
     if (sub.state === 'done') return svg(icons.checkMark).size(subMarkSize).flex_none().text_color(doneColor);
-    if (sub.state === 'doing') return svg(icons.spinner).size(subMarkSize).flex_none().text_color(doneColor).when(subSpinning, sp => sp.spin(900));
-    return div().size(subTodoSize).flex_none().rounded_full().border(Math.max(1, px(1.2))).border_color(t.border);
+    if (sub.state === 'doing') return svg(icons.spinner).size(subMarkSize).flex_none().text_color(workColor).when(subSpinning, sp => sp.spin(900));
+    return div().size(subTodoSize).flex_none().rounded_full().border(Math.max(1, px(1.2))).border_color(subTodoBorder);
   };
 
-  const planPolicy = steps.autoReview
-    ? { text: word(lang, 'planAutoReview'), tip: word(lang, 'planAutoReviewTip'), color: t.accent }
-    : steps.noReview
-      ? { text: word(lang, 'planNoReview'), tip: word(lang, 'planNoReviewTip'), color: t.dim }
-      : null;
+  const planPolicy = hidePolicy ? null
+    : steps.autoReview
+      ? { text: word(lang, 'planAutoReview'), tip: word(lang, 'planAutoReviewTip'), color: t.accent }
+      : steps.noReview
+        ? { text: word(lang, 'planNoReview'), tip: word(lang, 'planNoReviewTip'), color: t.dim }
+        : null;
 
-  const header = h_flex().w_full().min_w(0).pl(compact ? px(2) : 2).pr(compact ? px(2) : 6).gap(px(compact ? 5 : 6)).items_center()
-    .child(div().flex_none().text_size(compact ? font(11) : 11.5).font_semibold().text_color(t.muted).child(word(lang, 'planTitle')))
+  const header = h_flex().w_full().min_w(0).pl(compact ? px(2) : 4).pr(compact ? px(2) : 6).gap(px(compact ? 5 : 6)).items_center()
+    .child(div().flex_none().text_size(compact ? font(11.5) : 11.5).font_semibold()
+      .text_color(titleText ? t.foreground : t.muted).child(titleText || word(lang, 'planTitle')))
     .when(Boolean(headerMeta), el => el.child(div().flex_1().min_w(0).truncate()
-      .font_family('monospace').text_size(font(10)).text_color(t.dim).child(headerMeta)))
+      .font_family('monospace').text_size(font(10.5)).text_color(t.dim).child(titleText ? `· ${headerMeta}` : headerMeta)))
     .when(!headerMeta, el => el.child(div().flex_1().min_w(0)))
-    .when(steps.foldedRounds > 0, el => el.child(div().flex_none().px(px(compact ? 4 : 5)).py(px(1)).rounded(px(4)).bg(t.raised)
+    .when(steps.foldedRounds > 0, el => el.child(div().flex_none().px(px(compact ? 4 : 5)).py(px(1)).rounded(px(5)).bg(surf.well)
       .font_family('monospace').text_size(compact ? font(10) : 10.5).text_color(t.dim).child(steps.foldedLabel)))
     .when(Boolean(planPolicy), el => {
-      const pill = div().flex_none().px(px(compact ? 4 : 5)).py(px(1)).rounded(px(4))
-        .bg(withAlpha(planPolicy.color, .12)).text_size(compact ? font(10) : 10.5).text_color(planPolicy.color)
+      const pill = div().flex_none().px(px(compact ? 4 : 6)).py(px(1.5)).rounded(px(5))
+        .bg(withAlpha(planPolicy.color, surf.dark ? .13 : .10)).text_size(compact ? font(10) : 10.5).text_color(planPolicy.color)
         .child(planPolicy.text);
       return el.child(interactive && planPolicy.tip
         ? tip(`${cardId || 'steps'}-policy`, pill, planPolicy.tip, { panel: true, placement: 'below-right', wrap: true, flexNone: true })
         : pill);
     })
-    .child(div().flex_none().font_family('monospace').text_size(compact ? font(10.5) : 11).text_color(t.muted).child(steps.progress));
+    .child(div().flex_none().font_family('monospace').text_size(compact ? font(11) : 11)
+      .when(Boolean(progressColor), el => el.font_medium())
+      .text_color(progressColor || t.muted).child(steps.progress));
 
   const stepEls = steps.steps.map(s => {
     const hasSubs = Boolean(s.substeps?.length);
@@ -117,10 +109,10 @@ export function renderStepsCard({
     const stepRowEl = h_flex()
       .when(Boolean(stepIdPrefix), el => el.id(`${stepIdPrefix}-${s.index}`))
       .w_full().min_w(0).overflow_hidden()
-      .min_h(compact ? Math.max(19, px(21)) : 24)
-      .px(compact ? px(5) : 6).py(compact ? px(1.5) : 2).gap(compact ? px(6) : 7)
+      .min_h(compact ? Math.max(19, px(21)) : 26)
+      .px(compact ? px(5) : 6).py(compact ? px(1.5) : 2.5).gap(compact ? px(6) : 7)
       .rounded(compact ? px(5) : 6).items_start()
-      .when(s.state === 'doing' && !revWinOpen, el => el.bg(withAlpha(s.anchor === 'review' ? t.accent : t.foreground, .05)))
+      .when(s.state === 'doing' && !revWinOpen, el => el.bg(activeStepBg))
       .when(revWinOpen, el => el.bg(withAlpha(t.accent, .14)))
       .when(clickableReview, el => el.cursor_pointer().hover(h => h.bg(t.hover))
         .accessibility_label(word(lang, 'detailReviewStepTip'))
@@ -130,10 +122,10 @@ export function renderStepsCard({
       .child(div().flex_1().min_w(0).whitespace_normal()
         .text_size(compact ? font(12) : 12.5).line_height(`${lineH}px`)
         .font_weight(s.state === 'doing' ? 500 : 400)
-        .text_color(s.state === 'todo' ? t.muted : t.foreground)
+        .text_color(s.state === 'doing' ? t.foreground : s.state === 'done' ? t.muted : t.dim)
         .child(stepLabel))
       .when(s.round > 1, el => el.child(h_flex().h(lineH).flex_none().items_center()
-        .child(div().px(px(compact ? 4 : 5)).rounded(px(4)).bg(withAlpha(t.accent, .14))
+        .child(div().px(px(compact ? 4 : 5)).rounded(px(5)).bg(withAlpha(t.accent, .14))
           .font_family('monospace').text_size(compact ? font(10) : 10.5).text_color(t.accent)
           .child(word(lang, 'planRound', s.round)))))
       .when(Boolean(rightMeta), el => el.child(h_flex().h(lineH).min_w(0).max_w('40%').flex_shrink_1().items_center().overflow_hidden()
@@ -143,15 +135,15 @@ export function renderStepsCard({
         .child(svg(icons.windowPop).size(11.5).flex_none().text_color(revWinOpen ? t.accent : t.dim))))
       .when(hasSubs, el => el.child(h_flex().h(lineH).flex_none().items_center()
         .child(interactive && onToggleSub
-          ? tip(`substep-fold-${s.index}`, h_flex().id(`substep-fold-${s.index}`).h(18).px(5).gap(3).rounded(4)
-              .items_center().cursor_pointer().bg(t.raised).hover(h => h.bg(t.hover))
+          ? tip(`substep-fold-${s.index}`, h_flex().id(`substep-fold-${s.index}`).h(19).px(5.5).gap(3).rounded(5)
+              .items_center().cursor_pointer().bg(surf.well).hover(h => h.bg(t.hover))
               .on_click((_e, cx) => { cx.stop_propagation(); onToggleSub(s, cx); })
               .child(div().font_family('monospace').text_size(10.5).text_color(t.muted)
                 .child(`${s.subProgress.done}/${s.subProgress.total}`))
               .child(svg(subOpen ? icons.expand : icons.chevron).size(9.5).flex_none().text_color(t.dim)),
               word(lang, 'substepsFoldTip', s.subProgress.done, s.subProgress.total),
               { panel: true, placement: 'above-right' })
-          : div().px(px(4)).py(px(1)).rounded(px(4)).bg(withAlpha(t.foreground, .07))
+          : div().px(px(4.5)).py(px(1)).rounded(px(5)).bg(surf.pillMuted)
               .font_family('monospace').text_size(font(10)).text_color(t.muted)
               .child(`${s.subProgress.done}/${s.subProgress.total}`))));
     const stepRow = stepTip
@@ -165,13 +157,15 @@ export function renderStepsCard({
       const subEl = h_flex()
         .when(Boolean(stepIdPrefix), el => el.id(`plan-substep-${s.index}-${sub.index}`))
         .w_full().min_w(0).overflow_hidden()
-        .min_h(compact ? Math.max(17, px(19)) : 21)
-        .px(compact ? px(4) : 6).py(compact ? px(1) : 1.5).gap(compact ? px(5) : 6)
+        .min_h(compact ? Math.max(17, px(19)) : 22)
+        .px(compact ? px(4) : 6).py(compact ? px(1) : 2).gap(compact ? px(5) : 6)
         .rounded(px(5)).items_start()
+        .when(!compact && sub.state === 'doing', el => el.bg(activeSubBg))
         .child(h_flex().w(compact ? Math.max(10, px(11)) : 12).h(subLineH).flex_none().items_center().justify_center()
           .child(renderSubstepMark(sub)))
         .child(div().flex_1().min_w(0).whitespace_normal()
           .text_size(compact ? font(11) : 11.8).line_height(`${subLineH}px`)
+          .font_weight(sub.state === 'doing' ? 500 : 400)
           .text_color(sub.state === 'doing' ? t.foreground : sub.state === 'done' ? t.muted : t.dim)
           .child(subLabel))
         .when(splitNote, el => el.child(h_flex().h(subLineH).min_w(0).max_w('40%').flex_shrink_1().items_center().overflow_hidden()
@@ -180,26 +174,27 @@ export function renderStepsCard({
         ? tip(`plan-substep-${s.index}-${sub.index}`, subEl, sub.tip, { panel: true, placement: 'above-left', wrap: true, full: true })
         : subEl;
     });
-    return v_flex().w_full().min_w(0).gap(compact ? px(1.5) : 2)
+    // Plan B: clean indented concentric recessed well for sub-steps (zero tree-branch wires / border_l).
+    const subWell = framed
+      ? v_flex()
+          .when(Boolean(stepIdPrefix), el => el.id(`plan-substeps-${s.index}`))
+          .w_full().min_w(0).pl(20).pr(4).py(4).gap(1.5).rounded(6).bg(surf.podWell)
+          .children(subItems)
+      : v_flex()
+          .when(Boolean(stepIdPrefix), el => el.id(`plan-substeps-${s.index}`))
+          .w_full().min_w(0).pl(px(18)).pr(px(3)).py(px(2.5)).gap(px(1.5)).rounded(px(5)).bg(compactSubWellBg)
+          .children(subItems);
+    return v_flex().w_full().min_w(0).gap(compact ? px(2) : 3)
       .child(stepRow)
-      .child(div().w_full().min_w(0).pl(compact ? px(4) : 5).child(treeBranchList(ui, subItems, {
-        indent: compact ? px(15) : 18,
-        stemX: compact ? px(5) : 6,
-        curveSize: compact ? px(15) : 18,
-        strokeW: compact ? Math.max(1, px(1.2)) : 1.4,
-        curveStart: compact ? px(2.5) : 3,
-        gap: compact ? px(1.5) : 2,
-        wireColor,
-        treeBranchIcon: icons.treeBranch,
-      })));
+      .child(subWell);
   });
 
   return v_flex()
     .when(Boolean(cardId), el => el.id(cardId))
     .w_full().min_w(0).flex_none().gap(compact ? px(4) : 6)
-    .when(framed, el => el.rounded(10).p(10).bg(t.surface).border_1().border_color(t.border))
+    .when(framed, el => el.rounded(10).p(8).bg(surf.pod))
     .child(header)
-    .child(v_flex().w_full().min_w(0).gap(compact ? px(2) : 3).children(stepEls));
+    .child(v_flex().w_full().min_w(0).gap(compact ? px(2) : 2.5).children(stepEls));
 }
 
 export function renderDepsCard({
@@ -213,7 +208,9 @@ export function renderDepsCard({
   scale = 1,
   cardId = '',
   rowIdPrefix = '',
+  titleText = '',
   headerMeta = '',
+  footerText = '',
   animate = true,
   onSelect = null,
 }) {
@@ -223,7 +220,10 @@ export function renderDepsCard({
   const sc = compact ? (scale || 1) : 1;
   const px = n => n * sc;
   const font = n => Math.max(10, px(n));
-  const doneColor = t.ansi2 ?? t.working;
+  const surf = tonalSurfaces(t);
+  const doneColor = t.ansi2 ?? t.done ?? t.working;
+  const workColor = t.working ?? t.ansi3 ?? t.accent;
+  const todoBorder = withAlpha(t.muted || t.border, surf.dark ? .44 : .54);
   const markSize = compact ? Math.max(10, px(11)) : 12;
   const todoSize = compact ? Math.max(7, px(8)) : 8.5;
   const dotSize = compact ? Math.max(6, px(7)) : 7.5;
@@ -243,18 +243,19 @@ export function renderDepsCard({
         .child(div().size(innerDot).rounded_full().bg(t.accent));
     }
     if (item.isWorking) {
-      return svg(icons.spinner).size(markSize).flex_none().text_color(doneColor).when(animate, sp => sp.spin(900));
+      return svg(icons.spinner).size(markSize).flex_none().text_color(workColor).when(animate, sp => sp.spin(900));
     }
-    return div().size(todoSize).flex_none().rounded_full().border(Math.max(1, px(1.3)))
-      .border_color(item.isBroken ? t.blocked : t.border);
+    return div().size(todoSize).flex_none().rounded_full().border(Math.max(1, px(1.25)))
+      .border_color(item.isBroken ? t.blocked : todoBorder);
   };
 
-  const header = h_flex().w_full().min_w(0).pl(compact ? px(2) : 2).pr(compact ? px(2) : 6).gap(px(compact ? 5 : 6)).items_center()
-    .child(div().flex_none().text_size(compact ? font(11) : 11.5).font_semibold().text_color(t.muted).child(word(lang, 'depsTitle')))
+  const header = h_flex().w_full().min_w(0).pl(compact ? px(2) : 4).pr(compact ? px(2) : 6).gap(px(compact ? 5 : 6)).items_center()
+    .child(div().flex_none().text_size(compact ? font(11.5) : 11.5).font_semibold()
+      .text_color(titleText ? t.foreground : t.muted).child(titleText || word(lang, 'depsTitle')))
     .when(Boolean(headerMeta), el => el.child(div().flex_1().min_w(0).truncate()
-      .font_family('monospace').text_size(font(10)).text_color(t.dim).child(headerMeta)))
+      .font_family('monospace').text_size(font(10.5)).text_color(t.dim).child(titleText ? `· ${headerMeta}` : headerMeta)))
     .when(!headerMeta, el => el.child(div().flex_1().min_w(0)))
-    .when(deps.ready, el => el.child(div().flex_none().px(px(compact ? 5 : 6)).py(px(1)).rounded(px(4))
+    .when(deps.ready, el => el.child(div().flex_none().px(px(compact ? 5 : 6)).py(px(1.5)).rounded(px(5))
       .bg(withAlpha(doneColor, .14)).text_size(compact ? font(10) : 10.5).font_medium().text_color(doneColor)
       .child(word(lang, 'depsReady'))))
     .child(div().flex_none().font_family('monospace').text_size(compact ? font(10.5) : 11)
@@ -267,8 +268,8 @@ export function renderDepsCard({
     const rowEl = h_flex()
       .when(Boolean(rowIdPrefix), el => el.id(`${rowIdPrefix}-${item.id}`))
       .when(!rowIdPrefix && clickable, el => el.id(`dep-jump-${idx}-${item.id}`))
-      .min_h(compact ? Math.max(19, px(21)) : 24)
-      .px(compact ? px(5) : 6).py(compact ? px(1.5) : 2).gap(compact ? px(6) : 7)
+      .min_h(compact ? Math.max(19, px(21)) : 26)
+      .px(compact ? px(5) : 6).py(compact ? px(1.5) : 2.5).gap(compact ? px(6) : 7)
       .rounded(compact ? px(5) : 6).items_start()
       .when(clickable, el => el.cursor_pointer().hover(h => h.bg(t.hover))
         .accessibility_label(word(lang, 'depsJumpTip', item.title))
@@ -289,10 +290,15 @@ export function renderDepsCard({
       : rowEl;
   });
 
+  const rowsWrap = framed
+    ? v_flex().w_full().min_w(0).p(3).gap(1.5).rounded(6).bg(surf.podWell).children(rowEls)
+    : v_flex().w_full().min_w(0).gap(compact ? px(2) : 2.5).children(rowEls);
+
   return v_flex()
     .when(Boolean(cardId), el => el.id(cardId))
     .w_full().min_w(0).flex_none().gap(compact ? px(4) : 6)
-    .when(framed, el => el.rounded(10).p(10).bg(t.surface).border_1().border_color(t.border))
+    .when(framed, el => el.rounded(10).p(8).bg(surf.pod))
     .child(header)
-    .child(v_flex().w_full().min_w(0).gap(compact ? px(2) : 3).children(rowEls));
+    .child(rowsWrap)
+    .when(Boolean(footerText), el => el.child(div().px(compact ? px(5) : 6).text_size(compact ? font(11) : 11.5).text_color(t.dim).child(footerText)));
 }

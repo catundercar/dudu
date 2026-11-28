@@ -29,6 +29,7 @@ from .context import Context
 from .errors import PmError, Refused
 from .events.deliver import PASSED, Delivery
 from .events.deps_watch import DependencyWatcher
+from .messaging.nodes import NodeRegistry
 from .messaging.router import wake_fields_for
 from .events.stalls import StallWatcher
 from .ledger.deps import DEP_MET_STATUSES, dep_key_for, evaluate_depends_on, format_dep_summary, parse_depends_on
@@ -89,7 +90,8 @@ class Updates:
         stalls = StallWatcher(self.ctx)
 
         def wake_fields(task: dict[str, Any], status: str, reported: bool) -> dict[str, Any]:
-            return wake_fields_for(task, status, reported, caller, bool(self._projects.app_pm(task.get("repo"))))
+            pm_target = self.ctx.store.task_project_slug(task) or task.get("repo")
+            return wake_fields_for(task, status, reported, caller, bool(self._projects.app_pm(pm_target)))
 
         return TransitionHooks(
             blocked_by_worker=caller.blocked_by_worker,
@@ -120,7 +122,13 @@ class Updates:
                              "--ask 要和 --status blocked 一起用：它是向用户追问"))
         # Blocked again once the user has answered is a new question (asks_again): only with --ask. Recording the
         # answer is moving the task on; blocked means waiting for the user.
-        log = self.ctx.home.project_for(snapshot["repo"]).conversation if snapshot.get("repo") else None
+        pslug = snapshot.get("project_slug") or ""
+        if pslug:
+            log = self.ctx.home.project(pslug).conversation
+        elif snapshot.get("repo"):
+            log = self.ctx.home.project_for(snapshot["repo"]).conversation
+        else:
+            log = None
         if req.status == "blocked" and snapshot["status"] == "blocked" and not req.ask and log and \
                 tid in answered_tasks(conversation_events(log), {tid: snapshot.get("title") or ""},
                                       {tid: asked_at(snapshot)}):
@@ -234,7 +242,10 @@ class Updates:
 def wake(ctx: Context, tr: Transition) -> None:
     """Row 1: the entry is news for a PM that can be woken: its deliverer runs."""
     if tr.entry_fields.get("wake"):
-        Workers(ctx)._deliver_later(tr.after["repo"])
+        Workers(ctx)._deliver_later(
+            tr.after.get("repo") or "",
+            slug=tr.after.get("project_slug") or "",
+        )
 
 
 def _reviewer_alive(ctx: Context, tid: str) -> bool:
@@ -289,8 +300,12 @@ def after(ctx: Context, tr: Transition, say: Say = _quiet) -> None:
         ended = close_worker_for(ctx, task)
         if ended:
             say(f"{tid}: {ended}")
-        if task.get("repo"):
-            MemoryCandidates(ctx, task["repo"]).prune(finished=candidate_names_of(task))
+        if task.get("repo") or task.get("project_slug"):
+            MemoryCandidates(
+                ctx,
+                task.get("repo") or "",
+                slug=task.get("project_slug") or None,
+            ).prune(finished=candidate_names_of(task))
     elif "status=review" in changes:
         ended = close_reported_for(ctx, task)  # a reported worker's terminal ends once idle
         if ended:
@@ -309,6 +324,10 @@ def after(ctx: Context, tr: Transition, say: Say = _quiet) -> None:
                 say(tt(f"note: all dependencies of {tid} are already met ({format_dep_summary(info, tr_fn=tt)}); "
                        "ready to dispatch",
                        f"提示：{tid} 的前置依赖均已满足（{format_dep_summary(info, tr_fn=tt)}），现在即可派发"), err=True)
+    if tr.moved_status in CLOSED:
+        sh = task.get("self_hosted")
+        if isinstance(sh, dict) and sh.get("node_id"):
+            NodeRegistry(ctx.home.tokens, clock=ctx.clock).drop_grant(str(sh["node_id"]), tid)
     if tr.moved_status in (*DEP_MET_STATUSES, "abandoned"):
         DependencyWatcher(ctx).reconcile_dependents_of(tid, primary_repo=task.get("repo"))
     parent_id = str(task.get("parent") or "")
@@ -361,12 +380,13 @@ def _rollup_ancestors(ctx: Context, start_parent_id: str, *, child_id: str | Non
         chosen_rollup: Rollup | None = None
         chosen_key = ""
         target_repo = ""
+        target_slug = ""
         target_title = ""
         should_wake = False
         next_parent = ""
 
         def _apply(cur: Task | None, ch: Change) -> dict[str, Any] | None:
-            nonlocal outcome, chosen_rollup, chosen_key, target_repo, target_title, should_wake, next_parent
+            nonlocal outcome, chosen_rollup, chosen_key, target_repo, target_slug, target_title, should_wake, next_parent
             if cur is None:
                 return None
             raw = cur.raw
@@ -382,6 +402,7 @@ def _rollup_ancestors(ctx: Context, start_parent_id: str, *, child_id: str | Non
                 return None
             key = fam.rollup_key
             repo = str(raw.get("repo") or "")
+            pslug = ctx.store.task_project_slug(raw)
             if res.action == "notify":
                 if raw.get("rollup_notified") == key:
                     return None
@@ -390,6 +411,7 @@ def _rollup_ancestors(ctx: Context, start_parent_id: str, *, child_id: str | Non
                 chosen_rollup = res
                 chosen_key = key
                 target_repo = repo
+                target_slug = pslug
                 target_title = str(raw.get("title") or "")
                 return raw
             if res.action == "close":
@@ -401,7 +423,8 @@ def _rollup_ancestors(ctx: Context, start_parent_id: str, *, child_id: str | Non
                 raw.pop("adopting", None)
                 raw.pop("rollup_notified", None)
                 sync_plan_for_status(raw, "done", prev_status=prev_status)
-                wake_pm = bool(repo and projects.app_pm(repo))
+                pm_target = pslug or repo
+                wake_pm = bool(pm_target and projects.app_pm(pm_target))
                 ch.note_on(
                     raw,
                     f"status=done; {res.summary}",
@@ -413,6 +436,7 @@ def _rollup_ancestors(ctx: Context, start_parent_id: str, *, child_id: str | Non
                 chosen_rollup = res
                 chosen_key = key
                 target_repo = repo
+                target_slug = pslug
                 should_wake = wake_pm
                 next_parent = str(raw.get("parent") or "")
                 return raw
@@ -425,14 +449,15 @@ def _rollup_ancestors(ctx: Context, start_parent_id: str, *, child_id: str | Non
 
         if outcome == "close":
             ledger.run_after_save()
-            if should_wake and target_repo:
-                Delivery(ctx, target_repo).ensure_running()
-            deps_watcher.reconcile_dependents_of(parent_id, primary_repo=target_repo or None)
+            if should_wake and (target_repo or target_slug):
+                Delivery(ctx, target_repo, slug=target_slug or None).ensure_running()
+            deps_watcher.reconcile_dependents_of(parent_id, primary_repo=(target_slug or target_repo) or None)
             parent_id = next_parent
         elif outcome == "notify":
-            if target_repo and chosen_rollup is not None:
-                wake_pm = bool(projects.app_pm(target_repo))
-                Conversation(ctx, target_repo).record(
+            if (target_repo or target_slug) and chosen_rollup is not None:
+                pm_target = target_slug or target_repo
+                wake_pm = bool(projects.app_pm(pm_target))
+                Conversation(ctx, target_repo, slug=target_slug or None).record(
                     "event",
                     task=parent_id,
                     title=target_title,
@@ -444,7 +469,7 @@ def _rollup_ancestors(ctx: Context, start_parent_id: str, *, child_id: str | Non
                     wake=wake_pm,
                 )
                 if wake_pm:
-                    Delivery(ctx, target_repo).ensure_running()
+                    Delivery(ctx, target_repo, slug=target_slug or None).ensure_running()
             break
         else:
             break
