@@ -95,6 +95,7 @@ from .reattach import (
 )
 from .remote import (
     DEFAULT_REMOTE_PM,
+    require_remote_workers,
     issue_credential,
     machine_profile,
     next_remote_epoch,
@@ -1348,6 +1349,8 @@ class Workers:
     def dispatch(self, req: DispatchRequest) -> DispatchResult:
         """Dispatch a worker (hc desktop or herdr TUI) for a new or existing open task."""
         outer_steps, outer_explicit, sub_steps = _parse_new_plan(self.ctx, req.plan, req.step, req.outer_plan, req.subplan)
+        if req.on:
+            require_remote_workers(self.ctx)
         stderr_lines: list[str] = []
         explicit_brief = bool(req.brief)
         ask_text = str(req.ask or "").strip()

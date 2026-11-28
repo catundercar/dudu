@@ -194,8 +194,9 @@ def register_dispatch_command(sub):
     d.add_argument("--outer-plan", action="append", metavar="STEPS", help="explicitly set outer task plan steps")
     d.add_argument("--no-review", action="store_true", help="skip plan-driven automatic review when worker reports --commit")
     d.add_argument("--on", metavar="MACHINE",
-                   help="run the worker on a machine added to hc (`hc machine ls`): worktree and terminal there "
-                        "(`<machine>/t7`), PM and ledger here; reports come back through its outbox")
+                   help="experimental, off unless config.json sets experimental.remote_workers: run the worker on "
+                        "a machine added to hc (`hc machine ls`): worktree and terminal there (`<machine>/t7`), PM and "
+                        "ledger here; reports come back through its outbox")
     d.add_argument("--remote-repo", metavar="PATH",
                    help="with --on: the project's clone on that machine (default: config.json machines.<m>.repos.<slug>)")
     d.add_argument("--async", dest="async_", action="store_true",
